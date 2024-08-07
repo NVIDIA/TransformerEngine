@@ -323,11 +323,7 @@ def _main(opts):
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
     ubuf_dtype = torch.bfloat16
-    if (
-        opts.fp8
-        and not opts.bulk_overlap
-        and (opts.comm_type == 1 or opts.fp8_output)
-    ):
+    if opts.fp8 and not opts.bulk_overlap and (opts.comm_type == 1 or opts.fp8_output):
         ubuf_dtype = torch.uint8
     sample_buffer = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
     ub_obj = ub_obj = (
@@ -373,9 +369,11 @@ def _main(opts):
     # Numerical check on AG + atomic GEMM requires testing an AG+RS pair
     ub_obj2 = None
     if opts.atomic and opts.comm_type == 1 and opts.check_numerics:
-        sample_buffer2 = torch.empty((outer_size, hidden_size),
-                                     dtype=torch.uint8 if opts.fp8_output else torch.bfloat16,
-                                     device="cuda")
+        sample_buffer2 = torch.empty(
+            (outer_size, hidden_size),
+            dtype=torch.uint8 if opts.fp8_output else torch.bfloat16,
+            device="cuda",
+        )
         ub_obj2 = (
             tex.UbufP2PCommOverlap(
                 sample_buffer2,  # Sample userbuffer
@@ -620,9 +618,7 @@ def _main(opts):
             )
     else:
         if opts.bulk_overlap:
-            ub_obj.copy_input_to_ubuf(
-                bulk_inp_fp8 if opts.fp8 else bulk_inp, 0
-            )
+            ub_obj.copy_input_to_ubuf(bulk_inp_fp8 if opts.fp8 else bulk_inp, 0)
             ubuf_out = None
         else:
             ubuf_out = ub_obj.get_ubuf_output(1)
@@ -769,11 +765,7 @@ def _main(opts):
             "p2p all-gather + " if opts.comm_type == 1 else "",
             "atomic " if opts.atomic else "",
             "GEMM",
-            (
-                f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
-                if opts.comm_type == 0
-                else ""
-            ),
+            (f" + {'p2p ' if opts.p2p else ''}reduce-scatter" if opts.comm_type == 0 else ""),
         ]
     )
     timing_info = (

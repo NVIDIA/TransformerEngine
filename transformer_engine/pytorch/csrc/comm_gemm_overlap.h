@@ -704,9 +704,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     _ub_reg = register_user_buffer_collective(reinterpret_cast<void **>(&_ubuf_ptr), ubuf_bytes,
                                               _ub_comm, true);
-    _ubuf =
-        torch::from_blob(_ubuf_ptr, {sample.size(0) / tp_size * num_ubuf_chunks, sample.size(1)},
-                          sample.options());
+    _ubuf = torch::from_blob(
+        _ubuf_ptr, {sample.size(0) / tp_size * num_ubuf_chunks, sample.size(1)}, sample.options());
     if (_ub_comm->myrank == 0) {
       printf("!!! [UBP2P] Register UBuf %d\n", _ub_reg);
     }

@@ -64,7 +64,7 @@ def _parse_args(argv=None, namespace=None):
         "--layer-type",
         type=_te_layer_argtype,
         default=te.TransformerLayer,
-        help="Transformer Engine layer to train with comm+GEMM overlap."
+        help="Transformer Engine layer to train with comm+GEMM overlap.",
     )
     parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
     parser.add_argument(
@@ -275,12 +275,10 @@ def _train(opts):
             ranks_per_replica_list = ranks_per_node_list
             self_replica_idx = self_node_idx
 
-        tp_group, _ = dist.new_subgroups_by_enumeration(
-            ranks_per_replica_list, backend="nccl"
-        )
+        tp_group, _ = dist.new_subgroups_by_enumeration(ranks_per_replica_list, backend="nccl")
         ranks_per_replica_tensor = torch.tensor(ranks_per_replica_list, dtype=torch.int32)
         dp_group, _ = dist.new_subgroups_by_enumeration(
-            ranks_per_replica_tensor.transpose(0,1).tolist(), backend="nccl"
+            ranks_per_replica_tensor.transpose(0, 1).tolist(), backend="nccl"
         )
 
     else:
@@ -288,7 +286,9 @@ def _train(opts):
             # Mixed data- and tensor-parallelism on a single node
             # NOTE: Avoid dist.init_device_mesh() to support older PyTorch versions
             all_ranks = torch.tensor(list(range(LOCAL_SIZE)), dtype=torch.uint8, device="cpu")
-            ranks_per_replica_tensor = all_ranks.reshape((opts.num_replicas, LOCAL_SIZE // opts.num_replicas))
+            ranks_per_replica_tensor = all_ranks.reshape(
+                (opts.num_replicas, LOCAL_SIZE // opts.num_replicas)
+            )
             tp_group, _ = dist.new_subgroups_by_enumeration(
                 ranks_per_replica_tensor.tolist(), backend="nccl"
             )

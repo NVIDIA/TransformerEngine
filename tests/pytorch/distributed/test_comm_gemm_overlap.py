@@ -75,9 +75,11 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
             test_cmd.append("--atomic")
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (result.returncode != 0
+    if (
+        result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()):
+        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
+    ):
         raise AssertionError(result.stderr.decode())
 
 
@@ -110,9 +112,11 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
     os.unsetenv("NVTE_TORCH_COMPILE")
     os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
 
-    if (result.returncode != 0
+    if (
+        result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()):
+        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
+    ):
         raise AssertionError(result.stderr.decode())
 
 
@@ -208,10 +212,7 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
         ("RS", False),
         ("RS", True),
     ],
-    ids=[
-        " ALL-GATHER     - BF16 ",
-        " REDUCE-SCATTER - BF16 ",
-        " REDUCE-SCATTER - FP8 "],
+    ids=[" ALL-GATHER     - BF16 ", " REDUCE-SCATTER - BF16 ", " REDUCE-SCATTER - FP8 "],
 )
 def test_bulk_overlaps(comm_type, fp8):
     """
@@ -222,8 +223,8 @@ def test_bulk_overlaps(comm_type, fp8):
 
 @pytest.mark.parametrize(
     "layer_type",
-    [ layer.__name__ for layer in TE_LAYERS ],
-    ids=[ (" " + layer.__name__ + " ") for layer in TE_LAYERS ],
+    [layer.__name__ for layer in TE_LAYERS],
+    ids=[(" " + layer.__name__ + " ") for layer in TE_LAYERS],
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
@@ -236,7 +237,7 @@ def test_bulk_overlaps(comm_type, fp8):
         " BF16 GEMM - BF16 PARAMS ",
         " FP8  GEMM - BF16 PARAMS ",
         " FP8  GEMM - FP8  PARAMS ",
-    ]
+    ],
 )
 def test_layers_with_overlap(layer_type, fp8, fp8_init):
     """

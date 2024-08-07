@@ -181,7 +181,7 @@ def initialize_ub(
             intra_node_ranks = list(range(world_size))
 
         if world_rank == 0:
-            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end='', flush=True)
+            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end="", flush=True)
         if local_rank == 0:
             print(
                 f"!!! [UB] Global ranks on node {self_node_idx}: {intra_node_ranks}\n",

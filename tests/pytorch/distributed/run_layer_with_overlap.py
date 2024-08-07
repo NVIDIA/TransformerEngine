@@ -147,7 +147,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
         if ref.count_nonzero() == 0:
             warnings.warn(
                 f"WARNING: {name} is a zero-tensor for both test and reference models!",
-                category=RuntimeWarning
+                category=RuntimeWarning,
             )
         else:
             numerics_info = (
@@ -324,7 +324,6 @@ def _train(opts):
         )
         dist_print(numerics_info, src=WORLD_RANK, error=True)
     dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
-
 
     # Now validate accuracy
     if not bool(numerics_failed.item()):
