@@ -73,7 +73,7 @@ from transformer_engine.pytorch.graph import is_graph_capturing
 
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.6.1")
+_flash_attn_max_version = PkgVersion("2.6.3")
 _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
 _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
 _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
@@ -3104,7 +3104,7 @@ class FlashAttention(torch.nn.Module):
         if softcap > 0.0:
             assert (
                 _flash_attn_2_6_1_plus
-            ), f"FlashAttention minimum version {PkgVersion("2.6.1")} is required for softcap."
+            ), f"FlashAttention minimum version 2.6.1 is required for softcap."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -3282,6 +3282,9 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                 if _flash_attn_2_4_1_plus:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                if _flash_attn_2_6_1_plus:
+                    fa_optional_forward_kwargs["softcap"] = self.softcap
+
                 output = flash_attn_forward_func(
                     query_layer,
                     key_layer,
@@ -3293,7 +3296,6 @@ class FlashAttention(torch.nn.Module):
                     self.attention_dropout if self.training else 0.0,
                     softmax_scale=self.softmax_scale,
                     causal="causal" in attn_mask_type,
-                    softcap=self.softcap,
                     **fa_optional_forward_kwargs,
                 )
 
