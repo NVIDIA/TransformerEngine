@@ -163,7 +163,8 @@ def initialize_ub(
             for i, host in enumerate(hostnames):
                 ranks_per_node_list[unique_hosts.index(host)].append(i)
             intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                ranks_per_node_list, backend=bootstrap_backend,
+                ranks_per_node_list,
+                backend=bootstrap_backend,
             )
         else:
             intra_node_group = world_group
