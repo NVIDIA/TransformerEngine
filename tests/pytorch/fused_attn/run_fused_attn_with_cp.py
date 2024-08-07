@@ -60,7 +60,7 @@ def run_dpa_with_cp(
     # instantiate core attn module
     core_attn = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
@@ -71,49 +71,49 @@ def run_dpa_with_cp(
 
     # create flash attn inputs
     if qkv_format == "bshd":
-        q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim)
+        q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim_qk)
         kv_input_shape = (
             config.batch_size,
             config.max_seqlen_kv,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.batch_size,
             config.max_seqlen_q,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "sbhd":
-        q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim)
+        q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim_qk)
         kv_input_shape = (
             config.max_seqlen_kv,
             config.batch_size,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.max_seqlen_q,
             config.batch_size,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim)
+        q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim_qk)
         kv_input_shape = (
             config.batch_size * config.max_seqlen_q,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.batch_size * config.max_seqlen_q,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
