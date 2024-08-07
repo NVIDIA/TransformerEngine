@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
@@ -20,6 +21,13 @@ SEQ_LENGTH: int = 512
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 12
 HEAD_DIM: int = 64
+TE_LAYERS = [
+    te.Linear,
+    te.LayerNormLinear,
+    te.LayerNormMLP,
+    te.MultiheadAttention,
+    te.TransformerLayer,
+]
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(torch.cuda.device_count(), 4)
@@ -35,7 +43,7 @@ if not tex.device_supports_multicast():
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
 
-def _test_comm_gemm_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggregate):
+def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggregate):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -67,7 +75,44 @@ def _test_comm_gemm_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggre
             test_cmd.append("--atomic")
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if "NUMERICAL CHECK PASSED" not in result.stdout.decode():
+    if (result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
+        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()):
+        raise AssertionError(result.stderr.decode())
+
+
+def _run_layer_with_overlap(layer_type, fp8, fp8_init):
+    test_path = TEST_ROOT / "run_layer_with_overlap.py"
+    test_cmd = LAUNCH_CMD + [
+        str(test_path),
+        f"--seed={RNG_SEED}",
+        f"--seq-length={SEQ_LENGTH}",
+        f"--batch-size={BATCH_SIZE}",
+        f"--num-heads={NUM_HEADS}",
+        f"--head-dim={HEAD_DIM}",
+        f"--layer-type={layer_type}",
+    ]
+
+    if fp8:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        test_cmd.append("--fp8")
+        if fp8_init:
+            test_cmd.append("--fp8-init")
+
+    os.environ["PYTORCH_JIT"] = "0"
+    os.environ["NVTE_TORCH_COMPILE"] = "0"
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+
+    os.unsetenv("PYTORCH_JIT")
+    os.unsetenv("NVTE_TORCH_COMPILE")
+    os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
+
+    if (result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
+        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()):
         raise AssertionError(result.stderr.decode())
 
 
@@ -91,7 +136,7 @@ def test_split_all_gather_overlaps(fp8, aggregate):
     Test (split GEMM -> all-gather) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _test_comm_gemm_overlap("AG", False, True, False, fp8, False, aggregate)
+    _run_gemm_with_overlap("AG", False, True, False, fp8, False, aggregate)
 
 
 @pytest.mark.parametrize(
@@ -118,7 +163,7 @@ def test_split_reduce_scatter_overlaps(fp8_in, fp8_out, p2p):
     Test (reduce-scatter -> split GEMM) overlaps with direct calls to te.cpp_extensions.gemm or
     te.cpp_extensions.fp8_gemm.
     """
-    _test_comm_gemm_overlap("RS", False, p2p, False, fp8_in, fp8_out, False)
+    _run_gemm_with_overlap("RS", False, p2p, False, fp8_in, fp8_out, False)
 
 
 @pytest.mark.parametrize(
@@ -153,7 +198,7 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
     """
     os.environ["NVTE_AG_P2P_MULTI_ATOMIC"] = str(ag_type)
     os.environ["NVTE_RS_STRIDED_ATOMIC"] = str(rs_type)
-    _test_comm_gemm_overlap("AG", False, p2p, True, True, fp8_out, False)
+    _run_gemm_with_overlap("AG", False, p2p, True, True, fp8_out, False)
 
 
 @pytest.mark.parametrize(
@@ -169,4 +214,29 @@ def test_bulk_overlaps(comm_type, fp8):
     """
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
-    _test_comm_gemm_overlap(comm_type, True, False, False, fp8, False, False)
+    _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+
+
+@pytest.mark.parametrize(
+    "layer_type",
+    [ layer.__name__ for layer in TE_LAYERS ],
+    ids=[ (" " + layer.__name__ + " ") for layer in TE_LAYERS ],
+)
+@pytest.mark.parametrize(
+    "fp8,fp8_init",
+    [
+        (False, False),
+        (True, False),
+        (True, True),
+    ],
+    ids=[
+        " BF16 GEMM - BF16 PARAMS ",
+        " FP8  GEMM - BF16 PARAMS ",
+        " FP8  GEMM - FP8  PARAMS ",
+    ]
+)
+def test_layers_with_overlap(layer_type, fp8, fp8_init):
+    """
+    Test Transformer Engine layers with comm+GEMM overlap.
+    """
+    _run_layer_with_overlap(layer_type, fp8, fp8_init)

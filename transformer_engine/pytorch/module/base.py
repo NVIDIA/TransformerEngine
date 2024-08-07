@@ -153,17 +153,20 @@ def initialize_ub(
 
         hostnames = [None for _ in range(world_size)]
         torch.distributed.all_gather_object(hostnames, hostname, world_group)
-        intra_node_ranks = []
-        for i, host in enumerate(hostnames):
-            if host == hostname:
-                intra_node_ranks.append(i)
-        if len(intra_node_ranks) == world_size:
-            intra_node_group = world_group
-            intra_node_ranks = list(range(world_size))
-        else:
-            intra_node_group = torch.distributed.new_group(
-                backend=bootstrap_backend, ranks=intra_node_ranks, use_local_synchronization=True
+        unique_hosts = []
+        for host in hostnames:
+            if host not in unique_hosts:
+                unique_hosts.append(host)
+        num_nodes = len(unique_hosts)
+        if num_nodes > 1:
+            ranks_per_node_list = [[] for _ in range(num_nodes)]
+            for i, host in enumerate(hostnames):
+                ranks_per_node_list[unique_hosts.index(host)].append(i)
+            intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                ranks_per_node_list, backend=bootstrap_backend,
             )
+        else:
+            intra_node_group = world_group
 
         bootstrap_helper = tex.CommOverlapHelper(world_group, intra_node_group)
 

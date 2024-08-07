@@ -166,7 +166,7 @@ def _parse_args(argv=None, namespace=None):
     if opts.atomic:
         if not te.fp8.check_fp8_support():
             assert not opts.fp8, "Atomic GEMM is only supported in FP8."
-            opts.fp8 = True
+        opts.fp8 = True
 
     return opts
 
