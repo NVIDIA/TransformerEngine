@@ -761,7 +761,12 @@ def _run_dot_product_attention(
                 attention_mask_kv.to(device="cuda"),
             )
     if config.attn_mask_type == "arbitrary":
-        attention_mask = torch.randn(config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv, device="cuda") > 0.5
+        attention_mask = (
+            torch.randn(
+                config.batch_size, 1, config.max_seqlen_q, config.max_seqlen_kv, device="cuda"
+            )
+            > 0.5
+        )
 
     alibi_slopes = None
     if config.attn_bias_type == "alibi" and config.alibi_type == "custom":
