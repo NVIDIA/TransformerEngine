@@ -484,9 +484,9 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
  private:
   torch::Tensor _counters;
   torch::Tensor _ubuf;
-  int _ubuf_bytes;
-  void *_ubuf_scale_inv_ptr;
+  torch::Tensor _ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
+  int _ubuf_bytes;
 
  public:
   CommOverlap(torch::Tensor sample, CommOverlapHelper &helper, int tp_size, int num_splits = 4,
@@ -557,8 +557,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   torch::Tensor _counters;
   torch::Tensor _ubuf;
   std::vector<torch::Tensor> _ubufs;
-
-  void *_ubuf_scale_inv_ptr;
+  torch::Tensor _ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
   int _ubuf_bytes, _ubuf_chunk_bytes;
 

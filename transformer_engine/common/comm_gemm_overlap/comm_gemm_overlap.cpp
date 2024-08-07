@@ -490,6 +490,8 @@ CommOverlapP2P::CommOverlapP2P(
       _ag_sendrecv_multiatomic = getenv<bool>("NVTE_AG_P2P_MULTI_ATOMIC");
       if (world_rank == 0 && _ag_sendrecv_multiatomic) {
         printf("[%s] NVTE_AG_P2P_MULTI_ATOMIC=1 (multi-atomic AG + atomic GEMM)\n", _name);
+        _use_ce = 0;
+        _ub_comm->push = 1;
       }
     }
   }
@@ -550,6 +552,8 @@ void CommOverlapP2P::atomic_gemm_overlap_ag(
   for (int i = 0; i < _tp_size - 1; i++) {
     if (_ag_sendrecv_multiatomic) {
       if (i == 0) {
+        _ub_comm->use_ce = 0;
+        _ub_comm->push = 1;
         ubuf::userbuffers_sendrecv_multiatomic(_ub_reg, _ub_reg, comm_bytes, comm_bytes, comm_bytes,
                                                _ub_comm, _next_rank, _prev_rank, _tp_size,
                                                counter_ptr, true, _stream_recv);

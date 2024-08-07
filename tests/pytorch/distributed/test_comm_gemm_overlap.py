@@ -129,10 +129,10 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
         (True, True),
     ],
     ids=[
-        " IN: BF16 | RING-EXCHANGE ",
-        " IN: BF16 | RING-EXCHANGE | 2x AGGREGATED ",
-        " IN: FP8  | RING-EXCHANGE ",
-        " IN: FP8  | RING-EXCHANGE | 2x AGGREGATED ",
+        " BF16 IN - RING-EXCHANGE ",
+        " BF16 IN - RING-EXCHANGE - 2x AGGREGATED ",
+        " FP8  IN - RING-EXCHANGE ",
+        " FP8  IN - RING-EXCHANGE - 2x AGGREGATED ",
     ],
 )
 def test_split_all_gather_overlaps(fp8, aggregate):
@@ -154,12 +154,12 @@ def test_split_all_gather_overlaps(fp8, aggregate):
         (True, True, True),
     ],
     ids=[
-        " IN: BF16 | OUT: BF16 | PIPELINE ",
-        " IN: BF16 | OUT: BF16 | RING-EXCHANGE ",
-        " IN: FP8  | OUT: BF16 | PIPELINE ",
-        " IN: FP8  | OUT: BF16 | RING-EXCHANGE ",
-        " IN: FP8  | OUT: FP8  | PIPELINE ",
-        " IN: FP8  | OUT: FP8  | RING-EXCHANGE ",
+        " BF16 IN - BF16 OUT - PIPELINE ",
+        " BF16 IN - BF16 OUT - RING-EXCHANGE ",
+        " FP8  IN - BF16 OUT - PIPELINE ",
+        " FP8  IN - BF16 OUT - RING-EXCHANGE ",
+        " FP8  IN - FP8  OUT - PIPELINE ",
+        " FP8  IN - FP8  OUT - RING-EXCHANGE ",
     ],
 )
 def test_split_reduce_scatter_overlaps(fp8_in, fp8_out, p2p):
@@ -174,7 +174,6 @@ def test_split_reduce_scatter_overlaps(fp8_in, fp8_out, p2p):
     "ag_type,rs_type,p2p,fp8_out",
     [
         (0, 0, False, False),
-        (0, 0, False, True),
         (0, 1, False, False),
         (0, 1, False, True),
         (0, 2, False, False),
@@ -182,17 +181,18 @@ def test_split_reduce_scatter_overlaps(fp8_in, fp8_out, p2p):
         (0, 0, True, False),
         (0, 0, True, True),
         (1, 0, True, False),
+        (1, 0, True, True),
     ],
     ids=[
-        " NON-ATOMIC AG   | NON-ATOMIC RS   | PIPELINE      | OUT: BF16 ",
-        " NON-ATOMIC AG   | NON-ATOMIC RS   | PIPELINE      | OUT: FP8 ",
-        " NON-ATOMIC AG   | ATOMIC RS       | PIPELINE      | OUT: BF16 ",
-        " NON-ATOMIC AG   | ATOMIC RS       | PIPELINE      | OUT: FP8 ",
-        " NON-ATOMIC AG   | MULTI-ATOMIC RS | PIPELINE      | OUT: BF16 ",
-        " NON-ATOMIC AG   | MULTI-ATOMIC RS | PIPELINE      | OUT: FP8 ",
-        " NON-ATOMIC AG   | NON-ATOMIC RS   | RING-EXCHANGE | OUT: BF16 ",
-        " NON-ATOMIC AG   | NON-ATOMIC RS   | RING-EXCHANGE | OUT: FP8 ",
-        " MULTI-ATOMIC AG | NON-ATOMIC RS   | RING-EXCHANGE | OUT: BF16 ",
+        " NON-ATOMIC AG   - NON-ATOMIC RS   - PIPELINE      - BF16 OUT ",
+        " NON-ATOMIC AG   - ATOMIC RS       - PIPELINE      - BF16 OUT ",
+        " NON-ATOMIC AG   - ATOMIC RS       - PIPELINE      - FP8  OUT ",
+        " NON-ATOMIC AG   - MULTI-ATOMIC RS - PIPELINE      - BF16 OUT ",
+        " NON-ATOMIC AG   - MULTI-ATOMIC RS - PIPELINE      - FP8  OUT ",
+        " NON-ATOMIC AG   - NON-ATOMIC RS   - RING-EXCHANGE - BF16 OUT ",
+        " NON-ATOMIC AG   - NON-ATOMIC RS   - RING-EXCHANGE - FP8  OUT ",
+        " MULTI-ATOMIC AG - NON-ATOMIC RS   - RING-EXCHANGE - BF16 OUT ",
+        " MULTI-ATOMIC AG - NON-ATOMIC RS   - RING-EXCHANGE - FP8  OUT ",
     ],
 )
 def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
@@ -212,7 +212,7 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
         ("RS", False),
         ("RS", True),
     ],
-    ids=[" ALL-GATHER     | BF16 ", " REDUCE-SCATTER | BF16 ", " REDUCE-SCATTER | FP8 "],
+    ids=[" ALL-GATHER     - BF16 ", " REDUCE-SCATTER - BF16 ", " REDUCE-SCATTER - FP8 "],
 )
 def test_bulk_overlaps(comm_type, fp8):
     """

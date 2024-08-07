@@ -172,10 +172,14 @@ std::vector<at::Tensor> CommOverlap::bulk_overlap(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
 
   te::DType ubuf_dtype = GetTransformerEngineDType(_ubuf.scalar_type());
+  void *_ubuf_scale_inv_ptr = nullptr;
   if (_ubuf.element_size() == 1) {
-    assert(_ubuf_scale_inv_initialized);
     assert(bulk_fp8_dtype == te::DType::kFloat8E4M3 || bulk_fp8_dtype == te::DType::kFloat8E5M2);
     ubuf_dtype = bulk_fp8_dtype;
+    if (comm_type == te::CommOverlapType::REDUCE_SCATTER) {
+      assert(_ubuf_scale_inv_initialized);
+      _ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
+    }
   }
   auto ubuf_ = makeTransformerEngineTensor(
       _ubuf.data_ptr(), {static_cast<size_t>(_ubuf.size(0)), static_cast<size_t>(_ubuf.size(1))},
@@ -251,8 +255,10 @@ void CommOverlap::atomic_gemm_overlap_rs(
   auto pre_gelu_out_ = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
 
+  void *_ubuf_scale_inv_ptr = nullptr;
   if (_ubuf.element_size() == 1) {
     assert(_ubuf_scale_inv_initialized);
+    _ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
   }
   auto ubuf_ = makeTransformerEngineTensor(
       _ubuf.data_ptr(), {static_cast<size_t>(_ubuf.size(0)), static_cast<size_t>(_ubuf.size(1))},
@@ -314,8 +320,10 @@ void CommOverlap::split_gemm_overlap_rs(
   auto pre_gelu_out_ = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
 
+  void *_ubuf_scale_inv_ptr = nullptr;
   if (_ubuf.element_size() == 1) {
     assert(_ubuf_scale_inv_initialized);
+    _ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
   }
   auto ubuf_ = makeTransformerEngineTensor(
       _ubuf.data_ptr(), {static_cast<size_t>(_ubuf.size(0)), static_cast<size_t>(_ubuf.size(1))},
@@ -378,7 +386,7 @@ torch::Tensor CommOverlap::get_ubuf_output(te::CommOverlapBuffer buffer_type) {
 ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
 */
 void CommOverlap::set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
-  _ubuf_scale_inv_ptr = scale_inv.data_ptr();
+  _ubuf_scale_inv = scale_inv;
   _ubuf_scale_inv_initialized = true;
 }
 
@@ -619,8 +627,10 @@ void CommOverlapP2P::atomic_gemm_overlap_rs(
   auto pre_gelu_out_ = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
 
+  void *_ubuf_scale_inv_ptr = nullptr;
   if (_ubuf.element_size() == 1) {
     assert(_ubuf_scale_inv_initialized);
+    _ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
   }
   auto ubuf_ = makeTransformerEngineTensor(
       _ubuf.data_ptr(), {static_cast<size_t>(_ubuf.size(0)), static_cast<size_t>(_ubuf.size(1))},
@@ -685,8 +695,10 @@ void CommOverlapP2P::split_gemm_overlap_rs(
   auto pre_gelu_out_ = makeTransformerEngineTensor(
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
 
+  void *_ubuf_scale_inv_ptr = nullptr;
   if (_ubuf.element_size() == 1) {
     assert(_ubuf_scale_inv_initialized);
+    _ubuf_scale_inv_ptr = _ubuf_scale_inv.data_ptr();
   }
   std::vector<te::TensorWrapper> ubufs_;
   for (int i = 0; i < _num_ubuf_chunks; i++)
@@ -748,7 +760,7 @@ torch::Tensor CommOverlapP2P::get_ubuf_output(te::CommOverlapBuffer buffer_type)
 ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
 */
 void CommOverlapP2P::set_ubuf_scale_inv(const torch::Tensor &scale_inv) {
-  _ubuf_scale_inv_ptr = scale_inv.data_ptr();
+  _ubuf_scale_inv = scale_inv;
   _ubuf_scale_inv_initialized = true;
 }
 

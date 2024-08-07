@@ -122,7 +122,7 @@ def initialize_ub(
         else:
             # Make sure the backend requested by the user is valid and avialable in PyTorch.
             assert bootstrap_backend in ["gloo", "mpi", "nccl"]
-            assert torch.distribtued.is_backend_available(bootstrap_backend), (
+            assert torch.distributed.is_backend_available(bootstrap_backend), (
                 f"Failed to initialize Userbuffers: "
                 + "torch.distributed does not support '{bootstrap_backend}' backend!"
             )
