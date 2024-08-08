@@ -13,10 +13,12 @@ from ..utils import assert_dim_for_fp8_exec
 
 __all__ = ["gemm", "fp8_gemm", "grouped_gemm", "fp8_grouped_gemm"]
 
+
 @functools.lru_cache(maxsize=None)
 def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor()
+
 
 def fp8_gemm(
     A: torch.Tensor,
