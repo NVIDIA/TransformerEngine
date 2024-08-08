@@ -42,11 +42,13 @@ __all__ = [
 
 @cache
 def get_forward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
     return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
 
 
 @cache
 def get_backward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
     return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
 
