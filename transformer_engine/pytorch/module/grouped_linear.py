@@ -82,12 +82,12 @@ class _GroupedLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
-        weights_fp8 = weights_and_biases[num_gemms : 2 * num_gemms]
-        biases = weights_and_biases[2 * num_gemms :]
+        biases = weights_and_biases[num_gemms:]
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
@@ -489,8 +489,8 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # activation_dtype
             None,  # parallel_mode
             None,  # is_grad_enabled
+            None,  # weights_fp8
             *wgrad_list,
-            *([None] * ctx.num_gemms),  # weights_fp8
             *grad_biases,
         )
 
@@ -801,8 +801,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                weight_tensors_fp8,
                 *weight_tensors,
-                *weight_tensors_fp8,
                 *bias_tensors,
             )
             out = linear_fn(*args)
