@@ -399,19 +399,22 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Attention mask
-    # attn_mask_type               |     supported backends
-    # -------------------------------------------------------------------
-    # no_mask                      |     All
-    # padding                      |     FlashAttention, FusedAttention
-    # causal                       |
-    #     self-attention           |     All
-    #     cross-attention          |     FusedAttention
-    # padding_causal               |
-    #     self-attention           |     FlashAttention, FusedAttention
-    #     cross-attention          |     FusedAttention
-    # causal_bottom_right          |     All
-    # padding_causal_bottom_right  |     FlashAttention, FusedAttention
-    # arbitrary                    |     UnfusedDotProductAttention
+    # attn_mask_type              | attention_mask                       | supported backends
+    # ----------------------------------------------------------------------------------------
+    # no_mask                     | None                                 | All
+    # padding                     |                                      | All
+    #     self-attention          | One tensor in shape [b, 1, 1, sq]    |
+    #     cross-attention         | Tuple of two tensors in shapes       |
+    #                             | [b, 1, 1, sq] and [b, 1, 1, skv]     |
+    # causal                      | None                                 |
+    #     self-attention          |                                      | All
+    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
+    # padding_causal              | Same as "padding"                    |
+    #     self-attention          |                                      | All
+    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
+    # causal_bottom_right         | None                                 | All
+    # padding_causal_bottom_right | Same as "padding"                    | FlashAttention, UnfusedDotProductAttention
+    # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     if attn_mask_type == "arbitrary":
         if use_flash_attention:
             logger.debug("Disabling FlashAttention for arbitrary mask")
@@ -419,9 +422,6 @@ def get_attention_backend(
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
-    if use_unfused_attention and "padding" in attn_mask_type:
-        logger.debug("Disabling UnfusedDotProductAttention for %s mask", attn_mask_type)
-        use_unfused_attention = False
     if (
         use_flash_attention
         and _flash_attn_2_1_plus
@@ -2921,6 +2921,40 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
+        batch_size, max_seqlen_q, max_seqlen_kv = (
+            query_layer.shape[1],
+            query_layer.shape[0],
+            key_layer.shape[0],
+        )
+        if "padding" in attn_mask_type:
+            if max_seqlen_q == max_seqlen_kv:
+                if attention_mask.shape == (batch_size, 1, 1, max_seqlen_q):
+                    attention_mask = torch.logical_or(
+                        attention_mask.squeeze(1).unsqueeze(3), attention_mask
+                    )
+            else:
+                if attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q) and attention_mask[
+                    1
+                ].shape == (batch_size, 1, 1, max_seqlen_kv):
+                    attention_mask = torch.logical_or(
+                        attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
+                    )
+            assert attention_mask.shape == (
+                batch_size,
+                1,
+                max_seqlen_q,
+                max_seqlen_kv,
+            ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
+            if attn_mask_type == "padding_causal":
+                attention_mask = torch.logical_or(
+                    torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
+                )
+            if attn_mask_type == "padding_causal_bottom_right":
+                diagonal_offset = max_seqlen_kv - max_seqlen_q + 1
+                attention_mask = torch.logical_or(
+                    torch.triu(torch.logical_not(attention_mask), diagonal=diagonal_offset),
+                    attention_mask,
+                )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
@@ -3026,6 +3060,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attention_probs = self.scale_mask_softmax(
             attention_scores, attention_mask, attn_mask_type, softmax_scale
         )
+        if "padding" in attn_mask_type:
+            attention_probs = attention_probs.masked_fill(attention_mask, 0)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
