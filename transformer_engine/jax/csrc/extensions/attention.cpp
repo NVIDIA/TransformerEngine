@@ -19,7 +19,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
   auto backend = nvte_get_fused_attn_backend(
       static_cast<NVTEDType>(q_dtype), static_cast<NVTEDType>(kv_dtype), qkv_layout, bias_type,
       mask_type, dropout_probability, q_attn_heads, kv_attn_heads, q_max_seqlen, kv_max_seqlen,
-      head_dim, -1, -1);
+      head_dim, head_dim, -1, -1);
   return backend;
 }
 
@@ -139,7 +139,13 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  for (auto num_segments = input_batch; num_segments <= max_num_segments; ++num_segments) {
+  size_t min_num_segments = input_batch;
+  auto cudnn_runtime_version = cudnnGetVersion();
+  if (is_ragged && cudnn_runtime_version >= 90300) {
+    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
+    min_num_segments = input_batch * max_segments_per_seq;
+  }
+  for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
@@ -227,14 +233,19 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
 
   size_t num_segments = input_batch;  // Non-THD format, input_batch = num_segments
   if (is_ragged) {
-    // workspace can be reused here as it is not used with cuDNN graph at the same time
-    size_t runtime_num_segments_q =
-        GetRuntimeNumSegments(q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);
-    size_t runtime_num_segments_kv =
-        GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
-    NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
-    NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
-    num_segments = runtime_num_segments_q;
+    auto cudnn_runtime_version = cudnnGetVersion();
+    if (cudnn_runtime_version >= 90300) {
+      num_segments = input_batch * max_segments_per_seq;
+    } else {
+      // workspace can be reused here as it is not used with cuDNN graph at the same time
+      size_t runtime_num_segments_q =
+          GetRuntimeNumSegments(q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);
+      size_t runtime_num_segments_kv =
+          GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
+      NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
+      NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
+      num_segments = runtime_num_segments_q;
+    }
     cudaMemsetAsync(output, 0,
                     input_batch * q_max_seqlen * attn_heads * head_dim * typeToSize(dtype), stream);
   }
@@ -255,10 +266,10 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
 
   /* Prepare RNG state */
   auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
-  auto backend =
-      nvte_get_fused_attn_backend(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-                                  qkv_layout, bias_type, mask_type, dropout_probability, attn_heads,
-                                  num_gqa_groups, q_max_seqlen, kv_max_seqlen, head_dim, -1, -1);
+  auto backend = nvte_get_fused_attn_backend(
+      static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+      head_dim, head_dim, -1, -1);
   PopulateRngStateAsync(rng_state, seed, q_max_seqlen, kv_max_seqlen, backend, stream);
 
   /* Auxiliary tensors (to be propagated to the backward pass later) */
@@ -366,7 +377,13 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
   // It is a WAR to pre-create all possible cuDNN graph at the JIT compile time
   size_t max_num_segments = is_ragged ? input_batch * max_segments_per_seq : input_batch;
-  for (auto num_segments = input_batch; num_segments <= max_num_segments; ++num_segments) {
+  size_t min_num_segments = input_batch;
+  auto cudnn_runtime_version = cudnnGetVersion();
+  if (is_ragged && cudnn_runtime_version >= 90300) {
+    // For cuDNN < 9.3.0, it requires to run all possible seqlens to address act_seqlen = 0
+    min_num_segments = input_batch * max_segments_per_seq;
+  }
+  for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
     auto q_cu_seqlens_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
@@ -462,14 +479,19 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
 
   size_t num_segments = input_batch;  // Non-THD format, input_batch = num_segments
   if (is_ragged) {
-    // workspace can be reused here as it is not used with cuDNN graph at the same time
-    size_t runtime_num_segments_q =
-        GetRuntimeNumSegments(q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);
-    size_t runtime_num_segments_kv =
-        GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
-    NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
-    NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
-    num_segments = runtime_num_segments_q;
+    auto cudnn_runtime_version = cudnnGetVersion();
+    if (cudnn_runtime_version >= 90300) {
+      num_segments = input_batch * max_segments_per_seq;
+    } else {
+      // workspace can be reused here as it is not used with cuDNN graph at the same time
+      size_t runtime_num_segments_q =
+          GetRuntimeNumSegments(q_cu_seqlens, workspace, input_batch * q_max_seqlen, stream);
+      size_t runtime_num_segments_kv =
+          GetRuntimeNumSegments(kv_cu_seqlens, workspace, input_batch * kv_max_seqlen, stream);
+      NVTE_CHECK(runtime_num_segments_q == runtime_num_segments_kv);
+      NVTE_CHECK(runtime_num_segments_q <= input_batch * max_segments_per_seq);
+      num_segments = runtime_num_segments_q;
+    }
   }
 
   auto q_cu_seqlens_tensor =
@@ -488,10 +510,10 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
   /* Auxiliary tensors (propagated from the forward pass) */
   NVTETensorPack aux_input_tensors;
   nvte_tensor_pack_create(&aux_input_tensors);
-  auto backend =
-      nvte_get_fused_attn_backend(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
-                                  qkv_layout, bias_type, mask_type, dropout_probability, attn_heads,
-                                  num_gqa_groups, q_max_seqlen, kv_max_seqlen, head_dim, -1, -1);
+  auto backend = nvte_get_fused_attn_backend(
+      static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+      mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+      head_dim, head_dim, -1, -1);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, &descriptor, backend, softmax_aux,
                                      rng_state, bias);
 
