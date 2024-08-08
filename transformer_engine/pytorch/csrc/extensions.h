@@ -11,6 +11,26 @@
 #include "common/common.h"
 
 /***************************************************************************************************
+ * Permutation
+ **************************************************************************************************/
+
+std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
+    at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
+    int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num);
+
+at::Tensor moe_permute_bwd(at::Tensor input, const transformer_engine::DType dtype,
+                           at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
+                           int64_t topK);
+
+at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType dtype,
+                             at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
+                             int64_t topK);
+
+std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
+                                                     const transformer_engine::DType dtype,
+                                                     at::Tensor row_id_map, at::Tensor prob);
+
+/***************************************************************************************************
  * Attention
  **************************************************************************************************/
 
