@@ -91,7 +91,7 @@ class CMakeExtension(setuptools.Extension):
                 raise RuntimeError(f"Error when running CMake: {e}")
 
         total_time = time.perf_counter() - start_time
-        print(f"Time for build_ext: {total_time} seconds")
+        print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
 def get_build_ext(extension_cls: Type[setuptools.Extension]):
