@@ -10,6 +10,13 @@ import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch import fp8_model_init
+from transformer_engine.pytorch.utils import is_bf16_compatible
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
 class TestFusedOptimizer(unittest.TestCase):
@@ -168,6 +175,83 @@ class TestFusedAdam(TestFusedOptimizer):
             tst_optim.step()
 
             torch.testing.assert_close(ref_param, tst_param)
+
+    @unittest.skipIf(not is_bf16_compatible(), "bf16 if not supported")
+    def test_bf16_model_weight_cast(self):
+        dtype = torch.bfloat16
+        model = MultiheadAttention(
+            hidden_size=1024,
+            num_attention_heads=16,
+            layer_number=1,
+            params_dtype=dtype,
+            fuse_qkv_params=True,
+        ).cuda()
+        ref_params = []
+        master_params = []
+        model_params = []
+        for p in model.parameters():
+            if p.requires_grad:
+                ref_params.append(p.detach().clone().float())
+                master_params.append(p.detach().clone().float())
+                model_params.append(p)
+        options = {
+            "lr": 5e-4,
+            "betas": (0.9, 0.999),
+            "eps": 1e-08,
+            "weight_decay": 0,
+            "amsgrad": False,
+        }
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(model_params, master_weights=master_params, **options)
+
+        for i in range(self.iters):
+            self.gen_grad(ref_params, master_params)
+            ref_optim.step()
+            tst_optim.step()
+            torch.testing.assert_close(ref_params, master_params)
+            model_params_to_fp32 = [p.float() for p in model_params]
+            torch.testing.assert_close(
+                ref_params, model_params_to_fp32, rtol=1e-3, atol=1e-3, equal_nan=True
+            )
+
+    @unittest.skipIf(not fp8_available, reason=reason_for_no_fp8)
+    def test_fp8_model_weight_cast(self):
+        dtype = torch.bfloat16
+        with fp8_model_init(enabled=True):
+            model = MultiheadAttention(
+                hidden_size=1024,
+                num_attention_heads=16,
+                layer_number=1,
+                params_dtype=dtype,
+                fuse_qkv_params=True,
+            ).cuda()
+        ref_params = []
+        master_params = []
+        model_params = []
+        for p in model.parameters():
+            if p.requires_grad:
+                ref_params.append(p.detach().clone().float())
+                master_params.append(p.detach().clone().float())
+                model_params.append(p)
+        options = {
+            "lr": 5e-4,
+            "betas": (0.9, 0.999),
+            "eps": 1e-08,
+            "weight_decay": 0,
+            "amsgrad": False,
+        }
+        ref_optim = torch.optim.Adam(ref_params, **options)
+        tst_optim = te.optimizers.FusedAdam(model_params, master_weights=master_params, **options)
+
+        for i in range(self.iters):
+            self.gen_grad(ref_params, master_params)
+            ref_optim.step()
+            tst_optim.step()
+            torch.testing.assert_close(ref_params, master_params)
+            model_params_to_fp32 = [p.float() for p in model_params]
+            torch.testing.assert_close(
+                ref_params, model_params_to_fp32, rtol=1e-2, atol=1e-2, equal_nan=True
+            )
 
 
 class TestFusedSGD(TestFusedOptimizer):
@@ -345,8 +429,9 @@ class AdamTest(unittest.TestCase):
             if m.__class__ in [torch.nn.Conv2d]:
                 m.half()
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
+        master_weights = [p.float() for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(
-            params_, lr=self.lr, capturable=True, master_weights=True
+            params_, lr=self.lr, capturable=True, master_weights=master_weights
         )
         scaler = torch.cuda.amp.GradScaler(enabled=True)
         scaler_ = torch.cuda.amp.GradScaler(enabled=True)
