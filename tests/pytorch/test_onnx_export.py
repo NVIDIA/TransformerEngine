@@ -1083,7 +1083,7 @@ def test_export_core_attention(
 
     model = te.attention.DotProductAttention(
         num_attention_heads=num_attention_heads,
-        kv_channels=kv_channels,
+        k_channels=kv_channels,
         attention_dropout=0.5,
         qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,

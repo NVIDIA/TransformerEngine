@@ -5,7 +5,6 @@
 """LayerNormLinear API"""
 import os
 import warnings
-import logging
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -47,17 +46,6 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
-
-# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
-_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-logging.basicConfig(
-    format="[%(levelname)-8s | %(name)-19s]: %(message)s",
-    level=log_levels[log_level if log_level in [0, 1, 2] else 2],
-)
 
 __all__ = ["LayerNormLinear"]
 
@@ -104,7 +92,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_name: str,
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
-        logger = logging.getLogger("LayerNormLinear")
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -130,12 +117,14 @@ class _LayerNormLinear(torch.autograd.Function):
             if return_layernorm_output:
                 # First prepare LN output in higher precision,
                 # which will be later copied to a FP8 UB
-                ln_out = torch.empty_like(inputmat)
+                ln_out = torch.empty_like(inputmat, memory_format=torch.contiguous_format)
             else:
                 ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
-            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+            ln_out = torch.empty_like(
+                inputmat, dtype=ln_out_dtype, memory_format=torch.contiguous_format
+            )
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
@@ -201,8 +190,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out = ln_out_total
 
         if fp8:
-            logger.debug("Running forward in FP8")
-
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             bias = cast_if_needed(bias, bias_dtype) if use_bias else bias
 
@@ -257,8 +244,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     dtype=activation_dtype,
                 )
         else:
-            logger.debug("Running forward in %s", activation_dtype)
-
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -377,7 +362,6 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        logger = logging.getLogger("LayerNormLinear")
         if isinstance(grad_outputs[0], Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_outputs[
                 0
@@ -498,8 +482,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj = None
 
             if ctx.fp8:
-                logger.debug("Running backward in FP8")
-
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
                 out_index, meta_tensor, out_te_type, out_type = (
@@ -542,8 +524,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 clear_tensor_data(grad_output_c)
             else:
-                logger.debug("Running backward in %s", ctx.activation_dtype)
-
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
                     weight,
