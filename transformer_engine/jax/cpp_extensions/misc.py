@@ -137,6 +137,7 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
         *shape[transpose_start_idx:transpose_axis_boundary],
     )
 
+
 @functools.lru_cache(maxsize=None)
 def get_cudnn_version() -> Tuple[int, int, int]:
     """Runtime cuDNN version (major, minor, patch)"""
@@ -145,6 +146,7 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
+
 
 @functools.lru_cache(maxsize=None)
 def jax_version_meet_requirement(version: str):
