@@ -66,7 +66,7 @@ def canonicalize_fp8_scales(
         scale_inv_offset = 0
 
     # Force offsets to be the same if needed
-    if not allow_multiple_offsets and not (scale_offset == amax_offset == scale_inv_offset):
+    if not allow_multiple_offsets and not scale_offset == amax_offset == scale_inv_offset:
         if scale_offset != 0:
             scale = scale[scale_offset]
             scale_offset = 0

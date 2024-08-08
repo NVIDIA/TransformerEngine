@@ -854,7 +854,7 @@ __device__ __forceinline__ void reciprocal(T *value_inv, const T value) {
 
 template <>
 __device__ __forceinline__ void reciprocal<float>(float *value_inv, const float value) {
-  *value_inv = __frsqrt_rn(value);
+  *value_inv = __frcp_rn(value);
 }
 
 }  // namespace transformer_engine

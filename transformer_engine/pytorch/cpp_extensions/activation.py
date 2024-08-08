@@ -8,7 +8,7 @@ from typing import Optional, Union
 import torch
 
 import transformer_engine_torch as tex
-from ._common import canonicalize_fp8_scales, empty_tensor
+from ._common import canonicalize_fp8_scales
 
 __all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 
