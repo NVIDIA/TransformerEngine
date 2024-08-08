@@ -15,7 +15,6 @@ import pytest
 
 from utils import assert_allclose
 
-from transformer_engine.transformer_engine_jax import get_device_compute_capability
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_collections
 from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
@@ -41,19 +40,6 @@ DATA_SHAPE = [(32, 128, 512), (32, 512, 512)]  # (B, S, H)
 DTYPE = [jnp.float32, jnp.bfloat16]
 ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
-
-
-@pytest.fixture(autouse=True, scope="module")
-def enable_fused_attn():
-    """
-    Enable fused attn for hopper+ arch.
-    Fused attn kernels on pre-hopper arch are not deterministic.
-    """
-    if get_device_compute_capability(0) >= 90:
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-    yield
-    if "NVTE_FUSED_ATTN" in os.environ:
-        del os.environ["NVTE_FUSED_ATTN"]
 
 
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
