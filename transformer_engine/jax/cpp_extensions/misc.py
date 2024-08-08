@@ -137,8 +137,16 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
         *shape[transpose_start_idx:transpose_axis_boundary],
     )
 
+@functools.lru_cache(maxsize=None)
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = transformer_engine_jax.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
 
-<<<<<<< HEAD
+@functools.lru_cache(maxsize=None)
 def jax_version_meet_requirement(version: str):
     """
     Helper function checking if required JAX version is available
@@ -157,13 +165,3 @@ def is_ffi_enabled():
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
     assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
     return is_supported and is_enabled
-=======
-@functools.lru_cache(maxsize=None)
-def get_cudnn_version() -> Tuple[int, int, int]:
-    """Runtime cuDNN version (major, minor, patch)"""
-    encoded_version = transformer_engine_jax.get_cudnn_version()
-    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
-    major, encoded_version = divmod(encoded_version, major_version_magnitude)
-    minor, patch = divmod(encoded_version, 100)
-    return (major, minor, patch)
->>>>>>> main
