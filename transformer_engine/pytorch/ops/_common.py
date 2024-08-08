@@ -92,7 +92,13 @@ def convert_tensor(
 
     # Convert FP8 tensor
     if is_float8_tensor(tensor):
-        data = tensor._data.to(device=device, memory_format=memory_format)
+        data = tensor._data.to(device=device)
+        if memory_format != torch.preserve_format and not data.is_contiguous(
+            memory_format=memory_format
+        ):
+            # Note: torch.Tensor.to ignores memory_format kwarg (see
+            # https://github.com/pytorch/pytorch/issues/132020).
+            data = data.contiguous(memory_format=memory_format)
         return Float8Tensor.make_like(
             tensor,
             data=data,
@@ -101,7 +107,14 @@ def convert_tensor(
         )
 
     # Convert standard PyTorch tensor
-    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+    tensor = tensor.to(device=device, dtype=dtype)
+    if memory_format != torch.preserve_format and not tensor.is_contiguous(
+        memory_format=memory_format
+    ):
+        # Note: torch.Tensor.to ignores memory_format kwarg (see
+        # https://github.com/pytorch/pytorch/issues/132020).
+        tensor = tensor.contiguous(memory_format=memory_format)
+    return tensor
 
 
 def reshape(
@@ -150,3 +163,14 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
+
+def maybe_autocast_dtype(
+    *,
+    device_type: str = "cuda",
+    default_dtype: Optional[torch.dtype] = None,
+) -> torch.dtype:
+    """Get autocast dtype if enabled"""
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return canonicalize_dtype(default_dtype)

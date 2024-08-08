@@ -3,207 +3,137 @@
 # See LICENSE for license information.
 
 """RMSNorm API"""
-import os
 import warnings
-from typing import Union, Tuple, Optional
+from typing import Iterable, Optional, Union
 
 import torch
-from torch.nn.parameter import Parameter
-from torch.nn import init
 
-from .base import TransformerEngineBaseModule
-from .. import cpp_extensions as tex
-from ..jit import no_torch_dynamo
-from ..utils import cast_if_needed
-
+from transformer_engine.pytorch.ops import RMSNorm as _RMSNormOp
 
 __all__ = ["RMSNorm"]
 
 
-class _RMSNorm(torch.autograd.Function):
-    """functional RMSNorm"""
+class RMSNorm(_RMSNormOp):
+    r"""Root Mean Square Layer Normalization
 
-    @staticmethod
-    def forward(
-        ctx,
-        inp: torch.Tensor,
-        rmsnorm_weight: torch.Tensor,
-        eps: float,
-        fwd_rmsnorm_sm_margin: int,
-        bwd_rmsnorm_sm_margin: int,
-        inf_rmsnorm_sm_margin: int,
-        zero_centered_gamma: bool,
-        is_grad_enabled: bool,
-        activation_dtype: torch.dtype,
-    ) -> torch.Tensor:
-        # Make sure input dimensions are compatible
-        in_features = rmsnorm_weight.numel()
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert inp.shape[-1] == in_features, "RMSNorm not possible"
-        inputmat = inp.view((-1, in_features))
-
-        # Cast for native AMP
-        inputmat = cast_if_needed(inputmat, activation_dtype)
-        rmsnorm_weight = cast_if_needed(rmsnorm_weight, activation_dtype)
-
-        if is_grad_enabled:
-            rmsnorm_out, rsigma = tex.rmsnorm_fwd(
-                inputmat, rmsnorm_weight, eps, fwd_rmsnorm_sm_margin, zero_centered_gamma
-            )
-            ctx.save_for_backward(inputmat, rmsnorm_weight, rsigma)
-            ctx.inp_shape = inp.shape
-            ctx.bwd_rmsnorm_sm_margin = bwd_rmsnorm_sm_margin
-            ctx.zero_centered_gamma = zero_centered_gamma
-        else:
-            rmsnorm_out = tex.rmsnorm_fwd_inf(
-                inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
-            )
-        return rmsnorm_out.view_as(inp)
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
-        grad_output = grad_output.contiguous()
-        d_rmsnorm_out = grad_output.view(inputmat.shape)
-        dxmat, dgamma = tex.rmsnorm_bwd(
-            d_rmsnorm_out,
-            inputmat,
-            rsigma,
-            rmsnorm_weight,
-            ctx.bwd_rmsnorm_sm_margin,
-            ctx.zero_centered_gamma,
-        )
-        return (
-            dxmat.view(ctx.inp_shape),
-            dgamma,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-class RMSNorm(torch.nn.Module):
-    r"""
-    Applies Root Mean Square Layer Normalization over a mini-batch of inputs as described in
-    the paper `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
+    Applies Root Mean Square Layer Normalization over a mini-batch of
+    inputs as described in the paper
+    `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x}{RMS_\varepsilon(x)} * \gamma
+        y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma
 
-    where
-
-    .. math::
-        RMS_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^nx_i^2 + \varepsilon}
-
-    :math:`\gamma` is a learnable affine transform parameter of size :attr:`hidden_size`
+    :math:`\gamma` is a learnable affine transform parameter that
+    matches the inner-most dimensions of the input tensor.
 
     Parameters
     ----------
-    hidden_size : int
-                size of each input sample.
+    normalized_shape: int or iterable of int
+        Inner dimensions of input tensor
     eps : float, default = 1e-5
-        a value added to the denominator of layer normalization for numerical stability.
-    sequence_parallel : bool, default = `False`
-                        if set to `True`, uses sequence parallelism.
-    params_dtype : torch.dtype, default = `torch.get_default_dtype()`
-                    it controls the type used to allocate the initial parameters. Useful when
-                    the model is trained with lower precision and the original FP32 parameters
-                    would not fit in GPU memory.
+        A value added to the denominator for numerical stability
+    device: torch.device, default = default CUDA device
+        Tensor device
+    dtype: torch.dtype, default = default dtype
+        Tensor datatype
     zero_centered_gamma : bool, default = 'False'
-                         if set to 'True', gamma parameter in RMSNorm is initialized to 0 and
-                         the RMSNorm formula changes to
+        If `True`, the :math:`\gamma` parameter is initialized to zero
+        and the calculation changes to
 
-                         .. math::
-                            y = \frac{x}{RMS_\varepsilon(x)} * (1 + \gamma)
-    device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
-          responsibility to ensure all parameters are moved to the GPU before running the
-          forward pass.
+            .. math::
+                y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma)
+
+    sm_margin: int, default = 0
+        Number of SMs to exclude when launching CUDA kernels. This
+        helps overlap with other kernels, e.g. communication kernels.
+
     """
 
     def __init__(
         self,
-        hidden_size: int,
-        eps: float = 1e-5,
-        sequence_parallel: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        zero_centered_gamma: bool = False,
-        device: Union[torch.device, str] = "cuda",
+        normalized_shape: Union[Iterable[int], int],
+        *,
+        sequence_parallel: Optional[bool] = None,  # deprecated
+        params_dtype: Optional[torch.dtype] = None,  # deprecated
+        **kwargs,
     ) -> None:
-        super().__init__()
-        params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
-        self.eps = eps
-        self.zero_centered_gamma = zero_centered_gamma
-        self.weight = Parameter(
-            torch.empty(
-                hidden_size,
-                device=device,
-                dtype=params_dtype,
-            )
-        )
-        self.sequence_parallel = sequence_parallel
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        # Handle deprecated options
+        if params_dtype is not None:
+            if "dtype" in kwargs:
+                raise RuntimeError(
+                    "Both `dtype` and `params_dtype` (deprecated) kwargs are provided"
+                )
+            kwargs["dtype"] = params_dtype
 
-        # These many SMs are subtracted from the total SM count when calling forward
-        # and backward RMSNorm C APIs. These envvars can be used to prevent the LN
-        # kernels from using all SMs in the device. This is useful for cases such as
-        # communication overlap with RMSNorm.
-        self.fwd_rmsnorm_sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
-        self.bwd_rmsnorm_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
-        self.inf_rmsnorm_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
+        # Initialize layer norm operation
+        super().__init__(normalized_shape, **kwargs)
+
+        # Flag for sequence parallelism (deprecated)
+        self.sequence_parallel: Optional[bool] = sequence_parallel
 
     def reset_rms_norm_parameters(self) -> None:
-        """Init RMSNorm params"""
+        """Deprecated"""
         warnings.warn(
-            "This method is deprecated and will be removed in an upcoming release. "
-            "Update your code to use RMSNorm.reset_parameters() instead.",
+            "This method will be deprecated in an upcoming release. "
+            "Update your code to use LayerNorm.reset_parameters() instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        if not self.zero_centered_gamma:
-            init.ones_(self.weight)
-        else:
-            init.zeros_(self.weight)
+        self.reset_parameters()
 
-    def reset_parameters(self, defer_init=False) -> None:
-        """Reset RMSNorm parameters"""
-        if defer_init:
-            return
+    def reset_parameters(self, defer_init: Optional[bool] = None) -> None:
+        """Init LayerNorm parameters"""
 
-        if self.weight.device == torch.device("meta"):
-            self.weight = torch.nn.Parameter(torch.empty_like(self.weight, device="cuda"))
-        init.constant_(self.weight, float(not self.zero_centered_gamma))
-        setattr(self.weight, "sequence_parallel", self.sequence_parallel)
+        # Check whether to defer init (deprecated)
+        if defer_init is not None:
+            warnings.warn(
+                'reset_parameters kwarg is deprecated. Set device to "meta" instead.',
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if defer_init:
+                return
 
-    @no_torch_dynamo()
-    def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        """RMSNorm FWD"""
+        # Reset parameters
+        super().reset_parameters()
 
-        # Set the activation type for AMP.
-        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+        # Set flag for sequence parallelism (deprecated)
+        if getattr(self, "sequence_parallel", None) is not None:
+            self.weight.sequence_parallel = self.sequence_parallel
 
-        if torch.is_grad_enabled():
-            fwd_fn = _RMSNorm.apply
-            args = []
-        else:
-            fwd_fn = _RMSNorm.forward
-            args = [None]
+    @property
+    def fwd_rmsnorm_sm_margin(self) -> int:
+        """Shim for backward compatibility"""
+        warnings.warn("fwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        return self._sm_margins["fwd"]
 
-        args += (
-            inp,
-            self.weight,
-            self.eps,
-            self.fwd_rmsnorm_sm_margin,
-            self.bwd_rmsnorm_sm_margin,
-            self.inf_rmsnorm_sm_margin,
-            self.zero_centered_gamma,
-            torch.is_grad_enabled(),
-            self.activation_dtype,
-        )
+    @fwd_rmsnorm_sm_margin.setter
+    def fwd_rmsnorm_sm_margin(self, val: int) -> None:
+        """Shim for backward compatibility"""
+        warnings.warn("fwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        self._sm_margins["fwd"] = val
 
-        return fwd_fn(*args)
+    @property
+    def bwd_rmsnorm_sm_margin(self) -> int:
+        """Shim for backward compatibility"""
+        warnings.warn("bwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        return self._sm_margins["bwd"]
+
+    @bwd_rmsnorm_sm_margin.setter
+    def bwd_rmsnorm_sm_margin(self, val: int) -> None:
+        """Shim for backward compatibility"""
+        warnings.warn("bwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        self._sm_margins["bwd"] = val
+
+    @property
+    def inf_rmsnorm_sm_margin(self) -> int:
+        """Shim for backward compatibility"""
+        warnings.warn("inf_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        return self._sm_margins["inf"]
+
+    @inf_rmsnorm_sm_margin.setter
+    def inf_rmsnorm_sm_margin(self, val: int) -> None:
+        """Shim for backward compatibility"""
+        warnings.warn("inf_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
+        self._sm_margins["inf"] = val
