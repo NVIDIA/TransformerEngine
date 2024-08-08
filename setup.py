@@ -43,11 +43,11 @@ elif "jax" in frameworks:
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 # Start timing
-start_time = time.time()
+start_time = time.perf_counter()
 
 
 def print_total_time():
-    end_time = time.time()
+    end_time = time.perf_counter()
     total_time = end_time - start_time
     print(f"Total build time: {total_time:.2f} seconds")
 
@@ -62,10 +62,9 @@ class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
 
     def run(self):
-        start_time = time.time()
+        start_time = time.perf_counter()
         super().run()
-        end_time = time.time()
-        total_time = end_time - start_time
+        total_time = time.perf_counter() - start_time
         print(f"Time for bdist_wheel: {total_time:.2f} seconds")
 
 

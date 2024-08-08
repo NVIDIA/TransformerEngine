@@ -82,7 +82,7 @@ class CMakeExtension(setuptools.Extension):
             build_command.append(str(max_jobs))
 
         # Run CMake commands
-        start_time = time.time()
+        start_time = time.perf_counter()
         for command in [configure_command, build_command, install_command]:
             print(f"Running command {' '.join(command)}")
             try:
@@ -90,8 +90,8 @@ class CMakeExtension(setuptools.Extension):
             except (CalledProcessError, OSError) as e:
                 raise RuntimeError(f"Error when running CMake: {e}")
 
-        total_time = time.time() - start_time
-        print(f"Time for build_ext: {total_time:.2f} seconds")
+        total_time = time.perf_counter() - start_time
+        print(f"Time for build_ext: {total_time} seconds")
 
 
 def get_build_ext(extension_cls: Type[setuptools.Extension]):
