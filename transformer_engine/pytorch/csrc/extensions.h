@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <optional>
+
 #include "common.h"
 #include "common/common.h"
 
@@ -442,5 +444,200 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
+
+/***************************************************************************************************
+ * Comm+GEMM overlap
+ **************************************************************************************************/
+
+namespace transformer_engine_torch {
+
+class CommOverlapHelper : torch::CustomClassHolder {
+ private:
+  bool initialized{false};
+  bool backend_is_nccl{false};
+  std::map<std::string, c10d::ProcessGroup *> pgs;
+
+ public:
+  int world_rank;
+  int world_size;
+  int local_rank;
+  int local_size;
+  int node_id;
+  int num_nodes;
+
+  CommOverlapHelper() {}
+
+  CommOverlapHelper(c10d::ProcessGroup *world_group,
+                    std::optional<c10d::ProcessGroup *> intra_node_group_holder);
+
+  ~CommOverlapHelper();
+
+  void allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
+                 char *group);
+
+  void broadcast(void *data, size_t bytes, int src, char *group);
+
+  void barrier(char *group);
+};
+
+class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlap {
+ private:
+  torch::Tensor _counters;
+  torch::Tensor _ubuf;
+  torch::Tensor _ubuf_scale_inv;
+  bool _ubuf_scale_inv_initialized{false};
+  int _ubuf_bytes;
+
+ public:
+  CommOverlap(torch::Tensor sample, CommOverlapHelper &helper, int tp_size, int num_splits = 4,
+              int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int cga_size = 2,
+              int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
+
+  /*
+  ** Bulk GEMM + COMM
+  ** This function assumes the communication input is pre-copied to _ubuf.
+  */
+  std::vector<at::Tensor> bulk_overlap(
+      at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+      transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+      int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
+      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
+      transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+      size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+      transformer_engine::CommOverlapType comm_type, transformer_engine::DType bulk_dtype,
+      at::Tensor rs_output);
+
+  /*
+  ** Atomic GEMM + Pipelined (collective) Reduce-Scatter
+  */
+  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                              transformer_engine::DType A_type, bool transa, at::Tensor B,
+                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                              transformer_engine::DType B_type, bool transb, at::Tensor D,
+                              at::Tensor D_scale, transformer_engine::DType D_type,
+                              at::Tensor D_amax, at::Tensor bias,
+                              transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                              bool grad, at::Tensor workspace, size_t workspaceSize,
+                              bool accumulate, bool use_split_accumulator, bool gemm_overlap,
+                              at::Tensor rs_output);
+
+  /*
+  ** Split GEMM + Pipelined (collective) Reduce-Scatter
+  */
+  void split_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                             transformer_engine::DType A_type, bool transa, at::Tensor B,
+                             at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                             transformer_engine::DType B_type, bool transb, at::Tensor D,
+                             at::Tensor D_scale, transformer_engine::DType D_type,
+                             at::Tensor D_amax, at::Tensor bias,
+                             transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                             bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                             bool use_split_accumulator, bool gemm_overlap, at::Tensor rs_output);
+
+  /*
+  ** Helper function to copy input to _ubuf.
+  */
+  void copy_input_to_ubuf(torch::Tensor input, transformer_engine::CommOverlapBuffer buffer_type);
+
+  /*
+  ** Helper function to export _ubuf output.
+  */
+  torch::Tensor get_ubuf_output(transformer_engine::CommOverlapBuffer buffer_type);
+
+  /*
+  ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
+  */
+  void set_ubuf_scale_inv(const torch::Tensor &scale_inv);
+
+  bool is_fp8_ubuf() { return (_ubuf.element_size() == 1); }
+};  // CommOverlap
+
+class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2P {
+ protected:
+  torch::Tensor _counters;
+  torch::Tensor _ubuf;
+  std::vector<torch::Tensor> _ubufs;
+  torch::Tensor _ubuf_scale_inv;
+  bool _ubuf_scale_inv_initialized{false};
+  int _ubuf_bytes, _ubuf_chunk_bytes;
+
+ public:
+  CommOverlapP2P(torch::Tensor sample, CommOverlapHelper &helper, int tp_size,
+                 transformer_engine::CommOverlapType comm_type,
+                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int cga_size = 1,
+                 int num_comm_sms = 1, bool set_sm_margin = false, bool use_ce = true,
+                 bool atomic_gemm = false, bool aggregate = false);
+
+  /*
+  ** Ring-exchange (point-2-point) AllGather + Atomic GEMM
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
+  */
+  torch::Tensor atomic_gemm_overlap_ag(
+      at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+      transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+      int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
+      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
+      transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+      size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy);
+
+  /*
+  ** Ring-exchange (point-2-point) AllGather + Split GEMM
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
+  */
+  torch::Tensor split_gemm_overlap_ag(
+      at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+      transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+      int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
+      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
+      transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+      size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy);
+
+  /*
+  ** Atomic GEMM + Ring-exchange (point-2-point) Reduce-Scatter
+  */
+  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                              transformer_engine::DType A_type, bool transa, at::Tensor B,
+                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                              transformer_engine::DType B_type, bool transb, at::Tensor D,
+                              at::Tensor D_scale, transformer_engine::DType D_type,
+                              at::Tensor D_amax, at::Tensor bias,
+                              transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                              bool grad, at::Tensor workspace, size_t workspaceSize,
+                              bool accumulate, bool use_split_accumulator, at::Tensor rs_output);
+
+  /*
+  ** Split GEMM + Ring-exchange (point-2-point) Reduce+Scatter
+  */
+  void split_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                             transformer_engine::DType A_type, bool transa, at::Tensor B,
+                             at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                             transformer_engine::DType B_type, bool transb, at::Tensor D,
+                             at::Tensor D_scale, transformer_engine::DType D_type,
+                             at::Tensor D_amax, at::Tensor bias,
+                             transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                             bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                             bool use_split_accumulator, at::Tensor rs_output);
+
+  /*
+  ** Helper function to copy input to _ubuf or _ubufs chunks.
+  */
+  void copy_input_to_ubuf(torch::Tensor input, transformer_engine::CommOverlapBuffer buffer_type);
+
+  /*
+  ** Helper function to export _ubuf output.
+  */
+  torch::Tensor get_ubuf_output(transformer_engine::CommOverlapBuffer buffer_type);
+
+  /*
+  ** Helper function to set the inverse Fp8 scale for the _ubuf tensor.
+  */
+  void set_ubuf_scale_inv(const torch::Tensor &scale_inv);
+
+  bool is_fp8_ubuf() { return (_ubuf.element_size() == 1); }
+};  // CommOverlapP2P
+
+}  // namespace transformer_engine_torch
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

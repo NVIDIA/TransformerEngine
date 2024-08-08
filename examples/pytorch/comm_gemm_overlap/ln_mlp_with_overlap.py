@@ -29,12 +29,12 @@ def _parse_args(argv=None, namespace=None):
         "-i", "--num-iters", type=int, default=5, help="Number of dummy 'training' iterations."
     )
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
-    parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
+    parser.add_argument("-s", "--seq-length", type=int, default=512, help="Input sequence length.")
     parser.add_argument(
-        "-n", "--num-heads", type=int, default=64, help="Number of attention heads."
+        "-n", "--num-heads", type=int, default=12, help="Number of attention heads."
     )
     parser.add_argument(
-        "-d", "--head-dim", type=int, default=128, help="Dimension of each attention head."
+        "-d", "--head-dim", type=int, default=64, help="Dimension of each attention head."
     )
     parser.add_argument(
         "--mlp-expansion-factor",
@@ -173,7 +173,7 @@ def _train(opts):
             # The entire node is the tensor-parallel group
             tp_ranks = node_ranks
 
-        tp_group = dist.new_group(backend="nccl", ranks=tp_ranks)
+        tp_group = dist.new_group(backend="nccl", ranks=tp_ranks, use_local_synchronization=True)
         tp_size = dist.get_world_size(tp_group)
         tp_rank = dist.get_rank(tp_group)
 
@@ -181,7 +181,7 @@ def _train(opts):
         dp_start = tp_rank
         dp_end = dp_start + WORLD_SIZE
         dp_ranks = list(range(dp_start, dp_end, tp_size))
-        dp_group = dist.new_group(backend="nccl", ranks=dp_ranks)
+        dp_group = dist.new_group(backend="nccl", ranks=dp_ranks, use_local_synchronization=True)
 
     else:
         if opts.num_replicas > 1:
@@ -192,10 +192,12 @@ def _train(opts):
             node_idx = (mesh2d == LOCAL_RANK).nonzero().squeeze().tolist()
 
             tp_ranks = mesh2d[node_idx[0], :].tolist()
-            tp_group = dist.new_group(backend="nccl", ranks=tp_ranks)
+            tp_group = dist.new_group(
+                backend="nccl", ranks=tp_ranks, use_local_synchronization=True
+            )
 
             dp_ranks = mesh2d[:, node_idx[1]].tolist()
-            dp_group = dist.new_group(backend="nccl", ranks=dp_ranks)
+            dp_group = dist.new_group(backend="nccl", ranks=dp_ranks, use_local_syncronization=True)
         else:
             dp_group = None
             tp_group = nccl_world

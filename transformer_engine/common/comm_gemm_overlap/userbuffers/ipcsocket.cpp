@@ -13,6 +13,8 @@
 
 #define IPC_MAX_MSGLEN 4096
 
+namespace userbuffers {
+
 void ipc_warn(const char *format, ...) {
   char buffer[IPC_MAX_MSGLEN];
 
@@ -260,3 +262,5 @@ ipcSocketResult_t ipcSocketSendFd(IpcSocketHandle *handle, const int sendFd, int
                                   uint64_t hash) {
   return ipcSocketSendMsg(handle, NULL, 0, sendFd, rank, hash);
 }
+
+}  // namespace userbuffers

@@ -24,6 +24,8 @@
 #include "ipcsocket.h"
 #include "userbuffers.h"
 
+namespace userbuffers {
+
 #ifdef NVTE_UB_WITH_MPI
 static MPI_Comm EXT_COMM_WORLD = MPI_COMM_WORLD;
 static MPI_Comm EXT_COMM_INTRA;
@@ -108,9 +110,9 @@ int pipe_rank(communicator *comm, int step) {
 
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
-    int tensornodes) {
+    int numnodes, int pipegpus, int pipenodes, int tensorgpus, int tensornodes,
+    std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier) {
   *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
@@ -348,10 +350,11 @@ int create_communicator_grouped2(
 
 int create_communicator_grouped(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes) {
+    int numnodes, int pipegpus, int pipenodes,
+    std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
+    std::function<void(ExtComm)> ext_barrier) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_allgather, ext_barrier, pipegpus, pipenodes, 1, 1);
+                                      pipegpus, pipenodes, 1, 1, ext_allgather, ext_barrier);
 }
 
 int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
@@ -359,7 +362,7 @@ int create_communicator(communicator **comm, int myrank, int numranks, int myloc
                         std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
                         std::function<void(ExtComm)> ext_barrier) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_allgather, ext_barrier, 1, 1, 1, 1);
+                                      1, 1, 1, 1, ext_allgather, ext_barrier);
 }
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
@@ -410,8 +413,8 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
 
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      &ub_mpi_allgather, &ub_mpi_barrier, pipegpus, pipenodes,
-                                      tensorgpus, tensornodes);
+                                      pipegpus, pipenodes, tensorgpus, tensornodes,
+                                      &ub_mpi_allgather, &ub_mpi_barrier, );
 #else
   NVTE_ERROR(std::string("Bootstrapping Userbuffers with MPI requires building") +
              std::string("Transformer Engine with NVTE_UB_WITH_MPI=1 and MPI_HOME=/path/to/mpi"));
@@ -631,3 +634,5 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
   return comm->free_region++;
 }
+
+}  // namespace userbuffers

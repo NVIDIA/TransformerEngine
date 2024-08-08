@@ -119,7 +119,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 # which will be later copied to a FP8 UB
                 ln_out = torch.empty_like(inputmat, memory_format=torch.contiguous_format)
             else:
-                ln_out = ub_obj_lnout.get_ubuf_output(0)
+                ln_out = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
             ln_out = torch.empty_like(
@@ -145,13 +145,13 @@ class _LayerNormLinear(torch.autograd.Function):
         # Column Parallel Linear
         ln_out_gathered = False
         if ub_overlap_ag:
-            ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+            ln_out_total = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
             if not return_layernorm_output:
                 ln_out = torch.empty_like(ln_out)
             if ub_obj_lnout.is_atomic_gemm():
-                ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                ub_algo = tex.CommOverlapAlgo.ATOMIC_AG_P2P
             else:
-                ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                ub_algo = tex.CommOverlapAlgo.SPLIT_AG_P2P
         elif parallel_mode == "column" and sequence_parallel:
             ln_out_gathered = True
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
@@ -165,7 +165,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
                 if ub_overlap_ag:
-                    ln_out_fp8 = ub_obj_lnout.get_ubuf_output(0)
+                    ln_out_fp8 = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
                     tex.cast_to_fp8(
                         ln_out,
                         fp8_meta["scaling_fwd"],
@@ -267,7 +267,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None,
+                ub_algo=(tex.CommOverlapAlgo.SPLIT_AG_P2P if ub_overlap_ag else None),
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
@@ -410,7 +410,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub(ctx.ub_name + "_dgrad")
-                ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
+                ub_obj_lnout.copy_input_to_ubuf(ln_out, tex.CommOverlapBuffer.LOCAL)
             (
                 grad_output,
                 grad_output_c,
@@ -449,15 +449,15 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad_size[1] = weight.size(1)
             if ctx.ub_bulk_wgrad:  # allocate dgrad output
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_wgrad")
-                dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
+                dgrad = ub_obj_dgrad.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
             elif ctx.ub_overlap_rs_dgrad:
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_dgrad")
-                dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
+                dgrad = ub_obj_dgrad.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.ub_bulk_dgrad:
-                ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
+                ub_algo = tex.CommOverlapAlgo.BULK_AG
                 ub_obj = ub_obj_lnout
             elif ctx.ub_overlap_rs_dgrad:
                 dim_size = list(grad_output.size())
@@ -468,14 +468,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 if ub_obj_dgrad.is_p2p_overlap():
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_RS_P2P
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_RS_P2P
                 else:
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_RS
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_RS
                 ub_obj = ub_obj_dgrad
             else:
                 ub_algo = None
@@ -538,7 +538,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     extra_output_tensor=rs_out if ctx.ub_overlap_rs_dgrad else None,
                 )
             if ctx.ub_bulk_dgrad:
-                ln_out_total = ub_obj_lnout.get_ubuf_output(1)
+                ln_out_total = ub_obj_lnout.get_ubuf_output(tex.CommOverlapBuffer.GLOBAL)
 
             # Overlap dgrad-RS/AR with wgrad
             if ctx.parallel_mode == "column" and ctx.sequence_parallel:
@@ -559,13 +559,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     extra_output_tensor = None
                     if ctx.ub_bulk_wgrad:
                         if ub_obj_dgrad.is_fp8_ubuf():
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size())  # RS output
+                            dim_size = list(
+                                ub_obj_dgrad.get_ubuf_output(tex.CommOverlapBuffer.LOCAL).size()
+                            )  # RS output
                             extra_output_tensor = torch.empty(
                                 dim_size, dtype=ctx.activation_dtype, device=dgrad.device
                             )
                             dgrad = extra_output_tensor
                         else:
-                            dgrad = ub_obj_dgrad.get_ubuf_output(0)
+                            dgrad = ub_obj_dgrad.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         wgrad, _ = tex.fp8_gemm(
@@ -586,9 +588,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
-                            ub_algo=(
-                                tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
-                            ),
+                            ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
@@ -610,9 +610,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             grad=True,
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            ub_algo=(
-                                tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
-                            ),
+                            ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
                         )
@@ -629,12 +627,12 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                        ub_algo=(tex.CommOverlapAlgo.BULK_RS if ctx.ub_bulk_wgrad else None),
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                     )
                     clear_tensor_data(ln_out_total)
                     if ctx.ub_bulk_wgrad:
-                        dgrad = ub_obj_dgrad.get_ubuf_output(0)  # Reduce-scatter output
+                        dgrad = ub_obj_dgrad.get_ubuf_output(tex.CommOverlapBuffer.LOCAL)
 
             # Column Parallel Linear
             if (
