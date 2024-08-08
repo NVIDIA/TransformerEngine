@@ -334,7 +334,9 @@ def initialize_ub(
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
-                methods["pipeline"].append(name)
+                methods["bulk"].remove(name)
+                new_method = ub_cfgs[name]["method"]
+                methods[new_method].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         ub_cfg = get_default_config(name)
