@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
-"""Fused operation for GEMM, bias, activation in the forward pass."""
+"""Fused operation for forward GEMM + bias + activation."""
 
 from __future__ import annotations
+from collections.abc import Iterable
 from typing import Any, Optional
 
 import torch
@@ -20,7 +21,7 @@ from transformer_engine.pytorch.ops.op import (
 
 
 class ForwardLinearBiasActivation(FusedOperation):
-    """Fused GEMM, bias, activation in the forward pass
+    """Fused forward GEMM + bias + activation
 
     Bias and activation are both optional. Row tensor parallelism is
     not supported since that requires communication immediately after
@@ -60,10 +61,12 @@ class ForwardLinearBiasActivation(FusedOperation):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
 
         # Get basic operations
         idx = self._op_idxs["linear"]
@@ -128,13 +131,13 @@ class ForwardLinearBiasActivation(FusedOperation):
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
         linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
 
-        return output
+        return output, [() for _ in range(len(self.basic_ops))]
 
 
 def fuse_forward_linear_bias_activation(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
-    """Fuse GEMM, bias, activation in the forward pass
+    """Fuse forward GEMM + bias + activation
 
     Parameters
     ----------
