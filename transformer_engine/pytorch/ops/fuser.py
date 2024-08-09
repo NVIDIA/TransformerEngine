@@ -352,9 +352,7 @@ class OperationFuser:
             basic_op_kwargs = [{} for _ in range(len(self._basic_ops))]
 
         # Flatten list of parameters
-        params = []
-        for op in self._basic_ops:
-            params.extend(op.parameters())
+        params = [param for op in self._basic_ops for param in op.parameters()]
 
         # Fuser forward pass
         return _OperationFuserAutogradFunction.apply(
