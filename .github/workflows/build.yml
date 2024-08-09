@@ -19,7 +19,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake==3.21.0
+          pip install cmake torch
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -35,9 +35,14 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/pytorch:24.05-py3
+      image: nvcr.io/nvidia/cuda:12.5.0-devel-ubuntu22.04
       options: --user root
     steps:
+      - name: 'Dependencies'
+        run: |
+          apt-get update
+          apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
+          pip install cmake==3.21.0
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
