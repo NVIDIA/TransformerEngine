@@ -25,7 +25,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
     const IType* __restrict__ const input, const CType* __restrict__ const noop,
     OType* __restrict__ const output_c, OType* __restrict__ const output_t,
     const CType* __restrict__ const scale_ptr, CType* __restrict__ const amax_ptr,
-    const size_t row_length, const size_t num_rows) {
+    CType* __restrict__ const scale_inv_ptr, const size_t row_length, const size_t num_rows) {
   if (noop != nullptr && noop[0] == 1.0f) return;
 
   // Vectorized load/store sizes
@@ -120,5 +120,10 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
     if (threadIdx.x == 0) {
       atomicMaxFloat(amax_ptr, amax);
     }
+  }
+
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
+    reciprocal<CType>(scale_inv_ptr, scale);
   }
 }

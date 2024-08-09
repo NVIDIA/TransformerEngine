@@ -89,6 +89,9 @@ struct FwdParams : public ParamsBase {
   // AMax output
   void *amax;
 
+  // Inverse of scaling factor
+  void *scale_inv;
+
   // Whether to compute scale and amax
   bool fp8_out;
 };

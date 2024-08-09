@@ -52,6 +52,9 @@ def _apply_normalization(
     fwd_ln_sm_margin: int,
     zero_centered_gamma: bool,
     is_grad_enabled: bool,
+    fp8_scale: Optional[torch.Tensor] = None,
+    fp8_amax: Optional[torch.Tensor] = None,
+    fp8_scale_inv: Optional[torch.Tensor] = None,
 ):
     normalization_func = _get_normalization_func(normalization, fp8_out, is_grad_enabled, True)
 
@@ -70,6 +73,9 @@ def _apply_normalization(
                 fp8_dtype_forward,
                 fwd_ln_sm_margin,
                 zero_centered_gamma,
+                scale=fp8_scale,
+                amax=fp8_amax,
+                scale_inv=fp8_scale_inv,
                 **output_kwarg,
             )
         else:
@@ -82,6 +88,9 @@ def _apply_normalization(
                     fp8_dtype_forward,
                     fwd_ln_sm_margin,
                     zero_centered_gamma,
+                    scale=fp8_scale,
+                    amax=fp8_amax,
+                    scale_inv=fp8_scale_inv,
                 ),
                 None,
                 None,

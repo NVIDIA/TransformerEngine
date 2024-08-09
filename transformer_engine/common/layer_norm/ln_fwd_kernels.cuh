@@ -132,10 +132,18 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
     }
   }
   if (params.fp8_out) {
-    amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
-    if (threadIdx.x == 0 && threadIdx.y == 0) {
-      static_assert(std::is_same<compute_t, float>::value);
-      atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
+    // Reduce amax over block
+    if (params.amax != nullptr) {
+      amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
+      if (threadIdx.x == 0) {
+        static_assert(std::is_same<compute_t, float>::value);
+        atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
+      }
+    }
+
+    // Update scale-inverse
+    if (blockIdx.x == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
+      reciprocal<compute_t>(reinterpret_cast<compute_t *>(params.scale_inv), scale);
     }
   }
 }
@@ -291,10 +299,18 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
 
   // Finalize fp8 factors
   if (params.fp8_out) {
-    amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
-    if (threadIdx.x == 0) {
-      static_assert(std::is_same<compute_t, float>::value);
-      atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
+    // Reduce amax over block
+    if (params.amax != nullptr) {
+      amax = reduce_max<WARPS_M * WARPS_N>(amax, warp);
+      if (threadIdx.x == 0) {
+        static_assert(std::is_same<compute_t, float>::value);
+        atomicMaxFloat(reinterpret_cast<compute_t *>(params.amax), amax);
+      }
+    }
+
+    // Update scale-inverse
+    if (blockIdx.x == 0 && threadIdx.x == 0 && params.scale_inv != nullptr) {
+      reciprocal<compute_t>(reinterpret_cast<compute_t *>(params.scale_inv), scale);
     }
   }
 }
