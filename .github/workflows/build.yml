@@ -19,7 +19,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch
+          pip install cmake==3.21.0
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -42,7 +42,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake==3.21.0
+          pip install cmake torch
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
