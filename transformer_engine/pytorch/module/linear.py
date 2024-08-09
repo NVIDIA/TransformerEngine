@@ -48,6 +48,7 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
+from ..export import is_in_onnx_export_mode
 
 __all__ = ["Linear"]
 
@@ -142,6 +143,18 @@ class _Linear(torch.autograd.Function):
                         fp8_dtype_forward,
                         scale_inv=inputmat_scale_inv,
                     )
+
+            # Hack for ONNX export
+            # Note: ONNX models are represented as a graph of tensor
+            # operations, so the in-place scale-inv update doesn't fit
+            # very well. We work around this by making it look like
+            # the scale-inv tensor is initialized with a copy.
+            # Note: ONNX export expects FP8 scales can be represented
+            # with constant ops. However, copying into a buffer
+            # involves an expand op for array broadcasting. We work
+            # around this by filling the buffer instead.
+            if is_in_onnx_export_mode():
+                inputmat_scale_inv.fill_(inputmat_scale_inv.item())
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
