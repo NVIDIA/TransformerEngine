@@ -258,7 +258,8 @@ at::Tensor te_gemm_ts(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_te
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
 
-  const int sm_count = transformer_engine::cuda::sm_count();
+  const int device_id = at::cuda::current_device();
+  const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
   if (A_scale_inverse.numel()) A_scale_inverse = A_scale_inverse[A_fp8_tensor];
@@ -293,7 +294,8 @@ std::vector<at::Tensor> te_grouped_gemm_ts(
   // Set an external SM Margin to all the GEMMs.
   // This comes in handy when DP is overlapped with GEMMs
 
-  const int sm_count = transformer_engine::cuda::sm_count();
+  const int device_id = at::cuda::current_device();
+  const int sm_count = transformer_engine::cuda::sm_count(device_id);
   int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
 
   te_grouped_gemm(A, A_scale_inverse, A_offset, A_type_arg, transa_arg, B, B_scale_inverse,

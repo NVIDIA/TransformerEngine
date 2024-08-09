@@ -1228,7 +1228,8 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
     inp_hidden_states.retain_grad()
 
     m = config.seq_len // 16
-    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
+    dist.append(dist[-1])  # Manually add a zero
     m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
     m_splits = m_splits * 16
     assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms

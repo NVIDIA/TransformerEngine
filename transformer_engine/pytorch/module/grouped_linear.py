@@ -34,7 +34,7 @@ from ..distributed import (
 from ..cpp_extensions import (
     cast_to_fp8,
     fp8_cast_transpose_bgrad_fused,
-    fp8_cast_transpose_fused,
+    fp8_multi_cast_transpose_fused,
     fp8_grouped_gemm,
     grouped_gemm,
 )
@@ -82,12 +82,12 @@ class _GroupedLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
+        weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
-        weights_fp8 = weights_and_biases[num_gemms : 2 * num_gemms]
-        biases = weights_and_biases[2 * num_gemms :]
+        biases = weights_and_biases[num_gemms:]
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
@@ -113,15 +113,15 @@ class _GroupedLinear(torch.autograd.Function):
                 and not sequence_parallel
             ):
                 # FP8 input for forward, FP8 input transpose for backward wgrad
-                for i in range(num_gemms):
-                    mat, mat_t = fp8_cast_transpose_fused(
-                        inputmats_no_fp8[i],
-                        fp8_meta["scaling_fwd"],
-                        _GEMM_INPUT + i,
-                        fp8_dtype_forward,
-                    )
-                    inputmats.append(mat)
-                    inputmats_t.append(mat_t)
+                indices = list(range(_GEMM_INPUT, _GEMM_INPUT + num_gemms))
+                inputmats, inputmats_t = fp8_multi_cast_transpose_fused(
+                    inputmats_no_fp8,
+                    fp8_meta["scaling_fwd"],
+                    indices,  # scale_indices
+                    indices,  # amax_indices
+                    indices,  # scale_inv_indices
+                    fp8_dtype_forward,
+                )
             else:
                 # FP8 input for forward
                 inputmats = [
@@ -308,13 +308,15 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 else:
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        for i in range(ctx.num_gemms):
-                            grad_output_c[i], grad_output_t[i] = fp8_cast_transpose_fused(
-                                grad_output_mats[i],
-                                ctx.fp8_meta["scaling_bwd"],
-                                _GRAD_OUTPUT + i,
-                                fp8_dtype_backward,
-                            )
+                        indices = list(range(_GRAD_OUTPUT, _GRAD_OUTPUT + ctx.num_gemms))
+                        grad_output_c, grad_output_t = fp8_multi_cast_transpose_fused(
+                            grad_output_mats,
+                            ctx.fp8_meta["scaling_bwd"],
+                            indices,  # scale_indices
+                            indices,  # amax_indices
+                            indices,  # scale_inv_indices
+                            fp8_dtype_backward,
+                        )
                     else:
                         for i in range(ctx.num_gemms):
                             grad_output_c[i] = cast_to_fp8(
@@ -334,7 +336,7 @@ class _GroupedLinear(torch.autograd.Function):
             if ctx.requires_dgrad:
                 if ctx.fp8:
                     dgrad = torch.empty(
-                        (sum(ctx.m_splits), weights_fp8[i].size(1)),
+                        (sum(ctx.m_splits), weights_fp8[0].size(1)),
                         dtype=ctx.activation_dtype,
                         device=grad_output.device,
                     )
@@ -487,8 +489,8 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # activation_dtype
             None,  # parallel_mode
             None,  # is_grad_enabled
+            None,  # weights_fp8
             *wgrad_list,
-            *([None] * ctx.num_gemms),  # weights_fp8
             *grad_biases,
         )
 
@@ -799,8 +801,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
+                weight_tensors_fp8,
                 *weight_tensors,
-                *weight_tensors_fp8,
                 *bias_tensors,
             )
             out = linear_fn(*args)
