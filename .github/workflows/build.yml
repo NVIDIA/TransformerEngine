@@ -53,7 +53,7 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
-        run: python tests/pytorch/test_sanity_import.py
+        run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
     runs-on: ubuntu-latest
