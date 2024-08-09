@@ -1216,8 +1216,6 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
     reset_rng_states()
-    # using this seed because it will generate cases where m = 0, while the default seed 1234 won't
-    torch.manual_seed(1235)
     if fp8:
         FP8GlobalStateManager.reset()
 
@@ -1230,7 +1228,8 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
     inp_hidden_states.retain_grad()
 
     m = config.seq_len // 16
-    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
+    dist.append(dist[-1])  # Manually add a zero
     m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
     m_splits = m_splits * 16
     assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
@@ -1270,7 +1269,6 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
 
     config = model_configs[model]
-    config.seq_len = 128
     if config.seq_len % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
