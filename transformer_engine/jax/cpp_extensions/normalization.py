@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
-from functools import partial, reduce
+from functools import partial, reduce, cache
 import operator
 import os
 import warnings
@@ -38,6 +38,18 @@ __all__ = [
     "layernorm_fwd_fp8",
     "rmsnorm_fwd_fp8",
 ]
+
+
+@cache
+def get_forward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
+    return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def get_backward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
+    return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
 
 class LayerNormFwdPrimitive(BasePrimitive):
@@ -77,6 +89,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             True,
             kwargs["zero_centered_gamma"],
             kwargs["epsilon"],
+            get_forward_sm_margin(),
         )
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -136,7 +149,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, b_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -354,6 +367,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
                 True,
                 kwargs["zero_centered_gamma"],
                 kwargs["epsilon"],
+                get_backward_sm_margin(),
             )
         )
         wkspace_aval = dx_aval.update(
@@ -420,7 +434,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_backward_sm_margin()
 
         wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -591,6 +605,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             False,
             False,
             kwargs["epsilon"],
+            get_forward_sm_margin(),
         )
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -638,7 +653,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -776,6 +791,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 False,
                 False,
                 kwargs["epsilon"],
+                get_backward_sm_margin(),
             )
         )
         wkspace_aval = dx_aval.update(
@@ -829,7 +845,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_backward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -989,6 +1005,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             True,
             zero_centered_gamma,
             epsilon,
+            get_forward_sm_margin(),
         )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
@@ -1076,7 +1093,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         ]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -1296,6 +1313,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             False,
             False,
             epsilon,
+            get_forward_sm_margin(),
         )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
@@ -1365,7 +1383,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
