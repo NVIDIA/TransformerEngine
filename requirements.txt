@@ -1,0 +1,9 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+setuptools>=61.0
+cmake>=3.21
+pybind11
+ninja
+pip

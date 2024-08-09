@@ -43,7 +43,7 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install . -v --no-deps
+        run: pip install . -v --no-build-isolation
         env:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
@@ -61,7 +61,7 @@ jobs:
         with:
           submodules: recursive
       - name: 'Build'
-        run: pip install . -v
+        run: pip install . -v --no-build-isolation
         env:
           NVTE_FRAMEWORK: jax
       - name: 'Sanity check'
@@ -81,7 +81,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y libgoogle-glog-dev
-          pip install . -v
+          pip install . -v --no-build-isolation
         env:
           NVTE_FRAMEWORK: paddle
       - name: 'Sanity check'

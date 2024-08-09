@@ -29,11 +29,11 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 
 from build_tools.build_ext import get_build_ext
-from build_tools.utils import copy_common_headers, install_and_import
+from build_tools.utils import copy_common_headers, install_packages
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension
 
-install_and_import("pybind11")
+install_packages(["pybind11"])
 from pybind11.setup_helpers import build_ext as BuildExtension
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
