@@ -432,7 +432,7 @@ class TestActivationLu:
     def primitive_func(self, inputs):
         return jnp.mean(activation_lu(inputs, activation_type=self.activation_type))
 
-    @pytest.mark.parametrize("shape", [(32, 1, 64), (64, 1, 256)])
+    @pytest.mark.parametrize("shape", [(32, 1, 64), (16, 64, 1, 256)])
     @pytest.mark.parametrize(
         "activation_type",
         [
@@ -450,7 +450,7 @@ class TestActivationLu:
     )
     def test_activation_lu(self, random_inputs, activation_type):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(value_and_grad(self.primitive_func, (0,)))
@@ -511,7 +511,7 @@ class TestActivationLuFP8(TestActivationLu):
 
         _prim_func.defvjp(_prim_func_fwd, _prim_func_bwd)
 
-        dx_trans_no_use = jnp.empty([x.shape[i] for i in self.transpose_indices], dtype=x.dtype)
+        dx_trans_no_use = jnp.empty([x.shape[i] for i in self.transpose_axes], dtype=x.dtype)
         dbias_no_use = jnp.empty(x.shape[-1], dtype=x.dtype)
         amax_no_use = jnp.zeros(1, jnp.float32)
         value_n_grad_primitive_func = value_and_grad(
@@ -520,7 +520,7 @@ class TestActivationLuFP8(TestActivationLu):
         return value_n_grad_primitive_func(x, dx_trans_no_use, dbias_no_use, amax_no_use)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("shape", [(32, 1, 64), (64, 1, 256)])
+    @pytest.mark.parametrize("shape", [(32, 1, 64), (16, 64, 1, 256)])
     @pytest.mark.parametrize(
         "activation_type",
         [
@@ -541,10 +541,12 @@ class TestActivationLuFP8(TestActivationLu):
         self.scale = jnp.ones(1, jnp.float32)
         self.scale_inv = jnp.ones(1, jnp.float32)
         self.activation_type = activation_type
-        self.transpose_indices = (1, 2, 0)
 
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
+        axes = jnp.arange(x.ndim)
+        self.transpose_axes = tuple([*axes[-2:]] + [*axes[:-2]])
+        print(self.transpose_axes)
 
         prim_out, (prim_grad, prim_grad_trans, dbias, amax) = self.prim_func(x)
         ref_out, (ref_grad,) = self.ref_func(x, activation_type)
@@ -556,7 +558,7 @@ class TestActivationLuFP8(TestActivationLu):
         assert_allclose(prim_grad, ref_grad, dtype=FP8Helper.BWD_DTYPE)
         assert_allclose(
             prim_grad_trans,
-            jnp.transpose(ref_grad, self.transpose_indices),
+            jnp.transpose(ref_grad, self.transpose_axes),
             dtype=FP8Helper.BWD_DTYPE,
         )
 

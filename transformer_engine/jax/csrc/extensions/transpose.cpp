@@ -7,6 +7,7 @@
 #include "transformer_engine/transpose.h"
 
 #include "extensions.h"
+#include "xla/ffi/api/ffi.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -65,6 +66,61 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
   nvte_cast_transpose(input_tensor.data(), input_cast_tensor.data(), input_cast_trans_tensor.data(),
                       stream);
 }
+
+Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
+                            Buffer_Type scale_buf, Buffer_Type scale_inv_buf,
+                            Result_Type input_cast_buf, Result_Type input_cast_trans_buf,
+                            Result_Type amax_out_buf, int64_t transpose_axis) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(input_cast_buf->element_type());
+
+  auto *input = input_buf.untyped_data();
+  float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+  float *scale_inv = reinterpret_cast<float *>(scale_inv_buf.untyped_data());
+
+  auto *input_cast = input_cast_buf->untyped_data();
+  auto *input_cast_trans = input_cast_trans_buf->untyped_data();
+  float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
+  assert(amax == amax_out);
+
+  if (!use_fp8(out_dtype)) {
+    scale = nullptr;
+    scale_inv = nullptr;
+    amax_out = nullptr;
+  }
+
+  auto input_dims = input_buf.dimensions();
+  if (transpose_axis < 0) transpose_axis += input_dims.size();
+  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
+                           std::multiplies<>());
+  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
+                           std::multiplies<>());
+  auto input_shape = std::vector<size_t>{m, n};
+  auto input_trans_shape = std::vector<size_t>{n, m};
+
+  auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
+  auto input_cast_tensor =
+      TensorWrapper(input_cast, input_shape, out_dtype, amax_out, scale, scale_inv);
+  auto input_cast_trans_tensor =
+      TensorWrapper(input_cast_trans, input_trans_shape, out_dtype, amax_out, scale, scale_inv);
+
+  nvte_cast_transpose(input_tensor.data(), input_cast_tensor.data(), input_cast_trans_tensor.data(),
+                      stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(CastTransposeHandler, CastTransposeFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // input_cast
+                                  .Ret<Buffer_Type>()      // input_cast_trans
+                                  .Ret<Buffer_Type>()      // amax_out
+                                  .Attr<int64_t>("transpose_axis"));
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype) {

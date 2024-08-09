@@ -3,7 +3,6 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include "extensions.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"

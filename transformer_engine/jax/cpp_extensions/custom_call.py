@@ -3,12 +3,14 @@
 # See LICENSE for license information.
 """JAX/TE custom call"""
 from dataclasses import dataclass
+from enum import IntEnum
 
 from jax.lib import xla_client
 from jax.interpreters import mlir
 
 from transformer_engine import transformer_engine_jax
 
+from .misc import is_ffi_enabled
 
 try:
     from jaxlib.hlo_helpers import custom_call
@@ -17,8 +19,25 @@ except ImportError:
     # version, so we still need this import.
     pass
 
+
+class CustomCallAPIVersion(IntEnum):
+    """Enum for selecting between old and new custom call registration API"""
+
+    OPAQUE = 0
+    FFI = 1
+
+
 for _name, _value in transformer_engine_jax.registrations().items():
-    xla_client.register_custom_call_target(_name, _value, platform="CUDA")
+    if _name.endswith("_ffi"):
+        if is_ffi_enabled():
+            # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
+            xla_client.register_custom_call_target(
+                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
+            )
+    else:
+        xla_client.register_custom_call_target(
+            _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
+        )
 
 
 @dataclass
@@ -79,7 +98,7 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
             result_layouts=args.output_layouts,
             backend_config=opaque,
             has_side_effect=has_side_effect,
-            **kwargs
+            **kwargs,
         ).results
     else:
         # Need to disable one pylint error as the second function
@@ -93,6 +112,6 @@ def custom_caller(name, args, opaque, has_side_effect, **kwargs):
             result_layouts=args.output_layouts,
             backend_config=opaque,
             has_side_effect=has_side_effect,
-            **kwargs
+            **kwargs,
         )
     return out
