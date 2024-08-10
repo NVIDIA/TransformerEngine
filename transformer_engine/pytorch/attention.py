@@ -93,6 +93,9 @@ META_O = tex.FP8FwdTensors.GEMM2_INPUT
 META_DO = tex.FP8BwdTensors.GRAD_INPUT2
 META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
 META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+# repurpose some unused amax history buffers for partial results of CP fwd and bwd
+META_O_CP = tex.FP8FwdTensors.GEMM2_WEIGHT
+META_DQKV_CP = tex.FP8BwdTensors.GRAD_INPUT1
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -1211,7 +1214,26 @@ def get_cu_seqlens_on_cp_rank(
 
 
 def get_p2p_comm_info(rank, step, cp_size):
-    return 0, 0, 0
+    min_rank_in_p2p_ring = rank
+    curr_rank = rank
+    for _ in range(cp_size):
+        next_rank = (curr_rank + step) % cp_size
+        if curr_rank == rank:
+            send_dst = next_rank
+        if next_rank == rank:
+            recv_src = curr_rank
+
+        if next_rank < min_rank_in_p2p_ring:
+            min_rank_in_p2p_ring = next_rank
+            rank_in_p2p_ring = 0
+        else:
+            rank_in_p2p_ring += 1
+
+        curr_rank = next_rank
+        if curr_rank == rank:
+            break
+
+    return send_dst, recv_src, rank_in_p2p_ring
 
 
 class AttnFuncWithCP(torch.autograd.Function):
@@ -1351,13 +1373,12 @@ class AttnFuncWithCP(torch.autograd.Function):
                             )
                             for x in [k_f16, v_f16]
                         ]
-                amax_s_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
-                amax_o_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
                 fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
                 fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
+                amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
@@ -1401,8 +1422,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                             p2p_comm_buffers[i], fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
                         )
                     if fp8 and use_fused_attention:
-                        fp8_meta_kwargs["amax_s"] = amax_s_per_step[i]
-                        fp8_meta_kwargs["amax_o"] = amax_o_per_step[i]
+                        fp8_meta_kwargs["amax_s"] = amax_per_step[0][i]
+                        fp8_meta_kwargs["amax_o"] = amax_per_step[1][i]
                     if causal:
                         if i == 0:
                             if pad_between_seqs_q:
@@ -1853,11 +1874,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if fp8:
                         out_per_step[i-1] = cast_from_fp8(
-                            out_per_step[i-1],
-                            fp8_meta["scaling_fwd"],
-                            META_O,
-                            fp8_dtype_forward,
-                            TE_DType[q_fp8.dtype if fp8_meta["recipe"].fp8_mha else q_f16.dtype],
+                            out_per_step[i-1], fp8_meta["scaling_fwd"], META_O_CP, fp8_dtype_forward, TE_DType[torch.float32],
                         )
                     if i == 1:
                         out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
@@ -1951,23 +1968,26 @@ class AttnFuncWithCP(torch.autograd.Function):
             out = out.view(-1, *out.shape[-2:])
 
         if fp8 and use_fused_attention:
-            fp8_meta["scaling_fwd"].amax_history[0][META_S] = torch.max(amax_s_per_step)
-            fp8_meta["scaling_fwd"].amax_history[0][META_O] = torch.max(amax_o_per_step)
+            amax_cp_fwd = amax_per_step.max(dim=1)
+            fp8_meta["scaling_fwd"].amax_history[0][META_S] = amax_cp_fwd[0]
+            fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
         if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
-            out_f16 = out
             out_fp8 = cast_to_fp8(
                 out, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward
             )
-            if fp8_meta["recipe"].fp8_mha:
-                out = Float8Tensor(
-                    data=out_fp8,
-                    fp8_meta=fp8_meta,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=META_O,
-                    fp8_dtype=fp8_dtype_forward,
-                    dtype=q_fp8.dtype,
-                )
+
+        if fp8 and fp8_meta["recipe"].fp8_mha:
+            out_ret = Float8Tensor(
+                data=out_fp8,
+                fp8_meta=fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=META_O,
+                fp8_dtype=fp8_dtype_forward,
+                dtype=q_fp8.dtype,
+            )
+        else:
+            out_ret = out.to(q_f16.dtype)
 
         if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_save, kv_save, out_save = q, kv, out_fp8
@@ -1982,10 +2002,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_dtype=fp8_dtype_forward,
                 dtype=k_fp8.dtype
             )
-            q_save, kv_save, out_save = q_fp8, kv_fp8, out_f16
+            q_save, kv_save, out_save = q_fp8, kv_fp8, out_ret
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
         else:
-            q_save, kv_save, out_save = q_f16, kv, out
+            q_save, kv_save, out_save = q_f16, kv, out_ret
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
 
         ctx.save_for_backward(
@@ -2017,7 +2037,7 @@ class AttnFuncWithCP(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
-        return out
+        return out_ret
 
     @staticmethod
     def backward(ctx, dout):
@@ -2081,14 +2101,13 @@ class AttnFuncWithCP(torch.autograd.Function):
                 dkv = torch.empty((cp_size, kv.shape), dtype=kv.dtype, device=kv.device)
                 dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
+                    assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     dout = dout._data
                 else:
                     dout = cast_to_fp8(
                         dout, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                     )
                 p2p_comm_buffers = [[kv, dkv], [torch.empty_like(kv), dkv]]
-                amax_dp_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
-                amax_dqkv_per_step = torch.zeros(cp_size, dtype=torch.float32, device=q.device)
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_fwd_scale_invs[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_fwd_scale_invs[META_S]
@@ -2098,10 +2117,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_meta_kwargs["q_scale_s"] = fp8_fwd_scales[META_S]
                 fp8_meta_kwargs["q_scale_dp"] = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
                 fp8_meta_kwargs["q_scale_dqkv"] = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
+                amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            if ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
                 q, kv, dout = [x.from_float8(x.dtype) for x in [q, kv, dout]]
             dq = torch.empty_like(q)
             if ctx.qkv_format == "thd" and causal:
@@ -2179,8 +2199,8 @@ class AttnFuncWithCP(torch.autograd.Function):
 
             kv = p2p_comm_buffers[i % 2][0]
             if ctx.fp8 and use_fused_attention:
-                fp8_meta_kwargs["amax_dp"] = amax_dp_per_step[i]
-                fp8_meta_kwargs["amax_dqkv"] = amax_dqkv_per_step[i]
+                fp8_meta_kwargs["amax_dp"] = amax_per_step[0][i]
+                fp8_meta_kwargs["amax_dqkv"] = amax_per_step[0][i]
             # In reversed order of fwd
             if causal:
                 if i == (cp_size - 1):
@@ -2648,14 +2668,18 @@ class AttnFuncWithCP(torch.autograd.Function):
             dkv_[:, cu_seqlens_kv_padded[-1] :].fill_(0)
             dkv = dkv_
 
+        if ctx.fp8 and ctx.use_fused_attention:
+            amax_cp_bwd = amax_per_step.max(dim=1)
+            fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
+            fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
+
         if ctx.fp8:
             dq, dkv = [
                 cast_from_fp8(
-                    x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward, TE_DType[dout_dtype]
+                    x, ctx.fp8_meta["scaling_bwd"], META_DQKV_CP, fp8_dtype_backward, TE_DType[torch.float32]
                 ) for x in [dq, dkv]
             ]
             dq, dkv = [x.sum(dim=0) for x in [dq, dkv]]
-            dk, dv = dkv[0], dkv[1]
             if ctx.fp8_meta["recipe"].fp8_mha:
                 dq, dkv = [
                     cast_to_fp8(
@@ -2672,12 +2696,11 @@ class AttnFuncWithCP(torch.autograd.Function):
                         dtype=dout_dtype
                     ) for x in [dq, dkv[0], dkv[1]]
                 ]
+            else:
+                dq, dkv = [x.to(dout_dtype) for x in [dq, dkv]]
+                dk, dv = dkv[0], dkv[1]
         else:
             dk, dv = dkv[0], dkv[1]
-
-        if ctx.fp8 and ctx.use_fused_attention:
-            fp8_meta["scaling_bwd"].amax_history[0][META_DP] = torch.max(amax_dp_per_step)
-            fp8_meta["scaling_bwd"].amax_history[0][META_DQKV] = torch.max(amax_dqkv_per_step)
 
         if attn_dbias is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
