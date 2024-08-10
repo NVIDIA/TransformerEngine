@@ -902,7 +902,7 @@ def _run_dot_product_attention(
     # Set up model
     block = DotProductAttention(
         config.num_heads,
-        config.head_dim_qk,
+        (config.head_dim_qk, config.head_dim_v),
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
