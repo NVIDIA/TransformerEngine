@@ -6,7 +6,6 @@
 
 import os
 import time
-import atexit
 from pathlib import Path
 from typing import List, Tuple
 
@@ -45,15 +44,6 @@ elif "jax" in frameworks:
 # Start timing
 start_time = time.perf_counter()
 
-
-def print_total_time():
-    end_time = time.perf_counter()
-    total_time = end_time - start_time
-    print(f"Total build time: {total_time:.2f} seconds")
-
-
-# Register the print_total_time function to be called at exit
-atexit.register(print_total_time)
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
 
@@ -181,3 +171,8 @@ if __name__ == "__main__":
         include_package_data=True,
         package_data={"": ["VERSION.txt"]},
     )
+
+# End timing
+end_time = time.perf_counter()
+total_time = end_time - start_time
+print(f"Total build time: {total_time:.2f} seconds")
