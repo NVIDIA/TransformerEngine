@@ -5241,7 +5241,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                For that, please use `get_qkv_layout` to gain the layout information.
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
-                `1.0/math.sqrt(kv_channels if isinstance(kv_channels) == int else kv_channels[0])`.
+                `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
 
     Parallelism parameters
     ----------------------
@@ -5309,10 +5309,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_stream = cp_stream
 
         self.hidden_size_per_attention_head_k = (
-            kv_channels if isinstance(kv_channels) == int else kv_channels[0]
+            kv_channels if isinstance(kv_channels, int) else kv_channels[0]
         )
         self.hidden_size_per_attention_head_v = (
-            kv_channels if isinstance(kv_channels) == int else kv_channels[1]
+            kv_channels if isinstance(kv_channels, int) else kv_channels[1]
         )
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
@@ -5332,7 +5332,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(
-                kv_channels if isinstance(kv_channels) == int else kv_channels[0]
+                kv_channels if isinstance(kv_channels, int) else kv_channels[0]
             )
 
         self.deterministic = (
