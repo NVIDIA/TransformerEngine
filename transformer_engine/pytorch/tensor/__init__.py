@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor class with FP8 data"""
+"""Custom tensor classes"""
 
-from .tensor import Float8Tensor
+from .float8_tensor import Float8Tensor
+from .proxy_tensor import ProxyTensor
