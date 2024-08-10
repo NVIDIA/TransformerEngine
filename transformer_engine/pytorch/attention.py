@@ -1214,6 +1214,7 @@ def get_cu_seqlens_on_cp_rank(
 
 
 def get_p2p_comm_info(rank, step, cp_size):
+    """Compute communication info of each rank for FP8 dKV exchange"""
     min_rank_in_p2p_ring = rank
     curr_rank = rank
     for _ in range(cp_size):
@@ -2097,8 +2098,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fused_attn_qkv_dtype = fp8_dtype_backward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                dq = torch.empty((cp_size, q.shape), dtype=q.dtype, device=q.device)
-                dkv = torch.empty((cp_size, kv.shape), dtype=kv.dtype, device=kv.device)
+                dq_fp8 = torch.empty((cp_size, q.shape), dtype=q.dtype, device=q.device)
+                dkv_fp8 = torch.empty((cp_size, kv.shape), dtype=kv.dtype, device=kv.device)
                 dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
@@ -2107,7 +2108,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dout = cast_to_fp8(
                         dout, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                     )
-                p2p_comm_buffers = [[kv, dkv], [torch.empty_like(kv), dkv]]
+                p2p_comm_buffers = [[kv, dkv_fp8], [torch.empty_like(kv), dkv_fp8]]
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_fwd_scale_invs[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_fwd_scale_invs[META_S]
@@ -2524,6 +2525,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         **fa_optional_backward_kwargs,
                     )
 
+            dq = dq_fp8[(rank + i + 1) % cp_size] if ctx.fp8 else dq
             if i >= (cp_size - rank - 1) or not causal:
                 # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
                 # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
@@ -2536,7 +2538,17 @@ class AttnFuncWithCP(torch.autograd.Function):
                     # [b*sq//2, np, hn] -> [sq//2, b, np, hn]
                     dq_ = dq_.view(-1, *dq.shape[-3:])
 
-            if causal:
+            if ctx.fp8:
+                if i >= (cp_size - rank - 1) or not causal:
+                    dq.copy_(dq_)
+                else:
+                    if cxt.qkv_format == "bshd":
+                        dq[:, 0, ...].fill_(0)
+                        dq[:, 1, ...].copy_(dq_)
+                    elif ctx.qkv_format == "sbhd":
+                        dq[0].fill_(0)
+                        dq[1].copy_(dq_)
+            elif causal:
                 if i > (cp_size - rank - 1):
                     dq.add_(dq_)
                 elif i == (cp_size - rank - 1):
@@ -2592,6 +2604,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 req.wait()
 
             dkv = p2p_comm_buffers[(i + 1) % 2][1]
+            dkv = dkv_fp8[rank] if ctx.fp8 else dkv
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
                 if ctx.qkv_format in ["bshd", "sbhd"]:
@@ -2610,7 +2623,17 @@ class AttnFuncWithCP(torch.autograd.Function):
                 # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
                 dkv_ = dkv_.view(*dkv.shape)
 
-            if causal:
+            if ctx.fp8:
+                if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
+                    if ctx.qkv_format == "bshd":
+                        dkv[:, :, 0, ...].copy_(dkv_)
+                        dkv[:, :, 1, ...].fill_(0)
+                    elif ctx.qkv_format == "sbhd":
+                        dkv[:, 0, ...].copy_(dkv_)
+                        dkv[:, 1, ...].fill_(0)
+                else:
+                    dkv.copy_(dkv_)
+            elif causal:
                 if i == (cp_size - 1):
                     if rank == 0:
                         if ctx.qkv_format == "bshd":
@@ -2648,6 +2671,19 @@ class AttnFuncWithCP(torch.autograd.Function):
                 else:
                     dkv.add_(dkv_)
 
+        if ctx.fp8 and ctx.use_fused_attention:
+            amax_cp_bwd = amax_per_step.max(dim=1)
+            fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
+            fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
+            if ctx.qkv_format in ["bshd", "sbhd"]:
+                dkv_fp8 = dkv_fp8.view(cp_size, 2, *dkv_fp8.shape[1:-3], *dkv_fp8.shape[-2:])
+            dq, dkv = [
+                cast_from_fp8(
+                    x, ctx.fp8_meta["scaling_bwd"], META_DQKV_CP, fp8_dtype_backward, TE_DType[torch.float32]
+                ) for x in [dq_fp8, dkv_fp8]
+            ]
+            dq, dkv = [x.sum(dim=0) for x in [dq, dkv]]
+
         if causal:
             if ctx.qkv_format == "bshd":
                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
@@ -2668,37 +2704,25 @@ class AttnFuncWithCP(torch.autograd.Function):
             dkv_[:, cu_seqlens_kv_padded[-1] :].fill_(0)
             dkv = dkv_
 
-        if ctx.fp8 and ctx.use_fused_attention:
-            amax_cp_bwd = amax_per_step.max(dim=1)
-            fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
-            fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
-
-        if ctx.fp8:
+        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
             dq, dkv = [
-                cast_from_fp8(
-                    x, ctx.fp8_meta["scaling_bwd"], META_DQKV_CP, fp8_dtype_backward, TE_DType[torch.float32]
+                cast_to_fp8(
+                    x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward
                 ) for x in [dq, dkv]
             ]
-            dq, dkv = [x.sum(dim=0) for x in [dq, dkv]]
-            if ctx.fp8_meta["recipe"].fp8_mha:
-                dq, dkv = [
-                    cast_to_fp8(
-                        x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward
-                    ) for x in [dq, dkv]
-                ]
-                dq, dk, dv = [
-                    Float8Tensor(
-                        data=x,
-                        fp8_meta=ctx.fp8_meta,
-                        fp8_meta_forward=False,
-                        fp8_meta_index=META_DQKV,
-                        fp8_dtype=dp8_dtype_backward,
-                        dtype=dout_dtype
-                    ) for x in [dq, dkv[0], dkv[1]]
-                ]
-            else:
-                dq, dkv = [x.to(dout_dtype) for x in [dq, dkv]]
-                dk, dv = dkv[0], dkv[1]
+            dq, dk, dv = [
+                Float8Tensor(
+                    data=x,
+                    fp8_meta=ctx.fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=META_DQKV,
+                    fp8_dtype=dp8_dtype_backward,
+                    dtype=dout_dtype
+                ) for x in [dq, dkv[0], dkv[1]]
+            ]
+        elif ctx.fp8:
+            dq, dkv = [x.to(dout_dtype) for x in [dq, dkv]]
+            dk, dv = dkv[0], dkv[1]
         else:
             dk, dv = dkv[0], dkv[1]
 
