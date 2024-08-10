@@ -5308,8 +5308,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
-        self.hidden_size_per_attention_head_k = kv_channels if isinstance(kv_channels) == int else kv_channels[0]
-        self.hidden_size_per_attention_head_v = kv_channels if isinstance(kv_channels) == int else kv_channels[1]
+        self.hidden_size_per_attention_head_k = (
+            kv_channels if isinstance(kv_channels) == int else kv_channels[0]
+        )
+        self.hidden_size_per_attention_head_v = (
+            kv_channels if isinstance(kv_channels) == int else kv_channels[1]
+        )
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
@@ -5327,7 +5331,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_dropout_ctx = self.rng_states_tracker.fork
 
         if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(kv_channels if isinstance(kv_channels) == int else kv_channels[0])
+            softmax_scale = 1.0 / math.sqrt(
+                kv_channels if isinstance(kv_channels) == int else kv_channels[0]
+            )
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
