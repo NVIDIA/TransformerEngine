@@ -2403,9 +2403,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dout_ = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, 1)
                             kv_ = kv
                         if ctx.fp8:
-                            aux_ctx_tensors = [softmax_lse, softmax_lse, rng_states[cp_size - i - 1]]
+                            aux_ctx_tensors = [softmax_lse_, softmax_lse_, rng_states[cp_size - i - 1]]
                         else:
-                            aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
+                            aux_ctx_tensors = [softmax_lse_, rng_states[cp_size - i - 1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
