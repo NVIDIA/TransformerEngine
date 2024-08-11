@@ -88,6 +88,8 @@ def _run_dot_product_attention(
         get_rng_state_tracker=None,
         tp_group=None,
         layer_number=1,
+        attn_mask_type="no_mask",
+        window_size=(-1,-1),
     ).to(dtype=dtype, device="cuda")
 
     # Run a forward and backward pass
@@ -102,6 +104,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # 'arbitrary'
             core_attention_bias_type=config.attn_bias_type,  # 'no_bias'
             core_attention_bias=bias,  # None
+            window_size=(-1,-1),
         )
         out.backward(out_grad)
 
@@ -115,6 +118,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # no_mask
             core_attention_bias_type=config.attn_bias_type,  # 'post_scale_bias'
             core_attention_bias=bias,  # bias
+            window_size=(-1,-1),
         )
         out.backward(out_grad)
 
@@ -132,6 +136,7 @@ print("Run with post_scale_bias:")
 config = model_configs["test_bias"]
 fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(dtype, config, "bs3hd")
 
+print()
 print("Run with arbitrary mask:")
 config = model_configs["test_mask"]
 unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(dtype, config, "bs3hd")
@@ -139,4 +144,6 @@ unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(dtype, config, "
 torch.testing.assert_close(unfused_attn_fwd, fused_attn_fwd, atol=2.5e-2, rtol=2.5e-2)
 for i in range(3):
     torch.testing.assert_close(unfused_attn_bwd[i], fused_attn_bwd[i], atol=2.5e-2, rtol=2.5e-2)
+
+print()
 print("Test passed!")

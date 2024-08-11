@@ -8,6 +8,7 @@ import math
 import os
 from importlib.metadata import version
 from typing import Any, Dict, List, Tuple, Union, Optional
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -107,6 +108,14 @@ class ModelConfig:
         self.bias_shape = bias_shape
         self.window_size = window_size
 
+@contextmanager
+def logging_context(highest_level=logging.WARNING):
+    previous_level = logging.root.manager.disable
+    logging.disable(highest_level)
+    try:
+        yield
+    finally:
+        logging.disable(previous_level)
 
 def _get_attention_backends(
     config: ModelConfig,
@@ -180,12 +189,13 @@ def _get_attention_backends(
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    for i in range(3):
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-        _attention_backends["backend_selection_requires_update"] = True
-        available_backends, fused_attention_backend = test()
-        if fused_attention_backend == FusedAttnBackend[backends[i]]:
-            fused_attn_backends.append(fused_attention_backend)
+    with logging_context():
+        for i in range(3):
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+            _attention_backends["backend_selection_requires_update"] = True
+            available_backends, fused_attention_backend = test()
+            if fused_attention_backend == FusedAttnBackend[backends[i]]:
+                fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
 
