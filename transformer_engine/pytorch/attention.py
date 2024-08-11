@@ -1969,7 +1969,7 @@ class AttnFuncWithCP(torch.autograd.Function):
             out = out.view(-1, *out.shape[-2:])
 
         if fp8 and use_fused_attention:
-            amax_cp_fwd = amax_per_step.max(dim=1)
+            amax_cp_fwd = amax_per_step.amax(dim=1)
             fp8_meta["scaling_fwd"].amax_history[0][META_S] = amax_cp_fwd[0]
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
@@ -2095,16 +2095,16 @@ class AttnFuncWithCP(torch.autograd.Function):
 
         if ctx.fp8:
             if ctx.use_fused_attention:
-                fp8_dtype_backward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
+                fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
                 fused_attn_qkv_dtype = fp8_dtype_backward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                dq_fp8 = torch.empty((cp_size, q.shape), dtype=q.dtype, device=q.device)
-                dkv_fp8 = torch.empty((cp_size, kv.shape), dtype=kv.dtype, device=kv.device)
+                dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
+                dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
                 dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
-                    fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
+                    ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout = dout._data
                 else:
                     dout = cast_to_fp8(
@@ -2201,7 +2201,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
-            if ctx.fp8 and use_fused_attention:
+            if ctx.fp8 and ctx.use_fused_attention:
                 fp8_meta_kwargs["amax_dp"] = amax_per_step[0][i]
                 fp8_meta_kwargs["amax_dqkv"] = amax_per_step[0][i]
             # In reversed order of fwd
@@ -2226,7 +2226,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             dout_ = dout.view(-1, *dout.shape[-3:])
                         elif ctx.qkv_format == "thd":
                             q_, kv_, out_, dout_ = q, kv, out, dout
-                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
+                        if ctx.fp8:
+                            aux_ctx_tensors = [softmax_lse, softmax_lse, rng_states[cp_size - i - 1]]
+                        else:
+                            aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -2307,7 +2310,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             q_, out_, dout_ = q, out, dout
                             # [2, t, np, hn] -> [2, t/2, np, hn]
                             kv_ = tex.thd_read_half_tensor(kv, cu_seqlens_kv_padded, 0)
-                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
+                        if ctx.fp8:
+                            aux_ctx_tensors = [softmax_lse, softmax_lse, rng_states[cp_size - i - 1]]
+                        else:
+                            aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -2396,7 +2402,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                             out_ = tex.thd_read_half_tensor(out, cu_seqlens_q_padded, 1)
                             dout_ = tex.thd_read_half_tensor(dout, cu_seqlens_q_padded, 1)
                             kv_ = kv
-                        aux_ctx_tensors = [softmax_lse_, rng_states[cp_size - i - 1]]
+                        if ctx.fp8:
+                            aux_ctx_tensors = [softmax_lse, softmax_lse, rng_states[cp_size - i - 1]]
+                        else:
+                            aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
                         if attn_dbias is not None:
                             aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                         dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -2467,7 +2476,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                         )
             else:
                 if ctx.use_fused_attention:
-                    aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
+                    if ctx.fp8:
+                        aux_ctx_tensors = [softmax_lse, softmax_lse, rng_states[cp_size - i - 1]]
+                    else:
+                        aux_ctx_tensors = [softmax_lse, rng_states[cp_size - i - 1]]
                     if attn_dbias is not None:
                         aux_ctx_tensors += [attn_biases[cp_size - i - 1]]
                     dq_, dk_, dv_, dbias_ = fused_attn_bwd(
@@ -2544,7 +2556,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 if i >= (cp_size - rank - 1) or not causal:
                     dq.copy_(dq_)
                 else:
-                    if cxt.qkv_format == "bshd":
+                    if ctx.qkv_format == "bshd":
                         dq[:, 0, ...].fill_(0)
                         dq[:, 1, ...].copy_(dq_)
                     elif ctx.qkv_format == "sbhd":
@@ -2674,9 +2686,9 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dkv.add_(dkv_)
 
         if ctx.fp8 and ctx.use_fused_attention:
-            amax_cp_bwd = amax_per_step.max(dim=1)
-            fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
-            fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
+            amax_cp_bwd = amax_per_step.amax(dim=1)
+            ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
+            ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
             if ctx.qkv_format in ["bshd", "sbhd"]:
                 # [cp, b, 2, sk//2, 2, np, hn] -> [cp, 2, b, 2, sk//2, np, hn] or
                 # [cp, 2, sk//2, b, 2, np, hn] -> [cp, 2, 2, sk//2, b, np, hn]
