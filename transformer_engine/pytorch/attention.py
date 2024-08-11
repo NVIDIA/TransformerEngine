@@ -2539,7 +2539,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                         **fa_optional_backward_kwargs,
                     )
 
-            dq = dq_fp8[(rank + i + 1) % cp_size] if ctx.fp8 else dq
+            if ctx.fp8:
+                dq = dq_fp8[(rank + i + 1) % cp_size]
             if i >= (cp_size - rank - 1) or not causal:
                 # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
                 # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
@@ -2618,7 +2619,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 req.wait()
 
             dkv = p2p_comm_buffers[(i + 1) % 2][1]
-            dkv = dkv_fp8[rank] if ctx.fp8 else dkv
+            if ctx.fp8:
+                dkv = dkv_fp8[rank]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
                 if ctx.qkv_format in ["bshd", "sbhd"]:
