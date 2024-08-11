@@ -3,8 +3,9 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
 from dataclasses import dataclass
-from functools import partial, reduce
+from functools import partial, reduce, cache
 import operator
+import os
 from typing import Optional, Tuple
 import warnings
 
@@ -30,6 +31,7 @@ from .misc import (
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     get_padded_spec,
+    get_cudnn_version,
 )
 from ..sharding import (
     all_reduce_sum_along_dp_fsdp,
@@ -82,6 +84,12 @@ class FusedAttnHelper:
             self.kv_max_seqlen,
             self.head_dim,
         )
+
+    @staticmethod
+    @cache
+    def is_non_deterministic_allowed():
+        """Check if non-deterministic kernels are allowed"""
+        return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
     @staticmethod
     def parse_qkv_aval(q_aval, k_aval, v_aval, qkv_layout):
@@ -364,6 +372,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
+            not FusedAttnHelper.is_non_deterministic_allowed(),
         )
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -393,12 +402,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         if nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD:
 
-            def _fix_len_take(x, condition):
+            def _fix_len_take(x, condition, fill_value=-1):
                 x_shape = x.shape
                 x = x.flatten()
                 size = x.size
                 indices = jnp.nonzero(condition.flatten(), size=size, fill_value=size)[0]
-                y = jnp.take(x, indices, fill_value=-1)
+                y = jnp.take(x, indices, fill_value=fill_value)
                 return jnp.reshape(y, x_shape)
 
             def convert_to_2d(offsets, batch, max_seqlen):
@@ -425,9 +434,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                     kv_batch = reduce(operator.mul, k.shape[:-3])
 
             # Gather valid q_seqlen, which is greater than 0
+            # cuDNN version < 9.3.0:
             # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
-            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0)
-            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0)
+            # cuDNN version >= 9.3.0, which supports act_seqlen = 0
+            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, 0, 0, 0, 0]]
+            if get_cudnn_version() >= (9, 3, 0):
+                fill_value = 0
+            else:
+                fill_value = -1
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
 
             # Flatten the offset calculation
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
@@ -634,6 +650,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
+        deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
+
         input_batch = reduce(operator.mul, batch_shape)
         wkspace_shape, wkspace_dtype = transformer_engine_jax.get_fused_attn_bwd_workspace_sizes(
             input_batch,
@@ -651,6 +669,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             qkv_layout,
             jax_dtype_to_te_dtype(q_aval.dtype),
             is_training,
+            deterministic,
             max_segments_per_seq,
         )
 
@@ -756,6 +775,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             is_training,
+            not FusedAttnHelper.is_non_deterministic_allowed(),
         )
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -788,13 +808,13 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         if nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD:
 
-            def _fix_len_take(x, condition):
+            def _fix_len_take(x, condition, fill_value=-1):
                 x_shape = x.shape
                 x = x.flatten()
                 size = x.size
                 indices = jnp.nonzero(condition.flatten(), size=size, fill_value=size)[0]
                 # TODO(rewang): try indices_are_sorted
-                y = jnp.take(x, indices, fill_value=-1)
+                y = jnp.take(x, indices, fill_value=fill_value)
                 return jnp.reshape(y, x_shape)
 
             def convert_to_2d(offsets, batch, max_seqlen):
@@ -821,9 +841,16 @@ class FusedAttnBwdPrimitive(BasePrimitive):
                     kv_batch = reduce(operator.mul, k.shape[:-3])
 
             # Gather valid q_seqlen, which is greater than 0
+            # cuDNN version < 9.3.0:
             # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, -1, -1, -1, -1]]
-            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0)
-            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0)
+            # cuDNN version >= 9.3.0, which supports act_seqlen = 0
+            # [[3, 5, 7, -1, -1], [2, 4, 6, -1, -1]] -> [[3, 5, 7, 2, 4], [6, 0, 0, 0, 0]]
+            if get_cudnn_version() >= (9, 3, 0):
+                fill_value = 0
+            else:
+                fill_value = -1
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
 
             # Flatten the offset calculation
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]

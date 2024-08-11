@@ -22,6 +22,7 @@ namespace transformer_engine {
 namespace jax {
 
 int GetCudaRuntimeVersion();
+size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
