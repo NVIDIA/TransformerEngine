@@ -1861,6 +1861,14 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
   callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
 }
 
+template void reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e5m2>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream);
+
+template void reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
+    void *output, float *scale, const int handler, const int offset, const int rowelements,
+    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream);
+
 template <typename fp8type>
 void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
                                  const int elements, communicator *comm, cudaStream_t stream) {
