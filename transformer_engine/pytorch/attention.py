@@ -1973,9 +1973,10 @@ class AttnFuncWithCP(torch.autograd.Function):
             fp8_meta["scaling_fwd"].amax_history[0][META_S] = amax_cp_fwd[0]
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
+        out_f16 = out.to(q_fp8.dtype if fp8 and fp8_meta["recipe"].fp8_mha else q_f16.dtype)
         if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
             out_fp8 = cast_to_fp8(
-                out, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward
+                out_f16, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward
             )
 
         if fp8 and fp8_meta["recipe"].fp8_mha:
@@ -1988,7 +1989,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 dtype=q_fp8.dtype,
             )
         else:
-            out_ret = out.to(q_f16.dtype)
+            out_ret = out_f16
 
         if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_save, kv_save, out_save = q, kv, out_fp8
@@ -2003,11 +2004,10 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_dtype=fp8_dtype_forward,
                 dtype=k_fp8.dtype
             )
-            out_f16 = out.to(q_fp8.dtype)
             q_save, kv_save, out_save = q_fp8, kv_fp8, out_f16
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
         else:
-            q_save, kv_save, out_save = q_f16, kv, out_ret
+            q_save, kv_save, out_save = q_f16, kv, out_f16
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
 
         ctx.save_for_backward(
@@ -2686,7 +2686,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     x, ctx.fp8_meta["scaling_bwd"], META_DQKV_CP, fp8_dtype_backward, TE_DType[torch.float32]
                 ) for x in [dq_fp8, dkv_fp8]
             ]
-            dq, dkv = [x.sum(dim=0) for x in [dq, dkv]]
+            dq, dkv = [x.sum(dim=0).to(dout_dtype) for x in [dq, dkv]]
 
         if causal:
             if ctx.qkv_format == "bshd":
@@ -2724,9 +2724,6 @@ class AttnFuncWithCP(torch.autograd.Function):
                     dtype=dout_dtype
                 ) for x in [dq, dkv[0], dkv[1]]
             ]
-        elif ctx.fp8:
-            dq, dkv = [x.to(dout_dtype) for x in [dq, dkv]]
-            dk, dv = dkv[0], dkv[1]
         else:
             dk, dv = dkv[0], dkv[1]
 
