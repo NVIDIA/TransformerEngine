@@ -2003,7 +2003,8 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_dtype=fp8_dtype_forward,
                 dtype=k_fp8.dtype
             )
-            q_save, kv_save, out_save = q_fp8, kv_fp8, out_ret
+            out_f16 = out.to(q_fp8.dtype)
+            q_save, kv_save, out_save = q_fp8, kv_fp8, out_f16
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
         else:
             q_save, kv_save, out_save = q_f16, kv, out_ret
@@ -2103,6 +2104,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
+                    fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout = dout._data
                 else:
                     dout = cast_to_fp8(
@@ -2176,7 +2178,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                         rank_in_dkv_p2p_ring,
                         send_tensor[rank],
                         dkv_send_dst,
-                        recv_tensor[recv_src],
+                        recv_tensor[dkv_recv_src],
                         dkv_recv_src,
                         ctx.cp_group,
                         batch_p2p_comm
@@ -2676,6 +2678,8 @@ class AttnFuncWithCP(torch.autograd.Function):
             fp8_meta["scaling_bwd"].amax_history[0][META_DP] = amax_cp_bwd[0]
             fp8_meta["scaling_bwd"].amax_history[0][META_DQKV_CP] = amax_cp_bwd[1]
             if ctx.qkv_format in ["bshd", "sbhd"]:
+                # [cp, b, 2, sk//2, 2, np, hn] -> [cp, 2, b, 2, sk//2, np, hn] or
+                # [cp, 2, sk//2, b, 2, np, hn] -> [cp, 2, 2, sk//2, b, np, hn]
                 dkv_fp8 = dkv_fp8.view(cp_size, 2, *dkv_fp8.shape[1:-3], *dkv_fp8.shape[-2:])
             dq, dkv = [
                 cast_from_fp8(
