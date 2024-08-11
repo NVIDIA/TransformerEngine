@@ -108,6 +108,7 @@ class ModelConfig:
         self.bias_shape = bias_shape
         self.window_size = window_size
 
+
 @contextmanager
 def logging_context(highest_level=logging.WARNING):
     previous_level = logging.root.manager.disable
@@ -116,6 +117,7 @@ def logging_context(highest_level=logging.WARNING):
         yield
     finally:
         logging.disable(previous_level)
+
 
 def _get_attention_backends(
     config: ModelConfig,

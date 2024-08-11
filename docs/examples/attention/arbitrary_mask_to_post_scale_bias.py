@@ -89,7 +89,7 @@ def _run_dot_product_attention(
         tp_group=None,
         layer_number=1,
         attn_mask_type="no_mask",
-        window_size=(-1,-1),
+        window_size=(-1, -1),
     ).to(dtype=dtype, device="cuda")
 
     # Run a forward and backward pass
@@ -104,7 +104,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # 'arbitrary'
             core_attention_bias_type=config.attn_bias_type,  # 'no_bias'
             core_attention_bias=bias,  # None
-            window_size=(-1,-1),
+            window_size=(-1, -1),
         )
         out.backward(out_grad)
 
@@ -118,7 +118,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # no_mask
             core_attention_bias_type=config.attn_bias_type,  # 'post_scale_bias'
             core_attention_bias=bias,  # bias
-            window_size=(-1,-1),
+            window_size=(-1, -1),
         )
         out.backward(out_grad)
 
