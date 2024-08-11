@@ -1378,7 +1378,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
                 fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
-                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O_CP]
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
@@ -2119,7 +2119,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                 fp8_meta_kwargs["d_scale_dp"] = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP]
                 fp8_meta_kwargs["q_scale_s"] = fp8_fwd_scales[META_S]
                 fp8_meta_kwargs["q_scale_dp"] = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
-                fp8_meta_kwargs["q_scale_dqkv"] = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
+                fp8_meta_kwargs["q_scale_dqkv"] = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV_CP]
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
