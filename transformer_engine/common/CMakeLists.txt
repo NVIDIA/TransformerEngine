@@ -22,13 +22,13 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 
 if(DEFINED ENV{MAX_JOBS})
   set(JOBS $ENV{MAX_JOBS})
-elseif(DEFINED ENV{NVTE_MAX_BUILD_JOBS})
-  set(JOBS $ENV{NVTE_MAX_BUILD_JOBS})
+elseif(DEFINED ENV{NVTE_BUILD_MAX_JOBS})
+  set(JOBS $ENV{NVTE_BUILD_MAX_JOBS})
 else()
   set(JOBS "max number of")
 endif()
 
-message(STATUS "Parallel build with ${JOBS} jobs and $ENV{NVTE_MAX_BUILD_THREADS} threads per job")
+message(STATUS "Parallel build with ${JOBS} jobs and ${BUILD_THREADS_PER_JOB} threads per job")
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
