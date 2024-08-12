@@ -5,6 +5,7 @@
 set -e
 
 : ${TE_PATH:=/opt/transformerengine}
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
 
 git clone https://github.com/NVIDIA/Megatron-LM.git
 cd Megatron-LM
