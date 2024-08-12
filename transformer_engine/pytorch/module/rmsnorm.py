@@ -52,9 +52,10 @@ class RMSNorm(_RMSNormOp):
     def __init__(
         self,
         normalized_shape: Union[Iterable[int], int],
-        *,
+        eps: float = 1e-5,
         sequence_parallel: Optional[bool] = None,  # deprecated
         params_dtype: Optional[torch.dtype] = None,  # deprecated
+        zero_centered_gamma: bool = False,
         **kwargs,
     ) -> None:
 
@@ -66,8 +67,13 @@ class RMSNorm(_RMSNormOp):
                 )
             kwargs["dtype"] = params_dtype
 
-        # Initialize layer norm operation
-        super().__init__(normalized_shape, **kwargs)
+        # Initialize RMSNorm operation
+        super().__init__(
+            normalized_shape,
+            eps=eps,
+            zero_centered_gamma=zero_centered_gamma,
+            **kwargs,
+        )
 
         # Flag for sequence parallelism (deprecated)
         self.sequence_parallel: Optional[bool] = sequence_parallel

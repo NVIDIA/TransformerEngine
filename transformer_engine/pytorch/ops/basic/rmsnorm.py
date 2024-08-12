@@ -180,7 +180,7 @@ class RMSNorm(BasicOperation):
             w = w.from_float8()
 
         # Check if backward pass is needed
-        requires_grad = input_.requires_grad or self.weight.requires_grad
+        requires_grad = ctx.requires_grad
 
         # Check if FP8 is enabled
         with_fp8_output = (
@@ -235,11 +235,10 @@ class RMSNorm(BasicOperation):
                 y = rmsnorm_fwd_inf(*args)
 
         # Save state for backward pass
-        if not requires_grad:
-            x = None
-        ctx.save_for_backward(x, rstdevs)
-        ctx.dtype = dtype
-        ctx.has_prev_op = prev_op is not None
+        if requires_grad:
+            ctx.save_for_backward(x, rstdevs)
+            ctx.dtype = dtype
+            ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
         out = reshape(y, input_dims)

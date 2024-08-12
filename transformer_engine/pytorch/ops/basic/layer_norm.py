@@ -200,7 +200,7 @@ class LayerNorm(BasicOperation):
             b = x.from_float8()
 
         # Check if backward pass is needed
-        requires_grad = input_.requires_grad or self.weight.requires_grad or self.bias.requires_grad
+        requires_grad = ctx.requires_grad
 
         # Check if FP8 is enabled
         with_fp8_output = (
@@ -258,11 +258,10 @@ class LayerNorm(BasicOperation):
                 y = layernorm_fwd_inf(*args)
 
         # Save state for backward pass
-        if not requires_grad:
-            x = None
-        ctx.save_for_backward(x, means, rstdevs)
-        ctx.dtype = dtype
-        ctx.has_prev_op = prev_op is not None
+        if requires_grad:
+            ctx.save_for_backward(x, means, rstdevs)
+            ctx.dtype = dtype
+            ctx.has_prev_op = prev_op is not None
 
         # Reshape output tensor
         out = reshape(y, input_dims)
