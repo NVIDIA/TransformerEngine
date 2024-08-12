@@ -1056,7 +1056,6 @@ class TestBasicOps:
             if torch.device(device).type != "cuda":
                 pytest.skip("FP8 is only supported on CUDA devices")
 
-
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
