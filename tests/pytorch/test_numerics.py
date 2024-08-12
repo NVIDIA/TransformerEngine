@@ -1548,8 +1548,29 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         attn_input_format="bshd",
     )
 
-    for (n1, p1), (n2, p2) in zip(block_bshd.named_parameters(), block_sbhd.named_parameters()):
-        assert torch.all(torch.eq(p1, p2)), f"{n1}, {n2} not identical"
+    torch.manual_seed(0)
+    block_thd = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0,
+        attention_dropout=0,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
+        attn_input_format="thd",
+        self_attn_mask_type="padding_causal",
+    )
+
+    for (n1, p1), (n2, p2), (n3, p3) in zip(
+        block_bshd.named_parameters(), block_sbhd.named_parameters(), block_thd.named_parameters()
+    ):
+        assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
 
     x_sbhd = torch.randn(
         (config.seq_len, bs, config.hidden_size),
@@ -1559,6 +1580,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     )
 
     x_bshd = x_sbhd.transpose(0, 1).contiguous()
+    x_thd = x_bshd.reshape(bs * config.seq_len, config.hidden_size).contiguous()
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -1570,10 +1592,20 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
 
+    # To make sure forward is also identical (just in case some module decides
+    # to act fancy)
+    torch.manual_seed(0)
+    y_thd = block_thd(x_thd)
+
     # Check that results match
     torch.testing.assert_close(
         y_bshd,
         y_sbhd.transpose(0, 1).contiguous(),
+    )
+
+    torch.testing.assert_close(
+        y_bshd,
+        y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
     )
 
 

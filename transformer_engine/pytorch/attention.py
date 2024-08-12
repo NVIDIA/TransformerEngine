@@ -6566,6 +6566,9 @@ class MultiheadAttention(torch.nn.Module):
         # =================================================
 
         if inference_params and self.layer_number is not None:
+            assert (
+                self.qkv_format != "thd"
+            ), "qkv_format == thd is not supported for an inference with KV-cache!"
             if self.layer_number not in inference_params.key_value_memory_dict:
                 inf_max_seq_len = inference_params.max_sequence_length
                 inf_max_batch_size = inference_params.max_batch_size
