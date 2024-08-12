@@ -84,6 +84,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
         "Fused Multi-tensor Cast + Transpose", py::call_guard<py::gil_scoped_release>());
+  m.def("fused_multi_cast_transpose_alloc", &fused_multi_cast_transpose_alloc,
+        "Fused Multi-tensor Cast + Transpose with allocating output tensors",
+        py::call_guard<py::gil_scoped_release>());
   m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8", py::call_guard<py::gil_scoped_release>());
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8",
         py::call_guard<py::gil_scoped_release>());
@@ -153,6 +156,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
+  m.attr("_num_cublas_streams") = py::int_(transformer_engine::num_streams);
 
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &thd_read_half_tensor,

@@ -6,6 +6,7 @@ import os, sys
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 
@@ -86,6 +87,8 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
+        cu_seqlens_q_padded = None
+        cu_seqlens_kv_padded = None
     elif qkv_format == "sbhd":
         q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim)
         kv_input_shape = (
@@ -101,18 +104,36 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
+        cu_seqlens_q_padded = None
+        cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        seqlens_q = torch.randint(world_size * 2, config.max_seqlen_q + 1, [config.batch_size]).to(
-            torch.int32
+        q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim)
+        kv_input_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_gqa_groups,
+            config.head_dim,
         )
-        seqlens_q = seqlens_q - seqlens_q % (world_size * 2)
-        cu_seqlens_q = torch.cat([torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0)])
+        attn_output_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_heads * config.head_dim,
+        )
+        seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
+        seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
+        cu_seqlens_q_padded = torch.cat(
+            [
+                torch.zeros([1], dtype=torch.int32),
+                seqlens_q_padded.cumsum(0, dtype=torch.int32),
+                torch.tensor([q_input_shape[0]], dtype=torch.int32),
+            ]
+        ).cuda()
+        if kernel_backend == "FlashAttention":
+            cu_seqlens_q = cu_seqlens_q_padded[:-1]
+        else:
+            cu_seqlens_q = torch.cat(
+                [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
+            ).cuda()
         cu_seqlens_kv = cu_seqlens_q
-        q_input_shape = (cu_seqlens_q[-1], config.num_heads, config.head_dim)
-        kv_input_shape = (cu_seqlens_kv[-1], config.num_gqa_groups, config.head_dim)
-        attn_output_shape = (cu_seqlens_q[-1], config.num_heads * config.head_dim)
-        cu_seqlens_q = cu_seqlens_q.to(torch.int32).cuda()
-        cu_seqlens_kv = cu_seqlens_kv.to(torch.int32).cuda()
+        cu_seqlens_kv_padded = cu_seqlens_q_padded
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
@@ -132,7 +153,7 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
     for x in [q, k, v, dout] + ([] if bias is None else [bias]):
         dist.broadcast(x, 0, group=cp_comm_group)
     if qkv_format == "thd":
-        for x in [cu_seqlens_q, cu_seqlens_kv]:
+        for x in [cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded]:
             dist.broadcast(x, 0, group=cp_comm_group)
 
     # run core_attn without CP
@@ -146,6 +167,8 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         core_attention_bias=bias,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
+        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
     )
     out.backward(dout)
 
@@ -171,12 +194,14 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
             x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
-        seq_idx_q = tex.thd_get_partitioned_indices(cu_seqlens_q, q_.size(0), world_size, rank)
-        seq_idx_kv = tex.thd_get_partitioned_indices(cu_seqlens_kv, k_.size(0), world_size, rank)
+        seq_idx_q = tex.thd_get_partitioned_indices(
+            cu_seqlens_q_padded, q_.shape[0], world_size, rank
+        )
+        seq_idx_kv = tex.thd_get_partitioned_indices(
+            cu_seqlens_kv_padded, k_.shape[0], world_size, rank
+        )
         q_, dout_ = [x.index_select(0, seq_idx_q) for x in [q_, dout_]]
         k_, v_ = [x.index_select(0, seq_idx_kv) for x in [k_, v_]]
-        cu_seqlens_q = cu_seqlens_q // world_size
-        cu_seqlens_kv = cu_seqlens_kv // world_size
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
@@ -187,8 +212,6 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream())
-    max_seqlen_q = config.max_seqlen_q
-    max_seqlen_kv = config.max_seqlen_kv
     out_ = core_attn(
         q_,
         k_,
@@ -197,8 +220,8 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         core_attention_bias=bias_,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_kv=max_seqlen_kv,
+        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
     )
     out_.backward(dout_)
 
@@ -230,9 +253,45 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
             for x in [q_.grad, k_.grad, v_.grad, out_]
         ]
     elif qkv_format == "thd":
-        dq, out = [x.index_select(0, seq_idx_q).contiguous().view(-1) for x in [q.grad, out]]
-        dk, dv = [x.index_select(0, seq_idx_kv).contiguous().view(-1) for x in [k.grad, v.grad]]
-        dq_, dk_, dv_, out_ = [x.view(-1) for x in [q_.grad, k_.grad, v_.grad, out_]]
+        dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
+        dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
+        dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
+        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q = get_cu_seqlens_on_cp_rank(
+            cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
+        )
+        cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
+        num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+        for x in [dq, out, dq_, out_]:
+            assert torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() == 0
+            for b in range(config.batch_size):
+                assert (
+                    num_pads_q[b] == 0
+                    or torch.count_nonzero(
+                        x[(cu_seqlens_q_padded[b + 1] - num_pads_q[b]) : cu_seqlens_q_padded[b + 1]]
+                    ).item()
+                    == 0
+                )
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
+            cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
+        )
+        cu_pads_kv = cu_seqlens_kv_padded - cu_seqlens_kv
+        num_pads_kv = cu_pads_kv[1:] - cu_pads_kv[:-1]
+        for x in [dk, dv, dk_, dv_]:
+            assert torch.count_nonzero(x[cu_seqlens_kv_padded[-1] :]).item() == 0
+            for b in range(config.batch_size):
+                assert (
+                    num_pads_kv[b] == 0
+                    or torch.count_nonzero(
+                        x[
+                            (cu_seqlens_kv_padded[b + 1] - num_pads_kv[b]) : cu_seqlens_kv_padded[
+                                b + 1
+                            ]
+                        ]
+                    ).item()
+                    == 0
+                )
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 

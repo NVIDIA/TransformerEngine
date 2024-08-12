@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
+import functools
 from typing import Optional, Tuple, Union, List
 import torch
 import transformer_engine_torch as tex
@@ -11,6 +12,12 @@ from ..utils import assert_dim_for_fp8_exec
 
 
 __all__ = ["gemm", "fp8_gemm", "grouped_gemm", "fp8_grouped_gemm"]
+
+
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor()
 
 
 def fp8_gemm(
@@ -39,7 +46,7 @@ def fp8_gemm(
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
-    empty_tensor = torch.Tensor()
+    empty_tensor = _empty_tensor()
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_index is not None
     assert_dim_for_fp8_exec(A)
@@ -54,6 +61,9 @@ def fp8_gemm(
             dtype=out_dtype,
             device="cuda",
         )
+    else:
+        if not out.is_contiguous():
+            raise ValueError("Output tensor is not contiguous.")
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
@@ -192,7 +202,7 @@ def gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    empty_tensor = torch.Tensor()
+    empty_tensor = _empty_tensor()
     fp8_index = -1  # dummy index
 
     if out is None:
@@ -202,6 +212,9 @@ def gemm(
             dtype=dtype,
             device="cuda",
         )
+    else:
+        if not out.is_contiguous():
+            raise ValueError("Output tensor is not contiguous.")
 
     if gelu and not grad:
         gelu_input = torch.empty_like(out, dtype=dtype)
@@ -307,11 +320,13 @@ def grouped_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     num_gemms = len(A)
-    empty_tensor = torch.Tensor()
-    empty_tensors = [torch.Tensor()] * num_gemms
+    empty_tensor = _empty_tensor()
+    empty_tensors = [empty_tensor] * num_gemms
 
     if gelu and not grad:
-        gelu_input = [torch.empty_like(o, dtype=dtype) for o in out]
+        gelu_input = [
+            torch.empty_like(o, dtype=dtype, memory_format=torch.contiguous_format) for o in out
+        ]
     elif not gelu:
         gelu_input = empty_tensors
 
@@ -393,8 +408,8 @@ def fp8_grouped_gemm(
     """
 
     num_gemms = len(A)
-    empty_tensor = torch.Tensor()
-    empty_tensors = [torch.Tensor()] * num_gemms
+    empty_tensor = _empty_tensor()
+    empty_tensors = [empty_tensor] * num_gemms
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_offset is not None
     for a, b in zip(A, B):
@@ -406,7 +421,10 @@ def fp8_grouped_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias[0].dtype
     if gelu:
-        gelu_input = [torch.empty_like(o, dtype=bias_dtype) for o in out]
+        gelu_input = [
+            torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
+            for o in out
+        ]
     else:
         gelu_input = empty_tensors
     bias_dtype = TE_DType[bias_dtype]
