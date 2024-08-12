@@ -1581,7 +1581,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 
     x_bshd = x_sbhd.transpose(0, 1).contiguous()
     x_thd = x_bshd.reshape(bs * config.seq_len, config.hidden_size).contiguous()
-    x_thd_cumsum = torch.arange(bs+1, device="cuda", dtype=torch.int32) * config.seq_len
+    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.seq_len
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -1592,7 +1592,6 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     # to act fancy)
     torch.manual_seed(0)
     y_bshd = block_bshd(x_bshd)
-
 
     # Check that results match
     torch.testing.assert_close(
@@ -1610,7 +1609,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             cu_seqlens_q=x_thd_cumsum,
             cu_seqlens_kv=x_thd_cumsum,
             max_seqlen_q=config.seq_len,
-            max_seqlen_kv=config.seq_len
+            max_seqlen_kv=config.seq_len,
         )
 
         torch.testing.assert_close(
