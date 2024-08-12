@@ -37,8 +37,8 @@ def get_max_jobs_for_parallel_build() -> int:
     num_jobs = 0
 
     # Check environment variable
-    if os.getenv("NVTE_MAX_BUILD_JOBS"):
-        num_jobs = int(os.getenv("NVTE_MAX_BUILD_JOBS"))
+    if os.getenv("NVTE_BUILD_MAX_JOBS"):
+        num_jobs = int(os.getenv("NVTE_BUILD_MAX_JOBS"))
     elif os.getenv("MAX_JOBS"):
         num_jobs = int(os.getenv("MAX_JOBS"))
 
