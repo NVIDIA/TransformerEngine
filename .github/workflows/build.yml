@@ -42,7 +42,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y git python3.9 pip ninja-build cudnn9-cuda-12
-          pip install cmake torch numpy pydantic importlib-metadata>=1.0 packaging
+          pip install cmake torch pydantic importlib-metadata>=1.0 packaging pybind11
       - name: 'Checkout'
         uses: actions/checkout@v3
         with:
@@ -53,6 +53,7 @@ jobs:
           NVTE_FRAMEWORK: pytorch
           MAX_JOBS: 1
       - name: 'Sanity check'
+        if: false  # Sanity import test requires Flash Attention
         run: python3 tests/pytorch/test_sanity_import.py
   jax:
     name: 'JAX'
