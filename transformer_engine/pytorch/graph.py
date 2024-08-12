@@ -213,7 +213,7 @@ def _make_graphed_callables(
                     only_inputs=True,
                     allow_unused=allow_unused_input,
                 )
-            del outputs, grad_inputs
+                del outputs, grad_inputs
     torch.cuda.synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
