@@ -1227,8 +1227,10 @@ def get_p2p_comm_info(rank, step, cp_size):
         if next_rank < min_rank_in_p2p_ring:
             min_rank_in_p2p_ring = next_rank
             rank_in_p2p_ring = 0
-        else:
+        elif rank != min_rank_in_p2p_ring:
             rank_in_p2p_ring += 1
+        else:
+            rank_in_p2p_ring =0
 
         curr_rank = next_rank
         if curr_rank == rank:
@@ -2159,26 +2161,26 @@ class AttnFuncWithCP(torch.autograd.Function):
             recv_tensor = p2p_comm_buffers[(i + 1) % 2]
             if ctx.fp8:
                 if i < cp_size - 1:
-                    send_tensor = send_tensor[0]
-                    recv_tensor = recv_tensor[0]
+                    kv_send_tensor = send_tensor[0]
+                    kv_recv_tensor = recv_tensor[0]
                     send_recv_reqs = flash_attn_p2p_communicate(
                         rank,
-                        send_tensor,
+                        kv_send_tensor,
                         send_dst,
-                        recv_tensor,
+                        kv_recv_tensor,
                         recv_src,
                         ctx.cp_group,
                         batch_p2p_comm
                     )
-                if i > 1:
-                    send_tensor = send_tensor[1]
-                    recv_tensor = recv_tensor[1]
+                if i > 0:
+                    dkv_send_tensor = send_tensor[1]
+                    dkv_recv_tensor = recv_tensor[1]
                     dkv_send_dst, dkv_recv_src, rank_in_dkv_p2p_ring = get_p2p_comm_info(rank, i, cp_size)
                     send_recv_reqs += flash_attn_p2p_communicate(
                         rank_in_dkv_p2p_ring,
-                        send_tensor[rank],
+                        dkv_send_tensor[rank],
                         dkv_send_dst,
-                        recv_tensor[dkv_recv_src],
+                        dkv_recv_tensor[dkv_recv_src],
                         dkv_recv_src,
                         ctx.cp_group,
                         batch_p2p_comm
