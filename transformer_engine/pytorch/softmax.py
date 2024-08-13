@@ -344,9 +344,7 @@ class FusedScaleMaskSoftmax(nn.Module):
                     mask is not None
                     and sq % batch_per_block == 0
                     and mask.shape[0] in [1, b]
-                    and mask.shape[1] == 1
-                    and mask.shape[-2] == sq
-                    and mask.shape[-1] == sk
+                    and mask.shape[1:] == (1, sq, sk)
                 ):
                     return True
             else:

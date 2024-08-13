@@ -906,28 +906,28 @@ def get_alibi(
             )
         else:
             bias = torch.Tensor([]).to(device="cuda")
-            for b in range(len(actual_seqlen_q)):
+            for i,_ in enumerate(actual_seqlen_q):
                 if bottom_right_alignment:
                     bias_per_batch = torch.arange(
-                        1 - actual_seqlen_kv[b], 1, dtype=torch.int32, device="cuda"
-                    ).view(1, 1, 1, actual_seqlen_kv[b])
+                        1 - actual_seqlen_kv[i], 1, dtype=torch.int32, device="cuda"
+                    ).view(1, 1, 1, actual_seqlen_kv[i])
                 else:
                     bias_per_batch = torch.arange(
-                        1 - actual_seqlen_q[b],
-                        actual_seqlen_kv[b] - actual_seqlen_q[b] + 1,
+                        1 - actual_seqlen_q[i],
+                        actual_seqlen_kv[i] - actual_seqlen_q[i] + 1,
                         dtype=torch.int32,
                         device="cuda",
-                    ).view(1, 1, 1, actual_seqlen_kv[b])
+                    ).view(1, 1, 1, actual_seqlen_kv[i])
                 bias_per_batch = F.pad(
                     bias_per_batch
                     - torch.arange(
-                        1 - actual_seqlen_q[b], 1, dtype=torch.int32, device="cuda"
-                    ).view(1, 1, actual_seqlen_q[b], 1),
+                        1 - actual_seqlen_q[i], 1, dtype=torch.int32, device="cuda"
+                    ).view(1, 1, actual_seqlen_q[i], 1),
                     pad=(
                         0,
-                        max_seqlen_kv - actual_seqlen_kv[b],
+                        max_seqlen_kv - actual_seqlen_kv[i],
                         0,
-                        max_seqlen_q - actual_seqlen_q[b],
+                        max_seqlen_q - actual_seqlen_q[i],
                     ),
                     mode="constant",
                     value=0,
