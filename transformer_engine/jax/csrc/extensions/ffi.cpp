@@ -3,7 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include "jax/csrc/extensions/ffi.h"
+#include "extensions/ffi.h"
 
 #include <iostream>
 
