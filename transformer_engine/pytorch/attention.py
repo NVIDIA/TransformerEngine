@@ -2736,7 +2736,7 @@ class AttnFuncWithCP(torch.autograd.Function):
                     fp8_meta=ctx.fp8_meta,
                     fp8_meta_forward=False,
                     fp8_meta_index=META_DQKV,
-                    fp8_dtype=dp8_dtype_backward,
+                    fp8_dtype=fp8_dtype_backward,
                     dtype=dout_dtype
                 ) for x in [dq, dkv[0], dkv[1]]
             ]
