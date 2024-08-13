@@ -896,25 +896,42 @@ def get_alibi(
                 )
             else:
                 bias = torch.arange(
-                    1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda"
+                    1 - max_seqlen_q,
+                    max_seqlen_kv - max_seqlen_q + 1,
+                    dtype=torch.int32,
+                    device="cuda",
                 ).view(1, 1, 1, max_seqlen_kv)
             bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
                 1, 1, max_seqlen_q, 1
             )
         else:
-            bias = torch.Tensor([]).to(device='cuda')
+            bias = torch.Tensor([]).to(device="cuda")
             for b in range(len(actual_seqlen_q)):
                 if bottom_right_alignment:
-                    bias_per_batch = torch.arange(1 - actual_seqlen_kv[b], 1, dtype=torch.int32, device="cuda").view(
-                        1, 1, 1, actual_seqlen_kv[b]
-                    )
+                    bias_per_batch = torch.arange(
+                        1 - actual_seqlen_kv[b], 1, dtype=torch.int32, device="cuda"
+                    ).view(1, 1, 1, actual_seqlen_kv[b])
                 else:
                     bias_per_batch = torch.arange(
-                        1 - actual_seqlen_q[b], actual_seqlen_kv[b] - actual_seqlen_q[b] + 1, dtype=torch.int32, device="cuda"
+                        1 - actual_seqlen_q[b],
+                        actual_seqlen_kv[b] - actual_seqlen_q[b] + 1,
+                        dtype=torch.int32,
+                        device="cuda",
                     ).view(1, 1, 1, actual_seqlen_kv[b])
-                bias_per_batch = F.pad(bias_per_batch - torch.arange(1 - actual_seqlen_q[b], 1, dtype=torch.int32, device="cuda").view(1, 1, actual_seqlen_q[b], 1),
-                        pad=(0, max_seqlen_kv - actual_seqlen_kv[b], 0, max_seqlen_q - actual_seqlen_q[b]),
-                        mode='constant', value=0)
+                bias_per_batch = F.pad(
+                    bias_per_batch
+                    - torch.arange(
+                        1 - actual_seqlen_q[b], 1, dtype=torch.int32, device="cuda"
+                    ).view(1, 1, actual_seqlen_q[b], 1),
+                    pad=(
+                        0,
+                        max_seqlen_kv - actual_seqlen_kv[b],
+                        0,
+                        max_seqlen_q - actual_seqlen_q[b],
+                    ),
+                    mode="constant",
+                    value=0,
+                )
 
                 bias = torch.cat([bias, bias_per_batch], dim=0)
         bias = bias.abs().mul(-1)
@@ -2971,8 +2988,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_seqlen_kv,
             ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
             mask = attention_mask.squeeze(1).logical_not()
-            actual_seqlen_q = mask[:,:,0].sum(dim=1)
-            actual_seqlen_kv = mask[:,0,:].sum(dim=1)
+            actual_seqlen_q = mask[:, :, 0].sum(dim=1)
+            actual_seqlen_kv = mask[:, 0, :].sum(dim=1)
             if attn_mask_type == "padding_causal":
                 attention_mask = torch.logical_or(
                     torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
@@ -2980,9 +2997,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if attn_mask_type == "padding_causal_bottom_right":
                 for b in range(batch_size):
                     diagonal_offset = actual_seqlen_kv[b] - actual_seqlen_q[b] + 1
-                    attention_mask[b,0] = torch.logical_or(
-                        torch.triu(torch.logical_not(attention_mask[b,0]), diagonal=diagonal_offset),
-                        attention_mask[b,0],
+                    attention_mask[b, 0] = torch.logical_or(
+                        torch.triu(
+                            torch.logical_not(attention_mask[b, 0]), diagonal=diagonal_offset
+                        ),
+                        attention_mask[b, 0],
                     )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -3046,10 +3065,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 query_layer.transpose(0, 1),  # [b * np, sq, hn]
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             )
-            matmul_result = (
-                matmul_result.view(*output_size)
-                + core_attention_bias
-            )
+            matmul_result = matmul_result.view(*output_size) + core_attention_bias
             matmul_result *= scale
 
         elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
@@ -3072,12 +3088,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 beta=0.0,
                 alpha=scale,
             )
-            matmul_result = (
-                (
-                    matmul_result.view(*output_size)
-                    + core_attention_bias
-                )
-                .to(dtype=query_layer.dtype)
+            matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
+                dtype=query_layer.dtype
             )
 
         # attention scores and attention mask [b, np, sq, sk]
