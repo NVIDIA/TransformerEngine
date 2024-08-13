@@ -591,7 +591,8 @@ def make_graphed_callables(
     forward_funcs = []
     for module in modules:
         assert isinstance(module, torch.nn.Module), f"Graphing for {type(module)} is not supported."
-        wrap_autocast(module)
+        if fp8_enabled and not FP8GlobalStateManager.is_fp8_enabled:
+            wrap_autocast(module)
         forward_funcs.append(module)
 
     if just_one_callable:
