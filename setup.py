@@ -172,7 +172,7 @@ if __name__ == "__main__":
         package_data={"": ["VERSION.txt"]},
     )
 
-# End timing
-end_time = time.perf_counter()
-total_time = end_time - start_time
-print(f"Total build time: {total_time:.2f} seconds")
+    # End timing
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
+    print(f"Total build time: {total_time:.2f} seconds")
