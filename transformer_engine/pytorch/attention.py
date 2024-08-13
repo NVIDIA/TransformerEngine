@@ -6461,8 +6461,8 @@ class MultiheadAttention(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
-        max_seqlen_q: int = None,
-        max_seqlen_kv: int = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
@@ -6651,16 +6651,16 @@ class MultiheadAttention(torch.nn.Module):
                     dim=split_dim,
                 )
 
-            # query: -> [sq, b, np, hn]
-            # key, value: -> [sq, b, ng, hn]
-            query_layer, key_layer, value_layer = (
-                x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
-                for x in (query_layer, key_layer, value_layer)
-            )
-
             if self.qkv_format == "thd":
                 query_layer, key_layer, value_layer = (
-                    x.reshape(x.size(0), x.size(2), x.size(3))
+                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                    for x in (query_layer, key_layer, value_layer)
+                )
+            else:
+                # query: -> [sq, b, np, hn]
+                # key, value: -> [sq, b, ng, hn]
+                query_layer, key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
                     for x in (query_layer, key_layer, value_layer)
                 )
         elif self.attention_type == "cross":

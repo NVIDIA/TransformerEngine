@@ -527,8 +527,8 @@ class TransformerLayer(torch.nn.Module):
         alibi_slopes: Optional[torch.Tensor] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
-        max_seqlen_q: int = None,
-        max_seqlen_kv: int = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
     ) -> torch.Tensor:
         """
