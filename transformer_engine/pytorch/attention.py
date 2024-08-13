@@ -826,6 +826,8 @@ def get_alibi(
     num_heads: int,
     max_seqlen_q: int,
     max_seqlen_kv: int,
+    actual_seqlen_q: Optional[torch.Tensor] = None,
+    actual_seqlen_kv: Optional[torch.Tensor] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     bias_dtype: Optional[torch.dtype] = None,
     bottom_right_alignment: bool = True,
@@ -839,6 +841,10 @@ def get_alibi(
         Maximum sequence length for queries.
     max_seqlen_kv: int
         Maximum sequence length for keys and values.
+    actual_seqlen_q: Optional[torch.Tensor], default = `None`
+        Actual sequence lengths for queries, in shape [batch_size].
+    actual_seqlen_kv: Optional[torch.Tensor], default = `None`
+        Actual sequence lengths for keys and values, in shape [batch_size].
     alibi_slopes: Optional[torch.Tensor], default = `None`
         Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
     bias_dtype: Optional[torch.dtype], default = `None`
@@ -852,10 +858,12 @@ def get_alibi(
     alibi_slopes: torch.Tensor
         ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
     alibi_bias: torch.Tensor
-        ALiBi bias in FP32 or `bias_dtype`. If `alibi_slopes` is in [num_heads] shape,
-        then `alibi_bias` is in [1, num_heads, max_seqlen_q, max_seqlen_kv], and if
-        `alibi_slopes` is in [batch_size, num_heads], then the bias is in
-        [batch_size, num_heads, max_seqlen_q, max_seqlen_kv].
+        ALiBi bias in FP32 or `bias_dtype`. Its shape is
+        (1) [1, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in [num_heads] shape,
+        and `actual_seqlen_q` and `actual_seqlen_kv` are `None`,
+        or (2) [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in
+        [batch_size, num_heads] shape, or if `alibi_slopes` is in [num_heads] shape and
+        `actual_seqlen_q` and `actual_seqlen_kv` are not `None`.
     """
     global _alibi_cache
     if _alibi_cache["_alibi_slopes_require_update"]:
@@ -881,17 +889,34 @@ def get_alibi(
             slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
         if _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
-        if bottom_right_alignment:
-            bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
-                1, 1, 1, max_seqlen_kv
+        if actual_seqlen_q is None and actual_seqlen_kv is None:
+            if bottom_right_alignment:
+                bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
+                    1, 1, 1, max_seqlen_kv
+                )
+            else:
+                bias = torch.arange(
+                    1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda"
+                ).view(1, 1, 1, max_seqlen_kv)
+            bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
+                1, 1, max_seqlen_q, 1
             )
         else:
-            bias = torch.arange(
-                1 - max_seqlen_q, max_seqlen_kv - max_seqlen_q + 1, dtype=torch.int32, device="cuda"
-            ).view(1, 1, 1, max_seqlen_kv)
-        bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
-            1, 1, max_seqlen_q, 1
-        )
+            bias = torch.Tensor([]).to(device='cuda')
+            for b in range(len(actual_seqlen_q)):
+                if bottom_right_alignment:
+                    bias_per_batch = torch.arange(1 - actual_seqlen_kv[b], 1, dtype=torch.int32, device="cuda").view(
+                        1, 1, 1, actual_seqlen_kv[b]
+                    )
+                else:
+                    bias_per_batch = torch.arange(
+                        1 - actual_seqlen_q[b], actual_seqlen_kv[b] - actual_seqlen_q[b] + 1, dtype=torch.int32, device="cuda"
+                    ).view(1, 1, 1, actual_seqlen_kv[b])
+                bias_per_batch = F.pad(bias_per_batch - torch.arange(1 - actual_seqlen_q[b], 1, dtype=torch.int32, device="cuda").view(1, 1, actual_seqlen_q[b], 1),
+                        pad=(0, max_seqlen_kv - actual_seqlen_kv[b], 0, max_seqlen_q - actual_seqlen_q[b]),
+                        mode='constant', value=0)
+
+                bias = torch.cat([bias, bias_per_batch], dim=0)
         bias = bias.abs().mul(-1)
         bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
@@ -2945,16 +2970,20 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 max_seqlen_q,
                 max_seqlen_kv,
             ), "attention_mask should have [batch_size, 1, max_seqlen_q, max_seqlen_kv] shape!"
+            mask = attention_mask.squeeze(1).logical_not()
+            actual_seqlen_q = mask[:,:,0].sum(dim=1)
+            actual_seqlen_kv = mask[:,0,:].sum(dim=1)
             if attn_mask_type == "padding_causal":
                 attention_mask = torch.logical_or(
                     torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
                 )
             if attn_mask_type == "padding_causal_bottom_right":
-                diagonal_offset = max_seqlen_kv - max_seqlen_q + 1
-                attention_mask = torch.logical_or(
-                    torch.triu(torch.logical_not(attention_mask), diagonal=diagonal_offset),
-                    attention_mask,
-                )
+                for b in range(batch_size):
+                    diagonal_offset = actual_seqlen_kv[b] - actual_seqlen_q[b] + 1
+                    attention_mask[b,0] = torch.logical_or(
+                        torch.triu(torch.logical_not(attention_mask[b,0]), diagonal=diagonal_offset),
+                        attention_mask[b,0],
+                    )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
@@ -3009,7 +3038,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
                 beta=0.0,
                 alpha=scale,
-            )
+            ).view(*output_size)
 
         elif core_attention_bias_type == "pre_scale_bias":
             assert core_attention_bias is not None, "core_attention_bias should not be None!"
@@ -3018,9 +3047,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 key_layer.transpose(0, 1).transpose(1, 2),  # [b * np, hn, sk]
             )
             matmul_result = (
-                matmul_result.view(output_size[0], output_size[1], output_size[2], output_size[3])
+                matmul_result.view(*output_size)
                 + core_attention_bias
-            ).view(-1, output_size[2], output_size[3])
+            )
             matmul_result *= scale
 
         elif core_attention_bias_type in ["post_scale_bias", "alibi"]:
@@ -3031,6 +3060,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     output_size[1],
                     output_size[2],
                     output_size[3],
+                    actual_seqlen_q=actual_seqlen_q if "padding" in attn_mask_type else None,
+                    actual_seqlen_kv=actual_seqlen_kv if "padding" in attn_mask_type else None,
                     alibi_slopes=alibi_slopes,
                     bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                 )
@@ -3043,22 +3074,16 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
             matmul_result = (
                 (
-                    matmul_result.view(
-                        output_size[0], output_size[1], output_size[2], output_size[3]
-                    )
+                    matmul_result.view(*output_size)
                     + core_attention_bias
                 )
-                .view(-1, output_size[2], output_size[3])
                 .to(dtype=query_layer.dtype)
             )
-
-        # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(*output_size)
 
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
-            attention_scores, attention_mask, attn_mask_type, softmax_scale
+            matmul_result, attention_mask, attn_mask_type, softmax_scale
         )
         if "padding" in attn_mask_type:
             attention_probs = attention_probs.masked_fill(attention_mask, 0)

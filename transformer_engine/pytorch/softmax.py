@@ -386,7 +386,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         if scale is not None:
             inp = inp * scale
 
-        if "causal" in self.attn_mask_type:
+        if "causal" in self.attn_mask_type and "padding" not in self.attn_mask_type:
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
             if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
                 assert self.kvcache_max_seq >= seq_len_k
