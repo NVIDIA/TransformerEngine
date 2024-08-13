@@ -4,10 +4,10 @@
 """JAX/TE miscellaneous for custom ops"""
 
 import os
-from importlib.metadata import version as get_pkg_version
-from packaging.version import Version as PkgVersion
 import functools
 from typing import Tuple
+from importlib.metadata import version as get_pkg_version
+from packaging.version import Version as PkgVersion
 
 import numpy as np
 
