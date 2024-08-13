@@ -359,6 +359,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           kernel is not available on the system, a warning will be issued, and the module will
           automatically fall back to the unfused backend.
 
+    .. note::
+        The DotProductAttention default setting enables non-deterministic kernels for reduced
+        workspace requirements and faster computation. Users can disable the non-deterministic
+        kernels via the :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO` environment variable:
+
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` to allow only deterministic kernels.
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=1` to allow non-deterministic kernels (default).
+
     Parameters
     ----------
     head_dim: int
