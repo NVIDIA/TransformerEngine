@@ -12,7 +12,7 @@ Prerequisites
 .. _driver link: https://www.nvidia.com/drivers
 
 1. Linux x86_64
-2. `CUDA 11.8 <https://developer.nvidia.com/cuda-downloads>`__
+2. `CUDA 12.0 <https://developer.nvidia.com/cuda-downloads>`__
 3. |driver link|_ supporting CUDA 11.8 or later.
 4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
 5. For FP8/FP16/BF16 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9.1 <https://developer.nvidia.com/cudnn>`__ or later.
