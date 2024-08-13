@@ -6,6 +6,7 @@
 from pathlib import Path
 
 import setuptools
+import os
 
 from .utils import cuda_version
 
@@ -62,7 +63,7 @@ def setup_paddle_extension(
         print("Could not determine CUDA Toolkit version")
     else:
         if version >= (11, 2):
-            nvcc_flags.extend(["--threads", "4"])
+            nvcc_flags.extend(["--threads", os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1")])
         if version >= (11, 0):
             nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
         if version >= (11, 8):
