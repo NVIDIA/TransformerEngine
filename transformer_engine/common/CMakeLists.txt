@@ -16,25 +16,29 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-# Set number of threads per parallel build job
+# Number of parallel build jobs
+if(DEFINED ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{MAX_JOBS})
+elseif(DEFINED ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{NVTE_BUILD_MAX_JOBS})
+else()
+  set(BUILD_JOBS_STR "max")
+endif()
+message(STATUS "Parallel build jobs: ${BUILD_JOBS_STR}")
+
+# Number of threads per parallel build job
 set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
 if (NOT BUILD_THREADS_PER_JOB)
   set(BUILD_THREADS_PER_JOB 1)
 endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
-
-# Print number of parallel build jobs
-if(DEFINED ENV{MAX_JOBS})
-  set(MAX_JOBS_STR $ENV{MAX_JOBS})
-elseif(DEFINED ENV{NVTE_BUILD_MAX_JOBS})
-  set(MAX_JOBS_STR $ENV{NVTE_BUILD_MAX_JOBS})
-else()
-  set(MAX_JOBS_STR "max number of")
-endif()
-message(STATUS "Parallel build with ${MAX_JOBS_STR} jobs and ${BUILD_THREADS_PER_JOB} threads per job")
+message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 
 # CUDA Toolkit
-find_package(CUDAToolkit 12.0...999 REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.0)
+  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
