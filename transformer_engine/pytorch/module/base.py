@@ -107,7 +107,7 @@ def initialize_ub(
         world_size = torch.distributed.get_world_size(mpi_group)
         local_rank = world_rank % tp_size
         local_size = tp_size
-        node_id = world_rank // tp_size
+        self_node_idx = world_rank // tp_size
         num_nodes = world_size // tp_size
         ub_callbacks = tex.UbufBootstrapCallbacks()
     else:
@@ -126,13 +126,6 @@ def initialize_ub(
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
         world_size = torch.distributed.get_world_size(world_group)
-
-        if world_rank == 0:
-            print(
-                f'!!! [NVTE] Bootstrapping Userbuffers with backend="{bootstrap_backend}"\n',
-                end="",
-                flush=True,
-            )
 
         # Construct an intra-node communicator based on global ranks that share the same hostname
         # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
@@ -157,28 +150,41 @@ def initialize_ub(
 
         hostnames = [None for _ in range(world_size)]
         torch.distributed.all_gather_object(hostnames, hostname, world_group)
-        intra_node_ranks = []
-        for i, host in enumerate(hostnames):
-            if host == hostname:
-                intra_node_ranks.append(i)
-        if len(intra_node_ranks) == world_size:
+        unique_hosts = []
+        for host in hostnames:
+            if host not in unique_hosts:
+                unique_hosts.append(host)
+        num_nodes = len(unique_hosts)
+
+        if num_nodes > 1:
+            ranks_per_node_list = [[] for _ in range(num_nodes)]
+            self_node_idx = -1
+            for i, host in enumerate(hostnames):
+                node_idx = unique_hosts.index(host)
+                ranks_per_node_list[node_idx].append(i)
+                if host == hostname:
+                    self_node_idx = node_idx
+            assert self_node_idx >= 0, "Internal TE error!"
+
+            intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                ranks_per_node_list, backend=bootstrap_backend
+            )
+            local_rank = torch.distributed.get_rank(intra_node_group)
+            local_size = torch.distributed.get_world_size(intra_node_group)
+            intra_node_ranks = torch.distributed.get_process_group_ranks(intra_node_group)
+
+        else:
+            self_node_idx = 0
             intra_node_group = world_group
             local_rank = world_rank
             local_size = world_size
             intra_node_ranks = list(range(world_size))
-        else:
-            intra_node_group = torch.distributed.new_group(
-                backend=bootstrap_backend, ranks=intra_node_ranks
-            )
-            local_rank = torch.distributed.get_rank(intra_node_group)
-            local_size = torch.distributed.get_world_size(intra_node_group)
 
-        node_id = world_rank // local_size
-        num_nodes = world_size // local_size
+        if world_rank == 0:
+            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end="", flush=True)
         if local_rank == 0:
             print(
-                f"!!! [NVTE] Number of physical nodes: {num_nodes}\n"
-                + f"!!! [NVTE] Global ranks on node {node_id}: {intra_node_ranks}\n",
+                f"!!! [UB] Global ranks on node {self_node_idx}: {intra_node_ranks}\n",
                 end="",
                 flush=True,
             )
@@ -293,7 +299,7 @@ def initialize_ub(
                 world_size,  # World size
                 local_rank,  # Rank within the node
                 local_size,  # Number of ranks/GPUs per node
-                node_id,  # Node ID
+                self_node_idx,  # Node ID
                 num_nodes,  # Number of nodes
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
@@ -313,7 +319,7 @@ def initialize_ub(
                 world_size,  # World size
                 local_rank,  # Rank within the node
                 local_size,  # Number of ranks/GPUs per node
-                node_id,  # Node ID
+                self_node_idx,  # Node ID
                 num_nodes,  # Number of nodes
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
                 num_sm,  # Number of communication SMs
@@ -334,7 +340,9 @@ def initialize_ub(
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
-                methods["pipeline"].append(name)
+                methods["bulk"].remove(name)
+                new_method = ub_cfgs[name]["method"]
+                methods[new_method].append(name)
 
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         ub_cfg = get_default_config(name)

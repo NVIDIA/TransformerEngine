@@ -32,7 +32,7 @@ jobs:
            || github.actor == 'sudhakarsingh27'
            || github.actor == 'Oleg-Goncharov'
            || github.actor == 'phu0ngng'
-           || github.actor == 'nvcforster'
+           || github.actor == 'xrennvidia'
          )
     steps:
       - name: Check if comment is issued by authorized person

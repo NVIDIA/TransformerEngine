@@ -3,12 +3,16 @@
 # See LICENSE for license information.
 """JAX/TE miscellaneous for custom ops"""
 
+import functools
+from typing import Tuple
+
 import numpy as np
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
 
 from transformer_engine.transformer_engine_jax import DType as TEDType
+from transformer_engine import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
 
@@ -128,3 +132,13 @@ def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
         *shape[transpose_axis_boundary:],
         *shape[transpose_start_idx:transpose_axis_boundary],
     )
+
+
+@functools.lru_cache(maxsize=None)
+def get_cudnn_version() -> Tuple[int, int, int]:
+    """Runtime cuDNN version (major, minor, patch)"""
+    encoded_version = transformer_engine_jax.get_cudnn_version()
+    major_version_magnitude = 1000 if encoded_version < 90000 else 10000
+    major, encoded_version = divmod(encoded_version, major_version_magnitude)
+    minor, patch = divmod(encoded_version, 100)
+    return (major, minor, patch)
