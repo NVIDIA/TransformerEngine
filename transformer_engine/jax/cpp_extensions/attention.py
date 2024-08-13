@@ -1235,27 +1235,64 @@ class _FusedRingAttnStatusTracker:
                     *[i for i in range(seq_dim + 2, len(reorded_tensor.shape))],
                 )
             )
-            reorded_tensor = reorded_tensor.reshape(tensor.shape)
+            reorded_tensor = reorded_tensor.reshape(ori_tensor_shape)
             return reorded_tensor
 
+        def inverse_reorder_tensor(tensor, seq_dim: int = 1):
+            ori_tensor_shape = tensor.shape
+            tensor = tensor.reshpae(
+                (
+                    *ori_tensor_shape[:seq_dim],
+                    cp_size,
+                    2,
+                    ori_tensor_shape[seq_dim] // 2 // cp_size,
+                    *ori_tensor_shape[seq_dim + 1 :],
+                )
+            )
+            inversed_reorded_tensor = jnp.zeros(
+                (
+                    *ori_tensor_shape[:seq_dim],
+                    2,
+                    cp_size,
+                    ori_tensor_shape[seq_dim] // 2 // cp_size,
+                    *ori_tensor_shape[seq_dim + 1 :],
+                ),
+                dtype=tensor.dtype,
+            )
+            for i in range(cp_size):
+                inversed_reorded_tensor = inversed_reorded_tensor.at[:, 0, i, ...].set(
+                    tensor[:, i, 0, ...]
+                )
+                inversed_reorded_tensor = inversed_reorded_tensor.at[
+                    :, 1, cp_size - i - 1, ...
+                ].set(tensor[:, i, 1, ...])
+            reorded_t = reorded_t.reshape(ori_tensor_shape)
+            return reorded_t
+
         outputs = tree_util.tree_map(reorder_tensor, inputs)
-        return outputs
+        inverse_reorder_fn = partial(inverse_reorder_tensor, seq_dim=seq_dim)
+        return outputs, inverse_reorder_fn
 
     @staticmethod
     @contextmanager
     def workload_balance_of_context_parallel(*inputs, seq_dim: int = 1):
         try:
-            outputs = _FusedRingAttnStatusTracker._balance_workload_along_seq(
+            outputs, inverse_reorder_fn = _FusedRingAttnStatusTracker._balance_workload_along_seq(
                 *inputs, seq_dim=seq_dim
             )
             _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask = True
-            yield outputs
+            yield *outputs, inverse_reorder_fn
         finally:
             _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask = False
 
     @staticmethod
     def is_workload_balanced():
         return _FusedRingAttnStatusTracker.workload_balacne_of_causal_mask
+
+
+workload_balance_of_context_parallel = (
+    _FusedRingAttnStatusTracker.workload_balance_of_context_parallel
+)
 
 
 class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
