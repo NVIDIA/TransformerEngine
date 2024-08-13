@@ -906,7 +906,7 @@ def get_alibi(
             )
         else:
             bias = torch.Tensor([]).to(device="cuda")
-            for i,_ in enumerate(actual_seqlen_q):
+            for i, _ in enumerate(actual_seqlen_q):
                 if bottom_right_alignment:
                     bias_per_batch = torch.arange(
                         1 - actual_seqlen_kv[i], 1, dtype=torch.int32, device="cuda"
