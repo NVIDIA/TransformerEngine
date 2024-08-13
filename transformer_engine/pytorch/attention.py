@@ -3560,19 +3560,19 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        is_input_fp8 = False
         if fp8:
-            if fp8_meta["recipe"].fp8_mha:
-                assert isinstance(qkv, Float8Tensor), "qkv must be Float8Tensors for FP8 MHA."
+            is_input_fp8 = isinstance(qkv, Float8Tensor)
+            if is_input_fp8:
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             # 1: qkv packed, 2: kv packed, 3: qkv separate
             qkv_group = len(qkv_layout.split("_"))
-            assert qkv_group == 1, (
-                "qkv layout should conform to 3hd or h3d, e.g. sb3hd,                 but found"
-                f" {qkv_layout}."
-            )
-            if fp8_meta["recipe"].fp8_mha:
+            assert (
+                qkv_group == 1
+            ), f"qkv layout should conform to 3hd or h3d, e.g. sb3hd, but found {qkv_layout}."
+            if is_input_fp8:
                 qkv_fp8 = qkv._data
             else:
                 qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
@@ -3621,7 +3621,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     qkv_dtype,
                 ).view(out_fp8.shape)
             out_save = out_ret
-            if fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
                 qkv = cast_from_fp8(
                     qkv_c._data,
@@ -3672,6 +3672,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             out_save = out_ret
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        ctx.is_input_fp8 = is_input_fp8
         qkvo_tensors = (qkv, out_save) if not ctx.fp8 else (None, None)
         ctx.save_for_backward(
             *qkvo_tensors, cu_seqlens, cu_seqlens_padded, *fp8_tensors, *aux_ctx_tensors
@@ -3793,7 +3794,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_input_fp8:
                         dqkv = Float8Tensor(
                             data=dqkv_fp8,
                             fp8_meta=ctx.fp8_meta,
@@ -3931,22 +3932,22 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        is_input_fp8 = False
         if fp8:
-            if fp8_meta["recipe"].fp8_mha:
-                assert isinstance(q, Float8Tensor) and isinstance(
-                    kv, Float8Tensor
-                ), "q/kv must be Float8Tensors for FP8 MHA."
+            assert type(q) == type(kv), "q and kv must have the same type."
+            is_input_fp8 = isinstance(q, Float8Tensor)
+            if is_input_fp8:
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if fp8_meta["recipe"].fp8_mha:
+            if is_input_fp8:
                 q_fp8, kv_fp8 = q._data, kv._data
             else:
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
                 qkv_group = len(qkv_layout.split("_"))
                 assert qkv_group == 2, (
-                    "qkv layout should conform to hd_2hd or hd_h2d, e.g. sbhd_sb2hd,              "
-                    f"       but found {qkv_layout}."
+                    "qkv layout should conform to hd_2hd or hd_h2d, e.g. sbhd_sb2hd, "
+                    f"but found {qkv_layout}."
                 )
                 q_fp8 = cast_to_fp8(q, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward).view(
                     q.shape
@@ -4001,7 +4002,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     qkv_dtype,
                 ).view(out_fp8.shape)
             out_save = out_ret
-            if fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q = cast_from_fp8(
                     q._data, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward, TE_DType[q.dtype]
                 ).view(q.shape)
@@ -4060,6 +4061,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             fp8_tensors = (None, None, None, None, None)
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        ctx.is_input_fp8 = is_input_fp8
         qkvo_tensors = (q, kv, out_save) if not ctx.fp8 else (None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
@@ -4196,7 +4198,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                         ctx.window_size,
                         ctx.deterministic,
                     )
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_input_fp8:
                         dq = Float8Tensor(
                             data=dq_fp8,
                             fp8_meta=ctx.fp8_meta,
@@ -4362,15 +4364,13 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        is_input_fp8 = False
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if fp8_meta["recipe"].fp8_mha:
-                assert (
-                    isinstance(q, Float8Tensor)
-                    and isinstance(k, Float8Tensor)
-                    and isinstance(v, Float8Tensor)
-                ), "q/k/v must be Float8Tensors for FP8 MHA."
+            assert type(q) == type(k) == type(v), "q, k, and v must have the same type."
+            is_input_fp8 = isinstance(q, Float8Tensor)
+            if is_input_fp8:
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                 q_fp8, k_fp8, v_fp8 = q._data, k._data, v._data
             else:
@@ -4455,7 +4455,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 ).view(out_fp8.shape)
             out_save = out_ret
 
-            if fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
                 qkv_group = len(qkv_layout.split("_"))
                 if qkv_group == 1:
@@ -4572,6 +4572,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     tensor.activation_offloading = True
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        ctx.is_input_fp8 = is_input_fp8
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
@@ -4714,7 +4715,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
 
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_input_fp8:
                         dq = Float8Tensor(
                             data=dq_fp8,
                             fp8_meta=ctx.fp8_meta,
@@ -6592,6 +6593,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
+                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -6601,7 +6603,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=True,  # specific to FP8 MHA
+                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
 
             num_queries_per_key_value = (
@@ -6657,7 +6659,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                is_first_module_in_mha=True,  # specific to FP8 MHA
+                is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
             )
 
             if self.qkv_weight_interleaved:
@@ -6707,6 +6709,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
+                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -6716,7 +6719,7 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=True,  # specific to FP8 MHA
+                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]
