@@ -3152,8 +3152,8 @@ def get_qkv_layout(
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
         stride = k.stride()
-        check_strides_kv = torch.equal(
-            torch.Tensor(stride[:-1]) / k.shape[-1], torch.Tensor(v.stride()[:-1]) / v.shape[-1]
+        check_strides_kv = tuple(sk / k.shape[-1] for sk in k.stride()[:-1]) == tuple(
+            sv / v.shape[-1] for sv in v.stride()[:-1]
         )
 
         shape = q.shape

@@ -315,13 +315,18 @@ at::Tensor rmsnorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight, fl
  **************************************************************************************************/
 
 at::Tensor cast_to_fp8(const at::Tensor &input, const at::Tensor &scale, at::Tensor amax,
-                       at::Tensor scale_inv, transformer_engine::DType otype);
+                       at::Tensor scale_inv, transformer_engine::DType otype,
+                       const int scale_offset = 0, const int amax_offset = 0,
+                       const int scale_inv_offset = 0);
 
 void cast_to_fp8_noalloc(const at::Tensor &input, const at::Tensor &scale, at::Tensor output,
-                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype);
+                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype,
+                         const int scale_offset = 0, const int amax_offset = 0,
+                         const int scale_inv_offset = 0);
 
 at::Tensor cast_from_fp8(const at::Tensor &input, const at::Tensor &scale_inv,
-                         transformer_engine::DType itype, transformer_engine::DType otype);
+                         transformer_engine::DType itype, transformer_engine::DType otype,
+                         const int scale_inv_offset = 0);
 
 /***************************************************************************************************
  * Softmax
