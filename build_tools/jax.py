@@ -11,6 +11,8 @@ from glob import glob
 from .utils import cuda_path, all_files_in_dir
 from typing import List
 
+from jax.extend import ffi
+
 
 def setup_jax_extension(
     csrc_source_files,
@@ -27,12 +29,14 @@ def setup_jax_extension(
 
     # Header files
     cuda_home, _ = cuda_path()
+    jax_ffi_include = ffi.include_dir()
     include_dirs = [
         cuda_home / "include",
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
         csrc_header_files,
+        jax_ffi_include,
     ]
 
     # Compile flags
