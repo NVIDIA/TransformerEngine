@@ -6593,7 +6593,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -6603,7 +6603,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
 
             num_queries_per_key_value = (
@@ -6659,7 +6659,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
+                fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
             )
 
             if self.qkv_weight_interleaved:
@@ -6709,7 +6709,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -6719,7 +6719,7 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    is_first_module_in_mha=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]

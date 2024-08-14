@@ -90,7 +90,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_rs_dgrad: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-        is_first_module_in_mha: bool,
+        fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
@@ -200,7 +200,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             assert isinstance(weight_fp8, Float8Tensor)
 
-            if is_first_module_in_mha:
+            if fp8_output:
                 out_index, meta_tensor, output_te_dtype, output_dtype = (
                     tex.FP8FwdTensors.GEMM1_OUTPUT,
                     fp8_meta["scaling_fwd"],
@@ -745,7 +745,7 @@ class _LayerNormLinear(torch.autograd.Function):
             None,  # ub_overlap_rs_dgrad
             None,  # ub_overlap_ag
             None,  # ub_name
-            None,  # is_first_module_in_mha
+            None,  # fp8_output
             None,  # fsdp_group
         )
 
@@ -1098,7 +1098,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-        is_first_module_in_mha: Optional[bool] = False,
+        fp8_output: Optional[bool] = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
@@ -1128,7 +1128,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
-            is_first_module_in_mha = is_first_module_in_mha and self.fp8_meta["recipe"].fp8_mha
+            fp8_output = fp8_output and self.fp8_meta["recipe"].fp8_mha
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
@@ -1228,7 +1228,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_rs_dgrad,
                 self.ub_overlap_ag,
                 self.ub_name,
-                is_first_module_in_mha,
+                fp8_output,
                 self.fsdp_group,
             )
             out = fwd_fn(*args)
