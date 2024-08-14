@@ -3,14 +3,21 @@
 # See LICENSE for license information.
 
 import os, sys
+from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
+from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.common.recipe import DelayedScaling
 
-dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
+dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
+
+
+def _rmse(a, b):
+    return torch.sqrt((a - b).square().mean()).item()
 
 
 def run_dpa_with_cp(
@@ -56,6 +63,9 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+
+    if dtype == "fp8":
+        fp8_recipe = DelayedScaling(interval=1, fp8_dpa=True)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -171,18 +181,27 @@ def run_dpa_with_cp(
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
-    out = core_attn(
-        q,
-        k,
-        v,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
-    )
-    out.backward(dout)
+
+    if dtype == "fp8":
+        fp8_context = fp8_autocast(
+            enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group
+        )
+    else:
+        fp8_context = nullcontext()
+
+    with fp8_conext:
+        out = core_attn(
+            q,
+            k,
+            v,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias=bias,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+            cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
+        )
+        out.backward(dout)
 
     # run core_attn wit CP
     q_, k_, v_, dout_, *rest = [
@@ -226,18 +245,27 @@ def run_dpa_with_cp(
     core_attn.set_context_parallel_group(
         cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
     )
-    out_ = core_attn(
-        q_,
-        k_,
-        v_,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias_,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
-    )
-    out_.backward(dout_)
+
+    if dtype == "fp8":
+        fp8_context = fp8_autocast(
+            enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group
+        )
+    else:
+        fp8_context = nullcontext()
+
+    with fp8_context:
+        out_ = core_attn(
+            q_,
+            k_,
+            v_,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias=bias_,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+            cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
+        )
+        out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:
         assert torch.all(~torch.isnan(x))
