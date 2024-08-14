@@ -186,7 +186,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                   DType in_dtype, DType w_dtype, DType out_dtype,
                                                   bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps);
+                                                  float eps, int sm_margin);
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -196,7 +196,7 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
                                                    bool is_layer_norm, bool zero_centered_gamma,
-                                                   float eps);
+                                                   float eps, int sm_margin);
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
