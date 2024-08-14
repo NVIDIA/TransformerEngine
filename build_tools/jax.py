@@ -2,7 +2,8 @@
 #
 # See LICENSE for license information.
 
-"""Paddle-paddle related extensions."""
+"""JAX related extensions."""
+import os
 from pathlib import Path
 
 import setuptools
@@ -11,8 +12,17 @@ from glob import glob
 from .utils import cuda_path, all_files_in_dir
 from typing import List
 
-from jax.extend import ffi
 
+try:
+    from jax.extend import ffi
+except ImportError:
+    jax_ffi_include = "/opt/xla"
+    pass
+else:
+    jax_ffi_include = ffi.include_dir()
+
+if not os.path.isdir(jax_ffi_include):
+    raise Exception("Can not locate the XLA FFI include directory!")
 
 def setup_jax_extension(
     csrc_source_files,
@@ -29,7 +39,6 @@ def setup_jax_extension(
 
     # Header files
     cuda_home, _ = cuda_path()
-    jax_ffi_include = ffi.include_dir()
     include_dirs = [
         cuda_home / "include",
         common_header_files,
