@@ -31,7 +31,8 @@ RUN <<"EOF" bash -e
   || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
 
   NVTE_FRAMEWORK=${FRAMEWORK} \
-  pip install .[test]
+  NVTE_BUILD_THREADS_PER_JOB=4 \
+  pip install --verbose --verbose --no-build-isolation .[test]
 
   rm -rf transformer_engine.egg-info dist build
 EOF
