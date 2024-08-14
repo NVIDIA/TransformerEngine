@@ -5737,10 +5737,9 @@ class DotProductAttention(TransformerEngineBaseModule):
     ----------
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    k_channels : int
-                number of channels per attention head in key.
-    v_channels : Optional[int] = None
-                number of channels per attention head in value.
+    kv_channels : Union[int, Tuple[int, int]]
+                the head size in key and value tensors. If the same, :attr:`kv_channels` can be
+                an integer; if not, :attr:`kv_channels` should be a tuple of two integers.
     num_gqa_groups : Optional[int] = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
@@ -5802,7 +5801,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                For that, please use `get_qkv_layout` to gain the layout information.
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
-                `1.0 / math.sqrt(kv_channels)`.
+                `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
 
     Parallelism parameters
     ----------------------
@@ -5829,8 +5828,7 @@ class DotProductAttention(TransformerEngineBaseModule):
     def __init__(
         self,
         num_attention_heads: int,
-        k_channels: int,
-        v_channels: Optional[int] = None,
+        kv_channels: Union[int, Tuple[int, int]],
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
@@ -5875,8 +5873,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
 
-        self.hidden_size_per_attention_head = k_channels
-        self.v_channels = k_channels if v_channels is None else v_channels
+        self.hidden_size_per_attention_head_k = (
+            kv_channels if isinstance(kv_channels, int) else kv_channels[0]
+        )
+        self.hidden_size_per_attention_head_v = (
+            kv_channels if isinstance(kv_channels, int) else kv_channels[1]
+        )
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
@@ -5894,7 +5896,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_dropout_ctx = self.rng_states_tracker.fork
 
         if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(k_channels)
+            softmax_scale = 1.0 / math.sqrt(
+                kv_channels if isinstance(kv_channels, int) else kv_channels[0]
+            )
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -6198,6 +6202,14 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 key_layer.shape[:-1] == value_layer.shape[:-1]
             ), "Keys and values must have the same batch size, sequence length and number of heads!"
+            assert (
+                key_layer.shape[-1] == self.hidden_size_per_attention_head_k
+            ), f"Keys have head_dim = {key_layer.shape[-1]}, "
+            "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
+            assert (
+                value_layer.shape[-1] == self.hidden_size_per_attention_head_v
+            ), f"Values have head_dim = {value_layer.shape[-1]}, "
+            "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
 
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
