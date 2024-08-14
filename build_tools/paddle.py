@@ -62,12 +62,16 @@ def setup_paddle_extension(
     except FileNotFoundError:
         print("Could not determine CUDA Toolkit version")
     else:
-        if version >= (11, 2):
-            nvcc_flags.extend(["--threads", os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1")])
-        if version >= (11, 0):
-            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
-        if version >= (11, 8):
-            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+        if version < (12, 0):
+            raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
+        nvcc_flags.extend((
+            "--threads",
+            os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
+            "-gencode",
+            "arch=compute_80,code=sm_80",
+            "-gencode",
+            "arch=compute_90,code=sm_90",
+        ))
 
     # Construct Paddle CUDA extension
     sources = [str(path) for path in sources]
