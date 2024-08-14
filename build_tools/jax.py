@@ -24,6 +24,7 @@ else:
 if not os.path.isdir(jax_ffi_include):
     raise Exception("Can not locate the XLA FFI include directory!")
 
+
 def setup_jax_extension(
     csrc_source_files,
     csrc_header_files,
