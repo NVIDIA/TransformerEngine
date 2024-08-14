@@ -69,14 +69,16 @@ def setup_pytorch_extension(
     else:
         if version < (12, 0):
             raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
-        nvcc_flags.extend((
-            "--threads",
-            os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
-            "-gencode",
-            "arch=compute_80,code=sm_80",
-            "-gencode",
-            "arch=compute_90,code=sm_90",
-        ))
+        nvcc_flags.extend(
+            (
+                "--threads",
+                os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
+                "-gencode",
+                "arch=compute_80,code=sm_80",
+                "-gencode",
+                "arch=compute_90,code=sm_90",
+            )
+        )
 
     # Libraries
     library_dirs = []
