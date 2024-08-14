@@ -203,6 +203,26 @@ def cuda_version() -> Tuple[int, ...]:
     return tuple(int(v) for v in version)
 
 
+@functools.lru_cache(maxsize=None)
+def xla_path() -> str:
+    """XLA root path lookup.
+    Throws FileNotFoundError if XLA source is not found."""
+
+    try:
+        from jax.extend import ffi
+    except ImportError:
+        if os.getenv("XLA_HOME"):
+            xla_home = Path(os.getenv("XLA_HOME"))
+        else:
+            xla_home = "/opt/xla"
+    else:
+        xla_home = ffi.include_dir()
+
+    if not os.path.isdir(xla_home):
+        raise FileNotFoundError("Could not find xla source.")
+    return xla_home
+
+
 def get_frameworks() -> List[str]:
     """DL frameworks to build support for"""
     _frameworks: List[str] = []

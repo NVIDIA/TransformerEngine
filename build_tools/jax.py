@@ -9,20 +9,8 @@ from pathlib import Path
 import setuptools
 from glob import glob
 
-from .utils import cuda_path, all_files_in_dir
+from .utils import cuda_path, xla_path, all_files_in_dir
 from typing import List
-
-
-try:
-    from jax.extend import ffi
-except ImportError:
-    jax_ffi_include = "/opt/xla"
-    pass
-else:
-    jax_ffi_include = ffi.include_dir()
-
-if not os.path.isdir(jax_ffi_include):
-    raise Exception("Can not locate the XLA FFI include directory!")
 
 
 def setup_jax_extension(
@@ -40,13 +28,14 @@ def setup_jax_extension(
 
     # Header files
     cuda_home, _ = cuda_path()
+    xla_home = xla_path()
     include_dirs = [
         cuda_home / "include",
         common_header_files,
         common_header_files / "common",
         common_header_files / "common" / "include",
         csrc_header_files,
-        jax_ffi_include,
+        xla_home,
     ]
 
     # Compile flags
