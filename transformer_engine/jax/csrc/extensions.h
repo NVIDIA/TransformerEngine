@@ -13,8 +13,6 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <transformer_engine/activation.h>
-#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
@@ -27,22 +25,13 @@
 
 #include "common/common.h"
 #include "common/util/logging.h"
+#include "extensions/ffi.h"
+#include "extensions/misc.h"
+#include "transformer_engine/activation.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
-
-constexpr int kMaxNumDim = 8;
-
-// TODO: Rename Shape to ???
-struct Shape {
-  int num_dim;
-  size_t dims[kMaxNumDim];
-
-  void from_vector(const std::vector<size_t> &shape);
-
-  std::vector<size_t> to_vector() const;
-};
 
 // Phuong: These 3 functions need to stay in the header file for compilation purpose
 // 1.
@@ -61,8 +50,6 @@ const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
   }
   return reinterpret_cast<const T *>(opaque);
 }
-
-std::vector<size_t> MakeShapeVector(NVTEShape shape);
 
 // Packing
 
@@ -167,6 +154,8 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
+
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 // Activation
@@ -178,6 +167,10 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                         DType in_dtype, DType out_dtype);
