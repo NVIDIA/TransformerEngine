@@ -9,8 +9,27 @@ from pathlib import Path
 import setuptools
 from glob import glob
 
-from .utils import cuda_path, xla_path, all_files_in_dir
+from .utils import cuda_path, all_files_in_dir
 from typing import List
+
+
+def xla_path() -> str:
+    """XLA root path lookup.
+    Throws FileNotFoundError if XLA source is not found."""
+
+    try:
+        from jax.extend import ffi
+    except ImportError:
+        if os.getenv("XLA_HOME"):
+            xla_home = Path(os.getenv("XLA_HOME"))
+        else:
+            xla_home = "/opt/xla"
+    else:
+        xla_home = ffi.include_dir()
+
+    if not os.path.isdir(xla_home):
+        raise FileNotFoundError("Could not find xla source.")
+    return xla_home
 
 
 def setup_jax_extension(
