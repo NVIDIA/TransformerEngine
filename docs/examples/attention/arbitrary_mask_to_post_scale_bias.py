@@ -6,7 +6,6 @@ import os
 import torch
 from typing import Tuple
 from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
-from transformer_engine.pytorch.distributed import _set_cuda_rng_state
 from transformer_engine.pytorch.attention import DotProductAttention
 
 # Initialize RNG state
@@ -22,7 +21,7 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 def reset_rng_states() -> None:
     """Revert back to initial RNG state"""
     torch.set_rng_state(_cpu_rng_state)
-    _set_cuda_rng_state(_cuda_rng_state)
+    torch.cuda.set_rng_state(_cuda_rng_state)
 
 
 def _run_dot_product_attention(
@@ -40,7 +39,7 @@ def _run_dot_product_attention(
         [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
     )
     inp = torch.randn(
-        [config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim],
+        [config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim_qk],
         dtype=dtype,
         device="cuda",
     )
@@ -51,7 +50,7 @@ def _run_dot_product_attention(
     k.requires_grad = True
     v.requires_grad = True
     out_grad = torch.randn(
-        [config.batch_size, config.max_seqlen_q, config.num_heads * config.head_dim],
+        [config.batch_size, config.max_seqlen_q, config.num_heads * config.head_dim_v],
         dtype=dtype,
         device="cuda",
     )
@@ -80,7 +79,7 @@ def _run_dot_product_attention(
 
     block = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         num_gqa_groups=config.num_gqa_groups,
         qkv_format="bshd",
         attention_dropout=config.dropout_p,
@@ -89,6 +88,8 @@ def _run_dot_product_attention(
         get_rng_state_tracker=None,
         tp_group=None,
         layer_number=1,
+        attn_mask_type="no_mask",
+        window_size=(-1, -1),
     ).to(dtype=dtype, device="cuda")
 
     # Run a forward and backward pass
@@ -103,6 +104,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # 'arbitrary'
             core_attention_bias_type=config.attn_bias_type,  # 'no_bias'
             core_attention_bias=bias,  # None
+            window_size=(-1, -1),
         )
         out.backward(out_grad)
 
@@ -116,6 +118,7 @@ def _run_dot_product_attention(
             attn_mask_type=config.attn_mask_type,  # no_mask
             core_attention_bias_type=config.attn_bias_type,  # 'post_scale_bias'
             core_attention_bias=bias,  # bias
+            window_size=(-1, -1),
         )
         out.backward(out_grad)
 
@@ -133,6 +136,7 @@ print("Run with post_scale_bias:")
 config = model_configs["test_bias"]
 fused_attn_fwd, fused_attn_bwd = _run_dot_product_attention(dtype, config, "bs3hd")
 
+print()
 print("Run with arbitrary mask:")
 config = model_configs["test_mask"]
 unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(dtype, config, "bs3hd")
@@ -140,4 +144,6 @@ unfused_attn_fwd, unfused_attn_bwd = _run_dot_product_attention(dtype, config, "
 torch.testing.assert_close(unfused_attn_fwd, fused_attn_fwd, atol=2.5e-2, rtol=2.5e-2)
 for i in range(3):
     torch.testing.assert_close(unfused_attn_bwd[i], fused_attn_bwd[i], atol=2.5e-2, rtol=2.5e-2)
+
+print()
 print("Test passed!")

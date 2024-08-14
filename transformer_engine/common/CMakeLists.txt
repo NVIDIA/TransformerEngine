@@ -14,6 +14,22 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 project(transformer_engine LANGUAGES CUDA CXX)
 
+set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
+if (NOT BUILD_THREADS_PER_JOB)
+  set(BUILD_THREADS_PER_JOB 1)
+endif()
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
+
+if(DEFINED ENV{MAX_JOBS})
+  set(JOBS $ENV{MAX_JOBS})
+elseif(DEFINED ENV{NVTE_BUILD_MAX_JOBS})
+  set(JOBS $ENV{NVTE_BUILD_MAX_JOBS})
+else()
+  set(JOBS "max number of")
+endif()
+
+message(STATUS "Parallel build with ${JOBS} jobs and ${BUILD_THREADS_PER_JOB} threads per job")
+
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
