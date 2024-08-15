@@ -15,6 +15,7 @@ from transformer_engine.common.recipe import DelayedScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
+
 def run_dpa_with_cp(
     dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
 ):
@@ -178,9 +179,7 @@ def run_dpa_with_cp(
         x.requires_grad = True
 
     if dtype == "fp8":
-        fp8_context = fp8_autocast(
-            enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group
-        )
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
@@ -194,7 +193,9 @@ def run_dpa_with_cp(
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
+            cu_seqlens_kv_padded=(
+                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
+            ),
         )
         out.backward(dout)
 
@@ -243,9 +244,7 @@ def run_dpa_with_cp(
 
     if dtype == "fp8":
         core_attn.reset_fp8_meta_tensors()
-        fp8_context = fp8_autocast(
-            enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group
-        )
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
     else:
         fp8_context = nullcontext()
 
@@ -259,7 +258,9 @@ def run_dpa_with_cp(
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
+            cu_seqlens_kv_padded=(
+                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
+            ),
         )
         out_.backward(dout_)
 

@@ -128,14 +128,9 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             f"CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
         )
     if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip(
-            f"FP8 attention cannot work with THD format yet!"
-        )
+        pytest.skip(f"FP8 attention cannot work with THD format yet!")
     if dtype == "fp8" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            f"FP8 attention cannot work with bias yet!"
-        )
-
+        pytest.skip(f"FP8 attention cannot work with bias yet!")
 
     subprocess.run(
         get_bash_arguments(
