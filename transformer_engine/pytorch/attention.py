@@ -1282,32 +1282,6 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
-def get_p2p_comm_info(rank, step, cp_size):
-    """Compute communication info of each rank for FP8 dKV exchange"""
-    min_rank_in_p2p_ring = rank
-    curr_rank = rank
-    for _ in range(cp_size):
-        next_rank = (curr_rank + step) % cp_size
-        if curr_rank == rank:
-            send_dst = next_rank
-        if next_rank == rank:
-            recv_src = curr_rank
-
-        if next_rank < min_rank_in_p2p_ring:
-            min_rank_in_p2p_ring = next_rank
-            rank_in_p2p_ring = 0
-        elif rank != min_rank_in_p2p_ring:
-            rank_in_p2p_ring += 1
-        else:
-            rank_in_p2p_ring =0
-
-        curr_rank = next_rank
-        if curr_rank == rank:
-            break
-
-    return send_dst, recv_src, rank_in_p2p_ring
-
-
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Exchange KV between CP ranks
@@ -2173,6 +2147,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_backend = FusedAttnBackend["FP8"]
                 dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
                 dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
+                dkv_fp8_ = torch.empty_like(dkv_fp8)
                 dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
@@ -2182,7 +2157,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dout = cast_to_fp8(
                         dout, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
                     )
-                p2p_comm_buffers = [[kv, dkv_fp8], [torch.empty_like(kv), dkv_fp8]]
+                p2p_comm_buffers = [[kv, dkv_fp8], [torch.empty_like(kv), dkv_fp8_]]
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_fwd_scale_invs[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_fwd_scale_invs[META_S]
@@ -2231,32 +2206,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             recv_tensor = p2p_comm_buffers[(i + 1) % 2]
             if ctx.fp8:
                 if i < cp_size - 1:
-                    kv_send_tensor = send_tensor[0]
-                    kv_recv_tensor = recv_tensor[0]
                     send_recv_reqs = flash_attn_p2p_communicate(
                         rank,
-                        kv_send_tensor,
+                        send_tensor[0],
                         send_dst,
-                        kv_recv_tensor,
+                        recv_tensor[0],
                         recv_src,
                         ctx.cp_group,
                         batch_p2p_comm
                     )
                 else:
-                    send_recv_reqs = []
-                if i > 0:
-                    dkv_send_tensor = send_tensor[1]
-                    dkv_recv_tensor = recv_tensor[1]
-                    dkv_send_dst, dkv_recv_src, rank_in_dkv_p2p_ring = get_p2p_comm_info(rank, i, cp_size)
-                    send_recv_reqs += flash_attn_p2p_communicate(
-                        rank_in_dkv_p2p_ring,
-                        dkv_send_tensor[rank],
-                        ctx.cp_global_ranks[dkv_send_dst],
-                        dkv_recv_tensor[dkv_recv_src],
-                        ctx.cp_global_ranks[dkv_recv_src],
-                        ctx.cp_group,
-                        batch_p2p_comm
+                    dkv_a2a_req = torch.distributed.all_to_all_single(
+                        dkv_fp8,
+                        dkv_fp8_,
+                        group = ctx.cp_group,
+                        async_op = True,
                     )
+                    send_recv_reqs = [dkv_a2a_req]
             else:
                 if i == 0:
                     send_tensor = send_tensor[0]
@@ -2692,9 +2658,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             for req in send_recv_reqs:
                 req.wait()
 
-            dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.fp8:
-                dkv = dkv_fp8[rank]
+                if i < cp_size - 1:
+                    dkv = dkv_fp8_[(rank + i + 1) % cp_size]
+                else:
+                    dkv = dkv_fp8[(rank + i + 1) % cp_size]
+            else:
+                dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
                 dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
                 if ctx.qkv_format in ["bshd", "sbhd"]:
