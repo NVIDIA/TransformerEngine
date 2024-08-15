@@ -5778,7 +5778,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        if max_seqlen_q == max_seqlen_kv:
+                        if self.attention_type == "self":
+                            assert max_seqlen_q == max_seqlen_kv
                             cu_seqlens_q = get_cu_seqlens(attention_mask)
                             cu_seqlens_kv = cu_seqlens_q
                         else:
