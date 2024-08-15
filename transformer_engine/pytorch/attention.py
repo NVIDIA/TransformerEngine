@@ -2979,8 +2979,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
         if "padding" in attn_mask_type:
             if self.attention_type == "self":
-                assert (
-                    attention_mask.shape == (batch_size, 1, 1, max_seqlen_q)
+                assert attention_mask.shape == (
+                    batch_size,
+                    1,
+                    1,
+                    max_seqlen_q,
                 ), "attention_mask should be a single tensor with [b, 1, 1, sq] shape!"
                 attention_mask = torch.logical_or(
                     attention_mask.squeeze(1).unsqueeze(3), attention_mask
@@ -2990,17 +2993,19 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     len(attention_mask) == 2
                     and attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q)
                     and attention_mask[1].shape == (batch_size, 1, 1, max_seqlen_kv)
-                ), ("attention_mask should be a tuple of two tensors with shapes "
-                "[b, 1, 1, sq] and [b, 1, 1, skv]!")
+                ), (
+                    "attention_mask should be a tuple of two tensors with shapes "
+                    "[b, 1, 1, sq] and [b, 1, 1, skv]!"
+                )
                 attention_mask = torch.logical_or(
                     attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
                 )
             mask = attention_mask.squeeze(1).logical_not()
             actual_seqlens_q = mask[:, :, 0].sum(dim=1)
             actual_seqlens_kv = mask[:, 0, :].sum(dim=1)
-            if (attn_mask_type == "padding_causal"
-                or (attn_mask_type == "padding_causal_bottom_right"
-                and self.attention_type == "self")):
+            if attn_mask_type == "padding_causal" or (
+                attn_mask_type == "padding_causal_bottom_right" and self.attention_type == "self"
+            ):
                 attention_mask = torch.logical_or(
                     torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
                 )
