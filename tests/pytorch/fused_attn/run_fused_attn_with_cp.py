@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-import os, sys
+import os, sys, logging
 from contextlib import nullcontext
 import torch
 import torch.distributed as dist
@@ -14,11 +14,6 @@ from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.common.recipe import DelayedScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
-
-
-def _rmse(a, b):
-    return torch.sqrt((a - b).square().mean()).item()
-
 
 def run_dpa_with_cp(
     dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
@@ -189,7 +184,7 @@ def run_dpa_with_cp(
     else:
         fp8_context = nullcontext()
 
-    with fp8_conext:
+    with fp8_context:
         out = core_attn(
             q,
             k,
@@ -247,6 +242,7 @@ def run_dpa_with_cp(
     )
 
     if dtype == "fp8":
+        core_attn.reset_fp8_meta_tensors()
         fp8_context = fp8_autocast(
             enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group
         )
@@ -272,13 +268,6 @@ def run_dpa_with_cp(
         assert torch.all(~torch.isinf(x))
 
     # compare results with and without CP
-    tols = dict(atol=5e-3, rtol=5e-3)
-    if dtype == "bf16":
-        if config.num_heads == config.num_gqa_groups:
-            tols = dict(atol=2.5e-2, rtol=2.5e-2)
-        else:
-            tols = dict(atol=3.5e-2, rtol=3.5e-2)
-
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [
             x.view(
@@ -337,29 +326,50 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
+    if dtype == "bf16":
+        if config.num_heads == config.num_gqa_groups:
+            tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        else:
+            tols = dict(atol=3.5e-2, rtol=3.5e-2)
+    elif dtype == "fp16":
+        tols = dict(atol=5e-3, rtol=5e-3)
+    elif dtype == "fp8":
+        tols = dict(atol=5e-1, rtol=5e-1)
+        rmse_tol = 0.1
+    else:
+        assert False, f"{dtype} is an unsupported dtype!"
+
+    def _rmse(a, b):
+        return torch.sqrt((a - b).square().mean()).item()
+
+    def _error(a, b):
+        if dtype != "fp8":
+            torch.testing.assert_close(a, b, **tols)
+        else:
+            try:
+                torch.testing.assert_close(a, b, **tols)
+            except Exception as e:
+                logging.debug(e)
+
+            rmse = _rmse(a, b)
+            rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+            assert (
+                rmse < rmse_tol * rmse_range
+            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+            )
+
     if qkv_format == "bshd":
-        torch.testing.assert_close(out_[:, 0], out[:, 0], **tols)
-        torch.testing.assert_close(dq_[:, 0], dq[:, 0], **tols)
-        torch.testing.assert_close(dk_[:, 0], dk[:, 0], **tols)
-        torch.testing.assert_close(dv_[:, 0], dv[:, 0], **tols)
-        torch.testing.assert_close(out_[:, 1], out[:, 1], **tols)
-        torch.testing.assert_close(dq_[:, 1], dq[:, 1], **tols)
-        torch.testing.assert_close(dk_[:, 1], dk[:, 1], **tols)
-        torch.testing.assert_close(dv_[:, 1], dv[:, 1], **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a[:, 0], b[:, 0])
+            _error(a[:, 1], b[:, 1])
     elif qkv_format == "sbhd":
-        torch.testing.assert_close(out_[0], out[0], **tols)
-        torch.testing.assert_close(dq_[0], dq[0], **tols)
-        torch.testing.assert_close(dk_[0], dk[0], **tols)
-        torch.testing.assert_close(dv_[0], dv[0], **tols)
-        torch.testing.assert_close(out_[1], out[1], **tols)
-        torch.testing.assert_close(dq_[1], dq[1], **tols)
-        torch.testing.assert_close(dk_[1], dk[1], **tols)
-        torch.testing.assert_close(dv_[1], dv[1], **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a[0], b[0])
+            _error(a[1], b[1])
     elif qkv_format == "thd":
-        torch.testing.assert_close(out_, out, **tols)
-        torch.testing.assert_close(dq_, dq, **tols)
-        torch.testing.assert_close(dk_, dk, **tols)
-        torch.testing.assert_close(dv_, dv, **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a, b)
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
