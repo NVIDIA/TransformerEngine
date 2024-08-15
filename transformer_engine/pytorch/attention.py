@@ -414,7 +414,7 @@ def get_attention_backend(
         if "bottom_right" in attn_mask_type:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with"
-                " causal_bottom_right maskig"
+                " causal_bottom_right masking"
             )
             use_flash_attention = False
         elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
@@ -433,14 +433,14 @@ def get_attention_backend(
         elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with attention"
-                " bias for THD foramt"
+                " bias for THD format"
             )
             use_flash_attention = False
     if context_parallel and use_fused_attention:
         if "bottom_right" in attn_mask_type:
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with"
-                " causal_bottom_right maskig"
+                " causal_bottom_right masking"
             )
             use_fused_attention = False
         elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
@@ -459,7 +459,12 @@ def get_attention_backend(
         elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with attention"
-                " bias for THD foramt"
+                " bias for THD format"
+            )
+            use_fused_attention = False
+        elif head_dim_qk != head_dim_v:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
 
@@ -3029,9 +3034,6 @@ def attn_forward_func_with_cp(
     Attention implementation with context parallelism.
     """
 
-    assert (
-        "bottom_right" not in attn_mask_type
-    ), f"Context parallelism is not supported for {attn_mask_type} mask type!"
     assert qkv_format in [
         "bshd",
         "sbhd",
@@ -3055,9 +3057,6 @@ def attn_forward_func_with_cp(
     assert (
         cu_seqlens_q_padded is not None and cu_seqlens_kv_padded is not None
     ), "cu_seqlens_q_padded and cu_seqlens_kv_padded cannot be None with context parallelism!"
-    assert (
-        k.shape[-1] == v.shape[-1]
-    ), "Context parallelism does not support multi-latent attention yet!"
 
     sliding_window_attn = (
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
