@@ -3122,7 +3122,7 @@ def get_qkv_layout(
     qkv_format: str, default = `sbhd`
         Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
         the sequence length dimension, `b` batch size, `h` the number of attention heads,
-        `d` head size, and `t` the total number of sequences in a batch, i.e.
+        `d` head size, and `t` the total number of tokens in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
 
     Returns
@@ -5232,7 +5232,7 @@ class DotProductAttention(TransformerEngineBaseModule):
     qkv_format: str, default = `sbhd`
                dimension format for `query_layer`, `key_layer` and `value_layer`,
                {`sbhd`, `bshd`, `thd`}. `s` stands for the sequence length, `b` batch size,
-               `h` the number of heads, `d` head size, and `t` the total number of sequences
+               `h` the number of heads, `d` head size, and `t` the total number of tokens
                in a batch, with `t = sum(s_i), for i = 0...b-1`. `sbhd` and `bshd` formats
                are used for when sequences in a batch are of equal length or padded to
                equal length, and the `thd` format is used for when sequences in a batch
