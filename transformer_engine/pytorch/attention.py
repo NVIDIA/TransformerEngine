@@ -2242,6 +2242,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         ctx.cp_group,
                         batch_p2p_comm
                     )
+                else:
+                    send_recv_reqs = []
                 if i > 0:
                     dkv_send_tensor = send_tensor[1]
                     dkv_recv_tensor = recv_tensor[1]
