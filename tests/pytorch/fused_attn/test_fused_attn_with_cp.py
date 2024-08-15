@@ -123,7 +123,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip(
             f"Fused attention does not support sliding window attention + context parallelism yet!"
         )
-    if cp_comm_type == "all_gather" and dtye == "fp8":
+    if cp_comm_type == "all_gather" and dtype == "fp8":
         pytest.skip(
             f"CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
         )
