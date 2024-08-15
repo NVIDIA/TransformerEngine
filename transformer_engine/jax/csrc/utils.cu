@@ -19,6 +19,8 @@ int GetCudaRuntimeVersion() {
   return ver;
 }
 
+size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
+
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 
 __global__ void populate_rng_state_kernel(int64_t *rng_state_dst, const int64_t *const seed,

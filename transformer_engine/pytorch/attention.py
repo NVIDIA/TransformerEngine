@@ -114,12 +114,12 @@ META_DP = tex.FP8BwdTensors.GRAD_INPUT3
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-logging.basicConfig(
-    format="[%(levelname)-8s | %(name)-19s]: %(message)s",
-    level=log_levels[log_level if log_level in [0, 1, 2] else 2],
-)
+_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
+_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -158,8 +158,10 @@ class AttentionParams:
         Maximum sequence length of the query tensor.
     max_seqlen_kv: int, default = 128
         Maximum sequence length of the key and value tensors.
-    head_dim: int, default = 64
-        The size of each attention head.
+    head_dim_qk: int, default = 64
+        The size of each attention head in query and key tensors.
+    head_dim_v: int, default = 64
+        The size of each attention head in the value tensor.
     attn_mask_type: str, default = `no_mask`
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
@@ -198,7 +200,8 @@ class AttentionParams:
     num_gqa_groups: int = 16
     max_seqlen_q: int = 128
     max_seqlen_kv: int = 128
-    head_dim: int = 64
+    head_dim_qk: int = 64
+    head_dim_v: int = 64
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     alibi_slopes_shape: Union[torch.Size, List, None] = None
@@ -261,7 +264,8 @@ def get_attention_backend(
     num_gqa_groups = attention_params.num_gqa_groups
     max_seqlen_q = attention_params.max_seqlen_q
     max_seqlen_kv = attention_params.max_seqlen_kv
-    head_dim = attention_params.head_dim
+    head_dim_qk = attention_params.head_dim_qk
+    head_dim_v = attention_params.head_dim_v
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
     alibi_slopes_shape = attention_params.alibi_slopes_shape
@@ -278,6 +282,9 @@ def get_attention_backend(
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
+    logger.setLevel(_log_level)
+    if not logger.hasHandlers():
+        logger.addHandler(_stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
@@ -368,19 +375,31 @@ def get_attention_backend(
             use_unfused_attention = False
 
     # Filter: Head dimension
+    if use_flash_attention and head_dim_qk != head_dim_v:
+        logger.debug("Disabling FlashAttention as it does not support MLA.")
+        use_flash_attention = False
     if use_flash_attention and (
-        head_dim > 256
-        or head_dim % 8 != 0
-        or (head_dim > 192 and device_compute_capability not in ((8, 0), (9, 0)))
+        head_dim_qk > 256
+        or head_dim_qk % 8 != 0
+        or (head_dim_qk > 192 and device_compute_capability not in ((8, 0), (9, 0)))
     ):
         logger.debug(
-            "Disabling FlashAttention due to unsupported head_dim. "
-            "Supported: head_dim %%8 = 0, head_dim <= 256 (>192 requires sm80/90). "
-            "Found: head_dim = %s on sm%s.",
-            head_dim,
+            "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
+            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
+            "head_dim_qk <= 256 (>192 requires sm80/90). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            head_dim_qk,
+            head_dim_v,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention = False
+    qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
+    if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
+        logger.debug(
+            "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
+            qkv_layout,
+        )
+        use_fused_attention = False
 
     # Filter: QKV layout
     qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
@@ -573,7 +592,8 @@ def get_attention_backend(
             num_gqa_groups,
             max_seqlen_q,
             max_seqlen_kv,
-            head_dim,
+            head_dim_qk,
+            head_dim_v,
             window_size[0],
             window_size[1],
         )
@@ -3148,12 +3168,14 @@ def get_qkv_layout(
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
         stride = k.stride()
-        check_strides_kv = all(stride == x.stride() for x in [k, v])
+        check_strides_kv = torch.equal(
+            torch.Tensor(stride[:-1]) / k.shape[-1], torch.Tensor(v.stride()[:-1]) / v.shape[-1]
+        )
 
         shape = q.shape
         check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
         shape = k.shape
-        check_shapes_kv = all(shape == x.shape for x in [k, v])
+        check_shapes_kv = shape[:-1] == v.shape[:-1]
 
         last_dim_size = q.shape[-1]
         check_last_dim_offsets_qkv = all(
@@ -3233,31 +3255,28 @@ def check_set_window_size(
     """
     orig_window_size = window_size
     if "causal" in attn_mask_type:
-        if orig_window_size is None or (
-            orig_window_size[0] == -1 and orig_window_size[1] in [-1, 0]
-        ):
+        if orig_window_size is None:
             window_size = (-1, 0)
-            warnings.warn(
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
-            )
-        elif orig_window_size[0] >= 0:
+        elif orig_window_size == (-1, -1) or (
+            orig_window_size[0] >= 0 and orig_window_size[1] != 0
+        ):
             window_size = (orig_window_size[0], 0)
             warnings.warn(
                 "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
             )
-        else:
+        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
             assert False, (
                 "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
             )
     elif attn_mask_type in ["no_mask", "padding", "arbitrary"]:
-        if orig_window_size is None or (
-            orig_window_size[0] == -1 and orig_window_size[1] in [-1, 0]
-        ):
+        if orig_window_size is None:
+            window_size = (-1, -1)
+        elif orig_window_size == (-1, 0):
             window_size = (-1, -1)
             warnings.warn(
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
-        elif orig_window_size[0] < 0 or orig_window_size[1] < 0:
+        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
             assert False, (
                 "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
             )
@@ -3566,9 +3585,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if fp8:
-            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert isinstance(qkv, Float8Tensor), "qkv must be Float8Tensors for FP8 MHA."
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = qkv._scale_inv
@@ -3652,7 +3669,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", qkv.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training,
                 max_seqlen,
@@ -3705,7 +3721,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc_qkvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -3759,7 +3774,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_qkvpacked"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -3825,7 +3839,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                             ctx.qkv_dtype,
                         ).view(dqkv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", qkv.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(qkv.dtype)
                     dqkv, *rest = fused_attn_bwd_qkvpacked(
@@ -3943,9 +3956,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if fp8:
-            logger.debug("Running forward in FP8")
             if fp8_meta["recipe"].fp8_mha:
                 assert isinstance(q, Float8Tensor) and isinstance(
                     kv, Float8Tensor
@@ -4042,7 +4053,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training,
                 max_seqlen_q,
@@ -4106,7 +4116,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc_kvpacked")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -4164,7 +4173,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn_kvpacked"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -4249,7 +4257,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                             ctx.qkv_dtype,
                         ).view(dkv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dkv, *rest = fused_attn_bwd_kvpacked(
@@ -4380,9 +4387,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        logger = logging.getLogger("FusedAttnFunc")
         if fp8:
-            logger.debug("Running forward in FP8")
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if fp8_meta["recipe"].fp8_mha:
@@ -4550,7 +4555,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 fp8_meta["scaling_fwd"].scale_inv.clone(),
             )
         else:
-            logger.debug("Running forward in %s", q.dtype)
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -4624,7 +4628,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        logger = logging.getLogger("FusedAttnFunc")
         if ctx.fp8_meta["recipe"].fp8_mha:
             assert isinstance(
                 d_out, Float8Tensor
@@ -4686,7 +4689,6 @@ class FusedAttnFunc(torch.autograd.Function):
         else:
             with torch.cuda.nvtx.range("_FusedAttn"):
                 if ctx.fp8:
-                    logger.debug("Running backward in FP8")
                     fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
@@ -4824,7 +4826,6 @@ class FusedAttnFunc(torch.autograd.Function):
                                 ctx.qkv_dtype,
                             ).view(dv_fp8.shape)
                 else:
-                    logger.debug("Running backward in %s", q.dtype)
                     if d_out.dtype == torch.uint8:
                         d_out = d_out_f8tensor.from_float8(q.dtype)
                     dq, dk, dv, *rest = fused_attn_bwd(
@@ -4965,7 +4966,6 @@ class FusedAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        self.logger = logging.getLogger("FusedAttention")
         self.softmax_scale = softmax_scale
         self.attention_dropout = attention_dropout
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -5202,8 +5202,9 @@ class DotProductAttention(TransformerEngineBaseModule):
     ----------
     num_attention_heads : int
                          number of attention heads in the transformer layer.
-    kv_channels : int
-                number of key-query-value channels per attention head.
+    kv_channels : Union[int, Tuple[int, int]]
+                the head size in key and value tensors. If the same, :attr:`kv_channels` can be
+                an integer; if not, :attr:`kv_channels` should be a tuple of two integers.
     num_gqa_groups : Optional[int] = None
                     number of GQA groups in the transformer layer.
                     Grouped Query Attention is described in
@@ -5265,7 +5266,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                For that, please use `get_qkv_layout` to gain the layout information.
     softmax_scale: Optional[float], default = `None`
                 softmax scale for the attention scores. If `None`, defaults to
-                `1.0 / math.sqrt(kv_channels)`.
+                `1.0/math.sqrt(kv_channels if isinstance(kv_channels, int) else kv_channels[0])`.
 
     Parallelism parameters
     ----------------------
@@ -5289,7 +5290,7 @@ class DotProductAttention(TransformerEngineBaseModule):
     def __init__(
         self,
         num_attention_heads: int,
-        kv_channels: int,
+        kv_channels: Union[int, Tuple[int, int]],
         num_gqa_groups: Optional[int] = None,
         attention_dropout: float = 0.0,
         qkv_format: str = "sbhd",
@@ -5309,6 +5310,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")
+        self.logger.setLevel(_log_level)
+        if not self.logger.hasHandlers():
+            self.logger.addHandler(_stream_handler)
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",", "_")
         if attn_mask_type == "causal_padding":
@@ -5329,7 +5333,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_global_ranks = cp_global_ranks
         self.cp_stream = cp_stream
 
-        self.hidden_size_per_attention_head = kv_channels
+        self.hidden_size_per_attention_head_k = (
+            kv_channels if isinstance(kv_channels, int) else kv_channels[0]
+        )
+        self.hidden_size_per_attention_head_v = (
+            kv_channels if isinstance(kv_channels, int) else kv_channels[1]
+        )
 
         self.num_gqa_groups = num_attention_heads if num_gqa_groups is None else num_gqa_groups
         self.num_gqa_groups_per_partition = int(self.num_gqa_groups // self.tp_size)
@@ -5347,7 +5356,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             attention_dropout_ctx = self.rng_states_tracker.fork
 
         if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(kv_channels)
+            softmax_scale = 1.0 / math.sqrt(
+                kv_channels if isinstance(kv_channels, int) else kv_channels[0]
+            )
 
         self.deterministic = (
             not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
@@ -5496,16 +5507,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
         .. note::
 
-            Input tensor :attr:`query_layer` must be of shape
-            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`,
-            :attr:`kv_channels`) and the tensors :attr:`key_layer` and :attr:`value_layer`
-            must each be of shape (:attr:`sequence_length`, :attr:`batch_size`,
-            :attr:`num_gqa_groups`, :attr:`kv_channels`). Output of shape
-            (:attr:`sequence_length`, :attr:`batch_size`, :attr:`num_attention_heads`
-            * :attr:`kv_channels`) is returned.
-
-        .. note::
-
             DotProductAttention supports three backends: 1) FlashAttention which calls
             HazyResearch/Dao-AILab's `flash-attn <https://arxiv.org/pdf/2305.13245.pdf>`_
             PyTorch API, 2) FusedAttention which has multiple fused attention implementations
@@ -5631,7 +5632,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.fp8_meta["recipe"].fp8_mha:
                     if not self.fp8_meta["recipe"].fp8_dpa:
                         self.fp8_meta["recipe"].fp8_dpa = True
-                        self.logger.WARNING(
+                        self.logger.warning(
                             """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
                             """fp8_meta["recipe"].fp8_mha=True"""
                         )
@@ -5653,7 +5654,17 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 query_layer.dtype == key_layer.dtype and query_layer.dtype == value_layer.dtype
             ), "Queries, keys and values must have the same data type!"
-            assert key_layer.shape == value_layer.shape, "Keys and values must have the same shape!"
+            assert (
+                key_layer.shape[:-1] == value_layer.shape[:-1]
+            ), "Keys and values must have the same batch size, sequence length and number of heads!"
+            assert (
+                key_layer.shape[-1] == self.hidden_size_per_attention_head_k
+            ), f"Keys have head_dim = {key_layer.shape[-1]}, "
+            "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
+            assert (
+                value_layer.shape[-1] == self.hidden_size_per_attention_head_v
+            ), f"Values have head_dim = {value_layer.shape[-1]}, "
+            "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
 
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
@@ -5751,13 +5762,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
                     else:
                         seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    max_seqlen_q = pow(2, math.ceil(math.log2(seqlens_q.max().item())))
+                    max_seqlen_q = int((seqlens_q.max().item() + 63) // 64 * 64)
                 if max_seqlen_kv is None:
                     if cu_seqlens_kv_padded is not None:
                         seqlens_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
                     else:
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    max_seqlen_kv = pow(2, math.ceil(math.log2(seqlens_kv.max().item())))
+                    max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
                 batch_size = len(cu_seqlens_q) - 1
 
             cp_size = 1 if self.cp_group is None else get_distributed_world_size(self.cp_group)
@@ -5792,7 +5803,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        if max_seqlen_q == max_seqlen_kv:
+                        if self.attention_type == "self":
+                            assert max_seqlen_q == max_seqlen_kv
                             cu_seqlens_q = get_cu_seqlens(attention_mask)
                             cu_seqlens_kv = cu_seqlens_q
                         else:
@@ -5886,7 +5898,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 num_gqa_groups=key_layer.shape[-2],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                head_dim=query_layer.shape[-1],
+                head_dim_qk=query_layer.shape[-1],
+                head_dim_v=value_layer.shape[-1],
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
