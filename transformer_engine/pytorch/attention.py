@@ -1282,16 +1282,16 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
-def get_p2p_comm_info(rank, step, cp_size, cp_global_ranks):
+def get_p2p_comm_info(rank, step, cp_size):
     """Compute communication info of each rank for FP8 dKV exchange"""
     min_rank_in_p2p_ring = rank
     curr_rank = rank
     for _ in range(cp_size):
         next_rank = (curr_rank + step) % cp_size
         if curr_rank == rank:
-            send_dst = cp_global_ranks[next_rank]
+            send_dst = next_rank
         if next_rank == rank:
-            recv_src = cp_global_ranks[curr_rank]
+            recv_src = curr_rank
 
         if next_rank < min_rank_in_p2p_ring:
             min_rank_in_p2p_ring = next_rank
@@ -2245,13 +2245,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if i > 0:
                     dkv_send_tensor = send_tensor[1]
                     dkv_recv_tensor = recv_tensor[1]
-                    dkv_send_dst, dkv_recv_src, rank_in_dkv_p2p_ring = get_p2p_comm_info(rank, i, cp_size, ctx.cp_global_ranks)
+                    dkv_send_dst, dkv_recv_src, rank_in_dkv_p2p_ring = get_p2p_comm_info(rank, i, cp_size)
                     send_recv_reqs += flash_attn_p2p_communicate(
                         rank_in_dkv_p2p_ring,
                         dkv_send_tensor[rank],
-                        dkv_send_dst,
+                        ctx.cp_global_ranks[dkv_send_dst],
                         dkv_recv_tensor[dkv_recv_src],
-                        dkv_recv_src,
+                        ctx.cp_global_ranks[dkv_recv_src],
                         ctx.cp_group,
                         batch_p2p_comm
                     )
