@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 import warnings
 
 import torch
@@ -272,7 +272,7 @@ class _ViewFunc(torch.autograd.Function):
     def backward(
         ctx,
         grad: torch.Tensor,
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    ) -> Tuple[Optional[torch.Tensor], ...]:
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -314,7 +314,7 @@ class _ReshapeFunc(torch.autograd.Function):
     def backward(
         ctx,
         grad: torch.Tensor,
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    ) -> Tuple[Optional[torch.Tensor], ...]:
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -610,6 +610,9 @@ class Float8Tensor(ProxyTensor):
 
         return self
 
+    def proxy_detach(self) -> Float8Tensor:
+        return Float8Tensor.make_like(self, data=self._data, fp8_attrs=self._fp8_attrs)
+
     def clone(self) -> Float8Tensor:
         return _IdentityFunc.apply(self, {"data": self._data.detach().clone()})
 
@@ -618,16 +621,6 @@ class Float8Tensor(ProxyTensor):
 
     def reshape(self, *shape: Tuple[int]) -> Float8Tensor:
         return _ReshapeFunc.apply(self, shape)
-
-    def expand_as(self, other: torch.Tensor):
-        if other is self:
-            # Note: expand_as is hackily used to create dummy autograd nodes
-            # and access the backward graph (see
-            # https://github.com/pytorch/pytorch/blob/238fb660851268f44ff88127887041fea352fe48/torch/nn/parallel/distributed.py#L1026).
-            # We equally hackily add a dummy function to handle this
-            # case.
-            return _IdentityFunc.apply(self)
-        return super().expand_as(other)
 
     def contiguous(
         self,
@@ -867,15 +860,6 @@ class Float8Tensor(ProxyTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=data_slice)
-
-        # Detach op
-        if func == aten.detach.default:
-            # Simply return a new Float8Tensor with the same attrs
-            return Float8Tensor.make_like(
-                args[0],
-                data=args[0]._data,
-                fp8_attrs=args[0]._fp8_attrs,
-            )
 
         # View op
         if func == aten.view.default:
