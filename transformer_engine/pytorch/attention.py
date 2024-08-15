@@ -3934,7 +3934,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
     ):
         is_input_fp8 = False
         if fp8:
-            assert type(q) == type(kv), "q and kv must have the same type."
+            assert isinstance(kv, q.__class__), "q and kv must have the same type."
             is_input_fp8 = isinstance(q, Float8Tensor)
             if is_input_fp8:
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
@@ -4368,7 +4368,9 @@ class FusedAttnFunc(torch.autograd.Function):
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            assert type(q) == type(k) == type(v), "q, k, and v must have the same type."
+            assert isinstance(k, q.__class__) and isinstance(
+                v, q.__class__
+            ), "q, k, and v must have the same type."
             is_input_fp8 = isinstance(q, Float8Tensor)
             if is_input_fp8:
                 fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
@@ -6593,7 +6595,9 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=(
+                        self.layernorm_qkv.fp8_meta["recipe"].fp8_mha and rotary_pos_emb is None
+                    ),
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -6603,7 +6607,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=self.qkv.fp8_meta["recipe"].fp8_mha and rotary_pos_emb is None,
                 )
 
             num_queries_per_key_value = (
@@ -6659,7 +6663,7 @@ class MultiheadAttention(torch.nn.Module):
             mixed_kv_layer = self.key_value(
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
-                fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
+                fp8_output=self.key_value.fp8_meta["recipe"].fp8_mha and rotary_pos_emb is None,
             )
 
             if self.qkv_weight_interleaved:
@@ -6709,7 +6713,9 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_query_outputs = self.layernorm_query(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=(
+                        self.layernorm_query.fp8_meta["recipe"].fp8_mha and rotary_pos_emb is None
+                    ),
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -6719,7 +6725,9 @@ class MultiheadAttention(torch.nn.Module):
                 query_layer = self.query_layer(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=rotary_pos_emb is None,  # specific to FP8 MHA
+                    fp8_output=(
+                        self.query_layer.fp8_meta["recipe"].fp8_mha and rotary_pos_emb is None
+                    ),
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]

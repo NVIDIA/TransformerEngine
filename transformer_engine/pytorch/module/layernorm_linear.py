@@ -1128,8 +1128,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
-            fp8_output = fp8_output and self.fp8_meta["recipe"].fp8_mha
-
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
             if any(isinstance(w, Float8Tensor) for w in unfused_weights):
