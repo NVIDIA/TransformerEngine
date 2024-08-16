@@ -246,8 +246,8 @@ class FusedAdam(torch.optim.Optimizer):
                     m_of_fp8_model.append(state["exp_avg"])
                     v_of_fp8_model.append(state["exp_avg_sq"])
                 elif p.dtype in [torch.float16, torch.bfloat16]:
-                    has_fp16 = True if p.dtype == torch.float16 else False
-                    has_bf16 = True if p.dtype == torch.bfloat16 else False
+                    has_fp16 = has_fp16 or p.dtype == torch.float16
+                    has_bf16 = has_bf16 or p.dtype == torch.bfloat16
                     p_f16_model.append(p.data)
                     if self.master_weights:
                         p_main_of_f16_model.append(p_master.data)
@@ -274,6 +274,11 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
             def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
+                # Closures defined in a loop can have unexpected
+                # behavior when called outside the loop. However, this
+                # function is called in the same loop iteration as it
+                # is defined.
+                # pylint: disable=cell-var-from-loop
                 inv_scale_arg = () if inv_scale is None else (inv_scale,)
                 out_dtype_arg = () if out_dtype is None else (out_dtype,)
                 multi_tensor_applier(
