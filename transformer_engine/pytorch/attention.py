@@ -962,8 +962,10 @@ def get_alibi(
         if _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
         bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-            1, 1, max_seqlen_q, 1) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-            1, 1, 1, max_seqlen_kv)
+            1, 1, max_seqlen_q, 1
+        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+            1, 1, 1, max_seqlen_kv
+        )
         if actual_seqlens_q is None and actual_seqlens_kv is None:
             if bottom_right_alignment:
                 bias = bias + max_seqlen_kv - max_seqlen_q
