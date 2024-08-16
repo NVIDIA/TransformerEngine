@@ -21,6 +21,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import is_bf16_compatible
+import transformer_engine.pytorch.ops as te_ops
 
 
 # Only run FP8 tests on H100.
@@ -48,7 +49,15 @@ class ModelConfig:
 
 model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
 
-modules = ["transformer", "layernorm_mlp", "layernorm_linear", "linear", "mha", "dpa"]
+modules = [
+    "transformer",
+    "layernorm_mlp",
+    "layernorm_linear",
+    "linear",
+    "mha",
+    "dpa",
+    "linear_op",
+]
 
 all_boolean = [True, False]
 
@@ -171,7 +180,10 @@ def _test_cuda_graphs(
     """Helper function for CUDA graph test."""
     reset_rng_states()
     FP8GlobalStateManager.reset()
+
     dpa = module == "dpa"
+    if module == "linear_op":
+        fp8_weight_caching = False
 
     with fp8_model_init(enabled=fp8_params):
         # Create modules.
@@ -209,18 +221,27 @@ def _test_cuda_graphs(
                 )
                 for _ in range(num_layers)
             ]
-        elif dpa:
+        elif module == "dpa":
             assert config.hidden_size % config.num_heads == 0, "Err."
             assert num_layers == 1, "Err."
             modules = [
                 DotProductAttention(config.num_heads, config.kv_channels, attention_dropout=0.0)
                 for _ in range(num_layers)
             ]
-        else:
+        elif module == "linear":
             modules = [
                 Linear(config.hidden_size, config.hidden_size, device="cuda", params_dtype=dtype)
                 for _ in range(num_layers)
             ]
+        elif module == "linear_op":
+            modules = [
+                te_ops.Sequential(
+                    te_ops.Linear(config.hidden_size, config.hidden_size, dtype=dtype),
+                )
+                for _ in range(num_layers)
+            ]
+        else:
+            raise ValueError(f"Unknown module type ({module})")
 
         # Initialize gradient buffers.
         for module in modules:
