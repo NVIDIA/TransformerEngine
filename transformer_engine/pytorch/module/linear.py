@@ -106,16 +106,7 @@ class _Linear(torch.autograd.Function):
 
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if isinstance(inputmat, Float8Tensor):
-                if (
-                    not fp8_meta["recipe"].override_linear_precision.wgrad
-                    and is_grad_enabled
-                    and weight.requires_grad
-                    and not sequence_parallel
-                ):
-                    # FP8 input for forward, FP8 input transpose for backward wgrad
-                    inputmat_t = inputmat.transpose_2d()
-            else:
+            if not is_input_fp8:
                 if (
                     not fp8_meta["recipe"].override_linear_precision.wgrad
                     and is_grad_enabled
