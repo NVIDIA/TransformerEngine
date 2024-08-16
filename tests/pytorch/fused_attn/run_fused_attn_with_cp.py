@@ -374,6 +374,8 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
+    dist.destroy_process_group()
+
 
 def main(**kwargs):
     run_dpa_with_cp(**kwargs)
