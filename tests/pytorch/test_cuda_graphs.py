@@ -141,6 +141,7 @@ _test_cuda_graphs_modules: List[str] = [
     "linear_op",
 ]
 
+
 def _test_cuda_graphs(
     *,
     graph_mode: str,
@@ -331,6 +332,7 @@ _test_make_graphed_callables_with_fp8_weight_caching_modules = [
     "mha",
 ]
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 @pytest.mark.parametrize(
     "module",
@@ -478,7 +480,12 @@ def _test_cuda_graphs_with_kwargs(
             grad_output = generate_data(model_config, dtype, requires_grad=False)
             attn_mask = torch.randint(
                 2,
-                (model_config.batch_size, 1, model_config.sequence_length, model_config.sequence_length),
+                (
+                    model_config.batch_size,
+                    1,
+                    model_config.sequence_length,
+                    model_config.sequence_length,
+                ),
                 dtype=torch.bool,
                 device="cuda",
             )

@@ -286,9 +286,9 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = fp8_meta[
                         fp8_meta_key
                     ].amax_history[0]
-                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
-                        fp8_meta[fp8_meta_key].amax_history
-                    )
+                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = fp8_meta[
+                        fp8_meta_key
+                    ].amax_history
 
     def get_fp8_meta(self, mode: str) -> Optional[dict[str, Any]]:
         """FP8 metadata
@@ -335,16 +335,19 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         Tensor copies should be generated with _save_fp8_metas.
 
         """
-        assert (self._fp8_metas is None) == (fp8_metas is None), \
-            "Saved FP8 metadata does not match operation's FP8 metadata"
+        assert (self._fp8_metas is None) == (
+            fp8_metas is None
+        ), "Saved FP8 metadata does not match operation's FP8 metadata"
         if fp8_metas is None:
             return
         for mode, fp8_meta in fp8_metas.items():
-            assert mode in self._fp8_metas, \
-                f"Found an unexpected key ({mode=}) in saved FP8 metadata"
+            assert (
+                mode in self._fp8_metas
+            ), f"Found an unexpected key ({mode=}) in saved FP8 metadata"
             for fp8_meta_key, tensors in fp8_meta.items():
-                assert fp8_meta_key in self._fp8_metas[mode], \
-                    f"Found an unexpected key ({mode=}, {fp8_meta_key=}) in saved FP8 metadata"
+                assert (
+                    fp8_meta_key in self._fp8_metas[mode]
+                ), f"Found an unexpected key ({mode=}, {fp8_meta_key=}) in saved FP8 metadata"
                 scale, scale_inv, amax_history = tensors
                 self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
                 self._fp8_metas[mode][fp8_meta_key].scale_inv.copy_(scale_inv)

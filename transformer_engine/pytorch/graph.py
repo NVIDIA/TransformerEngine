@@ -492,6 +492,7 @@ def save_fp8_tensors(
     with adjusted amax history sizes.
     """
     from .ops import Sequential, FusibleOperation  # Avoid circular import
+
     fp8_tensors = []
     for module in modules:
         for m in module.modules():
@@ -521,6 +522,7 @@ def restore_fp8_tensors(
 ) -> None:
     """Restore FP8 tensors."""
     from .ops import Sequential, FusibleOperation  # Avoid circular import
+
     for module in modules:
         for m in module.modules():
             module_tensors = fp8_tensors.pop(0)
