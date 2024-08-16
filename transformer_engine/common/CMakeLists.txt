@@ -4,23 +4,27 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+# Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
 endif()
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-
-project(transformer_engine LANGUAGES CUDA CXX)
-
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
-find_package(CUDAToolkit REQUIRED)
+# Transformer Engine library
+project(transformer_engine LANGUAGES CUDA CXX)
 
-# Check for cuDNN frontend API
+# CUDA Toolkit
+find_package(CUDAToolkit REQUIRED)
+if (CUDAToolkit_VERSION VERSION_LESS 12.0)
+  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
     "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
 if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
@@ -31,10 +35,11 @@ if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
 endif()
 include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
+# Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-include_directories(${PROJECT_SOURCE_DIR}/..)
 
 # Configure Transformer Engine library
+include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      pycudnn.cpp
@@ -73,8 +78,6 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
-
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
@@ -84,7 +87,10 @@ target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
-# Make header files with C++ strings
+# Hack to enable dynamic loading in cuDNN frontend
+target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
+# Helper functions to make header files with C++ strings
 function(make_string_header STRING STRING_NAME)
     configure_file(util/string_header.h.in
                    "string_headers/${STRING_NAME}.h"
@@ -96,10 +102,11 @@ function(make_string_header_from_file file_ STRING_NAME)
                    "string_headers/${STRING_NAME}.h"
                    @ONLY)
 endfunction()
+
+# Header files with C++ strings
 list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
 make_string_header("${cuda_include_path}"
                    string_path_cuda_include)
-
 make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
                              string_code_transpose_rtc_cast_transpose_fusion_cu)
 make_string_header_from_file(transpose/rtc/cast_transpose.cu
@@ -110,7 +117,6 @@ make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
-
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
@@ -123,6 +129,23 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
+# Number of parallel build jobs
+if(ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
+elseif(ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
+else()
+  set(BUILD_JOBS_STR "max")
+endif()
+message(STATUS "Parallel build jobs: ${BUILD_JOBS_STR}")
+
+# Number of threads per parallel build job
+set(BUILD_THREADS_PER_JOB $ENV{NVTE_BUILD_THREADS_PER_JOB})
+if (NOT BUILD_THREADS_PER_JOB)
+  set(BUILD_THREADS_PER_JOB 1)
+endif()
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
+message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
+
 # Install library
 install(TARGETS transformer_engine DESTINATION .)
-

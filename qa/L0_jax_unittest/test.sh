@@ -4,6 +4,7 @@
 
 set -xe
 
+pip install "nltk>=3.8.2"
 pip install pytest==8.2.1
 : ${TE_PATH:=/opt/transformerengine}
 

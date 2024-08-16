@@ -147,7 +147,7 @@ def eval_model(state, test_ds, batch_size, var_collect, eval_fn):
 
 def data_preprocess(dataset, vocab, word_id, max_seq_len):
     """Convert tokens to numbers."""
-    nltk.download("punkt")
+    nltk.download("punkt_tab")
     dataset_size = len(dataset["sentence"])
     output = np.zeros((dataset_size, max_seq_len), dtype=np.int32)
     mask_3d = np.ones((dataset_size, max_seq_len, max_seq_len), dtype=np.uint8)
