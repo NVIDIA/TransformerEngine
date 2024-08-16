@@ -132,13 +132,13 @@ def get_padded_spec(spec, ndim):
     return spec + (None,) * (ndim - len(spec))
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, **kwargs: dict):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
     if mesh_resource is not None:
         _, resource = _get_mesh_info(mesh_resource)
-        return ops(x, resource)
+        return ops(x, resource, kwargs)
     return x
 
 
@@ -147,6 +147,79 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_device_ids():
+    """
+    Get a ID list of deteched devices with a proper sharding.
+    """
+    device_ids = jnp.arange(num_of_devices())
+    device_ids = jax.lax.with_sharding_constraint(device_ids, PartitionSpec(get_all_mesh_axes()))
+    return device_ids
+
+
+def get_mesh_axis_size(axis, mesh=None):
+    """
+    Get the axis size of the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh f{mesh.shape}"
+    return mesh.shape[axis]
+
+
+def get_group_of_mesh_axis(device_id, axis, mesh=None):
+    """
+    Get the axis group of the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    post_axis_size = 1
+    axis_size = get_mesh_axis_size(axis, mesh)
+
+    hit_the_axis = False
+    for ax in mesh.axis_names:
+        if hit_the_axis:
+            post_axis_size = post_axis_size * mesh.shape[ax]
+        if ax == axis:
+            hit_the_axis = True
+
+    group = (device_id % post_axis_size) + device_id // (
+        axis_size * post_axis_size
+    ) * post_axis_size
+    return group
+
+
+def get_rank_of_mesh_axis(device_id, axis, mesh=None):
+    """
+    Get the axis rank of the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    post_axis_size = 1
+    axis_size = get_mesh_axis_size(axis, mesh)
+
+    hit_the_axis = False
+    for ax in mesh.axis_names:
+        if hit_the_axis:
+            post_axis_size = post_axis_size * mesh.shape[ax]
+        if ax == axis:
+            hit_the_axis = True
+
+    rank = (device_id // post_axis_size) % axis_size
+    return rank
 
 
 @dataclass
