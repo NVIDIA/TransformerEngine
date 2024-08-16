@@ -961,31 +961,15 @@ def get_alibi(
             slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
         if _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
+        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+            1, 1, max_seqlen_q, 1) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+            1, 1, 1, max_seqlen_kv)
         if actual_seqlens_q is None and actual_seqlens_kv is None:
             if bottom_right_alignment:
-                bias = torch.arange(1 - max_seqlen_kv, 1, dtype=torch.int32, device="cuda").view(
-                    1, 1, 1, max_seqlen_kv
-                )
-            else:
-                bias = torch.arange(
-                    1 - max_seqlen_q,
-                    max_seqlen_kv - max_seqlen_q + 1,
-                    dtype=torch.int32,
-                    device="cuda",
-                ).view(1, 1, 1, max_seqlen_kv)
-            bias = bias - torch.arange(1 - max_seqlen_q, 1, dtype=torch.int32, device="cuda").view(
-                1, 1, max_seqlen_q, 1
-            )
+                bias = bias + max_seqlen_kv - max_seqlen_q
         elif actual_seqlens_q is not None and actual_seqlens_kv is not None:
             batch_size = actual_seqlens_q.shape[0]
-            bias = (
-                torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-                    1, 1, max_seqlen_q, 1
-                )
-                - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-                    1, 1, 1, max_seqlen_kv
-                )
-            ).expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
+            bias = bias.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
             if bottom_right_alignment:
                 bias = bias + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
         else:
