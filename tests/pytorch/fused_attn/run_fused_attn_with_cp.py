@@ -13,7 +13,9 @@ from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fuse
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
 
 
-def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention"):
+def run_dpa_with_cp(
+    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
+):
     """Test DotProductAttention module with context parallelism"""
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -24,10 +26,16 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
     if kernel_backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         config = model_configs_fused_attn[model]
-        if qkv_format == "thd" and (
-            config.num_heads != config.num_gqa_groups or config.attn_bias_type == "post_scale_bias"
-        ):
-            return
+
+    assert config.attn_mask_type in [
+        "causal",
+        "no_mask",
+    ], f"{config.attn_mask_type} is an unsupported attention mask type!"
+    if kernel_backend == "FusedAttention" and qkv_format == "thd":
+        if "causal" in config.attn_mask_type:
+            config.attn_mask_type = "padding_causal"
+        else:
+            config.attn_mask_type = "padding"
 
     rank = int(os.getenv("RANK", "0"))
     world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -49,73 +57,77 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
 
-    assert config.attn_mask_type in [
-        "causal",
-        "no_mask",
-    ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-
-    if kernel_backend == "FusedAttention" and qkv_format == "thd":
-        if "causal" in config.attn_mask_type:
-            config.attn_mask_type = "padding_causal"
-        else:
-            config.attn_mask_type = "padding"
-
     # instantiate core attn module
     core_attn = DotProductAttention(
         config.num_heads,
-        config.head_dim,
+        config.head_dim_qk,
         num_gqa_groups=config.num_gqa_groups,
         attention_dropout=config.dropout_p,
         qkv_format=qkv_format,
         attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
     )
     core_attn = core_attn.cuda()
 
     # create flash attn inputs
     if qkv_format == "bshd":
-        q_input_shape = (config.batch_size, config.max_seqlen_q, config.num_heads, config.head_dim)
+        q_input_shape = (
+            config.batch_size,
+            config.max_seqlen_q,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.batch_size,
             config.max_seqlen_kv,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.batch_size,
             config.max_seqlen_q,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "sbhd":
-        q_input_shape = (config.max_seqlen_q, config.batch_size, config.num_heads, config.head_dim)
+        q_input_shape = (
+            config.max_seqlen_q,
+            config.batch_size,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.max_seqlen_kv,
             config.batch_size,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.max_seqlen_q,
             config.batch_size,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         cu_seqlens_q = None
         cu_seqlens_kv = None
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        q_input_shape = (config.batch_size * config.max_seqlen_q, config.num_heads, config.head_dim)
+        q_input_shape = (
+            config.batch_size * config.max_seqlen_q,
+            config.num_heads,
+            config.head_dim_qk,
+        )
         kv_input_shape = (
             config.batch_size * config.max_seqlen_q,
             config.num_gqa_groups,
-            config.head_dim,
+            config.head_dim_qk,
         )
         attn_output_shape = (
             config.batch_size * config.max_seqlen_q,
-            config.num_heads * config.head_dim,
+            config.num_heads * config.head_dim_qk,
         )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
@@ -211,7 +223,9 @@ def run_dpa_with_cp(dtype="bf16", model=None, qkv_format="bshd", kernel_backend=
         )
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
-    core_attn.set_context_parallel_group(cp_comm_group, cp_comm_ranks, torch.cuda.Stream())
+    core_attn.set_context_parallel_group(
+        cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+    )
     out_ = core_attn(
         q_,
         k_,
