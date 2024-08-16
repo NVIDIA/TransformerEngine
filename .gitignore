@@ -39,3 +39,4 @@ develop-eggs/
 dist/
 downloads/
 .pytest_cache/
+.nfs*
