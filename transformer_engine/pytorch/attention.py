@@ -909,7 +909,14 @@ def get_alibi(
             )
         elif actual_seqlens_q is not None and actual_seqlens_kv is not None:
             batch_size = actual_seqlens_q.shape[0]
-            bias = (torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(1, 1, max_seqlen_q, 1) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)).expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
+            bias = (
+                torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+                    1, 1, max_seqlen_q, 1
+                )
+                - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+                    1, 1, 1, max_seqlen_kv
+                )
+            ).expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
             if bottom_right_alignment:
                 bias = bias + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
         else:
