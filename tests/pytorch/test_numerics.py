@@ -34,11 +34,13 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+sm_80plus = get_device_compute_capability() >= (8, 0)
 
 seed = 1234
 torch.manual_seed(seed)
@@ -1599,8 +1601,8 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         y_sbhd.transpose(0, 1).contiguous(),
     )
 
-    # THD is not supported in float32, skip the test here
-    if dtype != torch.float32:
+    # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
+    if dtype != torch.float32 and sm_80plus:
         # To make sure forward is also identical (just in case some module decides
         # to act fancy)
         torch.manual_seed(0)
