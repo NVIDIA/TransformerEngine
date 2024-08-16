@@ -316,9 +316,11 @@ def get_params_pspec(sharding_rules, abs_var_collect):
         return jax.sharding.PartitionSpec(*partitions)
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_pspec = jax.tree_util.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
+    params_axes_pspec = jax.tree_util.tree_map(
+        to_device_axis, nn_partitioning.get_axis_names(params_axes))
     params_axes_pspec = flax.core.unfreeze(params_axes_pspec)
-    params_pspec = jax.tree_util.tree_map(lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
+    params_pspec = jax.tree_util.tree_map(
+        lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY])
     params_pspec = {**params_pspec, **params_axes_pspec}
     return params_pspec
 
@@ -329,7 +331,8 @@ def get_state_pspec(state, params_pspec):
     def replace_params(x):
         return params_pspec if isinstance(x, dict) else None
 
-    state_pspec = jax.tree_util.tree_map(replace_params, state, is_leaf=lambda x: isinstance(x, dict))
+    state_pspec = jax.tree_util.tree_map(replace_params, state,
+                                         is_leaf=lambda x: isinstance(x, dict))
     return state_pspec
 
 

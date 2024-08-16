@@ -211,9 +211,13 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
         return NamedSharding(mesh, PartitionSpec(*partitions))
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_sharding = jax.tree_util.tree_map(to_device_axis, nn_partitioning.get_axis_names(params_axes))
+    params_axes_sharding = jax.tree_util.tree_map(
+        to_device_axis, nn_partitioning.get_axis_names(params_axes)
+    )
     params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
-    params_sharding = jax.tree_util.tree_map(lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY])
+    params_sharding = jax.tree_util.tree_map(
+        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
+    )
     params_sharding = {**params_sharding, **params_axes_sharding}
     return params_sharding
 
@@ -224,7 +228,9 @@ def get_state_sharding(state, params_sharding):
     def replace_params(x):
         return params_sharding if isinstance(x, dict) else None
 
-    state_sharding = jax.tree_util.tree_map(replace_params, state, is_leaf=lambda x: isinstance(x, dict))
+    state_sharding = jax.tree_util.tree_map(
+        replace_params, state, is_leaf=lambda x: isinstance(x, dict)
+    )
     return state_sharding
 
 
@@ -275,8 +281,10 @@ def train_and_evaluate(args):
                 apply_fn=encoder.apply, params=params, tx=optimizer
             )
             state_sharding = get_state_sharding(state, params_sharding)
-            labels_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS,))
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None, None)
+            labels_sharding = NamedSharding(mesh,
+                                            PartitionSpec(DEVICE_DP_AXIS,))
+            in_shardings = (state_sharding, inputs_sharding, masks_sharding,
+                            labels_sharding, None, None)
             out_shardings = (state_sharding, None, None, None)
             jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
 
