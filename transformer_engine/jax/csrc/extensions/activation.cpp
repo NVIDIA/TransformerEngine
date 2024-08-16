@@ -3,15 +3,16 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include "transformer_engine/activation.h"
 
 #include "extensions.h"
 #include "transformer_engine/transpose.h"
+#include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
 namespace jax {
 
+// TODO: We won't need this function anymore when we move to the new XLA custom calls
 size_t get_activation_len(NVTE_Activation_Type activation_enum) {
   switch (activation_enum) {
     case NVTE_Activation_Type::GELU:
@@ -43,8 +44,7 @@ size_t get_activation_len(NVTE_Activation_Type activation_enum) {
 
 void ActLuImpl(void *input, size_t m, size_t n, DType in_dtype, DType out_dtype, float *scale,
                cudaStream_t stream, float *scale_inverse, float *amax, void *output,
-               NVTE_Activation_Type act_enum) {
-  auto act_len = get_activation_len(act_enum);
+               NVTE_Activation_Type act_enum, size_t act_len) {
   auto input_shape = std::vector<size_t>{m, n * act_len};
   auto output_shape = std::vector<size_t>{m, n};
   auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
@@ -95,11 +95,38 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
   auto m = desc.shape.dims[0];
   auto n = desc.shape.dims[1];
   auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
-  ;
+  auto act_len = get_activation_len(act_enum);
 
   ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, nullptr, stream, nullptr, nullptr, output,
-            act_enum);
+            act_enum, act_len);
 }
+
+Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf,
+                    int64_t act_enum) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
+
+  auto *input = input_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
+
+  auto input_dims = input_buf.dimensions();
+  auto m = std::accumulate(input_dims.begin(), input_dims.end() - 2, 1, std::multiplies<>());
+  auto n = input_dims.back();
+  auto act_len = input_dims.end()[-2];
+  auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
+
+  ActLuImpl(input, m, n, in_dtype, out_dtype, nullptr, stream, nullptr, nullptr, output, act_type,
+            act_len);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<int64_t>("act_enum"));
 
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
@@ -119,10 +146,10 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
   auto m = desc.shape.dims[0];
   auto n = desc.shape.dims[1];
   auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
-  ;
+  auto act_len = get_activation_len(act_enum);
 
   ActLuImpl(input, m, n, desc.in_dtype, desc.out_dtype, scale, stream, scale_inv, amax_out, output,
-            act_enum);
+            act_enum, act_len);
 }
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -134,7 +161,6 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
   auto m = desc.shape.dims[0];
   auto n = desc.shape.dims[1];
   auto act_enum = static_cast<NVTE_Activation_Type>(desc.act_enum);
-  ;
 
   auto act_len = get_activation_len(act_enum);
   auto input_shape = std::vector<size_t>{m, n};
@@ -181,6 +207,76 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
       break;
   }
 }
+
+Error_Type DActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type act_input_buf,
+                     Result_Type output_buf, int64_t act_enum) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
+
+  auto *input = input_buf.untyped_data();
+  auto *act_input = act_input_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
+
+  auto act_input_dims = act_input_buf.dimensions();
+  auto m =
+      std::accumulate(act_input_dims.begin(), act_input_dims.end() - 2, 1, std::multiplies<>());
+  auto n = act_input_dims.back();
+  auto act_len = act_input_dims.end()[-2];
+
+  auto input_shape = std::vector<size_t>{m, n};
+  auto act_input_shape = std::vector<size_t>{m, n * act_len};
+  auto output_shape = std::vector<size_t>{m, n * act_len};
+
+  auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
+  auto act_input_tensor = TensorWrapper(act_input, act_input_shape, static_cast<DType>(in_dtype));
+  auto output_tensor = TensorWrapper(output, output_shape, static_cast<DType>(out_dtype));
+
+  auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
+  switch (act_type) {
+    case NVTE_Activation_Type::GELU:
+      nvte_dgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::GEGLU:
+      nvte_dgeglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::SILU:
+      nvte_dsilu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::SWIGLU:
+      nvte_dswiglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::RELU:
+      nvte_drelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::REGLU:
+      nvte_dreglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::QGELU:
+      nvte_dqgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::QGEGLU:
+      nvte_dqgeglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::SRELU:
+      nvte_dsrelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    case NVTE_Activation_Type::SREGLU:
+      nvte_dsreglu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(), stream);
+      break;
+    default:
+      NVTE_ERROR("Unsupported ActivationEnum");
+      break;
+  }
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuHandler, DActLuFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // act_input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<int64_t>("act_enum"));
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                         DType in_dtype, DType out_dtype) {

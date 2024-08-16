@@ -3,7 +3,6 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
 #include "extensions.h"
 #include "transformer_engine/layer_norm.h"
 #include "transformer_engine/rmsnorm.h"
@@ -14,7 +13,7 @@ namespace jax {
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                   DType in_dtype, DType w_dtype, DType out_dtype,
                                                   bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps) {
+                                                  float eps, int sm_margin) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
@@ -27,7 +26,7 @@ pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidd
 
   // dummy tensor wrappers that will carry workspace size info later
   TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
   auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
   if (is_layer_norm) {
     auto beta_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
@@ -54,7 +53,7 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
                           DType in_dtype, void *weight, DType w_dtype, void *bias, void *output,
                           DType out_dtype, void *workspace, DType work_dtype, void *barrier,
                           DType barrier_dtype, void *mu, void *rsigma, float *amax, float *scale,
-                          float *scale_inv, cudaStream_t stream) {
+                          float *scale_inv, int sm_margin, cudaStream_t stream) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
@@ -71,7 +70,7 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
   auto output_tensor = TensorWrapper(output, input_shape, out_dtype, amax, scale, scale_inv);
   auto rsigma_tensor = TensorWrapper(rsigma, intermediates_shape, DType::kFloat32);
 
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
   auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
 
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, work_dtype);
@@ -95,7 +94,7 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
                                                    bool is_layer_norm, bool zero_centered_gamma,
-                                                   float eps) {
+                                                   float eps, int sm_margin) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
@@ -112,7 +111,7 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
   // dummy tensor wrappers that will carry workspace size info later
   TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
   TensorWrapper dummy_dgamma_part_tensor, dummy_dbeta_part_tensor;
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
   auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
 
   // initialize dBeta information here -- layernorm will modify but RMSnorm will not
@@ -152,7 +151,7 @@ void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace
                            void *weight, DType w_dtype, void *ograd, void *workspace,
                            DType wkspace_dtype, void *barrier, DType barrier_dtype, void *mu,
                            void *rsigma, void *xgrad, void *wgrad, void *dbeta, void *dgamma_part,
-                           DType dgamma_dtype, void *dbeta_part, DType dbeta_dtype,
+                           DType dgamma_dtype, void *dbeta_part, DType dbeta_dtype, int sm_margin,
                            cudaStream_t stream) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
@@ -174,7 +173,7 @@ void LayerNormBackwardImpl(size_t batch_size, size_t hidden_size, size_t wkspace
   auto xgrad_tensor = TensorWrapper(xgrad, input_shape, x_dtype);
   auto wgrad_tensor = TensorWrapper(wgrad, weight_shape, w_dtype);
 
-  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
+  auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
   auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
 
   auto workspace_shape = std::vector<size_t>{wkspace_size};
@@ -228,13 +227,14 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
 
   auto out_dtype = DType::kFloat8E4M3;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                        eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
                        wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       stream);
+                       sm_margin, stream);
 }
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -263,11 +263,12 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
   auto eps = desc.eps;
   auto out_dtype = in_dtype;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                        eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
                        wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       stream);
+                       sm_margin, stream);
 }
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -287,6 +288,7 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
   auto dbeta_part_dtype = desc.dbeta_part_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
 
   auto *ograd = buffers[0];
   auto *mu = buffers[1];
@@ -305,7 +307,7 @@ void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, 
                         dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
                         w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
                         rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
-                        dbeta_part_dtype, stream);
+                        dbeta_part_dtype, sm_margin, stream);
 }
 
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -335,12 +337,13 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
   auto out_dtype = DType::kFloat8E4M3;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                        eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
                        wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       stream);
+                       sm_margin, stream);
 }
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -368,12 +371,13 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
   auto barrier_dtype = desc.barrier_dtype;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
   auto out_dtype = in_dtype;
 
   LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
                        eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
                        wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
-                       stream);
+                       sm_margin, stream);
 }
 
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
@@ -407,12 +411,13 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
   auto dbeta_part_dtype = DType::kByte;
   auto eps = desc.eps;
   auto zero_centered_gamma = desc.zero_centered_gamma;
+  auto sm_margin = desc.sm_margin;
 
   LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
                         dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
                         w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
                         rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
-                        dbeta_part_dtype, stream);
+                        dbeta_part_dtype, sm_margin, stream);
 }
 
 }  // namespace jax
