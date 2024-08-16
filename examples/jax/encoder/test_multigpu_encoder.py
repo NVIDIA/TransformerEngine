@@ -281,10 +281,20 @@ def train_and_evaluate(args):
                 apply_fn=encoder.apply, params=params, tx=optimizer
             )
             state_sharding = get_state_sharding(state, params_sharding)
-            labels_sharding = NamedSharding(mesh,
-                                            PartitionSpec(DEVICE_DP_AXIS,))
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding,
-                            labels_sharding, None, None)
+            labels_sharding = NamedSharding(
+                mesh,
+                PartitionSpec(
+                    DEVICE_DP_AXIS,
+                ),
+            )
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (state_sharding, None, None, None)
             jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
 
