@@ -160,7 +160,7 @@ def parse_results(per_cudnn, per_flash, model):
         df_times.loc[row, "FusedAttention Kernels (fwd+bwd)"] = t_cudnn_avg.sum() / 1e6
 
     if per_flash > 0:
-        t_flash_all = df[df["Name"].str.contains("void flash")]["Duration (ns)"].to_numpy()
+        t_flash_all = df[df["Name"].str.contains("flash")]["Duration (ns)"].to_numpy()
         t_flash_all = t_flash_all.reshape(-1, per_flash)
         t_flash_avg = np.average(t_flash_all, axis=0)
         df_times.loc[row, "FlashAttention Kernels (fwd)"] = t_flash_avg[0] / 1e6

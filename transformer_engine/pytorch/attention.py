@@ -3935,12 +3935,6 @@ class FlashAttention(torch.nn.Module):
             max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
             max_seqlen_q *= cp_size
             max_seqlen_kv *= cp_size
-            if not context_parallel and not _flash_attn_3_plus:
-                # [b * s, h, d]
-                query_layer, key_layer, value_layer = [
-                    x.view(x.shape[0] * x.shape[1], *x.shape[2:])
-                    for x in [query_layer, key_layer, value_layer]
-                ]
 
             if "padding" in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
