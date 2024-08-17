@@ -61,7 +61,7 @@ def run_dpa_with_cp(
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(interval=1, fp8_dpa=True)
+        fp8_recipe = DelayedScaling(fp8_dpa=True)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
