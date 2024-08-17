@@ -22,7 +22,7 @@ extern "C" {
 /*! \enum NVTE_QKV_Layout
  *  \brief Memory layouts of QKV tensors.
  *   `S`, `B`, `H`, `D`, and `T` stand for sequence length, batch size, number of heads,
- *   head size, and the total number of sequences in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
+ *   head size, and the total number of tokens in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
  *   `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
  *   or padded to the same length, and `THD`-based layouts are used when sequences have
  *   different lengths in a batch.
