@@ -95,12 +95,12 @@ except:
         """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
     )
 else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_forward_func
+    from flashattn_hopper.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
     from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward
     from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_backward
 
 if _flash_attn_version >= _flash_attn_version_required and not _flash_attn_3_plus:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_forward_func
+    from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
@@ -4044,23 +4044,31 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 if _flash_attn_2_5_7_plus:
                     fa_optional_forward_kwargs["block_table"] = None
+                fa_optional_forward_args_thd = []
+                if qkv_format in ["bshd", "sbhd"]:
+                    func = flash_attn_func
+                if qkv_format == "thd":
+                    func = flash_attn_varlen_func
+                    fa_optional_forward_args_thd.append(cu_seqlens_q)
+                    fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                    fa_optional_forward_args_thd.append(max_seqlens_q)
+                    fa_optional_forward_args_thd.append(max_seqlens_kv)
                 if _flash_attn_3_plus:
-                    output, _ = flash_attn_forward_func(
+                    output, _ = func(
                         query_layer,
                         key_layer,
                         value_layer,
+                        *fa_optional_forward_args_thd,
                         softmax_scale=self.softmax_scale,
                         causal="causal" in attn_mask_type,
+                        deterministic=self.deterministic,
                     )
                 else:
-                    output = flash_attn_forward_func(
+                    output = func(
                         query_layer,
                         key_layer,
                         value_layer,
-                        cu_seqlens_q,
-                        cu_seqlens_kv,
-                        max_seqlen_q,
-                        max_seqlen_kv,
+                        *fa_optional_forward_args_thd,
                         self.attention_dropout if self.training else 0.0,
                         softmax_scale=self.softmax_scale,
                         causal="causal" in attn_mask_type,
