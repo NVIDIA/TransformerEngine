@@ -36,7 +36,10 @@ def cast_to_fp8(
     )
 
     # Launch FP8 cast kernel
-    if out is None:
+    if inp.nelement() == 0:
+        if out is None:
+            out = inp
+    elif out is None:
         out = torch.ops.tex_ts.cast_to_fp8_ts(
             inp,
             fp8_scales["scale"],
@@ -45,7 +48,7 @@ def cast_to_fp8(
             fp8_scales_offsets["scale_offset"],
             otype,
         )
-    elif inp.nelement() > 0:
+    else:
         torch.ops.tex_ts.cast_to_fp8_noalloc_ts(
             inp,
             fp8_scales["scale"],
