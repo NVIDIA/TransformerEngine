@@ -2824,9 +2824,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         )
 
 
-@jit_fuser
+@torch.compile
 def get_seq_chunk_ids_to_all_gathered_kv(
-    local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size_left
+    local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size_left, device
 ):
     """Compute sequence chunk ids to the all-gathered KV."""
     seq_end_idx = (local_chunk_id + 1) * max_seqlen_kv
@@ -2837,7 +2837,7 @@ def get_seq_chunk_ids_to_all_gathered_kv(
         local_chunk_id - num_chunks + 1,
         local_chunk_id + 1,
         dtype=torch.int32,
-        device="cuda",
+        device=device,
     )
     chunk_ids_to_all_gathered_kv = torch.where(
         chunk_ids < cp_size, 2 * chunk_ids, 2 * (2 * cp_size - chunk_ids) - 1
@@ -2951,6 +2951,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             if (window_size is None or window_size[0] == -1)
                             else window_size[0]
                         ),
+                        k.device
                     )
                     chunk_ids_to_kv_ag_per_step[i] = chunk_ids_to_kv_ag
                     num_kv_chunks = chunk_ids_to_kv_ag.numel()
