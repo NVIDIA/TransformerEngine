@@ -2951,7 +2951,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             if (window_size is None or window_size[0] == -1)
                             else window_size[0]
                         ),
-                        k.device
+                        k.device,
                     )
                     chunk_ids_to_kv_ag_per_step[i] = chunk_ids_to_kv_ag
                     num_kv_chunks = chunk_ids_to_kv_ag.numel()
