@@ -14,7 +14,7 @@ import sys
 import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 
 @functools.lru_cache(maxsize=None)
@@ -254,12 +254,39 @@ def get_frameworks() -> List[str]:
     return _frameworks
 
 
-def copy_common_headers(te_src, dst):
-    headers = te_src / "common"
-    for file_path in glob.glob(os.path.join(str(headers), "**", "*.h"), recursive=True):
-        new_path = os.path.join(dst, file_path[len(str(te_src)) + 1 :])
-        Path(new_path).parent.mkdir(exist_ok=True, parents=True)
-        shutil.copy(file_path, new_path)
+def copy_common_headers(
+    src_dir: Union[Path, str],
+    dst_dir: Union[Path, str],
+) -> None:
+    """Copy headers from core library
+
+    src_dir should be the transformer_engine directory within the root
+    Transformer Engine repository. All .h and .cuh files within
+    transformer_engine/common are copied into dst_dir. Relative paths
+    are preserved.
+
+    """
+
+    # Find common header files in src dir
+    headers = glob.glob(
+        os.path.join(str(src_dir), "common", "**", "*.h"),
+        recursive=True,
+    )
+    headers.extend(
+        glob.glob(
+            os.path.join(str(src_dir), "common", "**", "*.cuh"),
+            recursive=True,
+        )
+    )
+    headers = [Path(path) for path in headers]
+
+    # Copy common header files to dst dir
+    src_dir = Path(src_dir)
+    dst_dir = Path(dst_dir)
+    for path in headers:
+        new_path = dst_dir / path.relative_to(src_dir)
+        new_path.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy(path, new_path)
 
 
 def install_and_import(package):
