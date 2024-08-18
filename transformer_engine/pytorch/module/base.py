@@ -703,6 +703,59 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
             return
 
+    @contextmanager
+    def prepare_grouped_forward(
+        self,
+        inputmats: List[torch.Tensor],
+        is_first_microbatch: Union[bool, None],  # pylint: disable=unused-argument
+        num_gemms: int = 1,
+        allow_non_contiguous: bool = False,
+    ) -> Generator[List[torch.Tensor], None, None]:
+        """Checks and prep for FWD.
+        The context manager is needed because there isn't a way for a module to know
+        if it's the last FP8 module in the forward autocast. It is useful
+        to setup the forward aggregated amax reduction for every module
+        just in case. The autocast exit will pick up the most recent one.
+        """
+        # Activation recomputation is used and this is the second forward phase.
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)
+        else:
+            for inp in inputmats:
+                assert inp.is_cuda, "TransformerEngine needs CUDA."
+                self.set_activation_dtype(inp)
+
+            if self.tp_size > 1:
+                assert self.tp_group_initialized, "TP group not initialized."
+
+            self.init_fp8_metadata(num_gemms=num_gemms)
+
+            if self.fp8 and self.sequence_parallel:
+                assert self.fp8_meta["recipe"].reduce_amax, (
+                    "Amax reduction across tensor parallel group is "
+                    "necessary when using sequence parallelism with FP8."
+                )
+
+            if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
+                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
+                    self.fp8_meta, fp8_weights=self._get_fp8_params()
+                )
+
+            # Activation recomputation is used and this is the first forward phase.
+            if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
+                FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
+
+        with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
+            for i, inp in enumerate(inputmats):
+                if not allow_non_contiguous:
+                    inputmats[i] = inp.contiguous()
+
+            yield inputmats
+
+        if self.fp8 and in_fp8_activation_recompute_phase():
+            FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
+            return
+
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
         before the GEMM for there to be a guaranteed overlap. From the

@@ -66,7 +66,6 @@ class _GroupedLinear(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        inp: torch.Tensor,
         m_splits: List[int],
         use_bias: bool,
         is_first_microbatch: Union[bool, None],
@@ -82,17 +81,28 @@ class _GroupedLinear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
-        weights_fp8: List[Union[Float8Tensor, None]],
-        *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
+        split_inp: bool,
+        *inp_weights_biases: Union[torch.Tensor, Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
         num_gemms = len(m_splits)
-        weights = weights_and_biases[:num_gemms]
-        biases = weights_and_biases[num_gemms:]
+        if split_inp:
+            offset = 1
+            inp = inp_weights_biases[0]
+        else:
+            offset = num_gemms
+            inputmats = inp_weights_biases[0:offset]
+
+        weights = inp_weights_biases[offset : num_gemms + offset]
+        weights_fp8 = inp_weights_biases[num_gemms + offset : 2 * num_gemms + offset]
+        biases = inp_weights_biases[2 * num_gemms + offset :]
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
+        if split_inp:
+            inputmats = torch.split(inp.view(-1, in_features), m_splits)
+
+        for inp in inputmats:
+            assert inp.shape[-1] == in_features, "GEMM not possible"
         if fp8:
             for i in range(num_gemms):
                 assert_dim_for_fp8_exec(inputmats[i])
@@ -100,8 +110,6 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Cast input to expected dtype
         inputmats_no_fp8 = [cast_if_needed(mat, activation_dtype) for mat in inputmats]
-        inputmats = []
-        inputmats_t = []
 
         global _GEMM_INPUT, _GEMM_WEIGHT, _GEMM_OUTPUT
         if fp8:
@@ -251,12 +259,12 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
+            ctx.split_inp = split_inp
             if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
                 ctx.reduce_and_update_bwd_fp8_tensors = (
                     ctx.reduce_and_update_bwd_fp8_tensors
@@ -340,6 +348,7 @@ class _GroupedLinear(torch.autograd.Function):
                         dtype=ctx.activation_dtype,
                         device=grad_output.device,
                     )
+                    dgrad_list = torch.split(dgrad, ctx.m_splits)
                     fp8_grouped_gemm(
                         [w.transpose_2d() for w in weights_fp8],
                         torch.cat(
@@ -351,7 +360,7 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
                         _GRAD_OUTPUT,
                         fp8_dtype_backward,
-                        torch.split(dgrad, ctx.m_splits),
+                        dgrad_list,
                         ctx.activation_dtype,
                         get_multi_stream_cublas_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
@@ -362,10 +371,11 @@ class _GroupedLinear(torch.autograd.Function):
                         dtype=ctx.activation_dtype,
                         device=grad_output.device,
                     )
+                    dgrad_list = torch.split(dgrad, ctx.m_splits)
                     grouped_gemm(
                         weights,
                         grad_output_mats,
-                        torch.split(dgrad, ctx.m_splits),
+                        dgrad_list,
                         ctx.activation_dtype,
                         get_multi_stream_cublas_workspace(),
                         layout="NN",
@@ -469,11 +479,18 @@ class _GroupedLinear(torch.autograd.Function):
             handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
         ]
 
+        if ctx.requires_dgrad:
+            if ctx.split_inp:
+                dgrad_holder = [dgrad]
+            else:
+                dgrad_holder = dgrad_list
+        else:
+            dgrad_holder = [None] * ctx.num_gemms
+
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # use_bias
             None,  # is_first_microbatch
@@ -489,8 +506,10 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # activation_dtype
             None,  # parallel_mode
             None,  # is_grad_enabled
-            None,  # weights_fp8
+            None,  # split_inp
+            *dgrad_holder,
             *wgrad_list,
+            *([None] * ctx.num_gemms),  # weights_fp8
             *grad_biases,
         )
 
@@ -696,7 +715,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     @no_torch_dynamo()
     def forward(
         self,
-        inp: torch.Tensor,
+        inp: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]],
         m_splits: List[int],
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
@@ -723,17 +742,27 @@ class GroupedLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        assert not isinstance(
-            inp, Float8Tensor
-        ), "GroupedLinear doesn't support input tensor in FP8."
+        split_inp = False
+        if isinstance(inp, torch.Tensor):
+            split_inp = True
+            inputmats = [inp]
+        else:
+            # inp is a list or tuple
+            inputmats = inp
+
+        for inp in inputmats:
+            assert not isinstance(
+                inp, Float8Tensor
+            ), "GroupedLinear doesn't support input tensor in FP8."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
-        with self.prepare_forward(inp, is_first_microbatch, num_gemms=self.num_gemms) as inp:
-
+        with self.prepare_grouped_forward(
+            list(inputmats), is_first_microbatch, num_gemms=self.num_gemms
+        ) as inputmats:
             weight_tensors = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
             bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fp8:
@@ -785,7 +814,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 args = [None]
             args += (
-                inp,
                 m_splits,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 is_first_microbatch,
@@ -801,8 +829,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
-                weight_tensors_fp8,
+                split_inp,
+                *inputmats,
                 *weight_tensors,
+                *weight_tensors_fp8,
                 *bias_tensors,
             )
             out = linear_fn(*args)
