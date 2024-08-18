@@ -11,15 +11,18 @@ from flax.linen import dot_product_attention
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from distributed_test_base import generate_configs, generate_collectives_count, compare_ops
-from utils import make_causal_mask, make_self_mask
+from utils import assert_allclose, make_causal_mask, make_self_mask
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     fused_attn,
+    fused_ring_attn,
+    workload_balance_of_context_parallel,
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
 )
+from transformer_engine.jax.sharding import MeshResource
 
 
 DTYPES = [jnp.float16, jnp.bfloat16]
@@ -310,3 +313,150 @@ class TestDistributedCrossAttn:
                 in_shardings=(q_pspec, kv_pspec, mask_pspec),
                 out_shardings=(None, (q_pspec, kv_pspec)),
             )
+
+
+class TestDistributedRingAttn:
+
+    def generate_inputs(self, shape, mesh_resource, attn_mask_type, dtype):
+        (
+            batch,
+            seqlen,
+            _,
+            _,
+        ) = shape
+
+        q = random.normal(random.PRNGKey(1124), shape, dtype=dtype)
+        k = random.normal(random.PRNGKey(1125), shape, dtype=dtype)
+        v = random.normal(random.PRNGKey(1126), shape, dtype=dtype)
+
+        mask = None
+        if attn_mask_type == AttnMaskType.CAUSAL_MASK:
+            mask = make_causal_mask(batch, seqlen)
+        elif attn_mask_type == AttnMaskType.PADDING_MASK:
+            mask = make_self_mask(batch, seqlen)
+
+        qkv_pspec = PartitionSpec(None, mesh_resource.cp_resource, None, None)
+
+        mask_pspec = (
+            PartitionSpec(mesh_resource.dp_resource, None, None, None)
+            if attn_mask_type != AttnMaskType.NO_MASK
+            else None
+        )
+
+        return (q, k, v, mask), (qkv_pspec, qkv_pspec, qkv_pspec, mask_pspec)
+
+    @pytest.mark.parametrize(
+        "device_count,mesh_shape,mesh_axes,mesh_resource",
+        [4, (4,), ("cp",), MeshResource(cp_resource="cp")],
+    )
+    @pytest.mark.parametrize("data_shape", [[32, 128, 12, 64], [32, 512, 16, 64]])
+    @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "attn_mask_type", [AttnMaskType.PADDING_MASK, AttnMaskType.CAUSAL_MASK]
+    )
+    @pytest.mark.parametrize("to_balance", [True, False])
+    def test_ring_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        dtype,
+        attn_mask_type,
+        to_balance,
+    ):
+        attn_bias_type = AttnBiasType.NO_BIAS
+        dropout_prob = 0.0
+        is_training = True
+        scaling_factor = 1.0
+
+        _, seqlen, num_head, hidden = data_shape
+
+        if not is_fused_attn_kernel_available(
+            dtype,
+            dtype,
+            QKVLayout.BSHD_BSHD_BSHD,
+            attn_bias_type,
+            attn_mask_type,
+            dropout_prob,
+            num_head,
+            num_head,
+            seqlen,
+            seqlen,
+            hidden,
+        ):
+            pytest.skip(f"No FusedAttn backwend found")
+
+        if attn_mask_type != AttnMaskType.CAUSAL_MASK and to_balance:
+            pytest.skip(f"Not support workload balance with AttnMaskType.PADDING_MASK")
+
+        def target_func(q, k, v, mask):
+            return jnp.mean(
+                fused_ring_attn(
+                    (q, k, v),
+                    None,
+                    mask,
+                    None,
+                    attn_bias_type=attn_bias_type,
+                    attn_mask_type=attn_mask_type,
+                    qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+                    scaling_factor=scaling_factor,
+                    dropout_probability=dropout_prob,
+                    is_training=is_training,
+                )
+            )
+
+        def ref_func(q, k, v, mask):
+            jnp.mean(
+                fused_attn(
+                    (q, k, v),
+                    None,
+                    mask,
+                    None,
+                    attn_bias_type=attn_bias_type,
+                    attn_mask_type=attn_mask_type,
+                    qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+                    scaling_factor=scaling_factor,
+                    dropout_probability=dropout_prob,
+                    is_training=is_training,
+                )
+            )
+
+        (q, k, v, mask), (q_pspec, k_pspec, v_pspec, mask_pspec) = self.generate_inputs(
+            data_shape, mesh_resource, attn_mask_type, dtype
+        )
+
+        ref_grad_func = jax.value_and_grad(ref_func, argnums=(0, 1, 2))
+        ref_loss, ref_grads = ref_grad_func(q, k, v, mask)
+
+        devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
+        mesh = Mesh(devices, mesh_axes)
+        with mesh, fp8_autocast(mesh_resource=mesh_resource):
+            with workload_balance_of_context_parallel(q, k, v) as wb_pkg:
+                if to_balance:
+                    q, k, v, inverse_fn = wb_pkg
+                q_ = jax.device_put(q, NamedSharding(mesh, q_pspec))
+                k_ = jax.device_put(k, NamedSharding(mesh, k_pspec))
+                v_ = jax.device_put(v, NamedSharding(mesh, v_pspec))
+                mask_ = (
+                    jax.device_put(mask, NamedSharding(mesh, mask_pspec))
+                    if mask is not None
+                    else mask
+                )
+
+                target_grad_func = jax.value_and_grad(target_func, argnums=(0, 1, 2))
+                target_pjitter = jax.jit(
+                    target_grad_func,
+                    in_shardings=(q_pspec, k_pspec, v_pspec, mask_pspec),
+                    out_shardings=(None, (q_pspec, k_pspec, v_pspec)),
+                )
+                target_loss, target_grads = target_pjitter(q_, k_, v_, mask_)
+
+                if to_balance:
+                    target_grads = [inverse_fn(g) for g in target_grads]
+
+        assert_allclose(target_loss, ref_loss, dtype=dtype)
+
+        for i in range(len(target_grads)):
+            assert_allclose(target_grads[i], ref_grads[i], dtype=dtype)

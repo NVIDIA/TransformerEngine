@@ -490,3 +490,183 @@ def _fused_attn_bwd_rule(
 
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
+
+
+def fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    mask: Optional[jnp.ndarray],
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+):
+    # convert the mask to seqlens, mask doesn't support ragged offsets
+    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+        batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
+        q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
+        kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
+    else:
+        assert mask is not None
+        mask = jnp.logical_not(mask)
+        q_seq_lens = jnp.sum(mask, axis=-2, dtype=jnp.int32)[..., 0, 0]
+        if attn_mask_type == AttnMaskType.PADDING_MASK:
+            kv_seq_lens = jnp.sum(mask, axis=-1, dtype=jnp.int32)[..., 0, 0]
+        else:
+            # When mask is causal, the actual seqlen is not the last row, use max to find it
+            kv_seq_lens = jnp.max(jnp.sum(mask, axis=-1, dtype=jnp.int32), axis=(-1, -2))
+
+    output = _fused_ring_attn(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        None,
+        None,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=1,
+    )
+
+    return output
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+def _fused_ring_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    q_seq_lens: jnp.ndarray,
+    kv_seq_lens: jnp.ndarray,
+    q_seq_offsets: Optional[jnp.ndarray],
+    kv_seq_offsets: Optional[jnp.ndarray],
+    seed: jnp.ndarray,
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+):
+    output, _ = _fused_ring_attn_fwd_rule(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+    )
+    return output
+
+
+def _fused_ring_attn_fwd_rule(
+    qkv,
+    bias,
+    q_seq_lens,
+    kv_seq_lens,
+    q_seq_offsets,
+    kv_seq_offsets,
+    seed,
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+):
+    output, softmax_aux, rng_state = tex.fused_ring_attn_fwd(
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        seed,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    output = checkpoint_name(output, "context")
+    softmax_aux = checkpoint_name(softmax_aux, "context")
+    rng_state = checkpoint_name(rng_state, "context")
+    return output, (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    )
+
+
+def _fused_ring_attn_bwd_rule(
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    ctx,
+    dz,
+):
+    (
+        qkv,
+        bias,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        softmax_aux,
+        rng_state,
+        output,
+    ) = ctx
+    grad_qkv, grad_bias = tex.fused_ring_attn_bwd(
+        qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        dz,
+        q_seq_lens,
+        kv_seq_lens,
+        q_seq_offsets,
+        kv_seq_offsets,
+        attn_bias_type=attn_bias_type.value,
+        attn_mask_type=attn_mask_type.value,
+        qkv_layout=qkv_layout.value,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+    )
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+    return grad_qkv, grad_bias, None, None, None, None, None
+
+
+_fused_ring_attn.defvjp(_fused_ring_attn_fwd_rule, _fused_ring_attn_bwd_rule)
