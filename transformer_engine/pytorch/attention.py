@@ -1312,9 +1312,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         dropout_p,
-        cp_group,
-        cp_global_ranks,
-        cp_stream,
         softmax_scale,
         qkv_format,
         attn_mask_type,
@@ -1322,6 +1319,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         attn_bias,
         deterministic,
         use_fused_attention,
+        cp_group,
+        cp_global_ranks,
+        cp_stream,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -2547,10 +2547,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
-            None,
-            None,
-            None,
             attn_dbias,
+            None,
+            None,
+            None,
             None,
             None,
         )
@@ -2597,8 +2597,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         dropout_p,
-        cp_group,
-        cp_stream,
         softmax_scale,
         qkv_format,
         attn_mask_type,
@@ -2607,6 +2605,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         window_size,
+        cp_group,
+        cp_stream,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -3062,54 +3062,33 @@ def attn_forward_func_with_cp(
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     )
 
+    args = (
+        is_training,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        dropout_p,
+        softmax_scale,
+        qkv_format,
+        attn_mask_type,
+        attn_bias_type,
+        attn_bias,
+        deterministic,
+        use_fused_attention,
+    )
+
     if sliding_window_attn or cp_comm_type == "all_gather":
-        out = AttnFuncWithCPAndKVAllGather.apply(
-            is_training,
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
-            dropout_p,
-            cp_group,
-            cp_stream,
-            softmax_scale,
-            qkv_format,
-            attn_mask_type,
-            attn_bias_type,
-            attn_bias,
-            deterministic,
-            use_fused_attention,
-            window_size,
-        )
+        args += (window_size, cp_group, cp_stream)
+        out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "p2p":
-        out = AttnFuncWithCPAndKVP2P.apply(
-            is_training,
-            q,
-            k,
-            v,
-            cu_seqlens_q,
-            cu_seqlens_kv,
-            max_seqlen_q,
-            max_seqlen_kv,
-            cu_seqlens_q_padded,
-            cu_seqlens_kv_padded,
-            dropout_p,
-            cp_group,
-            cp_global_ranks,
-            cp_stream,
-            softmax_scale,
-            qkv_format,
-            attn_mask_type,
-            attn_bias_type,
-            attn_bias,
-            deterministic,
-            use_fused_attention,
-        )
+        args += (cp_group, cp_global_ranks, cp_stream)
+        out = AttnFuncWithCPAndKVP2P.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
