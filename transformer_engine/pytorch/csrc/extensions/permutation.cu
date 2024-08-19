@@ -55,7 +55,7 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Float;
+    _st = at::ScalarType::Byte;
   else
     _st = input.scalar_type();
 
@@ -67,10 +67,6 @@ std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
       {num_tokens * topK}, torch::dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    num_cols *= 4;
 
   auto input_cu = makeTransformerEngineTensor(
       input.data_ptr(), {static_cast<size_t>(input.size(0)), static_cast<size_t>(num_cols)}, dtype);
@@ -106,7 +102,7 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType d
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Float;
+    _st = at::ScalarType::Byte;
   else
     _st = input.scalar_type();
 
@@ -115,10 +111,6 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType d
       {num_tokens, num_cols}, torch::dtype(_st).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    num_cols *= 4;
 
   auto input_cu = makeTransformerEngineTensor(
       input.data_ptr(), {static_cast<size_t>(input.size(0)), static_cast<size_t>(num_cols)}, dtype);
@@ -145,7 +137,7 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
   at::ScalarType _st;
   if (dtype == transformer_engine::DType::kFloat8E4M3 ||
       dtype == transformer_engine::DType::kFloat8E5M2)
-    _st = at::ScalarType::Float;
+    _st = at::ScalarType::Byte;
   else
     _st = input_bwd.scalar_type();
 
@@ -156,10 +148,6 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
       {num_tokens, topK}, torch::dtype(torch::kFloat32).device(torch::kCUDA).requires_grad(false));
 
   auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  if (dtype == transformer_engine::DType::kFloat8E4M3 ||
-      dtype == transformer_engine::DType::kFloat8E5M2)
-    num_cols *= 4;
 
   auto input_bwd_cu = makeTransformerEngineTensor(
       input_bwd.data_ptr(), {static_cast<size_t>(input_bwd.size(0)), static_cast<size_t>(num_cols)},

@@ -8,6 +8,7 @@ import warnings
 from typing import Tuple
 
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
 
 __all__ = [
@@ -43,11 +44,16 @@ class _moe_permute(torch.autograd.Function):
         assert inp.size(0) == indices.size(0), "Permute not possible"
 
         # Data type check
+        fp8 = False
         if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
-            assert inp.dtype == torch.float32, (
-                "When using fp8 data as input, the input should be packed to"
-                f" {torch.float32} data type first."
+            fp8 = True
+        if fp8:
+            assert isinstance(inp, Float8Tensor), (
+                "Input must be in Float8Tensor type for FP8 moe_permute."
             )
+            fp8_dtype = inp._fp8_dtype
+            fp8_scale_inv = inp._scale_inv
+            inp = inp._data
         if indices.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `indices` of Permute is {indices.dtype}! "
@@ -69,10 +75,16 @@ class _moe_permute(torch.autograd.Function):
         permuted_act, row_id_map, _moe_permute.workspace = tex.moe_permute_fwd(
             inp, dtype, indices, num_out_tokens, _moe_permute.workspace, _moe_permute.max_expanded_token_num
         )
+        
+        if fp8:
+            permuted_act = Float8Tensor(data=permuted_act,
+                                        fp8_dtype=fp8_dtype,
+                                        fp8_scale_inv=fp8_scale_inv)
 
         ctx.row_id_map = row_id_map
         ctx.num_tokens = indices.size(0)
         ctx.topK = indices.size(1)
+        ctx.fp8 = fp8
         return permuted_act, row_id_map
 
     @staticmethod
@@ -88,6 +100,15 @@ class _moe_permute(torch.autograd.Function):
         if not permuted_act_grad.is_contiguous():
             permuted_act_grad = permuted_act_grad.contiguous()
 
+        fp8 = ctx.fp8
+        if fp8:
+            assert isinstance(permuted_act_grad, Float8Tensor), (
+                "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
+            )
+            fp8_dtype=permuted_act_grad._fp8_dtype
+            fp8_scale_inv=permuted_act_grad._scale_inv
+            permuted_act_grad = permuted_act_grad._data
+
         row_id_map = ctx.row_id_map
         num_tokens = ctx.num_tokens
         topK = ctx.topK
@@ -97,6 +118,10 @@ class _moe_permute(torch.autograd.Function):
             act_grad = tex.moe_permute_bwd(
                 permuted_act_grad, _moe_permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
             )
+            if fp8:
+                act_grad = Float8Tensor(data=act_grad,
+                                        fp8_dtype=fp8_dtype,
+                                        fp8_scale_inv=fp8_scale_inv)
 
         return act_grad, None, None, None, None
 
@@ -140,11 +165,16 @@ class _moe_unpermute(torch.autograd.Function):
         assert row_id_map.is_cuda, "TransformerEngine needs CUDA."
 
         # Data type check
+        fp8 = False
         if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
-            assert inp.dtype == torch.float32, (
-                "When using fp8 data as input, the input should be packed to"
-                f" {torch.float32} data type first."
+            fp8 = True
+        if fp8:
+            assert isinstance(inp, Float8Tensor), (
+                "Input must be in Float8Tensor type for FP8 moe_unpermute."
             )
+            fp8_dtype = inp._fp8_dtype
+            fp8_scale_inv = inp._scale_inv
+            inp = inp._data
         if row_id_map.dtype != torch.int32:
             warnings.warn(
                 f"The data type of the input `row_id_map` of Unpermute is {row_id_map.dtype}! "
@@ -154,8 +184,14 @@ class _moe_unpermute(torch.autograd.Function):
 
         unpermuted_output = tex.moe_unpermute_fwd(inp, dtype, row_id_map, probs, num_tokens, topK)
 
+        if fp8:
+            unpermuted_output = Float8Tensor(data=unpermuted_output,
+                                             fp8_dtype=fp8_dtype,
+                                             fp8_scale_inv=fp8_scale_inv)
+
         ctx.dtype = dtype
         ctx.save_for_backward(inp, row_id_map, probs)
+        ctx.fp8 = fp8
         return unpermuted_output
 
     @staticmethod
@@ -170,6 +206,15 @@ class _moe_unpermute(torch.autograd.Function):
         if not unpermuted_act_grad.is_contiguous():
             unpermuted_act_grad = unpermuted_act_grad.contiguous()
 
+        fp8 = ctx.fp8
+        if fp8:
+            assert isinstance(unpermuted_act_grad, Float8Tensor), (
+                "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
+            )
+            fp8_dtype=unpermuted_act_grad._fp8_dtype
+            fp8_scale_inv=unpermuted_act_grad._scale_inv
+            unpermuted_act_grad = unpermuted_act_grad._data
+
         inp, row_id_map, probs = ctx.saved_tensors
 
         act_grad = None
@@ -177,6 +222,10 @@ class _moe_unpermute(torch.autograd.Function):
             act_grad, prob_grad = tex.moe_unpermute_bwd(
                 unpermuted_act_grad, inp, ctx.dtype, row_id_map, probs
             )
+            if fp8:
+                act_grad = Float8Tensor(data=act_grad,
+                                        fp8_dtype=fp8_dtype,
+                                        fp8_scale_inv=fp8_scale_inv)
         if not ctx.needs_input_grad[3]:
             prob_grad = None
 
