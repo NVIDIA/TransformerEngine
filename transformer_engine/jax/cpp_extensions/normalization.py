@@ -533,8 +533,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
             local_dx, local_dgamma, local_dbeta = LayerNormBwdPrimitive.impl(
                 dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
             )
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
-            global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
+            global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta, mesh)
             return local_dx, global_dgamma, global_dbeta
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -935,7 +935,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
 
         def sharded_impl(dz, x, rsigma, gamma):
             local_dx, local_dgamma = RmsNormBwdPrimitive.impl(dz, x, rsigma, gamma, epsilon=epsilon)
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
             return local_dx, global_dgamma
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -1228,7 +1228,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 zero_centered_gamma=zero_centered_gamma,
                 epsilon=epsilon,
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, local_mu, local_rsigma, global_updated_amax
 
@@ -1481,7 +1481,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             local_x, local_rsigma, local_amax = RmsNormFwdFp8Primitive.impl(
                 x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, local_rsigma, global_updated_amax
 

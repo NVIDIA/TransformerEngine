@@ -1011,7 +1011,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             )
             global_dbias = local_dbias
             if attn_bias_type is not NVTE_Bias_Type.NVTE_NO_BIAS:
-                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias)
+                global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
             return local_dq, local_dk, local_dv, global_dbias
 
         return mesh, sharded_impl, out_shardings, arg_shardings
