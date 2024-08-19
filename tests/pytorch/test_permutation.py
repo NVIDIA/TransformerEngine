@@ -6,7 +6,7 @@ import torch
 import pytest
 from typing import Dict, List
 
-from transformer_engine.pytorch import permute as te_permute, unpermute as te_unpermute
+from transformer_engine.pytorch import moe_permute as te_permute, moe_unpermute as te_unpermute
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine_torch as tex

@@ -11,12 +11,12 @@ import transformer_engine_torch as tex
 
 
 __all__ = [
-    "Permute",
-    "Unpermute",
+    "moe_permute",
+    "moe_unpermute",
 ]
 
 
-class _permute(torch.autograd.Function):
+class _moe_permute(torch.autograd.Function):
     """functional Permute"""
 
     workspace = None
@@ -58,16 +58,16 @@ class _permute(torch.autograd.Function):
         topK = indices.size(1)
 
         input_max_expanded_token_num = max(max_token_num, inp.size(0)) * topK
-        if _permute.max_expanded_token_num < input_max_expanded_token_num:
-            _permute.max_expanded_token_num = input_max_expanded_token_num
-            _permute.workspace = []
+        if _moe_permute.max_expanded_token_num < input_max_expanded_token_num:
+            _moe_permute.max_expanded_token_num = input_max_expanded_token_num
+            _moe_permute.workspace = []
 
-        if _permute.dtype != dtype:
-            _permute.dtype = dtype
-            _permute.workspace = []
+        if _moe_permute.dtype != dtype:
+            _moe_permute.dtype = dtype
+            _moe_permute.workspace = []
 
-        permuted_act, row_id_map, _permute.workspace = tex.moe_permute_fwd(
-            inp, dtype, indices, num_out_tokens, _permute.workspace, _permute.max_expanded_token_num
+        permuted_act, row_id_map, _moe_permute.workspace = tex.moe_permute_fwd(
+            inp, dtype, indices, num_out_tokens, _moe_permute.workspace, _moe_permute.max_expanded_token_num
         )
 
         ctx.row_id_map = row_id_map
@@ -95,13 +95,13 @@ class _permute(torch.autograd.Function):
         act_grad = None
         if ctx.needs_input_grad[0]:
             act_grad = tex.moe_permute_bwd(
-                permuted_act_grad, _permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
+                permuted_act_grad, _moe_permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
             )
 
         return act_grad, None, None, None, None
 
 
-class _unpermute(torch.autograd.Function):
+class _moe_unpermute(torch.autograd.Function):
     """functional Unpermute"""
 
     @staticmethod
@@ -183,7 +183,7 @@ class _unpermute(torch.autograd.Function):
         return act_grad, None, None, prob_grad
 
 
-def permute(
+def moe_permute(
     inp: torch.Tensor,
     dtype: tex.DType,
     indices: torch.Tensor,
@@ -209,10 +209,10 @@ def permute(
         By default, set to '-1', meaning the calculation of the size of workspace is
         automatically taken over by the operator.
     """
-    return _permute.apply(inp, dtype, indices, num_out_tokens, max_token_num)
+    return _moe_permute.apply(inp, dtype, indices, num_out_tokens, max_token_num)
 
 
-def unpermute(
+def moe_unpermute(
     inp: torch.Tensor,
     dtype: tex.DType,
     row_id_map: torch.Tensor,
@@ -236,4 +236,4 @@ def unpermute(
         the unpermuted tokens will be merged with their respective probabilities.
         By default, set to an empty tensor, which means that the tokens are directly merged by accumulation.
     """
-    return _unpermute.apply(inp, dtype, row_id_map, probs)
+    return _moe_unpermute.apply(inp, dtype, row_id_map, probs)
