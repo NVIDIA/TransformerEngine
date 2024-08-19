@@ -38,7 +38,7 @@ def cast_to_fp8(
     # Launch FP8 cast kernel
     if inp.nelement() == 0:
         if out is None:
-            out = inp
+            out = torch.empty_like(inp, dtype=torch.uint8)
     elif out is None:
         out = torch.ops.tex_ts.cast_to_fp8_ts(
             inp,
