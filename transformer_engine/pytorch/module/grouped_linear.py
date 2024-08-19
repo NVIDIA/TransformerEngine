@@ -717,6 +717,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self,
         inp: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]],
         m_splits: List[int],
+        split_inp: Optional[bool] = True,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -742,12 +743,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        split_inp = False
         if isinstance(inp, torch.Tensor):
-            split_inp = True
+            assert split_inp == True, "split_inp must be set True when inp is torch.Tensor"
             inputmats = [inp]
         else:
             # inp is a list or tuple
+            assert (
+                split_inp == False
+            ), "split_inp must be set False when inp is collection of torch.Tensor"
             inputmats = inp
 
         for inp in inputmats:
