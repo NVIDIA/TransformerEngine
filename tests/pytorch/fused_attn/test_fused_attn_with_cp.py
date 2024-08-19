@@ -121,16 +121,16 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
         )
     if config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip(
-            f"Fused attention does not support sliding window attention + context parallelism yet!"
+            "Fused attention does not support sliding window attention + context parallelism yet!"
         )
     if cp_comm_type == "all_gather" and dtype == "fp8":
         pytest.skip(
-            f"CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
+            "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
         )
     if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip(f"FP8 attention cannot work with THD format yet!")
+        pytest.skip("FP8 attention cannot work with THD format yet!")
     if dtype == "fp8" and config.attn_bias_type != "no_bias":
-        pytest.skip(f"FP8 attention cannot work with bias yet!")
+        pytest.skip("FP8 attention cannot work with bias yet!")
 
     subprocess.run(
         get_bash_arguments(
