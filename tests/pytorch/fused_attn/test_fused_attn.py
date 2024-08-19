@@ -1996,12 +1996,18 @@ class _custom_mha_fp8(torch.autograd.Function):
             None,
             None,
             None,
-            fp8_meta["scaling_fwd"].scale_inv[META_QKV],
-            fp8_meta["scaling_fwd"].scale_inv[META_S],
-            fp8_meta["scaling_fwd"].scale[META_S],
-            fp8_meta["scaling_fwd"].scale[META_O],
-            fp8_meta["scaling_fwd"].amax_history[0][META_S],
-            fp8_meta["scaling_fwd"].amax_history[0][META_O],
+            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_qkv
+            META_QKV,  # d_scale_qkv_offset
+            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_s
+            META_S,  # d_scale_s_offset
+            fp8_meta["scaling_fwd"].scale,  # q_scale_s
+            META_S,  # q_scale_s_offset
+            fp8_meta["scaling_fwd"].scale,  # q_scale_o
+            META_O,  # q_scale_o_offset
+            fp8_meta["scaling_fwd"].amax_history,  # amax_s
+            META_S,  # amax_s_offset
+            fp8_meta["scaling_fwd"].amax_history,  # amax_o
+            META_O,  # amax_o_offset
             attn_scale=None,
             dropout=p_dropout,
             fast_zero_fill=fast_zero_fill,
