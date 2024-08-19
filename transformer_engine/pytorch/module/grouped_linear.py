@@ -717,7 +717,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         self,
         inp: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]],
         m_splits: List[int],
-        split_inp: Optional[bool] = True,
         is_first_microbatch: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -725,8 +724,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         Parameters
         ----------
-        inp : torch.Tensor
-             Input tensor.
+        inp : {torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]}
+             Input tensor or collection of input tensor.
+
+             * `inp` will be split base `m_splits` if type of `inp` is torch.tensor.
+             * assume `inp` is split base `m_splits` if `inp` is collection of torch.Tensor.
         m_splits : List[int]
                  List of integers representing the split of the input tensor.
         is_first_microbatch : {True, False, None}, default = None
@@ -744,13 +746,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                                produced)
         """
         if isinstance(inp, torch.Tensor):
-            assert split_inp == True, "split_inp must be set True when inp is torch.Tensor"
+            split_inp = True
             inputmats = [inp]
         else:
             # inp is a list or tuple
-            assert (
-                split_inp == False
-            ), "split_inp must be set False when inp is collection of torch.Tensor"
+            split_inp = False
             inputmats = inp
 
         for inp in inputmats:
