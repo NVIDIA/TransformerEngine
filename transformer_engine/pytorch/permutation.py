@@ -48,9 +48,9 @@ class _moe_permute(torch.autograd.Function):
         if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
             fp8 = True
         if fp8:
-            assert isinstance(inp, Float8Tensor), (
-                "Input must be in Float8Tensor type for FP8 moe_permute."
-            )
+            assert isinstance(
+                inp, Float8Tensor
+            ), "Input must be in Float8Tensor type for FP8 moe_permute."
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
@@ -73,13 +73,18 @@ class _moe_permute(torch.autograd.Function):
             _moe_permute.workspace = []
 
         permuted_act, row_id_map, _moe_permute.workspace = tex.moe_permute_fwd(
-            inp, dtype, indices, num_out_tokens, _moe_permute.workspace, _moe_permute.max_expanded_token_num
+            inp,
+            dtype,
+            indices,
+            num_out_tokens,
+            _moe_permute.workspace,
+            _moe_permute.max_expanded_token_num,
         )
-        
+
         if fp8:
-            permuted_act = Float8Tensor(data=permuted_act,
-                                        fp8_dtype=fp8_dtype,
-                                        fp8_scale_inv=fp8_scale_inv)
+            permuted_act = Float8Tensor(
+                data=permuted_act, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+            )
 
         ctx.row_id_map = row_id_map
         ctx.num_tokens = indices.size(0)
@@ -102,11 +107,11 @@ class _moe_permute(torch.autograd.Function):
 
         fp8 = ctx.fp8
         if fp8:
-            assert isinstance(permuted_act_grad, Float8Tensor), (
-                "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
-            )
-            fp8_dtype=permuted_act_grad._fp8_dtype
-            fp8_scale_inv=permuted_act_grad._scale_inv
+            assert isinstance(
+                permuted_act_grad, Float8Tensor
+            ), "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
+            fp8_dtype = permuted_act_grad._fp8_dtype
+            fp8_scale_inv = permuted_act_grad._scale_inv
             permuted_act_grad = permuted_act_grad._data
 
         row_id_map = ctx.row_id_map
@@ -119,9 +124,9 @@ class _moe_permute(torch.autograd.Function):
                 permuted_act_grad, _moe_permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
             )
             if fp8:
-                act_grad = Float8Tensor(data=act_grad,
-                                        fp8_dtype=fp8_dtype,
-                                        fp8_scale_inv=fp8_scale_inv)
+                act_grad = Float8Tensor(
+                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+                )
 
         return act_grad, None, None, None, None
 
@@ -169,9 +174,9 @@ class _moe_unpermute(torch.autograd.Function):
         if dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
             fp8 = True
         if fp8:
-            assert isinstance(inp, Float8Tensor), (
-                "Input must be in Float8Tensor type for FP8 moe_unpermute."
-            )
+            assert isinstance(
+                inp, Float8Tensor
+            ), "Input must be in Float8Tensor type for FP8 moe_unpermute."
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
@@ -185,9 +190,9 @@ class _moe_unpermute(torch.autograd.Function):
         unpermuted_output = tex.moe_unpermute_fwd(inp, dtype, row_id_map, probs, num_tokens, topK)
 
         if fp8:
-            unpermuted_output = Float8Tensor(data=unpermuted_output,
-                                             fp8_dtype=fp8_dtype,
-                                             fp8_scale_inv=fp8_scale_inv)
+            unpermuted_output = Float8Tensor(
+                data=unpermuted_output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+            )
 
         ctx.dtype = dtype
         ctx.save_for_backward(inp, row_id_map, probs)
@@ -208,11 +213,11 @@ class _moe_unpermute(torch.autograd.Function):
 
         fp8 = ctx.fp8
         if fp8:
-            assert isinstance(unpermuted_act_grad, Float8Tensor), (
-                "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
-            )
-            fp8_dtype=unpermuted_act_grad._fp8_dtype
-            fp8_scale_inv=unpermuted_act_grad._scale_inv
+            assert isinstance(
+                unpermuted_act_grad, Float8Tensor
+            ), "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
+            fp8_dtype = unpermuted_act_grad._fp8_dtype
+            fp8_scale_inv = unpermuted_act_grad._scale_inv
             unpermuted_act_grad = unpermuted_act_grad._data
 
         inp, row_id_map, probs = ctx.saved_tensors
@@ -223,9 +228,9 @@ class _moe_unpermute(torch.autograd.Function):
                 unpermuted_act_grad, inp, ctx.dtype, row_id_map, probs
             )
             if fp8:
-                act_grad = Float8Tensor(data=act_grad,
-                                        fp8_dtype=fp8_dtype,
-                                        fp8_scale_inv=fp8_scale_inv)
+                act_grad = Float8Tensor(
+                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+                )
         if not ctx.needs_input_grad[3]:
             prob_grad = None
 
