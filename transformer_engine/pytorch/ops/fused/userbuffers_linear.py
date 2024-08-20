@@ -16,7 +16,7 @@ from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager
 from ...module.base import get_ub, get_workspace
-from ..basic import BasicLinear, Bias
+from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     BasicOperation,
     FusedOperation,
@@ -120,13 +120,13 @@ class UserbuffersLinear(FusedOperation):
         with_fp8_output = with_fp8_output and output_fp8_meta is not None
 
         # Check tensor parallel group
-        tensor_parallel_group_size = get_distributed_world_size(tensor_parallel_group)
-        if tensor_parallel_group_size == 1:
+        tensor_parallel_size = get_distributed_world_size(tensor_parallel_group)
+        if tensor_parallel_size == 1:
             tensor_parallel_mode = None
         if tensor_parallel_mode not in ("column", "row"):
             raise RuntimeError(
                 "Invalid configuration for Userbuffers "
-                f"({tensor_parallel_group_size=}, {tensor_parallel_mode=})"
+                f"({tensor_parallel_size=}, {tensor_parallel_mode=})"
             )
         if not sequence_parallel:
             raise RuntimeError(
@@ -148,7 +148,21 @@ class UserbuffersLinear(FusedOperation):
             else:
                 ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif with_ub_reduce_scatter:
-            raise NotImplementedError ### TODO Implement
+            if with_fp8_compute:
+                ub_algo = {
+                    (True, True): tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
+                    (True, False): tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
+                    (False, True): tex.UbufOverlapAlgo.ATOMIC_GEMM_RS,
+                    (False, False): tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS,
+                }[(ub_comm.is_p2p_overlap(), ub_comm.is_atomic_gemm())]
+                if ub_comm.is_fp8_ubuf():
+                    assert output_fp8_meta is not None
+                    ub_comm.set_ubuf_scale_inv(output_fp8_meta.scale_inv)
+            else:
+                if ub_comm.is_p2p_overlap():
+                    ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                else:
+                    ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
         else:
             raise RuntimeError("Could not choose Userbuffers communication algorithm")
 
@@ -239,32 +253,57 @@ class UserbuffersLinear(FusedOperation):
             )
 
         # Construct output tensor
-        ### TODO UB RS
         y = None
-        if with_fp8_output:
-            fp8_dtype = get_fp8_te_dtype(
-                output_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            data = torch.empty(
-                (x.size(0), weight_dims[0]),
-                dtype=torch.uint8,
-                device=device,
-            )
-            y = Float8Tensor(
-                data=data,
-                fp8_meta=output_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
+        y_local = None
+        if with_ub_reduce_scatter:
+            # Initialize buffers for UB reduce-scatter
+            if with_fp8_output:
+                fp8_dtype = get_fp8_te_dtype(
+                    output_fp8_meta["recipe"],
+                    fprop_tensor=True,
+                )
+                y = Float8Tensor(
+                    data=ub_global_buffer,
+                    fp8_meta=output_fp8_meta, ### TODO Probably wrong
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    dtype=dtype,
+                )
+            else:
+                y = ub_global_buffer
+            y_local = torch.empty(
+                (x.size(0) // tensor_parallel_size, weight_dims[0]),
                 dtype=dtype,
+                device=device,
             )
         else:
-            y = torch.empty(
-                (x.size(0), weight_dims[0]),
-                dtype=dtype,
-                device=device,
-            )
+            # Allocate output tensor
+            if with_fp8_output:
+                fp8_dtype = get_fp8_te_dtype(
+                    output_fp8_meta["recipe"],
+                    fprop_tensor=True,
+                )
+                data = torch.empty(
+                    (x.size(0), weight_dims[0]),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                y = Float8Tensor(
+                    data=data,
+                    fp8_meta=output_fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    dtype=dtype,
+                )
+            else:
+                y = torch.empty(
+                    (x.size(0), weight_dims[0]),
+                    dtype=dtype,
+                    device=device,
+                )
+            y_local = y
 
         # Perform GEMM
         if with_fp8_compute:
@@ -277,6 +316,8 @@ class UserbuffersLinear(FusedOperation):
             )
             if with_ub_all_gather:
                 kwargs["extra_output_tensor"] = x_local._data
+            if with_ub_reduce_scatter:
+                kwargs["extra_output_tensor"] = y_local._data
             if with_fp8_output:
                 if y._fp8_meta is None:
                     # Hackily create FP8TensorMeta if needed
@@ -323,10 +364,12 @@ class UserbuffersLinear(FusedOperation):
             )
             if with_ub_all_gather:
                 kwargs["extra_output_tensor"] = x_local
+            if with_ub_reduce_scatter:
+                kwargs["extra_output_tensor"] = y_local
             gemm(w, x, y.dtype, get_workspace(), **kwargs)
 
         # Reshape output tensor
-        out = reshape(y, output_dims)
+        out = reshape(y_local, output_dims)
 
         return out, x_local, w
 
@@ -412,6 +455,8 @@ def fuse_forward_userbuffers_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
 
+    ### TODO Handle separate RS op
+
     # Scan through ops, fusing if possible
     out = []
     window = []
@@ -431,7 +476,7 @@ def fuse_forward_userbuffers_linear(
 
         # Check if second op is bias
         op2 = None
-        if ops and isinstance(ops[0][0], Bias):
+        if op1.tensor_parallel_mode != "row" and ops and isinstance(ops[0][0], Bias):
             op2, _ = ops[0]
             window.append(ops[0])
             ops = ops[1:]

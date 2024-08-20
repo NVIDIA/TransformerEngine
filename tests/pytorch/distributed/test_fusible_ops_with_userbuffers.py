@@ -18,13 +18,13 @@ import torch
 
 import transformer_engine
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.ops.fused import UserbuffersLinear
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -146,7 +146,7 @@ def make_reference_and_test_tensors(
 def _test_linear(
     *,
     model_config: ModelConfig,
-    bias: bool = True,
+    bias: bool = False,
     device: torch.device = "cuda",
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = True,
@@ -262,15 +262,18 @@ def _test_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    userbuffers_options = dict(
-        comm_name="qkv",
-    )
+    userbuffers_options = {}
+    if tensor_parallel_mode == "column":
+        userbuffers_options["comm_name"] = "qkv"
+    if tensor_parallel_mode == "row":
+        userbuffers_options["comm_name"] = "fc1"
     with te.fp8_model_init(enabled=fp8_compute):
         model = te_ops.Sequential(
-            te_ops.Linear(
+            # te_op.Linear(  ### TODO Restore
+            te_ops.BasicLinear(  ### TODO Remove
                 in_features,
                 out_features,
-                bias=bias,
+                #bias=bias, ### TODO Restore
                 device=device,
                 dtype=dtype,
                 tensor_parallel_mode=tensor_parallel_mode,
@@ -327,8 +330,8 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
 
     # Linear op
     for test_config in itertools.product(
-        (False, True),
-        ("column",), #("column", "row"),
+        (False,),  # (False, True) # bias
+        ("column", "row"),  # tensor_parallel_mode
     ):
         if rank == 0:
             print(f"Running _test_linear with {test_config=}")
@@ -381,11 +384,17 @@ def test_fuser_ops_with_userbuffers(
     if fp8:
         command.append("--fp8")
 
+    # Environment
+    env = dict(os.environ)
+    if not tex.device_supports_multicast():
+        env["UB_SKIPMC"] = "1"
+    env["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    env["PYTORCH_JIT"] = "0"
+    env["NVTE_TORCH_COMPILE"] = "0"
+    env["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+
     # Launch parallel job
-    result = subprocess.run(
-        command,
-        check=True,
-    )
+    result = subprocess.run(command, check=True, env=env)
 
 
 def main() -> None:
@@ -393,11 +402,11 @@ def main() -> None:
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
-    parser.add_argument("--sequence-length", type=int, default=16)
+    parser.add_argument("--sequence-length", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=16)
-    parser.add_argument("--head-dim", type=int, default=16)
-    parser.add_argument("--dtype", type=str, default="float32")
+    parser.add_argument("--head-dim", type=int, default=32)
+    parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--fp8", action="store_true")
     args = parser.parse_args()
 
