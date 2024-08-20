@@ -2628,6 +2628,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         fa_optional_forward_kwargs = {}
         if _flash_attn_2_4_plus:
             fa_optional_forward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_5_7_plus:
+            fa_optional_forward_kwargs["block_table"] = None
 
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -3034,9 +3036,140 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         use_fused_attention,
         window_size,
         cp_group,
-        cp_stream,
     ):
-        out = None
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** (-0.5)
+
+        cp_size = get_distributed_world_size(cp_group)
+        rank = get_distributed_rank(cp_group)
+
+        causal = "causal" in attn_mask_type
+        padding = "padding" in attn_mask_type
+        assert causal and not padding, f"{attn_mask_type} mask type is not supported!"
+        assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
+        assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
+        assert (
+            window_size == (-1, 0) or window_size == (-1, -1) or use_fused_attention or _flash_attn_2_3_plus
+        ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
+        fa_optional_forward_kwargs = {}
+        if _flash_attn_2_3_plus:
+            fa_optional_forward_kwargs["window_size"] = window_size
+        if _flash_attn_2_4_plus:
+            fa_optional_forward_kwargs["alibi_slopes"] = None
+        if _flash_attn_2_5_7_plus:
+            fa_optional_forward_kwargs["block_table"] = None
+
+        assert (
+            q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0
+        ), "Number of attention heads needs to be divisible by CP size!"
+
+        assert qkv_format != "thd", f"{qkv_format} format is not supported!"
+        qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+
+        seq_dim = qkv_format.index("s")
+        assert (
+            q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
+        ), "Sequence length per GPU needs to be divisible by 2!"
+
+        # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+        q, k, v = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [q, k, v]]
+        # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        q, k, v = [x.movedim(-3, 0).contiguous() for x in [q, k, v]]
+        q_, k_, v_ = [torch.empty_like(x) for x in [q, k, v]]
+        for x_, x in zip([q_, k_, v_], [q, k, v]):
+            torch.distributed.all_to_all_single(x_, x, group=cp_group)
+        q, k, v = q_, k_, v_
+        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        q, k, v = [x.movedim(0, seq_dim).contiguous() for x in [q, k, v]]
+        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        q, k, v = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
+        # reorder the sequence chunks
+        q, k, v = [torch.index_select(x, dim=seq_dim, index=chunk_ids) for x in [q, k, v]]
+
+        if use_fused_attention:
+            out, aux_ctx_tensors = fused_attn_fwd(
+                is_training,
+                max_seqlen_q,
+                max_seqlen_kv,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                q,
+                k,
+                v
+                TE_DType[q.dtype],
+                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                attn_scale=softmax_scale,
+                dropout=dropout_p,
+                qkv_layout=qkv_layout,
+                attn_mask_type=attn_mask_type,
+                attn_bias_type=attn_bias_type,
+                attn_bias=attn_bias,
+                cu_seqlens_q_padded=cu_seqlens_q_padded,
+                cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            )
+            softmax_lse, rng_state, *rest = aux_ctx_tensors
+            attn_bias = rest[0] if len(rest) > 0 else None
+        else:
+            (
+                _,
+                _,
+                _,
+                _,
+                out,
+                softmax_lse,
+                _,
+                rng_state,
+            ) = _flash_attn_forward(
+                q,
+                k,
+                k,
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_seqlen_q,
+                max_seqlen_kv,
+                dropout_p,
+                softmax_scale,
+                causal=causal,
+                return_softmax=False,
+                **fa_optional_forward_kwargs,
+            )
+
+        # [b, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+2):])
+        # reorder the sequence chunks
+        out = torch.index_select(out, dim=seq_dim, index=chunk_ids)
+        # [b, cp*2, s//2, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        out = out.movedim(seq_dim, 0).contiguous()
+        out = out.view()
+        out_ = torch.empty_like(out)
+        torch.distributed.all_to_all_single(out_, out, group=cp_group)
+        out = out_
+        # [cp, b, s, np//cp, hn] -> [b, s, np, hn] or [cp, s, b, np//cp, hn] -> [s, b, np, hn]
+        out = out.movedim(seq_dim, 0).contiguous()
+
+        ctx.save_for_backward(
+            q,
+            k,
+            v,
+            out,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            cu_seqlens_q_padded,
+            cu_seqlens_kv_padded,
+            rng_state,
+            attn_bias,
+        )
+        ctx.cp_group = cp_group
+        ctx.dropout_p = dropout_p
+        ctx.max_seqlen_q = max_seqlen_q
+        ctx.max_seqlen_kv = max_seqlen_kv
+        ctx.softmax_scale = softmax_scale
+        ctx.qkv_format = qkv_format
+        ctx.attn_mask_type = attn_mask_type
+        ctx.attn_bias_type = attn_bias_type
+        ctx.deterministic = deterministic
+        ctx.use_fused_attention = use_fused_attention
         return out
 
     @staticmethod
@@ -3123,6 +3256,9 @@ def attn_forward_func_with_cp(
     sliding_window_attn = (
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     )
+    assert (
+        not sliding_window_attn or cp_comm_type != "p2p"
+    ), "Context parallel implementation with P2P does not support sliding window attetnion!"
 
     args = (
         is_training,
@@ -3145,14 +3281,14 @@ def attn_forward_func_with_cp(
         use_fused_attention,
     )
 
-    if sliding_window_attn or cp_comm_type == "all_gather":
-        args += (window_size, cp_group, cp_stream)
-        out = AttnFuncWithCPAndKVAllGather.apply(*args)
-    elif cp_comm_type == "p2p":
+    if cp_comm_type == "p2p":
         args += (cp_group, cp_global_ranks, cp_stream)
         out = AttnFuncWithCPAndKVP2P.apply(*args)
-    elif cp_comm_type == "a2a":
+    elif cp_comm_type == "all_gather":
         args += (window_size, cp_group, cp_stream)
+        out = AttnFuncWithCPAndKVAllGather.apply(*args)
+    elif cp_comm_type == "a2a":
+        args += (window_size, cp_group)
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
