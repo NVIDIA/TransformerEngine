@@ -3529,17 +3529,25 @@ class UnfusedDotProductAttention(torch.nn.Module):
             actual_seqlens_q = mask[:, :, 0].sum(dim=1)
             actual_seqlens_kv = mask[:, 0, :].sum(dim=1)
             mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-                    1, 1, max_seqlen_q, 1
-                ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-                    1, 1, 1, max_seqlen_kv
-                )
+                1, 1, max_seqlen_q, 1
+            ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+                1, 1, 1, max_seqlen_kv
+            )
             if attn_mask_type == "padding_causal":
                 attention_mask = torch.logical_or(
-                    torch.where(mask.view(1, 1, max_seqlen_q, max_seqlen_kv)<0, 1, 0), attention_mask
+                    torch.where(mask.view(1, 1, max_seqlen_q, max_seqlen_kv) < 0, 1, 0),
+                    attention_mask,
                 )
             if attn_mask_type == "padding_causal_bottom_right":
                 attention_mask = torch.logical_or(
-                    torch.where(mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)+(actual_seqlens_kv-actual_seqlens_q).view(batch_size,1,1,1)<0, 1, 0), attention_mask
+                    torch.where(
+                        mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
+                        + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
+                        < 0,
+                        1,
+                        0,
+                    ),
+                    attention_mask,
                 )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
