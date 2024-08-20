@@ -125,7 +125,7 @@ class _moe_permute(torch.autograd.Function):
             )
             if fp8:
                 act_grad = Float8Tensor(
-                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv * topK
                 )
 
         return act_grad, None, None, None, None

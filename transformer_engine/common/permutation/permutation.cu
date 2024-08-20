@@ -113,6 +113,10 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     T *dest_row_ptr = unpermuted_output + source_token * num_cols;
 
     for (int e = 0; e < kElementsPerAccess; e++) {
+      if constexpr ((std::is_same_v<T, __nv_fp8_e4m3> || std::is_same_v<T, __nv_fp8_e5m2>) &&
+                    (!hasProb)) {
+        frag_sum[e] = frag_sum[e] / TCompute(topK);
+      }
       frag_load_store_ptr[e] = T(frag_sum[e]);
     }
 
