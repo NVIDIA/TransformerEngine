@@ -1,0 +1,438 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import functools
+import itertools
+import os
+import pathlib
+import subprocess
+import sys
+
+import pytest
+import torch
+
+import transformer_engine
+import transformer_engine.pytorch as te
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+import transformer_engine.pytorch.ops as te_ops
+from transformer_engine.pytorch.ops._common import is_float8_tensor
+from transformer_engine.pytorch.ops.fused import UserbuffersLinear
+from transformer_engine.pytorch.utils import is_bf16_compatible
+import transformer_engine_torch as tex
+
+# Import utility functions
+_current_file = pathlib.Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
+from utils import dtype_tols, str_to_dtype
+
+# Check if FP8 is supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+# Check if there are multiple GPUs
+if torch.cuda.device_count() < 2:
+    pytest.skip("Userbuffers requires at least 2 GPUs.")
+
+
+@dataclasses.dataclass
+class ModelConfig:
+    sequence_length: int
+    batch_size: int
+    num_heads: int
+    head_dim: int
+    dtype: torch.dtype
+    fp8: bool
+
+    @property
+    def sequence_and_batch_size(self):
+        return self.sequence_length * self.batch_size
+
+    @property
+    def hidden_size(self):
+        return self.num_heads * self.head_dim
+
+
+@functools.cache
+def launcher() -> str:
+    if "OMPI_COMM_WORLD_SIZE" in os.environ:
+        return "ompi"
+    if "TORCHELASTIC_RUN_ID" in os.environ:
+        return "torchrun"
+    raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`")
+
+
+@functools.cache
+def world_group() -> torch.distributed.ProcessGroup:
+    """Get NCCL process group, initializing if needed"""
+
+    # Get launch config from environment
+    if launcher() == "ompi":
+        # OpenMPI
+        world_size = int(os.getenv("OMPI_COMM_WORLD_SIZE"))
+        rank = int(os.getenv("OMPI_COMM_WORLD_RANK"))
+        local_size = int(os.getenv("OMPI_COMM_WORLD_LOCAL_SIZE"))
+        local_rank = int(os.getenv("OMPI_COMM_WORLD_LOCAL_RANK"))
+    elif launcher() == "torchrun":
+        # torchrun
+        world_size = int(os.getenv("WORLD_SIZE"))
+        rank = int(os.getenv("RANK"))
+        local_size = int(os.getenv("LOCAL_WORLD_SIZE"))
+        local_rank = int(os.getenv("LOCAL_RANK"))
+    else:
+        raise RuntimeError("Unexpected launcher ({launcher()})")
+
+    # Construct communicator
+    assert local_size == world_size
+    torch.cuda.set_device(local_rank)
+    group = torch.distributed.init_process_group(
+        "nccl",
+        init_method="file:///tmp/rdzv",
+        world_size=world_size,
+        rank=rank,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
+    return group
+
+
+def reset_rng(seed: int = 1234) -> None:
+    """Reset random number generators"""
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+
+@torch.no_grad()
+def make_reference_and_test_tensors(
+    shape: int | Iterable[int],
+    ref_dtype: torch.dtype = torch.float64,
+    ref_device: torch.device = "cpu",
+    test_dtype: torch.dtype = torch.float32,
+    test_device: torch.device = "cuda",
+    test_is_fp8: bool = False,
+    requires_grad: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct tensors with the same values
+
+    The reference tensor is intended for use in plain PyTorch
+    operations in high precision. The test tensor is intended for use
+    in Transformer Engine operations.
+
+    """
+
+    # Random data
+    ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
+
+    # Make copy of tensor
+    if test_is_fp8:
+        test = Float8Tensor.to_float8(ref)
+    else:
+        test = ref.to(device=test_device, dtype=test_dtype)
+        if test.data_ptr() == ref.data_ptr():
+            test = test.clone()
+
+    # Make sure reference and test tensors represent exact same values
+    ref.copy_(test)
+
+    # Return reference and test tensors
+    ref.requires_grad_(requires_grad)
+    test.requires_grad_(requires_grad)
+    return ref, test
+
+
+def _test_linear(
+    *,
+    model_config: ModelConfig,
+    bias: bool = True,
+    device: torch.device = "cuda",
+    tensor_parallel_mode: str = "column",
+    sequence_parallel: bool = True,
+) -> None:
+    dtype = model_config.dtype
+    fp8_compute = model_config.fp8
+
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
+
+    # Tensor dimensions
+    out_features = model_config.hidden_size
+    in_features = model_config.hidden_size
+    batch_size = model_config.sequence_and_batch_size
+    in_shape = [batch_size, in_features]
+    out_shape = [batch_size, out_features]
+
+    # Random data
+    reset_rng()
+    x_ref, x_test = make_reference_and_test_tensors(
+        in_shape,
+        test_dtype=dtype,
+        test_device=device,
+        test_is_fp8=fp8_compute,
+    )
+    w_ref, w_test = make_reference_and_test_tensors(
+        (out_features, in_features),
+        test_dtype=dtype,
+        test_device=device,
+        test_is_fp8=fp8_compute,
+    )
+    b_ref, b_test = None, None
+    if bias:
+        if tensor_parallel_mode == "row":
+            bias_shape = [world_size, out_features]
+        else:
+            bias_shape = [out_features]
+        b_ref, b_test = make_reference_and_test_tensors(
+            bias_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+    dy_ref, dy_test = make_reference_and_test_tensors(
+        out_shape,
+        test_dtype=dtype,
+        test_device=device,
+        test_is_fp8=fp8_compute,
+        requires_grad=False,
+    )
+
+    # Plain PyTorch implementation
+    y_ref = torch.nn.functional.linear(x_ref, w_ref)
+    if bias:
+        if tensor_parallel_mode == "row":
+            y_ref += b_ref.sum(dim=0)
+        else:
+            y_ref += b_ref
+    y_ref.backward(dy_ref)
+
+    # Convert to distributed tensors
+    with torch.no_grad():
+        dw_ref = w_ref.grad
+        db_ref = b_ref.grad if bias else None
+        dx_ref = x_ref.grad
+        if tensor_parallel_mode == "column":
+            local_out_features = out_features // world_size
+            local_slice = slice(
+                rank * local_out_features,
+                (rank + 1) * local_out_features,
+            )
+            w_ref = w_ref[local_slice, :]
+            dw_ref = dw_ref[local_slice, :]
+            w_test = w_test[local_slice, :]
+            if bias:
+                b_ref = b_ref[local_slice]
+                db_ref = db_ref[local_slice]
+                b_test = b_test[local_slice]
+            y_ref = y_ref[..., local_slice]
+            dy_ref = dy_ref[..., local_slice]
+            dy_test = dy_test[..., local_slice].clone()
+        elif tensor_parallel_mode == "row":
+            local_in_features = in_features // world_size
+            local_slice = slice(
+                rank * local_in_features,
+                (rank + 1) * local_in_features,
+            )
+            w_ref = w_ref[:, local_slice]
+            dw_ref = dw_ref[:, local_slice]
+            w_test = w_test[:, local_slice]
+            if bias:
+                b_ref = b_ref[rank, :]
+                db_ref = db_ref[rank, :]
+                b_test = b_test[rank, :]
+            x_ref = x_ref[..., local_slice]
+            dx_ref = dx_ref[..., local_slice]
+            x_test = x_test[..., local_slice].clone()
+        if sequence_parallel:
+            local_batch_size = batch_size // world_size
+            local_slice = slice(
+                rank * local_batch_size,
+                (rank + 1) * local_batch_size,
+            )
+            if tensor_parallel_mode == "column":
+                x_ref = x_ref[local_slice, ...]
+                dx_ref = dx_ref[local_slice, ...]
+                x_test = x_test[local_slice, ...].clone()
+            elif tensor_parallel_mode == "row":
+                y_ref = y_ref[local_slice, ...]
+                dy_ref = dy_ref[local_slice, ...]
+                dy_test = dy_test[local_slice, ...].clone()
+    x_test.requires_grad_()
+
+    # Implementation with fusible operation
+    userbuffers_options = dict(
+        comm_name="qkv",
+    )
+    with te.fp8_model_init(enabled=fp8_compute):
+        model = te_ops.Sequential(
+            te_ops.Linear(
+                in_features,
+                out_features,
+                bias=bias,
+                device=device,
+                dtype=dtype,
+                tensor_parallel_mode=tensor_parallel_mode,
+                tensor_parallel_group=process_group,
+                sequence_parallel=sequence_parallel,
+                userbuffers_options=userbuffers_options,
+            ),
+        )
+    with torch.no_grad():
+        model[0].weight.copy_(w_test)
+        if bias:
+            model[0].bias.copy_(b_test)
+        del w_test
+        del b_test
+    with te.fp8_autocast(enabled=fp8_compute):
+        y_test = model(x_test)
+    y_test.backward(dy_test)
+
+    # Check that forward operations have been fused
+    forward_ops = model._module_groups[0]._forward_ops
+    assert len(forward_ops) == 1
+    assert isinstance(forward_ops[0][0], UserbuffersLinear)
+
+    # Expected numerical error
+    tols = dtype_tols(dtype)
+    if dtype == torch.float32:
+        tols = dtype_tols(torch.float16)  # TF32 GEMM
+    if fp8_compute:
+        tols = dtype_tols(
+            model[0].weight._fp8_dtype
+            if is_float8_tensor(model[0].weight)
+            else tex.DType.kFloat8E4M3
+        )
+
+    # Check results
+    y_test = y_test.to(dtype=torch.float64, device="cpu")
+    dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+    dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+    torch.testing.assert_close(y_test, y_ref, **tols)
+    torch.testing.assert_close(dx_test, dx_ref, **tols)
+    torch.testing.assert_close(dw_test, dw_ref, **tols)
+    if bias:
+        db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(db_test, db_ref, **tols)
+
+
+def run_parallel_tests(model_config: ModelConfig) -> None:
+    """Run parallel tests"""
+
+    # Distributed process group
+    process_group = world_group()
+    rank = torch.distributed.get_rank(process_group)
+    world_size = torch.distributed.get_world_size(process_group)
+
+    # Linear op
+    for test_config in itertools.product(
+        (False, True),
+        ("column",), #("column", "row"),
+    ):
+        if rank == 0:
+            print(f"Running _test_linear with {test_config=}")
+        bias, tensor_parallel_mode = test_config
+        _test_linear(
+            model_config=model_config,
+            bias=bias,
+            tensor_parallel_mode=tensor_parallel_mode,
+        )
+
+
+# Parallel job sizes
+_world_sizes = []
+if torch.cuda.device_count() > 1:
+    _world_sizes.append(torch.cuda.device_count())
+
+
+@pytest.mark.parametrize("world_size", _world_sizes)
+def test_fuser_ops_with_userbuffers(
+    *,
+    world_size: int,
+    dtype: torch.dtype = torch.float32,
+    fp8: bool = False,
+) -> None:
+    """Launch parallel job that runs parallel tests"""
+
+    # Parallel job launcher
+    command = []
+    if tex.ubuf_built_with_mpi():
+        python_exe = pathlib.Path(sys.executable).resolve()
+        command.extend(
+            ("mpirun", "-np", str(world_size), "--oversubscribe", "--quiet", python_exe)
+        )
+    else:
+        command.extend(("torchrun", f"--nproc_per_node={world_size}"))
+
+    # Script invocation
+    command.extend(
+        (
+            _current_file,
+            "--parallel",
+            "--batch-size",
+            str(world_size),
+            "--num-heads",
+            str(world_size),
+            "--dtype",
+            str(dtype),
+        )
+    )
+    if fp8:
+        command.append("--fp8")
+
+    # Launch parallel job
+    result = subprocess.run(
+        command,
+        check=True,
+    )
+
+
+def main() -> None:
+
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
+    parser.add_argument("--sequence-length", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-heads", type=int, default=16)
+    parser.add_argument("--head-dim", type=int, default=16)
+    parser.add_argument("--dtype", type=str, default="float32")
+    parser.add_argument("--fp8", action="store_true")
+    args = parser.parse_args()
+
+    # Run parallel tests if needed
+    if args.parallel:
+
+        # Model config
+        model_config = ModelConfig(
+            sequence_length=args.sequence_length,
+            batch_size=args.batch_size,
+            num_heads=args.num_heads,
+            head_dim=args.head_dim,
+            dtype=str_to_dtype(args.dtype),
+            fp8=args.fp8,
+        )
+
+        # Initialize Userbuffers
+        group = world_group()  # Initialize NCCL
+        bootstrap_backend = "mpi" if launcher() == "ompi" else "nccl"
+        te.module.base.initialize_ub(
+            [
+                model_config.sequence_length * model_config.batch_size,
+                model_config.num_heads * model_config.head_dim,
+            ],
+            torch.distributed.get_world_size(group),
+            use_fp8=model_config.fp8,
+            dtype=model_config.dtype,
+            bootstrap_backend=bootstrap_backend,
+        )
+
+        # Run tests
+        run_parallel_tests(model_config)
+
+        # Clean up
+        te.module.base.destroy_ub()
+
+if __name__ == "__main__":
+    main()
