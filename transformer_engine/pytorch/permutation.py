@@ -21,7 +21,6 @@ class _moe_permute(torch.autograd.Function):
     """functional Permute"""
 
     workspace = None
-    dtype = None
     max_expanded_token_num = 0
 
     @staticmethod
@@ -68,10 +67,6 @@ class _moe_permute(torch.autograd.Function):
             _moe_permute.max_expanded_token_num = input_max_expanded_token_num
             _moe_permute.workspace = []
 
-        if _moe_permute.dtype != dtype:
-            _moe_permute.dtype = dtype
-            _moe_permute.workspace = []
-
         permuted_act, row_id_map, _moe_permute.workspace = tex.moe_permute_fwd(
             inp,
             dtype,
@@ -89,6 +84,7 @@ class _moe_permute(torch.autograd.Function):
         ctx.row_id_map = row_id_map
         ctx.num_tokens = indices.size(0)
         ctx.topK = indices.size(1)
+        ctx.dtype = dtype
         ctx.fp8 = fp8
         return permuted_act, row_id_map
 
@@ -121,7 +117,7 @@ class _moe_permute(torch.autograd.Function):
         act_grad = None
         if ctx.needs_input_grad[0]:
             act_grad = tex.moe_permute_bwd(
-                permuted_act_grad, _moe_permute.dtype, row_id_map, torch.empty(0), num_tokens, topK
+                permuted_act_grad, ctx.dtype, row_id_map, torch.empty(0), num_tokens, topK
             )
             if fp8:
                 act_grad = Float8Tensor(
