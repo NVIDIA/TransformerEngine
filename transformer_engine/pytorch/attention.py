@@ -3528,21 +3528,19 @@ class UnfusedDotProductAttention(torch.nn.Module):
             mask = attention_mask.squeeze(1).logical_not()
             actual_seqlens_q = mask[:, :, 0].sum(dim=1)
             actual_seqlens_kv = mask[:, 0, :].sum(dim=1)
-            if attn_mask_type == "padding_causal" or (
-                attn_mask_type == "padding_causal_bottom_right" and self.attention_type == "self"
-            ):
-                attention_mask = torch.logical_or(
-                    torch.triu(torch.logical_not(attention_mask), diagonal=1), attention_mask
+            mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+                    1, 1, max_seqlen_q, 1
+                ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
+                    1, 1, 1, max_seqlen_kv
                 )
-            if attn_mask_type == "padding_causal_bottom_right" and self.attention_type == "cross":
-                for b in range(batch_size):
-                    diagonal_offset = actual_seqlens_kv[b] - actual_seqlens_q[b] + 1
-                    attention_mask[b, 0] = torch.logical_or(
-                        torch.triu(
-                            torch.logical_not(attention_mask[b, 0]), diagonal=diagonal_offset
-                        ),
-                        attention_mask[b, 0],
-                    )
+            if attn_mask_type == "padding_causal":
+                attention_mask = torch.logical_or(
+                    torch.where(mask.view(1, 1, max_seqlen_q, max_seqlen_kv)<0, 1, 0), attention_mask
+                )
+            if attn_mask_type == "padding_causal_bottom_right":
+                attention_mask = torch.logical_or(
+                    torch.where(mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)+(actual_seqlens_kv-actual_seqlens_q).view(batch_size,1,1,1)<0, 1, 0), attention_mask
+                )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
