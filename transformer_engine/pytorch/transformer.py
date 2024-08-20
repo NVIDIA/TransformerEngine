@@ -503,7 +503,7 @@ class TransformerLayer(torch.nn.Module):
                    cuda stream for context parallel execution.
         cp_comm_type : str
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather".
+                      Can be "p2p" or "all_gather" or "a2a".
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):

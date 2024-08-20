@@ -3005,6 +3005,68 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         )
 
 
+class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
+    """
+    Attention implementation with context parallelism.
+    Like Ulysses, applying A2A to QKVO.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        is_training,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        dropout_p,
+        softmax_scale,
+        qkv_format,
+        attn_mask_type,
+        attn_bias_type,
+        attn_bias,
+        deterministic,
+        use_fused_attention,
+        window_size,
+        cp_group,
+        cp_stream,
+    ):
+        out = None
+        return out
+
+    @staticmethod
+    def backward(ctx, dout):
+        dq, dk, dv = None, None, None
+        return (
+            None,
+            dq,
+            dk,
+            dv,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 def attn_forward_func_with_cp(
     is_training,
     q,
@@ -3089,6 +3151,9 @@ def attn_forward_func_with_cp(
     elif cp_comm_type == "p2p":
         args += (cp_group, cp_global_ranks, cp_stream)
         out = AttnFuncWithCPAndKVP2P.apply(*args)
+    elif cp_comm_type == "a2a":
+        args += (window_size, cp_group, cp_stream)
+        out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
@@ -5800,7 +5865,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                can overlap two flash attention kernels.
     cp_comm_type : str
                   inter-gpu communication type for context parallelism.
-                  Can be "p2p" or "all_gather".
+                  Can be "p2p" or "all_gather" or "a2a".
     """
 
     def __init__(
@@ -5989,7 +6054,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                    cuda stream for context parallel execution.
         cp_comm_type : str
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather".
+                      Can be "p2p" or "all_gather" or "a2a".
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
@@ -7004,7 +7069,7 @@ class MultiheadAttention(torch.nn.Module):
                    cuda stream for context parallel execution.
         cp_comm_type : str
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather".
+                      Can be "p2p" or "all_gather" or "a2a".
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
