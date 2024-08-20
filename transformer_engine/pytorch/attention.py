@@ -7120,6 +7120,10 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        cu_seqlens_q: Optional[torch.Tensor] = None,
+        cu_seqlens_kv: Optional[torch.Tensor] = None,
+        max_seqlen_q: Optional[int] = None,
+        max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
@@ -7185,6 +7189,18 @@ class MultiheadAttention(torch.nn.Module):
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
+        cu_seqlens_q: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
+                   with shape [batch_size + 1] and dtype torch.int32.
+        cu_seqlens_kv: Optional[torch.Tensor], default = `None`
+                   Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+        max_seqlen_q: Optional[int], default = `None`
+                      Maximum sequence length in `query_layer`.
+                      Calculated from `cu_seqlens_q` if not provided.
+        max_seqlen_kv: Optional[int], default = `None`
+                       Maximum sequence length in `key_layer` and `value_layer`.
+                       Calculated from `cu_seqlens_kv` if not provided.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
         """
@@ -7211,6 +7227,9 @@ class MultiheadAttention(torch.nn.Module):
         # =================================================
 
         if inference_params and self.layer_number is not None:
+            assert (
+                self.qkv_format != "thd"
+            ), "qkv_format == thd is not supported for an inference with KV-cache!"
             if self.layer_number not in inference_params.key_value_memory_dict:
                 inf_max_seq_len = inference_params.max_sequence_length
                 inf_max_batch_size = inference_params.max_batch_size
@@ -7293,13 +7312,18 @@ class MultiheadAttention(torch.nn.Module):
                     dim=split_dim,
                 )
 
-            # query: -> [sq, b, np, hn]
-            # key, value: -> [sq, b, ng, hn]
-            query_layer, key_layer, value_layer = (
-                x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
-                for x in (query_layer, key_layer, value_layer)
-            )
-
+            if self.qkv_format == "thd":
+                query_layer, key_layer, value_layer = (
+                    x.reshape(x.size(0), -1, self.hidden_size_per_attention_head)
+                    for x in (query_layer, key_layer, value_layer)
+                )
+            else:
+                # query: -> [sq, b, np, hn]
+                # key, value: -> [sq, b, ng, hn]
+                query_layer, key_layer, value_layer = (
+                    x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
+                    for x in (query_layer, key_layer, value_layer)
+                )
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -7413,8 +7437,10 @@ class MultiheadAttention(torch.nn.Module):
             key_layer,
             value_layer,
             qkv_format=self.qkv_format,
-            cu_seqlens_q=None,
-            cu_seqlens_kv=None,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
             attention_mask=attention_mask,
             attn_mask_type=attn_mask_type,
             window_size=window_size,
