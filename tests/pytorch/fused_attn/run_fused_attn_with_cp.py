@@ -2,15 +2,18 @@
 #
 # See LICENSE for license information.
 
-import os, sys
+import os, sys, logging
+from contextlib import nullcontext
 import torch
 import torch.distributed as dist
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
+from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.common.recipe import DelayedScaling
 
-dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16}
+dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
 def run_dpa_with_cp(
@@ -56,6 +59,9 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+
+    if dtype == "fp8":
+        fp8_recipe = DelayedScaling(fp8_dpa=True)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -171,18 +177,27 @@ def run_dpa_with_cp(
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
-    out = core_attn(
-        q,
-        k,
-        v,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
-    )
-    out.backward(dout)
+
+    if dtype == "fp8":
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
+
+    with fp8_context:
+        out = core_attn(
+            q,
+            k,
+            v,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias=bias,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+            cu_seqlens_kv_padded=(
+                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
+            ),
+        )
+        out.backward(dout)
 
     # run core_attn wit CP
     q_, k_, v_, dout_, *rest = [
@@ -226,31 +241,34 @@ def run_dpa_with_cp(
     core_attn.set_context_parallel_group(
         cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
     )
-    out_ = core_attn(
-        q_,
-        k_,
-        v_,
-        core_attention_bias_type=config.attn_bias_type,
-        core_attention_bias=bias_,
-        cu_seqlens_q=cu_seqlens_q,
-        cu_seqlens_kv=cu_seqlens_kv,
-        cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-        cu_seqlens_kv_padded=None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1],
-    )
-    out_.backward(dout_)
+
+    if dtype == "fp8":
+        core_attn.reset_fp8_meta_tensors()
+        fp8_context = fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, fp8_group=cp_comm_group)
+    else:
+        fp8_context = nullcontext()
+
+    with fp8_context:
+        out_ = core_attn(
+            q_,
+            k_,
+            v_,
+            core_attention_bias_type=config.attn_bias_type,
+            core_attention_bias=bias_,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
+            cu_seqlens_kv_padded=(
+                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
+            ),
+        )
+        out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
 
     # compare results with and without CP
-    tols = dict(atol=5e-3, rtol=5e-3)
-    if dtype == "bf16":
-        if config.num_heads == config.num_gqa_groups:
-            tols = dict(atol=2.5e-2, rtol=2.5e-2)
-        else:
-            tols = dict(atol=3.5e-2, rtol=3.5e-2)
-
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [
             x.view(
@@ -309,31 +327,54 @@ def run_dpa_with_cp(
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
 
+    if dtype == "bf16":
+        if config.num_heads == config.num_gqa_groups:
+            tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        else:
+            tols = dict(atol=3.5e-2, rtol=3.5e-2)
+    elif dtype == "fp16":
+        tols = dict(atol=5e-3, rtol=5e-3)
+    elif dtype == "fp8":
+        tols = dict(atol=5e-1, rtol=5e-1)
+        rmse_tol = 0.1
+    else:
+        assert False, f"{dtype} is an unsupported dtype!"
+
+    def _rmse(a, b):
+        return torch.sqrt((a - b).square().mean()).item()
+
+    def _error(a, b):
+        if dtype != "fp8":
+            torch.testing.assert_close(a, b, **tols)
+        else:
+            try:
+                torch.testing.assert_close(a, b, **tols)
+            except Exception as e:
+                logging.debug(e)
+
+            rmse = _rmse(a, b)
+            rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
+            assert (
+                rmse < rmse_tol * rmse_range
+            ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+                rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+            )
+
     if qkv_format == "bshd":
-        torch.testing.assert_close(out_[:, 0], out[:, 0], **tols)
-        torch.testing.assert_close(dq_[:, 0], dq[:, 0], **tols)
-        torch.testing.assert_close(dk_[:, 0], dk[:, 0], **tols)
-        torch.testing.assert_close(dv_[:, 0], dv[:, 0], **tols)
-        torch.testing.assert_close(out_[:, 1], out[:, 1], **tols)
-        torch.testing.assert_close(dq_[:, 1], dq[:, 1], **tols)
-        torch.testing.assert_close(dk_[:, 1], dk[:, 1], **tols)
-        torch.testing.assert_close(dv_[:, 1], dv[:, 1], **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a[:, 0], b[:, 0])
+            _error(a[:, 1], b[:, 1])
     elif qkv_format == "sbhd":
-        torch.testing.assert_close(out_[0], out[0], **tols)
-        torch.testing.assert_close(dq_[0], dq[0], **tols)
-        torch.testing.assert_close(dk_[0], dk[0], **tols)
-        torch.testing.assert_close(dv_[0], dv[0], **tols)
-        torch.testing.assert_close(out_[1], out[1], **tols)
-        torch.testing.assert_close(dq_[1], dq[1], **tols)
-        torch.testing.assert_close(dk_[1], dk[1], **tols)
-        torch.testing.assert_close(dv_[1], dv[1], **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a[0], b[0])
+            _error(a[1], b[1])
     elif qkv_format == "thd":
-        torch.testing.assert_close(out_, out, **tols)
-        torch.testing.assert_close(dq_, dq, **tols)
-        torch.testing.assert_close(dk_, dk, **tols)
-        torch.testing.assert_close(dv_, dv, **tols)
+        for a, b in zip([out_, dq_, dk_, dv_], [out, dq, dk, dv]):
+            _error(a, b)
     else:
         assert False, f"{qkv_format} is an unsupported qkv_format!"
+
+    dist.destroy_process_group()
 
 
 def main(**kwargs):

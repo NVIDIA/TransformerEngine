@@ -44,6 +44,7 @@ set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      pycudnn.cpp
      transformer_engine.cpp
+     common.cu
      transpose/cast_transpose.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu

@@ -117,13 +117,6 @@ class _ToFloat8Func(torch.autograd.Function):
         scale_inv: Optional[torch.Tensor] = None,
     ) -> Float8Tensor:
 
-        # Manually compute scale-inverse if needed
-        if scale is not None and scale_inv is None:
-            if isinstance(scale, torch.Tensor):
-                scale_inv = scale.reciprocal()
-            else:
-                scale_inv = 1 / scale
-
         # Extract data from FP8 meta tensors if provided
         if fp8_meta is not None:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
@@ -138,9 +131,6 @@ class _ToFloat8Func(torch.autograd.Function):
                 scale = fp8_meta[fp8_meta_key].scale[fp8_meta_index]
             if amax is None:
                 amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-            if scale_inv is None:
-                scale_inv = fp8_meta[fp8_meta_key].scale_inv[fp8_meta_index]
-                scale_inv = scale_inv.detach().view(1).clone()
 
         # Check input tensor
         tensor = tensor.contiguous().cuda().detach()
@@ -163,8 +153,9 @@ class _ToFloat8Func(torch.autograd.Function):
 
         # Check scale-inverse
         if scale_inv is None:
-            scale_inv = scale.reciprocal()
-        scale_inv = scale_inv.to(device=tensor.device, dtype=torch.float32)
+            scale_inv = torch.empty([1], dtype=torch.float32, device=tensor.device)
+        else:
+            scale_inv = scale_inv.to(device=tensor.device, dtype=torch.float32)
 
         # Check amax
         if amax is None:
@@ -737,19 +728,9 @@ class Float8Tensor(torch.Tensor):
             self._fp8_dtype,
             cast_out=data,
             transpose_out=transpose,
+            scale_inv=self._scale_inv,
             noop_flag=noop_flag,
         )
-        scale = fp8_meta.scale[fp8_meta_index : fp8_meta_index + 1]
-        scale_inv = self._scale_inv
-        if noop_flag is None:
-            torch.reciprocal(scale, out=scale_inv)
-        else:
-            torch.where(
-                noop_flag.bool(),
-                scale_inv,
-                scale.reciprocal(),
-                out=scale_inv,
-            )
         self._transpose_invalid = False
 
     @torch.no_grad()
@@ -853,7 +834,6 @@ class Float8Tensor(torch.Tensor):
                     fp8_meta_index = dst._fp8_meta_index
                     scale = dst._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
                     amax = dst._fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-                    dst._scale_inv.copy_(scale.detach().reciprocal())
 
                 # Cast to FP8
                 if not dst._data.is_contiguous():

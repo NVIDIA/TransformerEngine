@@ -467,7 +467,7 @@ class ActLuFp8Primitive(BasePrimitive):
             local_x, local_amax = ActLuFp8Primitive.impl(
                 x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, global_updated_amax
 
