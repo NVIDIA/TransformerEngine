@@ -30,8 +30,7 @@ W_TP_AXES = "nvte_w_tp"
 W_JOINED_AXES = "nvte_w_joined"
 
 
-def _get_mesh_info(resource: str):
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
@@ -132,12 +131,12 @@ def get_padded_spec(spec, ndim):
     return spec + (None,) * (ndim - len(spec))
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str, mesh: jax.sharding.Mesh):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
     if mesh_resource is not None:
-        _, resource = _get_mesh_info(mesh_resource)
+        _, resource = _get_mesh_info(mesh_resource, mesh)
         return ops(x, resource)
     return x
 
@@ -201,22 +200,22 @@ def global_mesh_resource() -> MeshResource:
     return _GLOBAL_MESH_RESOURCE
 
 
-def all_reduce_sum_along_dp_fsdp(x: jnp.array):
+def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     """
     All-Reduce (Sum) along DP and FSDP mesh axes.
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
-def all_reduce_max_along_all_axes_except_PP(x: jnp.array):
+def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
     """
     All-Reduce (Max) along all mesh axes.
     """
     all_axes = get_all_mesh_axes()
     for axis in all_axes:
         if axis != global_mesh_resource().pp_resource:
-            x = lax_paral_op(x, jax.lax.pmax, axis)
+            x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
 
 

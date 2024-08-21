@@ -48,6 +48,7 @@ from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
+from ..export import is_in_onnx_export_mode
 
 __all__ = ["Linear"]
 
@@ -103,10 +104,14 @@ class _Linear(torch.autograd.Function):
         inputmat = cast_if_needed(inputmat, activation_dtype)
         inputmat_t = None
         inputmat_no_fp8 = inputmat
+        inputmat_scale_inv = None
 
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            if not is_input_fp8:
+            if isinstance(inputmat, Float8Tensor):
+                inputmat_scale_inv = inputmat._scale_inv
+            else:
+                inputmat_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
                 if (
                     not fp8_meta["recipe"].override_linear_precision.wgrad
                     and is_grad_enabled
@@ -119,6 +124,7 @@ class _Linear(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        scale_inv=inputmat_scale_inv,
                     )
                 else:
                     # FP8 input for forward
@@ -127,7 +133,20 @@ class _Linear(torch.autograd.Function):
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        scale_inv=inputmat_scale_inv,
                     )
+
+            # Hack for ONNX export
+            # Note: ONNX models are represented as a graph of tensor
+            # operations, so the in-place scale-inv update doesn't fit
+            # very well. We work around this by making it look like
+            # the scale-inv tensor is initialized with a copy.
+            # Note: ONNX export expects FP8 scales can be represented
+            # with constant ops. However, copying into a buffer
+            # involves an expand op for array broadcasting. We work
+            # around this by filling the buffer instead.
+            if is_in_onnx_export_mode():
+                inputmat_scale_inv.fill_(inputmat_scale_inv.item())
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
@@ -197,8 +216,8 @@ class _Linear(torch.autograd.Function):
                     if isinstance(inputmat_total, Float8Tensor)
                     else inputmat_total
                 ),
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
+                inputmat_scale_inv,
+                0,
                 fp8_dtype_forward,
                 proj_out_pttype,
                 get_workspace(),
@@ -303,10 +322,10 @@ class _Linear(torch.autograd.Function):
             ctx.save_for_backward(
                 saved_inputmat,
                 saved_inputmat_t,
+                inputmat_scale_inv,
                 weight,
                 weight_fp8,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -355,10 +374,10 @@ class _Linear(torch.autograd.Function):
             (
                 inputmat,
                 inputmat_t,
+                inputmat_scale_inv,
                 weight,
                 weight_fp8,
                 main_grad,
-                fwd_scale_inverses,
             ) = ctx.saved_tensors
 
             # Gather intermediate/activation tensors if needed
@@ -511,8 +530,8 @@ class _Linear(torch.autograd.Function):
                                 if isinstance(inputmat_t_total, Float8Tensor)
                                 else inputmat_t_total
                             ),
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            inputmat_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,

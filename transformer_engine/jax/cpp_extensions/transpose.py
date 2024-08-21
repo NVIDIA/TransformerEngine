@@ -390,7 +390,7 @@ class CastTransposePrimitive(BasePrimitive):
                 static_axis_boundary=static_axis_boundary,
                 transpose_axis_boundary=transpose_axis_boundary,
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
 
             return local_cx, local_cxt, global_updated_amax
 
@@ -646,8 +646,8 @@ class DBiasCastTransposePrimitive(BasePrimitive):
                 static_axis_boundary=static_axis_boundary,
                 transpose_axis_boundary=transpose_axis_boundary,
             )
-            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias)
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             return local_out, local_t_out, global_dbias, global_updated_amax
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -981,8 +981,8 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
                     act_enum=act_enum,
                 )
             )
-            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias)
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_dbias = all_reduce_sum_along_dp_fsdp(local_dbias, mesh)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             return local_out, local_t_out, global_dbias, global_updated_amax
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -1225,7 +1225,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
                 static_axis_boundary=static_axis_boundary,
                 act_enum=act_enum,
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             return local_out, local_t_out, global_updated_amax
 
         return mesh, sharded_impl, out_shardings, arg_shardings
