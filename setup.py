@@ -13,17 +13,17 @@ import setuptools
 from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
+from build_tools.te_version import te_version
 from build_tools.utils import (
+    cuda_archs,
     found_cmake,
     found_ninja,
     found_pybind11,
-    remove_dups,
     get_frameworks,
     install_and_import,
+    remove_dups,
     uninstall_te_fw_packages,
 )
-from build_tools.te_version import te_version
-
 
 frameworks = get_frameworks()
 current_file_path = Path(__file__).parent.resolve()
@@ -59,10 +59,11 @@ def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
+
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=[],
+        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())],
     )
 
 
