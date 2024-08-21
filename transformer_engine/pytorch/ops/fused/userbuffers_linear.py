@@ -38,23 +38,44 @@ class UserbuffersLinear(FusedOperation):
         *,
         linear: BasicLinear,
         bias: Optional[Bias],
+        reduce_scatter: Optional[ReduceScatter],
     ) -> None:
 
         # Basic operations that comprise this fused operation
         op_idxs = dict(
             linear=0,
             bias=None,
+            reduce_scatter=None,
         )
         ops = [linear]
         if bias is not None:
             op_idxs["bias"] = len(ops)
             ops.append(bias)
+        if reduce_scatter is not None:
+            op_idxs["reduce_scatter"] = len(ops)
+            ops.append(reduce_scatter)
 
         # Initialize base class
         super().__init__(ops)
 
         # Index of each basic operations
         self._op_idxs: dict[str, Optional[int]] = op_idxs
+
+        # Tensor parallelism configuration
+        self.tensor_parallel_mode: Optional[str]
+        self.tensor_parallel_group: Optional[torch.distributed.ProcessGroup]
+        self.tensor_parallel_size: int
+        self.sequence_parallel: bool
+        if reduce_scatter is None:
+            self.tensor_parallel_mode = linear.tensor_parallel_mode
+            self.tensor_parallel_group = linear.tensor_parallel_group
+            self.tensor_parallel_size = linear.tensor_parallel_size
+            self.sequence_parallel = linear.sequence_parallel
+        else:
+            self.tensor_parallel_mode = "row"
+            self.tensor_parallel_group = reduce_scatter.process_group
+            self.tensor_parallel_size = reduce_scatter.process_group_size
+            self.sequence_parallel = True
 
     @staticmethod
     def _functional_forward(
@@ -66,6 +87,7 @@ class UserbuffersLinear(FusedOperation):
         dtype: Optional[torch.dtype] = None,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
+        tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
         with_fp8_compute: bool = False,
         input_fp8_meta: Optional[dict[str, Any]] = None,
@@ -106,21 +128,9 @@ class UserbuffersLinear(FusedOperation):
         output_dims[0] = -1
         output_dims[-1] = weight_dims[0]
 
-        # Check if FP8 is enabled
-        if with_fp8_compute:
-            if input_fp8_meta is None and not is_float8_tensor(input):
-                raise ValueError("No FP8 metadata was provided for casting input to FP8")
-            if weight_fp8_meta is None and not is_float8_tensor(weight):
-                raise ValueError("No FP8 metadata was provided for casting weight to FP8")
-        else:
-            input_fp8_meta = None
-            weight_fp8_meta = None
-            output_fp8_meta = None
-        with_fp8_output = with_fp8_compute and tensor_parallel_mode != "row"
-        with_fp8_output = with_fp8_output and output_fp8_meta is not None
-
         # Check tensor parallel group
-        tensor_parallel_size = get_distributed_world_size(tensor_parallel_group)
+        if tensor_parallel_size is None:
+            tensor_parallel_size = get_distributed_world_size(tensor_parallel_group)
         if tensor_parallel_size == 1:
             tensor_parallel_mode = None
         if tensor_parallel_mode not in ("column", "row"):
@@ -132,6 +142,20 @@ class UserbuffersLinear(FusedOperation):
             raise RuntimeError(
                 f"Invalid configuration for Userbuffers ({sequence_parallel=})"
             )
+
+        # Check if FP8 is enabled
+        if with_fp8_compute:
+            if input_fp8_meta is None and not is_float8_tensor(input):
+                raise ValueError("No FP8 metadata was provided for casting input to FP8")
+            if weight_fp8_meta is None and not is_float8_tensor(weight):
+                raise ValueError("No FP8 metadata was provided for casting weight to FP8")
+            if output_fp8_meta is None and tensor_parallel_mode == "row":
+                raise ValueError("No FP8 metadata was provided for casting output to FP8")
+        else:
+            input_fp8_meta = None
+            weight_fp8_meta = None
+            output_fp8_meta = None
+        with_fp8_output = with_fp8_compute and output_fp8_meta is not None
 
         # Get Userbuffers communicator
         ub_comm = get_ub(ub_comm_name + "_fprop")
@@ -156,7 +180,6 @@ class UserbuffersLinear(FusedOperation):
                     (False, False): tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS,
                 }[(ub_comm.is_p2p_overlap(), ub_comm.is_atomic_gemm())]
                 if ub_comm.is_fp8_ubuf():
-                    assert output_fp8_meta is not None
                     ub_comm.set_ubuf_scale_inv(output_fp8_meta.scale_inv)
             else:
                 if ub_comm.is_p2p_overlap():
@@ -264,7 +287,7 @@ class UserbuffersLinear(FusedOperation):
                 )
                 y = Float8Tensor(
                     data=ub_global_buffer,
-                    fp8_meta=output_fp8_meta, ### TODO Probably wrong
+                    fp8_meta=output_fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
@@ -388,15 +411,20 @@ class UserbuffersLinear(FusedOperation):
         idx = self._op_idxs["linear"]
         linear_op = self.basic_ops[idx]
         linear_op_ctx = basic_op_ctxs[idx]
-        if self._op_idxs["bias"] is None:
-            bias_op = None
-            bias = None
-        else:
+        bias_op = None
+        bias = None
+        if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
             bias_op = self.basic_ops[idx]
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
+        reduce_scatter_op = None
+        if self._op_idxs["reduce_scatter"] is not None:
+            idx = self._op_idxs["reduce_scatter"]
+            reduce_scatter_op = self.basic_ops[idx]
+            if basic_op_kwargs[idx]:
+                raise ValueError("Reduce-scatter operation forward does not expect keyword arguments")
 
         # FP8 metadata
         with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
@@ -427,9 +455,10 @@ class UserbuffersLinear(FusedOperation):
             bias=bias,
             device=linear_op.device,
             dtype=linear_op.dtype,
-            tensor_parallel_mode=linear_op.tensor_parallel_mode,
-            tensor_parallel_group=linear_op.tensor_parallel_group,
-            sequence_parallel=linear_op.sequence_parallel,
+            tensor_parallel_mode=self.tensor_parallel_mode,
+            tensor_parallel_group=self.tensor_parallel_group,
+            tensor_parallel_size=self.tensor_parallel_size,
+            sequence_parallel=self.sequence_parallel,
             with_fp8_compute=with_fp8_compute,
             input_fp8_meta=input_fp8_meta,
             weight_fp8_meta=weight_fp8_meta,
@@ -455,8 +484,6 @@ def fuse_forward_userbuffers_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
 
-    ### TODO Handle separate RS op
-
     # Scan through ops, fusing if possible
     out = []
     window = []
@@ -464,27 +491,45 @@ def fuse_forward_userbuffers_linear(
         out.extend(window)
 
         # Check if first op is linear
-        op1, _ = ops[0]
-        window = [ops[0]]
-        ops = ops[1:]
-        if not isinstance(op1, BasicLinear):
+        window, ops = ops[:1], ops[1:]
+        if not isinstance(window[0][0], BasicLinear):
             continue
-        if op1.tensor_parallel_mode not in ("column", "row"):
-            continue
-        if op1._userbuffers_options is None:
+        linear = window[0][0]
+        if linear._userbuffers_options is None:
             continue
 
-        # Check if second op is bias
-        op2 = None
-        if op1.tensor_parallel_mode != "row" and ops and isinstance(ops[0][0], Bias):
-            op2, _ = ops[0]
+        # Check if next op is bias
+        bias = None
+        if linear.tensor_parallel_mode != "row" and ops and isinstance(ops[0][0], Bias):
+            bias = ops[0][0]
             window.append(ops[0])
             ops = ops[1:]
 
+        # Check if next op is FP8 cast
+        ### TODO Implement
+
+        # Check if next op is reduce-scatter
+        reduce_scatter = None
+        if linear.tensor_parallel_mode is None and ops and isinstance(ops[0][0], ReduceScatter):
+            reduce_scatter = ops[0][0]
+            window.append(ops[0])
+            ops = ops[1:]
+
+        # Check for invalid combinations
+        if reduce_scatter is None:
+            if linear.tensor_parallel_mode is None:
+                continue
+            if linear.tensor_parallel_mode == "row" and bias is not None:
+                continue
+        else:
+            if linear.tensor_parallel_mode is not None:
+                continue
+
         # Replace window with fused op
         op = UserbuffersLinear(
-            linear=op1,
-            bias=op2,
+            linear=linear,
+            bias=bias,
+            reduce_scatter=reduce_scatter,
         )
         basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]
         window = [(op, basic_op_idxs)]

@@ -262,30 +262,49 @@ def _test_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    userbuffers_options = {}
-    if tensor_parallel_mode == "column":
-        userbuffers_options["comm_name"] = "qkv"
-    if tensor_parallel_mode == "row":
-        userbuffers_options["comm_name"] = "fc1"
     with te.fp8_model_init(enabled=fp8_compute):
-        model = te_ops.Sequential(
-            # te_op.Linear(  ### TODO Restore
-            te_ops.BasicLinear(  ### TODO Remove
+        ops = []
+        linear_op = None
+        bias_op = None
+        if tensor_parallel_mode == "column":
+            userbuffers_options = dict(comm_name="qkv")
+            linear_op = te_ops.BasicLinear(
                 in_features,
                 out_features,
-                #bias=bias, ### TODO Restore
                 device=device,
                 dtype=dtype,
                 tensor_parallel_mode=tensor_parallel_mode,
                 tensor_parallel_group=process_group,
                 sequence_parallel=sequence_parallel,
                 userbuffers_options=userbuffers_options,
-            ),
-        )
+            )
+            ops.append(linear_op)
+            if bias:
+                bias_op = te_ops.Bias(
+                    out_features // world_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                ops.append(bias_op)
+        elif tensor_parallel_mode == "row":
+            userbuffers_options = dict(comm_name="fc1")
+            linear_op = te_ops.BasicLinear(
+                in_features // world_size,
+                out_features,
+                device=device,
+                dtype=dtype,
+                userbuffers_options=userbuffers_options,
+            )
+            ops.append(linear_op)
+            if bias:
+                bias_op = te_ops.Bias(out_features, device=device, dtype=dtype)
+                ops.append(bias_op)
+            ops.append(te_ops.ReduceScatter(process_group))
+        model = te_ops.Sequential(*ops)
     with torch.no_grad():
-        model[0].weight.copy_(w_test)
+        linear_op.weight.copy_(w_test)
         if bias:
-            model[0].bias.copy_(b_test)
+            bias_op.bias.copy_(b_test)
         del w_test
         del b_test
     with te.fp8_autocast(enabled=fp8_compute):
@@ -311,12 +330,12 @@ def _test_linear(
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
     dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-    dw_test = model[0].weight.grad.to(dtype=torch.float64, device="cpu")
+    dw_test = linear_op.weight.grad.to(dtype=torch.float64, device="cpu")
     torch.testing.assert_close(y_test, y_ref, **tols)
     torch.testing.assert_close(dx_test, dx_ref, **tols)
     torch.testing.assert_close(dw_test, dw_ref, **tols)
     if bias:
-        db_test = model[0].bias.grad.to(dtype=torch.float64, device="cpu")
+        db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(db_test, db_ref, **tols)
 
 
@@ -330,7 +349,7 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
 
     # Linear op
     for test_config in itertools.product(
-        (False,),  # (False, True) # bias
+        (False, True),  # bias
         ("column", "row"),  # tensor_parallel_mode
     ):
         if rank == 0:
@@ -350,13 +369,18 @@ if torch.cuda.device_count() > 1:
 
 
 @pytest.mark.parametrize("world_size", _world_sizes)
+@pytest.mark.parametrize("fp8", (False, True))
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
     dtype: torch.dtype = torch.float32,
-    fp8: bool = False,
+    fp8: bool,
 ) -> None:
     """Launch parallel job that runs parallel tests"""
+
+    # Skip invalid configurations
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
 
     # Parallel job launcher
     command = []
@@ -406,7 +430,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=16)
     parser.add_argument("--head-dim", type=int, default=32)
-    parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--dtype", type=str, default="float32")
     parser.add_argument("--fp8", action="store_true")
     args = parser.parse_args()
 

@@ -71,7 +71,6 @@ class Linear(FusedOperation):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
-        userbuffers_options: Optional[dict[str, Any]] = None,
     ) -> None:
 
         # Tensor parallel configuration
@@ -102,7 +101,6 @@ class Linear(FusedOperation):
             sequence_parallel=sequence_parallel,
             rng_state_tracker_function=rng_state_tracker_function,
             accumulate_into_main_grad=accumulate_into_main_grad,
-            userbuffers_options=userbuffers_options,
         )
         bias_kwargs = dict(
             size=out_features,
