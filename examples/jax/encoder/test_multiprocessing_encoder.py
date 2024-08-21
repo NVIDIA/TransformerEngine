@@ -408,7 +408,14 @@ def train_and_evaluate(args):
             state_sharding = get_state_sharding(state, params_sharding)
             labels_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS))
 
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None, None)
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (state_sharding, None, None, None)
             jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
 
@@ -453,7 +460,7 @@ def train_and_evaluate(args):
                         mesh,
                         inputs_pspec,
                         masks_pspec,
-                        labels_sharding.spec
+                        labels_sharding.spec,
                     )
                     if args.process_id == 0:
                         print(

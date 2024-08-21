@@ -274,7 +274,9 @@ def train_and_evaluate(args):
     ), f"Test batch size needs to be multiple of {num_gpu_dp}"
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
-    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)) as mesh:
+    with jax.sharding.Mesh(
+        devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
+    ) as mesh:
 
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -299,7 +301,6 @@ def train_and_evaluate(args):
             inputs_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None))
             masks_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, None, None, None))
 
-
             in_shardings = (None, inputs_sharding, masks_sharding)
             out_shardings = {
                 key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
@@ -315,7 +316,14 @@ def train_and_evaluate(args):
             state_sharding = get_state_sharding(state, params_sharding)
             labels_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS))
 
-            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None, None)
+            in_shardings = (
+                state_sharding,
+                inputs_sharding,
+                masks_sharding,
+                labels_sharding,
+                None,
+                None,
+            )
             out_shardings = (state_sharding, None, None, None)
             jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
 
