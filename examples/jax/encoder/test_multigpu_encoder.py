@@ -244,7 +244,7 @@ def train_and_evaluate(args):
     assert args.test_batch_size % num_gpu == 0, f"Test batch size needs to be multiple of {num_gpu}"
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu,))
-    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)):
+    with jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS,)) as mesh:
 
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
