@@ -624,7 +624,7 @@ class TransformerLayer(torch.nn.Module):
                     Whether to set output tensors to 0 or not before use.
         inference_params: InferenceParams, default = None
                          Inference parameters that are passed to the main model in order
-                         to efficienly calculate and store the context during inference.
+                         to efficiently calculate and store the context during inference.
         """
 
         if self_attn_mask_type is None:
