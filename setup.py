@@ -91,13 +91,13 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        if "pytorch" in frameworks():
+        if "pytorch" in frameworks:
             add_unique(install_reqs, ["torch", "flash-attn>=2.0.6,<=2.5.8,!=2.0.9,!=2.1.0"])
             add_unique(test_reqs, ["numpy", "onnxruntime", "torchvision", "prettytable"])
-        if "jax" in frameworks():
+        if "jax" in frameworks:
             add_unique(install_reqs, ["jax", "flax>=0.7.1"])
             add_unique(test_reqs, ["numpy", "praxis"])
-        if "paddle" in frameworks():
+        if "paddle" in frameworks:
             add_unique(install_reqs, "paddlepaddle-gpu")
             add_unique(test_reqs, "numpy")
 
