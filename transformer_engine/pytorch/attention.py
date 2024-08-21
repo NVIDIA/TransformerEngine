@@ -1439,10 +1439,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             for x in [k_f16, v_f16]
                         ]
                 fp8_meta_kwargs = {}
-                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
-                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
-                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
-                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O_CP]
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_qkv_offset"] = META_QKV
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_o_offset"] = META_O_CP
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
@@ -1494,8 +1498,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fp8_dtype_forward,
                         )
                     if fp8 and use_fused_attention:
-                        fp8_meta_kwargs["amax_s"] = amax_per_step[0][i]
-                        fp8_meta_kwargs["amax_o"] = amax_per_step[1][i]
+                        fp8_meta_kwargs["amax_s"] = amax_per_step
+                        fp8_meta_kwargs["amax_s_offset"] = i
+                        fp8_meta_kwargs["amax_o"] = amax_per_step
+                        fp8_meta_kwargs["amax_o_offset"] = cp_size + i
                     if causal:
                         if i == 0:
                             if pad_between_seqs_q:
