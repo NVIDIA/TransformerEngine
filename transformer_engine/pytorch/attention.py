@@ -4926,7 +4926,11 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 if is_input_fp8:
                     q = cast_from_fp8(
-                        q._data, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward, TE_DType[q.dtype]
+                        q._data,
+                        fp8_meta["scaling_fwd"],
+                        META_QKV,
+                        fp8_dtype_forward,
+                        TE_DType[q.dtype],
                     ).view(q.shape)
                     kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
                     kv = cast_from_fp8(
@@ -7588,7 +7592,10 @@ class MultiheadAttention(torch.nn.Module):
         # Query, Key, and Value
         # ======================
 
-        fp8_mha = FP8GlobalStateManager.is_fp8_enabled() and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
+        fp8_mha = (
+            FP8GlobalStateManager.is_fp8_enabled()
+            and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
+        )
 
         if self.attention_type == "self":
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn]
