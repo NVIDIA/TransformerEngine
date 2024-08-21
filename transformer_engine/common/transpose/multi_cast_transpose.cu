@@ -36,6 +36,8 @@ struct MultiCastTransposeArgs {
   void* scale_list[kMaxTensorsPerKernel];
   // (output) AMAX's of input tensors
   void* amax_list[kMaxTensorsPerKernel];
+  // (output) Inverse of scaling factor for output tensors
+  void* scale_inv_list[kMaxTensorsPerKernel];
   // Input matrix heights
   int num_rows_list[kMaxTensorsPerKernel];
   // Input matrix widths
@@ -82,7 +84,8 @@ __global__ void __launch_bounds__(threads_per_block)
   OType* output_t = reinterpret_cast<OType*>(args.output_t_list[tensor_id]);
   const CType* scale_ptr = reinterpret_cast<CType*>(args.scale_list[tensor_id]);
   const CType scale = scale_ptr == nullptr ? 1 : *scale_ptr;
-  CType* amax = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
+  CType* amax_ptr = reinterpret_cast<CType*>(args.amax_list[tensor_id]);
+  CType* scale_inv_ptr = reinterpret_cast<CType*>(args.scale_inv_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
 
@@ -183,7 +186,10 @@ __global__ void __launch_bounds__(threads_per_block)
   local_amax = reduce_max<n_warps_per_tile>(local_amax, tidy);
   if (tid == 0) {
     static_assert(std::is_same<CType, float>::value);
-    if (amax != nullptr) atomicMaxFloat(amax, local_amax);
+    if (amax_ptr != nullptr) atomicMaxFloat(amax_ptr, local_amax);
+  }
+  if (tile_id == 0 && tid == 0 && scale_inv_ptr != nullptr) {
+    reciprocal<CType>(scale_inv_ptr, scale);
   }
 }
 
@@ -285,6 +291,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list,
     kernel_args.output_t_list[pos] = transposed_output_list[tensor_id]->data.dptr;
     kernel_args.scale_list[pos] = cast_output_list[tensor_id]->scale.dptr;
     kernel_args.amax_list[pos] = cast_output_list[tensor_id]->amax.dptr;
+    kernel_args.scale_inv_list[pos] = cast_output_list[tensor_id]->scale_inv.dptr;
     kernel_args.num_rows_list[pos] = num_rows;
     kernel_args.row_length_list[pos] = row_length;
     kernel_args.block_range[pos + 1] = kernel_args.block_range[pos] + num_tiles;
