@@ -34,11 +34,13 @@ from transformer_engine.pytorch import (
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+sm_80plus = get_device_compute_capability() >= (8, 0)
 
 seed = 1234
 torch.manual_seed(seed)
@@ -1228,7 +1230,8 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
     inp_hidden_states.retain_grad()
 
     m = config.seq_len // 16
-    dist = torch.sort(torch.randint(0, m, (num_gemms - 1,))).values.tolist()
+    dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
+    dist.append(dist[-1])  # Manually add a zero
     m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
     m_splits = m_splits * 16
     assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
@@ -1261,7 +1264,9 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
 @pytest.mark.parametrize("model", model_configs.keys())
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_params):
+def test_grouped_linear_accuracy(
+    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
 
@@ -1276,6 +1281,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
             4 * config.hidden_size,
             bias=True,
             params_dtype=dtype,
+            parallel_mode=parallel_mode,
             device="cuda",
         ).eval()
         sequential_linear = torch.nn.ModuleList(
@@ -1285,6 +1291,7 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
                     4 * config.hidden_size,
                     bias=True,
                     params_dtype=dtype,
+                    parallel_mode=parallel_mode,
                     device="cuda",
                 ).eval()
                 for _ in range(num_gemms)
@@ -1305,6 +1312,20 @@ def test_grouped_linear_accuracy(dtype, num_gemms, bs, model, fp8, fp8_model_par
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("parallel_mode", ["column", "row"])
+def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
+    """Split the tests to reduce CI time"""
+    test_grouped_linear_accuracy(
+        dtype=torch.float32,
+        num_gemms=6,
+        bs=2,
+        model=list(model_configs.keys())[0],
+        fp8=True,
+        fp8_model_params=True,
+        parallel_mode=parallel_mode,
+    )
 
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
@@ -1529,8 +1550,29 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         attn_input_format="bshd",
     )
 
-    for (n1, p1), (n2, p2) in zip(block_bshd.named_parameters(), block_sbhd.named_parameters()):
-        assert torch.all(torch.eq(p1, p2)), f"{n1}, {n2} not identical"
+    torch.manual_seed(0)
+    block_thd = TransformerLayer(
+        config.hidden_size,
+        4 * config.hidden_size,
+        config.num_attention_heads,
+        layernorm_epsilon=config.eps,
+        init_method=init_method,
+        output_layer_init_method=output_layer_init_method,
+        hidden_dropout=0,
+        attention_dropout=0,
+        kv_channels=config.embed,
+        params_dtype=dtype,
+        apply_residual_connection_post_layernorm=False,
+        output_layernorm=False,
+        device="cuda",
+        attn_input_format="thd",
+        self_attn_mask_type="padding_causal",
+    )
+
+    for (n1, p1), (n2, p2), (n3, p3) in zip(
+        block_bshd.named_parameters(), block_sbhd.named_parameters(), block_thd.named_parameters()
+    ):
+        assert torch.all(torch.eq(p1, p2) & torch.eq(p1, p3)), f"{n1}, {n2} and {n3} not identical"
 
     x_sbhd = torch.randn(
         (config.seq_len, bs, config.hidden_size),
@@ -1540,6 +1582,8 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
     )
 
     x_bshd = x_sbhd.transpose(0, 1).contiguous()
+    x_thd = x_bshd.reshape(bs * config.seq_len, config.hidden_size).contiguous()
+    x_thd_cumsum = torch.arange(bs + 1, device="cuda", dtype=torch.int32) * config.seq_len
 
     # To make sure forward is also identical (just in case some module decides
     # to act fancy)
@@ -1556,6 +1600,24 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
         y_bshd,
         y_sbhd.transpose(0, 1).contiguous(),
     )
+
+    # THD is not supported in float32 and on GPUs older than Ampere, skip the test here
+    if dtype != torch.float32 and sm_80plus:
+        # To make sure forward is also identical (just in case some module decides
+        # to act fancy)
+        torch.manual_seed(0)
+        y_thd = block_thd(
+            x_thd,
+            cu_seqlens_q=x_thd_cumsum,
+            cu_seqlens_kv=x_thd_cumsum,
+            max_seqlen_q=config.seq_len,
+            max_seqlen_kv=config.seq_len,
+        )
+
+        torch.testing.assert_close(
+            y_bshd,
+            y_thd.reshape(bs, config.seq_len, config.hidden_size).contiguous(),
+        )
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1593,6 +1655,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
             ffn_hidden_size=4 * D,
             num_attention_heads=H,
             attn_input_format=input_format,
+            self_attn_mask_type="causal",
+            enc_dec_attn_mask_type="causal",
             layer_number=layer_number,
             attention_dropout=0.0,
             params_dtype=dtype,
@@ -1606,6 +1670,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
                 qkv_format=input_format,
                 layer_number=layer_number,
                 attention_dropout=0.0,
+                attn_mask_type="causal",
                 params_dtype=dtype,
             )
             .cuda()
@@ -1813,3 +1878,52 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
     # should be bit-wise match
     for o, o_ref in zip(out, out_ref):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+def test_noncontiguous():
+    def _create2modules(m, params):
+        mod1 = m(*params)
+        mod2 = m(*params)
+        for p1, p2 in zip(mod1.parameters(), mod2.parameters()):
+            p2.data = p1.data.clone()
+
+        return mod1, mod2
+
+    def _run_module(m, inp):
+        out = m(inp)
+        out.sum().backward()
+        ret = [out]
+        if inp.grad is not None:
+            ret.append(inp.grad)
+
+        for p in m.parameters():
+            if p.requires_grad:
+                ret.append(p.grad)
+        return ret
+
+    a = torch.randn((128, 256), device="cuda", requires_grad=True)
+    a = a.T
+    assert not a.is_contiguous(), "The test is supposed to test noncontiguous input."
+
+    b = a.contiguous()
+
+    # LayerNorm
+    ln1, ln2 = _create2modules(LayerNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT, 1e-7)
+
+    # RMSNorm
+    ln1, ln2 = _create2modules(RMSNorm, [128])
+    outT = _run_module(ln1, a)
+    out = _run_module(ln2, b)
+
+    assert_allclose(out, outT, 1e-7)
+
+    # GEMM
+    g1, g2 = _create2modules(Linear, [128, 128])
+    outT = _run_module(g1, a)
+    out = _run_module(g2, b)
+
+    assert_allclose(out, outT, 1e-7)

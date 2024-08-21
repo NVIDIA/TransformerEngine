@@ -26,7 +26,7 @@ from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..attention import AttnBiasType, AttnMaskType, QKVLayout
 from ..attention import is_fused_attn_kernel_available, canonicalize_attn_mask_type
-from ..attention import fused_attn_qkvpacked, fused_attn_kvpacked, fused_attn
+from ..attention import fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
 from ..sharding import get_sharding_map_logic_axis_to_mesh_axis
@@ -268,6 +268,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             scale_factor = self.scale_factor
         del self.scale_factor
 
+        # TODO(rewang): integrate THD format
         if self.qkv_layout == QKVLayout.BS3HD:
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
@@ -277,13 +278,14 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             qkv_packed = query
             if self.transpose_batch_sequence:
                 qkv_packed = qkv_packed.transpose([1, 0, 2, 3, 4])
-            x = fused_attn_qkvpacked(
-                qkv_packed,
+            x = fused_attn(
+                (qkv_packed,),
                 bias,
                 mask,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
+                qkv_layout=self.qkv_layout,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -298,14 +300,14 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 kv_packed = kv_packed.transpose([1, 0, 2, 3, 4])
-            x = fused_attn_kvpacked(
-                query,
-                kv_packed,
+            x = fused_attn(
+                (query, kv_packed),
                 bias,
                 mask,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
+                qkv_layout=self.qkv_layout,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -316,14 +318,13 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 key = key.transpose([1, 0, 2, 3])
                 value = value.transpose([1, 0, 2, 3])
             x = fused_attn(
-                query,
-                key,
-                value,
+                (query, key, value),
                 bias,
                 mask,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
+                qkv_layout=self.qkv_layout,
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
@@ -357,6 +358,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         * Set :attr:`NVTE_FUSED_ATTN=1` for fused attention. If the required cuDNN fused attention
           kernel is not available on the system, a warning will be issued, and the module will
           automatically fall back to the unfused backend.
+
+    .. note::
+        The DotProductAttention default setting enables non-deterministic kernels for reduced
+        workspace requirements and faster computation. Users can disable the non-deterministic
+        kernels via the :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO` environment variable:
+
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` to allow only deterministic kernels.
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=1` to allow non-deterministic kernels (default).
 
     Parameters
     ----------
@@ -1530,19 +1539,20 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
-        Indicate the method to coupled the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
-        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+        Indicate the method to couple the coordinates. It should be one of
+        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`,
+        where :math:`d` is the hidden dimension. 'consecutive' pairs index :math:`i` with
+        :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
         ['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
-         'exclude_output_proj', 'exclude_mlp']
+        'exclude_output_proj', 'exclude_mlp']
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
 

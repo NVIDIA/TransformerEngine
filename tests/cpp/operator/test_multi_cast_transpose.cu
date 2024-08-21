@@ -139,6 +139,10 @@ void performTest() {
                      output_c_list[tensor_id].amax(),
                      ref_amax_list[tensor_id],
                      atol_amax, rtol_amax);
+      compareResults("scale_inv",
+                     output_c_list[tensor_id].scale_inv(),
+                     1.f / output_c_list[tensor_id].scale(),
+                     atol_amax, rtol_amax);
     }
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c",

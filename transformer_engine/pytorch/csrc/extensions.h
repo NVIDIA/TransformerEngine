@@ -40,24 +40,26 @@ NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q
                                                NVTE_Mask_Type attn_mask_type, float p_dropout,
                                                size_t num_attn_heads, size_t num_gqa_groups,
                                                size_t max_seqlen_q, size_t max_seqlen_kv,
-                                               size_t head_dim);
+                                               size_t head_dim_qk, size_t head_dim_v,
+                                               int64_t window_size_left, int64_t window_size_right);
 
 std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     size_t max_seqlen, bool is_training, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    const at::Tensor cu_seqlens, const at::Tensor QKV, const transformer_engine::DType qkv_type,
-    const c10::optional<at::Tensor> cu_seqlens_padded, const c10::optional<at::Tensor> descale_QKV,
-    const c10::optional<at::Tensor> descale_S, const c10::optional<at::Tensor> scale_S,
-    const c10::optional<at::Tensor> scale_O, c10::optional<at::Tensor> amax_S,
-    c10::optional<at::Tensor> amax_O, const c10::optional<at::Tensor> Bias,
-    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
+    const std::vector<int64_t> window_size, const at::Tensor cu_seqlens, const at::Tensor QKV,
+    const transformer_engine::DType qkv_type, const c10::optional<at::Tensor> cu_seqlens_padded,
+    const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
+    const c10::optional<at::Tensor> scale_S, const c10::optional<at::Tensor> scale_O,
+    c10::optional<at::Tensor> amax_S, c10::optional<at::Tensor> amax_O,
+    const c10::optional<at::Tensor> Bias, const c10::optional<at::Generator> rng_gen,
+    size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
     size_t max_seqlen, float attn_scale, float p_dropout, bool set_zero, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, const at::Tensor cu_seqlens,
-    const at::Tensor QKV, const at::Tensor O, const at::Tensor dO,
-    const transformer_engine::DType qkv_type, const transformer_engine::DType dqkv_type,
-    const std::vector<at::Tensor> Aux_CTX_Tensors,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
+    bool deterministic, const at::Tensor cu_seqlens, const at::Tensor QKV, const at::Tensor O,
+    const at::Tensor dO, const transformer_engine::DType qkv_type,
+    const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
     const c10::optional<at::Tensor> cu_seqlens_padded, const c10::optional<at::Tensor> descale_QKV,
     const c10::optional<at::Tensor> descale_S, const c10::optional<at::Tensor> descale_O,
     const c10::optional<at::Tensor> descale_dO, const c10::optional<at::Tensor> descale_dP,
@@ -68,8 +70,9 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
 std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
-    const at::Tensor Q, const at::Tensor KV, const transformer_engine::DType qkv_type,
+    NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
+    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
+    const at::Tensor KV, const transformer_engine::DType qkv_type,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
     const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
@@ -81,10 +84,10 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
 std::vector<at::Tensor> fused_attn_bwd_kvpacked(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
-    const at::Tensor KV, const at::Tensor O, const at::Tensor dO,
-    const transformer_engine::DType qkv_type, const transformer_engine::DType dqkv_type,
-    const std::vector<at::Tensor> Aux_CTX_Tensors,
+    const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
+    const at::Tensor cu_seqlens_kv, const at::Tensor Q, const at::Tensor KV, const at::Tensor O,
+    const at::Tensor dO, const transformer_engine::DType qkv_type,
+    const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
     const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
@@ -96,9 +99,10 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
 std::vector<at::Tensor> fused_attn_fwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type attn_mask_type, const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv,
-    const at::Tensor Q, const at::Tensor K, const at::Tensor V,
-    const transformer_engine::DType qkv_type, const c10::optional<at::Tensor> cu_seqlens_q_padded,
+    NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
+    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
+    const at::Tensor K, const at::Tensor V, const transformer_engine::DType qkv_type,
+    const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
     const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
     const c10::optional<at::Tensor> scale_S, const c10::optional<at::Tensor> scale_O,
@@ -109,10 +113,10 @@ std::vector<at::Tensor> fused_attn_fwd(
 std::vector<at::Tensor> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
-    const at::Tensor K, const at::Tensor V, const at::Tensor O, const at::Tensor dO,
-    const transformer_engine::DType qkv_type, const transformer_engine::DType dqkv_type,
-    const std::vector<at::Tensor> Aux_CTX_Tensors,
+    const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
+    const at::Tensor cu_seqlens_kv, const at::Tensor Q, const at::Tensor K, const at::Tensor V,
+    const at::Tensor O, const at::Tensor dO, const transformer_engine::DType qkv_type,
+    const transformer_engine::DType dqkv_type, const std::vector<at::Tensor> Aux_CTX_Tensors,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
     const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
@@ -195,6 +199,11 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
                                 std::vector<at::Tensor> amax_output_list,
                                 std::vector<at::Tensor> scale_inv_output_list,
                                 transformer_engine::DType otype);
+
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_transpose_alloc(
+    std::vector<at::Tensor> input_list, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
+    std::vector<int> scale_indices, std::vector<int> amax_indices,
+    std::vector<int> scale_inv_indices, transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);
 
@@ -434,11 +443,18 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python);
 
+using transformer_engine::DType;
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay);
+
+void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
+                                std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                                const float beta1, const float beta2, const float epsilon,
+                                const int step, const int mode, const int bias_correction,
+                                const float weight_decay, DType fp8_dtype);
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        std::vector<std::vector<at::Tensor>> tensor_lists,

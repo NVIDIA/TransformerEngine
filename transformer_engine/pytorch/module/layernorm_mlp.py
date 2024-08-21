@@ -13,6 +13,7 @@ from torch.nn import init
 
 from .base import (
     get_workspace,
+    _ub_communicators,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -149,7 +150,9 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
-            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+            ln_out = torch.empty_like(
+                inputmat, dtype=ln_out_dtype, memory_format=torch.contiguous_format
+            )
         ub_overlap_rs = False if tp_world_size == 1 else ub_overlap_rs
 
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -425,9 +428,6 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if is_grad_enabled:
             if cpu_offloading:
-                if fuse_wgrad_accumulation:
-                    fc1_weight.main_grad.weight_offloading = True
-                    fc2_weight.main_grad.weight_offloading = True
                 if fp8 and fc1_weight_fp8 is not None:
                     fc1_weight_fp8.weight_offloading = True
                 if fp8 and fc2_weight_fp8 is not None:
@@ -570,8 +570,8 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                fc1_weight = Parameter(fc1_weight, False)
-                fc2_weight = Parameter(fc2_weight, False)
+                fc1_weight = Parameter(fc1_weight, fc1_weight.requires_grad)
+                fc2_weight = Parameter(fc2_weight, fc2_weight.requires_grad)
 
                 fc1_weight.main_grad = fc1_weight_main_grad
                 fc2_weight.main_grad = fc2_weight_main_grad
@@ -1298,7 +1298,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
-            and not get_ub("fc1_fprop").is_atomic_gemm()
+            and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
         )
 
         if tp_group is None:

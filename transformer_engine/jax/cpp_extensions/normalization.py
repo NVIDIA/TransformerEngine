@@ -2,11 +2,12 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for normalization"""
-from functools import partial, reduce
+from functools import partial, reduce, cache
 import operator
 import os
 import warnings
 
+import jax
 import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters import mlir
@@ -25,6 +26,7 @@ from .misc import (
     jax_dtype_to_ir_dtype,
     te_dtype_to_jax_dtype,
 )
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -36,6 +38,18 @@ __all__ = [
     "layernorm_fwd_fp8",
     "rmsnorm_fwd_fp8",
 ]
+
+
+@cache
+def get_forward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
+    return int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+
+
+@cache
+def get_backward_sm_margin():
+    """Retrieves the number of stream multiprocessors (SM) reserved for other kernels"""
+    return int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
 
 
 class LayerNormFwdPrimitive(BasePrimitive):
@@ -75,6 +89,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
             True,
             kwargs["zero_centered_gamma"],
             kwargs["epsilon"],
+            get_forward_sm_margin(),
         )
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -134,7 +149,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, b_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -239,12 +254,77 @@ class LayerNormFwdPrimitive(BasePrimitive):
 register_primitive(LayerNormFwdPrimitive)
 
 
+def _jax_layernorm(x, gamma, beta, zero_centered_gamma, eps):
+    """
+    JAX native layernorm implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    mean = jnp.mean(x_, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    normed_input = (x_ - mean) * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.0
+    return jnp.asarray(normed_input * gamma + beta).astype(x.dtype)
+
+
+def _jax_rmsnorm(x, gamma, zero_centered_gamma, eps):
+    """
+    JAX native rmsnorm implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    normed_input = x_ * jax.lax.rsqrt(var + eps)
+    if zero_centered_gamma:
+        gamma += 1.0
+    return jnp.asarray(normed_input * gamma).astype(x.dtype)
+
+
+def _jax_layernorm_fp8(x, gamma, beta, scale, amax, out_dtype, zero_centered_gamma, eps):
+    """
+    JAX native layernorm fp8 implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    mean = jnp.mean(x_, axis=-1, keepdims=True)
+    var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
+    rsigma = jax.lax.rsqrt(var + eps)
+    normed_input = (x_ - mean) * rsigma
+    if zero_centered_gamma:
+        gamma += 1.0
+    output = normed_input * gamma + beta
+    casted_output, updated_amax = _jax_cast_fp8(output, scale, amax, out_dtype=out_dtype)
+    return casted_output, jnp.squeeze(mean, axis=-1), jnp.squeeze(rsigma, axis=-1), updated_amax
+
+
+def _jax_rmsnorm_fp8(x, gamma, scale, amax, out_dtype, zero_centered_gamma, eps):
+    """
+    JAX native rmsnorm fp8 implementation
+    """
+    x_ = jnp.asarray(x, jnp.float32)
+    var = jnp.mean(jnp.square(x_), axis=-1, keepdims=True)
+    rsigma = jax.lax.rsqrt(var + eps)
+    normed_input = x_ * rsigma
+    if zero_centered_gamma:
+        gamma += 1.0
+    output = normed_input * gamma
+    casted_output, updated_amax = _jax_cast_fp8(output, scale, amax, out_dtype=out_dtype)
+    return casted_output, jnp.squeeze(rsigma, axis=-1), updated_amax
+
+
 def layernorm_fwd(
     x: jnp.ndarray, gamma: jnp.ndarray, beta: jnp.ndarray, zero_centered_gamma: bool, epsilon: float
 ):
     """
     Wrapper for TE layernorm fwd
     """
+    if not LayerNormFwdPrimitive.enabled():
+        x_ = jnp.asarray(x, jnp.float32)
+        mu = jnp.mean(x_, axis=-1, keepdims=True)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_ - mu), axis=-1, keepdims=True) + epsilon)
+        return (
+            _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon),
+            jnp.squeeze(mu, axis=-1),
+            jnp.squeeze(rsigma, axis=-1),
+        )
     return LayerNormFwdPrimitive.outer_primitive.bind(
         x, gamma, beta, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
     )
@@ -287,6 +367,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
                 True,
                 kwargs["zero_centered_gamma"],
                 kwargs["epsilon"],
+                get_backward_sm_margin(),
             )
         )
         wkspace_aval = dx_aval.update(
@@ -353,7 +434,7 @@ class LayerNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, mu_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_backward_sm_margin()
 
         wkspace_aval, barrier_aval, dgamma_part_aval, dbeta_part_aval = ctx.avals_out[-4:]
         opaque = transformer_engine_jax.pack_norm_descriptor(
@@ -452,8 +533,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
             local_dx, local_dgamma, local_dbeta = LayerNormBwdPrimitive.impl(
                 dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
             )
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
-            global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
+            global_dbeta = all_reduce_sum_along_dp_fsdp(local_dbeta, mesh)
             return local_dx, global_dgamma, global_dbeta
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -468,12 +549,21 @@ def layernorm_bwd(
     mu: jnp.ndarray,
     rsigma: jnp.ndarray,
     gamma: jnp.ndarray,
+    beta: jnp.ndarray,
     zero_centered_gamma: bool,
     epsilon: float,
 ):
     """
     Wrapper for TE layernorm bwd
     """
+    if not LayerNormBwdPrimitive.enabled():
+        _, vjp_func = jax.vjp(
+            partial(_jax_layernorm, zero_centered_gamma=zero_centered_gamma, eps=epsilon),
+            x,
+            gamma,
+            beta,
+        )
+        return vjp_func(dz)
     return LayerNormBwdPrimitive.outer_primitive.bind(
         dz, x, mu, rsigma, gamma, zero_centered_gamma=zero_centered_gamma, epsilon=epsilon
     )
@@ -515,6 +605,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
             False,
             False,
             kwargs["epsilon"],
+            get_forward_sm_margin(),
         )
         wkspace_aval = out_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -562,7 +653,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -655,6 +746,12 @@ def rmsnorm_fwd(x: jnp.ndarray, gamma: jnp.ndarray, epsilon: float):
     """
     Wrapper for TE rmsnorm fwd
     """
+    if not RmsNormFwdPrimitive.enabled():
+        x_ = jnp.asarray(x, jnp.float32)
+        rsigma = jax.lax.rsqrt(jnp.mean(jnp.square(x_), axis=-1, keepdims=True) + epsilon)
+        return _jax_rmsnorm(x, gamma, zero_centered_gamma=False, eps=epsilon), jnp.squeeze(
+            rsigma, axis=-1
+        )
     return RmsNormFwdPrimitive.outer_primitive.bind(x, gamma, epsilon=epsilon)
 
 
@@ -694,6 +791,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
                 False,
                 False,
                 kwargs["epsilon"],
+                get_backward_sm_margin(),
             )
         )
         wkspace_aval = dx_aval.update(
@@ -747,7 +845,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
         operand_shapes = [dz_shape, rsigma_shape, x_shape, g_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_backward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -837,7 +935,7 @@ class RmsNormBwdPrimitive(BasePrimitive):
 
         def sharded_impl(dz, x, rsigma, gamma):
             local_dx, local_dgamma = RmsNormBwdPrimitive.impl(dz, x, rsigma, gamma, epsilon=epsilon)
-            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma)
+            global_dgamma = all_reduce_sum_along_dp_fsdp(local_dgamma, mesh)
             return local_dx, global_dgamma
 
         return mesh, sharded_impl, out_shardings, arg_shardings
@@ -852,6 +950,11 @@ def rmsnorm_bwd(
     """
     Wrapper for TE layernorm bwd
     """
+    if not RmsNormBwdPrimitive.enabled():
+        _, vjp_func = jax.vjp(
+            partial(_jax_rmsnorm, zero_centered_gamma=False, eps=epsilon), x, gamma
+        )
+        return vjp_func(dz)
     return RmsNormBwdPrimitive.outer_primitive.bind(dz, x, rsigma, gamma, epsilon=epsilon)
 
 
@@ -902,6 +1005,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             True,
             zero_centered_gamma,
             epsilon,
+            get_forward_sm_margin(),
         )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
@@ -989,7 +1093,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
         ]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -1124,7 +1228,7 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 zero_centered_gamma=zero_centered_gamma,
                 epsilon=epsilon,
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, local_mu, local_rsigma, global_updated_amax
 
@@ -1148,6 +1252,17 @@ def layernorm_fwd_fp8(
     """
     Wrapper for TE layernorm fwd (fp8 out)
     """
+    if not LayerNormFwdFp8Primitive.enabled():
+        return _jax_layernorm_fp8(
+            x,
+            gamma,
+            beta,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            zero_centered_gamma=zero_centered_gamma,
+            eps=epsilon,
+        )
     return LayerNormFwdFp8Primitive.outer_primitive.bind(
         x,
         gamma,
@@ -1198,6 +1313,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             False,
             False,
             epsilon,
+            get_forward_sm_margin(),
         )
 
         out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
@@ -1267,7 +1383,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
         args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        sm_margin = int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", "0"))
+        sm_margin = get_forward_sm_margin()
 
         opaque = transformer_engine_jax.pack_norm_descriptor(
             batch_size,
@@ -1365,7 +1481,7 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             local_x, local_rsigma, local_amax = RmsNormFwdFp8Primitive.impl(
                 x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, local_rsigma, global_updated_amax
 
@@ -1387,6 +1503,10 @@ def rmsnorm_fwd_fp8(
     """
     Wrapper for TE rmsnorm fwd (fp8 out)
     """
+    if not RmsNormFwdFp8Primitive.enabled():
+        return _jax_rmsnorm_fp8(
+            x, gamma, scale, amax, out_dtype=out_dtype, zero_centered_gamma=False, eps=epsilon
+        )
     return RmsNormFwdFp8Primitive.outer_primitive.bind(
         x, gamma, amax, scale, scale_inv, out_dtype=out_dtype, epsilon=epsilon
     )

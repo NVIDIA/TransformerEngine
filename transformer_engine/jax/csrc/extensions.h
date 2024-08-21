@@ -13,8 +13,6 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <transformer_engine/activation.h>
-#include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
@@ -27,22 +25,13 @@
 
 #include "common/common.h"
 #include "common/util/logging.h"
+#include "extensions/ffi.h"
+#include "extensions/misc.h"
+#include "transformer_engine/activation.h"
 #include "utils.h"
 
 namespace transformer_engine {
 namespace jax {
-
-constexpr int kMaxNumDim = 8;
-
-// TODO: Rename Shape to ???
-struct Shape {
-  int num_dim;
-  size_t dims[kMaxNumDim];
-
-  void from_vector(const std::vector<size_t> &shape);
-
-  std::vector<size_t> to_vector() const;
-};
 
 // Phuong: These 3 functions need to stay in the header file for compilation purpose
 // 1.
@@ -61,8 +50,6 @@ const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
   }
   return reinterpret_cast<const T *>(opaque);
 }
-
-std::vector<size_t> MakeShapeVector(NVTEShape shape);
 
 // Packing
 
@@ -137,6 +124,7 @@ struct CustomCallFusedAttnDescriptor {
   size_t num_gqa_groups;
   size_t bias_heads;
   size_t head_dim;
+  size_t max_segments_per_seq;
   size_t wkspace_size;
   float scaling_factor;
   float dropout_probability;
@@ -146,14 +134,16 @@ struct CustomCallFusedAttnDescriptor {
   DType dtype;
   DType wkspace_dtype;
   bool is_training;
+  bool deterministic;
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t input_batch, size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
-    size_t wkspace_size, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
-    bool is_training);
+    size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
+    bool deterministic);
 
 // Transpose
 
@@ -163,6 +153,8 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
 
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -175,6 +167,10 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                         DType in_dtype, DType out_dtype);
@@ -190,7 +186,7 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
 pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                   DType in_dtype, DType w_dtype, DType out_dtype,
                                                   bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps);
+                                                  float eps, int sm_margin);
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -200,7 +196,7 @@ void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
                                                    bool is_layer_norm, bool zero_centered_gamma,
-                                                   float eps);
+                                                   float eps, int sm_margin);
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -249,7 +245,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training);
+    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
+    size_t max_segments_per_seq);
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -257,7 +254,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training);
+    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
+    bool deterministic, size_t max_segments_per_seq);
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 

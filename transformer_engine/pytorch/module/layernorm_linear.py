@@ -46,8 +46,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
-
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+from ..export import is_in_onnx_export_mode
 
 __all__ = ["LayerNormLinear"]
 
@@ -119,15 +118,22 @@ class _LayerNormLinear(torch.autograd.Function):
             if return_layernorm_output:
                 # First prepare LN output in higher precision,
                 # which will be later copied to a FP8 UB
-                ln_out = torch.empty_like(inputmat)
+                ln_out = torch.empty_like(inputmat, memory_format=torch.contiguous_format)
             else:
                 ln_out = ub_obj_lnout.get_ubuf_output(0)
         else:
             ln_out_dtype = torch.uint8 if (fp8 and not return_layernorm_output) else inputmat.dtype
-            ln_out = torch.empty_like(inputmat, dtype=ln_out_dtype)
+            ln_out = torch.empty_like(
+                inputmat, dtype=ln_out_dtype, memory_format=torch.contiguous_format
+            )
 
+        # Objects for FP8 cast
         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+        ln_out_scale_inv = None
+        if fp8:
+            ln_out_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
 
+        # Launch normalization kernel
         ln_out, mu, rsigma = _apply_normalization(
             inputmat,
             ln_out,
@@ -140,6 +146,7 @@ class _LayerNormLinear(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
             is_grad_enabled,
+            fp8_scale_inv=ln_out_scale_inv,
         )
 
         # Column Parallel Linear
@@ -172,14 +179,16 @@ class _LayerNormLinear(torch.autograd.Function):
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                         out=ln_out_fp8,
+                        scale_inv=ln_out_scale_inv,
                     )
-                    ln_out = ln_out_fp8
+                    ln_out = torch.empty_like(ln_out_fp8)
                 else:
                     ln_out_total = tex.cast_to_fp8(
                         ln_out_total,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
+                        scale_inv=ln_out_scale_inv,
                     )
                     if ln_out_gathered:
                         rank = torch.distributed.get_rank(tp_group)
@@ -190,9 +199,6 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out = ln_out_total
 
         if fp8:
-            if _NVTE_DEBUG:
-                print("[LayerNormLinear]: using FP8 forward")
-
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             bias = cast_if_needed(bias, bias_dtype) if use_bias else bias
 
@@ -201,6 +207,18 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8 = weight
 
             assert isinstance(weight_fp8, Float8Tensor)
+
+            # Hack for ONNX export
+            # Note: ONNX models are represented as a graph of tensor
+            # operations, so the in-place scale-inv update doesn't fit
+            # very well. We work around this by making it look like
+            # the scale-inv tensor is initialized with a copy.
+            # Note: ONNX export expects FP8 scales can be represented
+            # with constant ops. However, copying into a buffer
+            # involves an expand op for array broadcasting. We work
+            # around this by filling the buffer instead.
+            if is_in_onnx_export_mode():
+                ln_out_scale_inv.fill_(ln_out_scale_inv.item())
 
             if fp8_meta["recipe"].fp8_mha:
                 out_index, meta_tensor, output_te_dtype, output_dtype = (
@@ -222,8 +240,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 0,
                 weight_fp8._fp8_dtype,
                 ln_out_total,
-                fp8_meta["scaling_fwd"].scale_inv,
-                tex.FP8FwdTensors.GEMM1_INPUT,
+                ln_out_scale_inv,
+                0,
                 fp8_dtype_forward,
                 output_dtype,
                 get_workspace(),
@@ -247,9 +265,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     dtype=activation_dtype,
                 )
         else:
-            if _NVTE_DEBUG:
-                print("[LayerNormLinear]: using non-FP8 forward")
-
             # Cast for native AMP
             weight = cast_if_needed(weight, activation_dtype)
             bias = cast_if_needed(bias, activation_dtype) if use_bias else bias
@@ -280,8 +295,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             if cpu_offloading:
-                if fuse_wgrad_accumulation:
-                    weight.main_grad.weight_offloading = True
                 if fp8 and weight_fp8 is not None:
                     weight_fp8.weight_offloading = True
                 ln_weight.weight_offloading = True
@@ -314,7 +327,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8,
                 weight.main_grad if cpu_offloading and fuse_wgrad_accumulation else None,
                 ln_out if weight.requires_grad else None,
-                fp8_meta["scaling_fwd"].scale_inv.clone() if fp8 else None,
+                ln_out_scale_inv,
             )
 
             ctx.activation_dtype = activation_dtype
@@ -385,7 +398,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_fp8,
                 main_grad,
                 ln_out,
-                fwd_scale_inverses,
+                ln_out_scale_inv,
             ) = ctx.saved_tensors
 
             # Gather intermediate/activation tensors if needed
@@ -401,7 +414,7 @@ class _LayerNormLinear(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = torch.nn.Parameter(weight, False)
+                weight = torch.nn.Parameter(weight, weight.requires_grad)
                 weight.main_grad = main_grad
 
             if ctx.ub_overlap_rs_dgrad:
@@ -490,9 +503,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj = None
 
             if ctx.fp8:
-                if _NVTE_DEBUG:
-                    print("[LayerNormLinear]: using FP8 backward")
-
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
                 out_index, meta_tensor, out_te_type, out_type = (
@@ -535,9 +545,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 clear_tensor_data(grad_output_c)
             else:
-                if _NVTE_DEBUG:
-                    print("[LayerNormLinear]: using non-FP8 backward")
-
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
                 _, _, _ = tex.gemm(
                     weight,
@@ -584,8 +591,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
                         wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            ln_out_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             (
                                 grad_output_t._data
@@ -610,8 +617,8 @@ class _LayerNormLinear(torch.autograd.Function):
                     else:
                         ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
                             ln_out_total,
-                            fwd_scale_inverses,
-                            tex.FP8FwdTensors.GEMM1_INPUT,
+                            ln_out_scale_inv,
+                            0,
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
                         )

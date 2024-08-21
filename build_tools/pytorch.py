@@ -67,25 +67,30 @@ def setup_pytorch_extension(
     except FileNotFoundError:
         print("Could not determine CUDA Toolkit version")
     else:
-        if version >= (11, 2):
-            nvcc_flags.extend(["--threads", "4"])
-        if version >= (11, 0):
-            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
-        if version >= (11, 8):
-            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
+        if version < (12, 0):
+            raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
+        nvcc_flags.extend(
+            (
+                "--threads",
+                os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
+                "-gencode",
+                "arch=compute_80,code=sm_80",
+                "-gencode",
+                "arch=compute_90,code=sm_90",
+            )
+        )
 
-    # Libraries -- PyTorch CUDAExtension links to libcudart.so but not to libcuda.so
-    cuda_home, _ = cuda_path()
-    library_dirs = [cuda_home / "compat" / "lib"]
-    libraries = ["cuda"]
-    if os.getenv("UB_MPI_BOOTSTRAP"):
+    # Libraries
+    library_dirs = []
+    libraries = []
+    if os.getenv("NVTE_UB_WITH_MPI"):
         assert (
             os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME must be set when compiling with UB_MPI_BOOTSTRAP=1"
+        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         mpi_home = Path(os.getenv("MPI_HOME"))
         include_dirs.append(mpi_home / "include")
-        cxx_flags.append("-DUB_MPI_BOOTSTRAP")
-        nvcc_flags.append("-DUB_MPI_BOOTSTRAP")
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+        nvcc_flags.append("-DNVTE_UB_WITH_MPI")
         library_dirs.append(mpi_home / "lib")
         libraries.append("mpi")
 

@@ -4,12 +4,14 @@
 """JAX/TE custom ops for activation"""
 from typing import Tuple, Sequence, Union, Callable
 import operator
-from functools import reduce
+from functools import reduce, partial
 
+import jax
 import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import NVTE_Activation_Type
@@ -21,7 +23,9 @@ from .misc import (
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
     get_padded_spec,
+    is_ffi_enabled,
 )
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
 
@@ -40,6 +44,35 @@ ActivationEnum = {
     ("squared_relu",): NVTE_Activation_Type.SRELU,
     ("squared_relu", "linear"): NVTE_Activation_Type.SREGLU,
 }
+
+
+def _convert_to_activation_function(fn_or_string):
+    """Convert a string to an activation function."""
+    if fn_or_string == "linear":
+        return lambda x: x
+    if fn_or_string == "quick_gelu":
+        return lambda x: jax.nn.sigmoid(1.702 * x) * x
+    if fn_or_string == "squared_relu":
+        return lambda x: reduce(operator.mul, [jax.nn.relu(x), jax.nn.relu(x)])
+    if isinstance(fn_or_string, str):
+        return getattr(jax.nn, fn_or_string)
+    if callable(fn_or_string):
+        return fn_or_string
+    raise ValueError(f"Unsupported {fn_or_string} to an activation function")
+
+
+def _jax_act_lu(inputs, activation_type):
+    """
+    JAX native activation implementation
+    """
+    x = jnp.split(inputs, len(activation_type), axis=-2)
+    acts = []
+    for idx, act_fn in enumerate(activation_type):
+        x_i = _convert_to_activation_function(act_fn)(x[idx])
+        acts.append(x_i)
+    x = reduce(operator.mul, acts)
+    x = jnp.squeeze(x, axis=-2)
+    return x
 
 
 class ActLuPrimitive(BasePrimitive):
@@ -78,27 +111,31 @@ class ActLuPrimitive(BasePrimitive):
         """
         (x_aval,) = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        out_shape = ir_x_shape[:-2] + [ir_x_shape[-1]]
+        if is_ffi_enabled():
+            name = "te_act_lu_ffi"
+            out = ffi.ffi_lowering(name)(ctx, x, act_enum=act_enum)
+        else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            out_shape = ir_x_shape[:-2] + [ir_x_shape[-1]]
 
-        out_types = [
-            ir.RankedTensorType.get(out_shape, ir_x_type.element_type),
-        ]
-        operands = [x]
-        operand_shapes = [ir_x_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [
+                ir.RankedTensorType.get(out_shape, ir_x_type.element_type),
+            ]
+            operands = [x]
+            operand_shapes = [ir_x_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        hidden_size = ir_x_shape[-1]
-        batch_size = reduce(operator.mul, ir_x_shape[:-2])
-        in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (batch_size, hidden_size), in_dtype, in_dtype, act_enum
-        )
+            hidden_size = ir_x_shape[-1]
+            batch_size = reduce(operator.mul, ir_x_shape[:-2])
+            in_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                (batch_size, hidden_size), in_dtype, in_dtype, act_enum
+            )
 
-        out = custom_caller(ActLuPrimitive.name, args, opaque, False)
+            out = custom_caller(ActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(x, act_enum):
@@ -155,7 +192,10 @@ def act_lu(inputs: jnp.ndarray, activation_type: Sequence[Union[str, Callable]])
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
-    act_type_id = ActivationEnum[activation_type]
+    if not ActLuPrimitive.enabled():
+        return _jax_act_lu(inputs, activation_type)
+
+    act_type_id = ActivationEnum[activation_type].value
     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_type_id)
 
 
@@ -197,36 +237,40 @@ class DActLuPrimitive(BasePrimitive):
         in_aval, gi_aval = ctx.avals_in
         assert in_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert gi_aval.dtype == in_aval.dtype
-        ir_in_type = ir.RankedTensorType(dz.type)
-        ir_in_shape = ir_in_type.shape
-        gi_type = ir.RankedTensorType(x.type)
-        gi_shape = gi_type.shape
-        #        assert ir_in_shape == gi_shape
-        for axis in range(len(ir_in_shape) - 1):
-            assert ir_in_shape[axis] == gi_shape[axis]
+        if is_ffi_enabled():
+            name = "te_dact_lu_ffi"
+            out = ffi.ffi_lowering(name)(ctx, dz, x, act_enum=act_enum)
+        else:
+            ir_in_type = ir.RankedTensorType(dz.type)
+            ir_in_shape = ir_in_type.shape
+            gi_type = ir.RankedTensorType(x.type)
+            gi_shape = gi_type.shape
+            #        assert ir_in_shape == gi_shape
+            for axis in range(len(ir_in_shape) - 1):
+                assert ir_in_shape[axis] == gi_shape[axis]
 
-        ir_batch_size = reduce(operator.mul, ir_in_shape[:-1])
-        i_hidden_size = ir_in_shape[-1]
-        g_hidden_size = gi_shape[-1]
-        assert i_hidden_size == g_hidden_size
-        out_dtype = ir_in_type.element_type
-        out_shape = gi_shape
+            ir_batch_size = reduce(operator.mul, ir_in_shape[:-1])
+            i_hidden_size = ir_in_shape[-1]
+            g_hidden_size = gi_shape[-1]
+            assert i_hidden_size == g_hidden_size
+            out_dtype = ir_in_type.element_type
+            out_shape = gi_shape
 
-        out_types = [
-            ir.RankedTensorType.get(out_shape, out_dtype),
-        ]
-        operands = [dz, x]
-        operand_shapes = [ir_in_shape, gi_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [
+                ir.RankedTensorType.get(out_shape, out_dtype),
+            ]
+            operands = [dz, x]
+            operand_shapes = [ir_in_shape, gi_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
-        )
+            in_dtype = jax_dtype_to_te_dtype(in_aval.dtype)
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                (ir_batch_size, i_hidden_size), in_dtype, in_dtype, act_enum
+            )
 
-        out = custom_caller(DActLuPrimitive.name, args, opaque, False)
+            out = custom_caller(DActLuPrimitive.name, args, opaque, False)
 
-        return [out]
+        return out
 
     @staticmethod
     def impl(dz, x, act_enum):
@@ -286,7 +330,11 @@ def dact_lu(
     dact_lu fusion wrapper
     Return dgated_act_lu(inputs)
     """
-    act_type_id = ActivationEnum[activation_type]
+    if not DActLuPrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), act_lu_inputs)
+        return vjp_func(inputs)[0]
+
+    act_type_id = ActivationEnum[activation_type].value
     return DActLuPrimitive.outer_primitive.bind(inputs, act_lu_inputs, act_enum=act_type_id)
 
 
@@ -419,7 +467,7 @@ class ActLuFp8Primitive(BasePrimitive):
             local_x, local_amax = ActLuFp8Primitive.impl(
                 x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_enum
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
 
             return local_x, global_updated_amax
 
@@ -443,7 +491,12 @@ def act_lu_fp8(
     Input shape: (N, 1, H) for non-gated activations
                  (N, 2, H) for gated activations
     """
-    act_type_id = ActivationEnum[activation_type]
+    if not ActLuFp8Primitive.enabled():
+        act_lu_output = _jax_act_lu(x, activation_type)
+        casted_output, updated_amax = _jax_cast_fp8(act_lu_output, scale, amax, out_dtype)
+        return casted_output, updated_amax
+
+    act_type_id = ActivationEnum[activation_type].value
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
     )

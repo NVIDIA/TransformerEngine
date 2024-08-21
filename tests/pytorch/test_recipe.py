@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-from typing import Optional
+from typing import Iterable, Optional
 
 import pytest
 import torch
@@ -15,6 +15,8 @@ from transformer_engine.pytorch.fp8 import (
     _amax_and_scale_update,
     get_default_fp8_recipe,
 )
+import transformer_engine.pytorch.ops as te_ops
+import transformer_engine_torch as tex
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -33,7 +35,7 @@ class TestFP8Recipe:
     @pytest.mark.parametrize("amax_history_len", [31, 1024])
     @pytest.mark.parametrize("amax_compute_algo", ["max", "most_recent"])
     @pytest.mark.parametrize("is_first_microbatch", [None, True, False])
-    def test_amax_and_scale_update(
+    def test_fp8_scale_update_with_linear_module(
         self,
         amax_history_len: int,
         amax_compute_algo: str,
@@ -49,7 +51,7 @@ class TestFP8Recipe:
             amax_history_len=amax_history_len,
             amax_compute_algo=amax_compute_algo,
         )
-        with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+        with te.fp8_autocast(fp8_recipe=recipe):
             module = te.Linear(16, 16)
             y = module(
                 torch.randn([16, 16], device="cuda"),
@@ -162,6 +164,130 @@ class TestFP8Recipe:
             ref_scale_inv_backward[0],
         )
 
+    @pytest.mark.parametrize("amax_history_len", [31, 1024])
+    @pytest.mark.parametrize("amax_compute_algo", ["max", "most_recent"])
+    def test_fp8_scale_update_with_linear_fuser_op(
+        self,
+        amax_history_len: int,
+        amax_compute_algo: str,
+        margin: float = 2,
+        num_steps: int = 4,
+        in_shape: tuple[int] = (16, 16),
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ):
+
+        # Construct linear op
+        op = te_ops.BasicLinear(in_shape[-1], in_shape[-1])
+
+        # Get FP8 meta tensors
+        forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
+        backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+        x_fp8_meta = op.get_fp8_meta("input")[forward_key]
+        w_fp8_meta = op.get_fp8_meta("param")[forward_key]
+        dy_fp8_meta = op.get_fp8_meta("grad_output")[backward_key]
+
+        # Perform training steps
+        x_history = []
+        w_history = []
+        dy_history = []
+        for step in range(num_steps):
+
+            # Fill tensors with known values
+            x_history.append(step + 0.25)
+            w_history.append(step + 0.5)
+            dy_history.append(step + 0.75)
+            x = torch.full(
+                in_shape,
+                x_history[-1],
+                dtype=dtype,
+                device=device,
+                requires_grad=True,
+            )
+            dy = torch.full(
+                in_shape,
+                dy_history[-1],
+                dtype=dtype,
+                device=device,
+            )
+            with torch.no_grad():
+                op.weight.fill_(w_history[-1])
+
+            # Forward and backward pass
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+            recipe = transformer_engine.common.recipe.DelayedScaling(
+                margin=margin,
+                interval=1,
+                fp8_format=fp8_format,
+                amax_history_len=amax_history_len,
+                amax_compute_algo=amax_compute_algo,
+            )
+            with te.fp8_autocast(fp8_recipe=recipe):
+                y = op(x)
+            y.backward(dy)
+
+            def check_amax_history(
+                fp8_meta: dict,
+                ref_amax_history: Iterable[float],
+            ) -> None:
+                """Check that amax history matches expected values"""
+                if len(ref_amax_history) > amax_history_len:
+                    ref_amax_history = ref_amax_history[-amax_history_len:]
+                ref_amax_history = torch.tensor(
+                    ref_amax_history,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                test_amax_history = fp8_meta.amax_history[:, 0]
+                tols = dict(rtol=0, atol=0)
+                torch.testing.assert_close(
+                    test_amax_history[-(step + 1) :],
+                    ref_amax_history[: (step + 1)],
+                    **tols,
+                )
+
+            def check_scale(
+                fp8_meta: dict,
+                ref_amax_history: Iterable[float],
+                stage: str,
+            ):
+                """Check that scale and scale reciprocal match expected values"""
+
+                # Compute amax
+                if len(ref_amax_history) > amax_history_len:
+                    ref_amax_history = ref_amax_history[-(amax_history_len + 1) :]
+                if amax_compute_algo == "max":
+                    ref_amax = max(ref_amax_history)
+                elif amax_compute_algo == "most_recent":
+                    ref_amax = ref_amax_history[-1]
+                else:
+                    raise RuntimeError(f"{amax_compute_algo=} is not supported")
+
+                # Compute scale
+                max_val = {
+                    "forward": 448.0,
+                    "backward": 57344.0,
+                }[stage]
+                ref_scale = (max_val / ref_amax) / (2**margin)
+
+                # Check values in FP8 meta tensors
+                torch.testing.assert_close(
+                    fp8_meta.scale.item(),
+                    ref_scale,
+                )
+                torch.testing.assert_close(
+                    fp8_meta.scale_inv.item(),
+                    1 / ref_scale,
+                )
+
+            # Check that results match expected values
+            check_amax_history(x_fp8_meta, x_history)
+            check_amax_history(w_fp8_meta, w_history)
+            check_amax_history(dy_fp8_meta, dy_history)
+            check_scale(x_fp8_meta, x_history, "forward")
+            check_scale(w_fp8_meta, w_history, "forward")
+            check_scale(dy_fp8_meta, dy_history, "backward")
+
     @pytest.mark.parametrize("amax_case", ["zero", "tiny", "normal", "inf", "nan"])
     @pytest.mark.parametrize("fused_update", [True, False], ids=["fused", "non-fused"])
     @pytest.mark.parametrize(
@@ -191,7 +317,7 @@ class TestFP8Recipe:
 
         # Setup fp8_meta dictionary
         def setup_fp8_meta():
-            with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+            with te.fp8_autocast(fp8_recipe=recipe):
                 module = te.Linear(16, 16)
                 y = module(torch.zeros([16, 16], device="cuda"))
             y.backward(torch.zeros_like(y))

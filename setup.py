@@ -5,10 +5,12 @@
 """Installation script."""
 
 import os
+import time
 from pathlib import Path
 from typing import List, Tuple
 
 import setuptools
+from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.utils import (
@@ -18,6 +20,7 @@ from build_tools.utils import (
     remove_dups,
     get_frameworks,
     install_and_import,
+    uninstall_te_fw_packages,
 )
 from build_tools.te_version import te_version
 
@@ -28,16 +31,28 @@ current_file_path = Path(__file__).parent.resolve()
 
 from setuptools.command.build_ext import build_ext as BuildExtension
 
+os.environ["NVTE_PROJECT_BUILDING"] = "1"
+
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
 elif "paddle" in frameworks:
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
-    install_and_import("pybind11")
+    install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
+
+
+class TimedBdist(bdist_wheel):
+    """Helper class to measure build time"""
+
+    def run(self):
+        start_time = time.perf_counter()
+        super().run()
+        total_time = time.perf_counter() - start_time
+        print(f"Total time for bdist_wheel: {total_time:.2f} seconds")
 
 
 def setup_common_extension() -> CMakeExtension:
@@ -61,14 +76,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     setup_reqs: List[str] = []
     install_reqs: List[str] = [
         "pydantic",
-        "importlib-metadata>=1.0; python_version<'3.8'",
+        "importlib-metadata>=1.0",
         "packaging",
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
     # Requirements that may be installed outside of Python
     if not found_cmake():
-        setup_reqs.append("cmake>=3.18")
+        setup_reqs.append("cmake>=3.21")
     if not found_ninja():
         setup_reqs.append("ninja")
     if not found_pybind11():
@@ -85,6 +100,9 @@ if __name__ == "__main__":
 
     ext_modules = [setup_common_extension()]
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        # Remove residual FW packages since compiling from source
+        # results in a single binary with FW extensions included.
+        uninstall_te_fw_packages()
         if "pytorch" in frameworks:
             from build_tools.pytorch import setup_pytorch_extension
 
@@ -129,10 +147,21 @@ if __name__ == "__main__":
         ),
         extras_require={
             "test": test_requires,
+            "pytorch": [f"transformer_engine_torch=={__version__}"],
+            "jax": [f"transformer_engine_jax=={__version__}"],
+            "paddle": [f"transformer_engine_paddle=={__version__}"],
         },
         description="Transformer acceleration library",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension},
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        python_requires=">=3.8, <3.13",
+        classifiers=[
+            "Programming Language :: Python :: 3.8",
+            "Programming Language :: Python :: 3.9",
+            "Programming Language :: Python :: 3.10",
+            "Programming Language :: Python :: 3.11",
+            "Programming Language :: Python :: 3.12",
+        ],
         setup_requires=setup_requires,
         install_requires=install_requires,
         license_files=("LICENSE",),

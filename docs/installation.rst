@@ -12,8 +12,8 @@ Prerequisites
 .. _driver link: https://www.nvidia.com/drivers
 
 1. Linux x86_64
-2. `CUDA 11.8 <https://developer.nvidia.com/cuda-downloads>`__
-3. |driver link|_ supporting CUDA 11.8 or later.
+2. `CUDA 12.0 <https://developer.nvidia.com/cuda-downloads>`__
+3. |driver link|_ supporting CUDA 12.0 or later.
 4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
 5. For FP8/FP16/BF16 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9.1 <https://developer.nvidia.com/cudnn>`__ or later.
 
@@ -63,7 +63,7 @@ Execute the following command to install the latest development build of Transfo
 
   pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
 
 In order to install a specific PR, execute after changing NNN to the PR number:
 

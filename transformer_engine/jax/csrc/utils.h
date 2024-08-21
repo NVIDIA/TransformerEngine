@@ -22,11 +22,14 @@ namespace transformer_engine {
 namespace jax {
 
 int GetCudaRuntimeVersion();
+size_t GetCudnnRuntimeVersion();
 int GetDeviceComputeCapability(int gpu_id);
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,
                            cudaStream_t stream);
+
+uint32_t GetRuntimeNumSegments(void *cu_seqlen, void *workspace, size_t len, cudaStream_t stream);
 
 class cudaDevicePropertiesManager {
  public:
