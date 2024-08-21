@@ -254,9 +254,7 @@ def get_frameworks() -> List[str]:
     _frameworks = [framework.lower() for framework in _frameworks]
     for framework in _frameworks:
         if framework not in supported_frameworks:
-            raise ValueError(
-                f"Transformer Engine does not support framework={framework}"
-            )
+            raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
 
