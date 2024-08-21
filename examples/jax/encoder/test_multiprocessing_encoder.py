@@ -19,7 +19,7 @@ from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
-from jax.experimental.pjit import pjit
+from jax.sharding import PartitionSpec, NamedSharding
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
@@ -305,38 +305,36 @@ def check_fp8(state, var_collect, inputs, masks, labels):
     )
 
 
-def get_params_pspec(sharding_rules, abs_var_collect):
-    """Refer params to create params partition spec"""
-    rules_dict = {}
-    for key, value in sharding_rules:
-        rules_dict[key] = value
+def get_params_sharding(sharding_rules, abs_var_collect, mesh):
+    """Refer params to create params sharding"""
+    rules_dict = dict(sharding_rules)
 
     def to_device_axis(logical_axis):
         partitions = [rules_dict[key] for key in logical_axis]
-        return jax.sharding.PartitionSpec(*partitions)
+        return NamedSharding(mesh, jax.sharding.PartitionSpec(*partitions))
 
     params_axes = abs_var_collect.get(PARAMS_AXES_KEY, {})
-    params_axes_pspec = jax.tree_util.tree_map(
+    params_axes_sharding = jax.tree_util.tree_map(
         to_device_axis, nn_partitioning.get_axis_names(params_axes)
     )
-    params_axes_pspec = flax.core.unfreeze(params_axes_pspec)
-    params_pspec = jax.tree_util.tree_map(
-        lambda x: jax.sharding.PartitionSpec(), abs_var_collect[PARAMS_KEY]
+    params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
+    params_sharding = jax.tree_util.tree_map(
+        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
     )
-    params_pspec = {**params_pspec, **params_axes_pspec}
-    return params_pspec
+    params_sharding = {**params_sharding, **params_axes_sharding}
+    return params_sharding
 
 
-def get_state_pspec(state, params_pspec):
-    """Refer params_pspec to create state partition spec"""
+def get_state_sharding(state, params_sharding):
+    """Refer params_sharding to create state sharding"""
 
     def replace_params(x):
-        return params_pspec if isinstance(x, dict) else None
+        return params_sharding if isinstance(x, dict) else None
 
-    state_pspec = jax.tree_util.tree_map(
+    state_sharding = jax.tree_util.tree_map(
         replace_params, state, is_leaf=lambda x: isinstance(x, dict)
     )
-    return state_pspec
+    return state_sharding
 
 
 def train_and_evaluate(args):
@@ -368,7 +366,7 @@ def train_and_evaluate(args):
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
         devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TP_AXIS)
-    ) as shard_mesh:
+    ) as mesh:
 
         rng = jax.random.PRNGKey(args.seed)
         rng, params_rng = jax.random.split(rng)
@@ -389,34 +387,34 @@ def train_and_evaluate(args):
 
             customized_rules = ((NAMED_BROADCAST_AXIS, None), (NAMED_TP_AXIS, DEVICE_TP_AXIS))
             sharding_rules = te_flax.extend_logical_axis_rules(tuple()) + customized_rules
-            params_pspec = get_params_pspec(sharding_rules, abs_var_collect)
+            params_sharding = get_params_sharding(sharding_rules, abs_var_collect, mesh)
             inputs_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None)
             masks_pspec = jax.sharding.PartitionSpec(DEVICE_DP_AXIS, None, None, None)
 
-            in_shardings = (None, inputs_pspec, masks_pspec)
+            inputs_sharding = NamedSharding(mesh, inputs_pspec)
+            masks_sharding = NamedSharding(mesh, masks_pspec)
+            in_shardings = (None, inputs_sharding, masks_sharding)
             out_shardings = {
-                key: params_pspec if key is PARAMS_KEY else None for key in abs_var_collect
+                key: params_sharding if key is PARAMS_KEY else None for key in abs_var_collect
             }
-            pjit_encoder_init = pjit(encoder.init, in_shardings, out_shardings)
-            var_collect = pjit_encoder_init(init_rngs, inputs, masks)
+            jit_encoder_init = jax.jit(encoder.init, in_shardings, out_shardings)
+            var_collect = jit_encoder_init(init_rngs, inputs, masks)
 
             optimizer = optax.adamw(args.lr)
             var_collect, params = flax.core.pop(var_collect, PARAMS_KEY)
             state = train_state.TrainState.create(
                 apply_fn=encoder.apply, params=params, tx=optimizer
             )
-            state_pspec = get_state_pspec(state, params_pspec)
-            labels_pspec = jax.sharding.PartitionSpec(
-                DEVICE_DP_AXIS,
-            )
+            state_sharding = get_state_sharding(state, params_sharding)
+            labels_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS))
 
-            in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None, None)
-            out_shardings = (state_pspec, None, None, None)
-            pjit_train_step = pjit(train_step, in_shardings, out_shardings)
+            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None, None)
+            out_shardings = (state_sharding, None, None, None)
+            jit_train_step = jax.jit(train_step, in_shardings, out_shardings)
 
-            in_shardings = (state_pspec, inputs_pspec, masks_pspec, labels_pspec, None)
+            in_shardings = (state_sharding, inputs_sharding, masks_sharding, labels_sharding, None)
             out_shardings = (None, None)
-            pjit_eval_step = pjit(eval_step, in_shardings, out_shardings)
+            jit_eval_step = jax.jit(eval_step, in_shardings, out_shardings)
 
             if args.use_fp8:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
@@ -425,7 +423,7 @@ def train_and_evaluate(args):
             if args.dry_run:
                 labels = jnp.zeros(label_shape, dtype=jnp.bfloat16)
                 rngs = {DROPOUT_KEY: dropout_rng}
-                pjit_train_step(state, inputs, masks, labels, var_collect, rngs)
+                jit_train_step(state, inputs, masks, labels, var_collect, rngs)
                 print("PASSED")
             else:
                 for epoch in range(1, args.epochs + 1):
@@ -439,11 +437,11 @@ def train_and_evaluate(args):
                         args.batch_size,
                         rngs,
                         var_collect,
-                        pjit_train_step,
-                        shard_mesh,
+                        jit_train_step,
+                        mesh,
                         inputs_pspec,
                         masks_pspec,
-                        labels_pspec,
+                        labels_sharding.spec,
                     )
 
                     test_loss, test_accuracy = eval_model(
@@ -451,11 +449,11 @@ def train_and_evaluate(args):
                         test_ds,
                         args.test_batch_size,
                         var_collect,
-                        pjit_eval_step,
-                        shard_mesh,
+                        jit_eval_step,
+                        mesh,
                         inputs_pspec,
                         masks_pspec,
-                        labels_pspec,
+                        labels_sharding.spec
                     )
                     if args.process_id == 0:
                         print(

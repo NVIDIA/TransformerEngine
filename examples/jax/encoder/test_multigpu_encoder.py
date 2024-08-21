@@ -223,7 +223,7 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
 
 
 def get_state_sharding(state, params_sharding):
-    """Refer params_pspec to create state sharding"""
+    """Refer params_sharding to create state sharding"""
 
     def replace_params(x):
         return params_sharding if isinstance(x, dict) else None
