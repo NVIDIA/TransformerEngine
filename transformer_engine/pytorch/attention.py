@@ -340,14 +340,11 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: Data type
-    if use_flash_attention and (
-        qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type == Float8Tensor
-    ):
+    if use_flash_attention and qkv_dtype not in [torch.bfloat16, torch.float16]:
         logger.debug(
             "Disabling FlashAttention due to unsupported QKV data type. "
-            "Supported: qkv_type = torch.Tensor, qkv_dtype = {torch.bfloat16, torch.float16}. "
-            "Found: qkv_type = %s, qkv_dtype = %s.",
-            qkv_type,
+            "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
+            "Found: qkv_dtype = %s.",
             qkv_dtype,
         )
         use_flash_attention = False
@@ -362,8 +359,8 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention:
-            logger.debug("Disabling FlashAttention as it does not support FP8")
+        if use_flash_attention and is_training:
+            logger.debug("Disabling FlashAttention as it does not support FP8 training")
             use_flash_attention = False
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
@@ -427,6 +424,11 @@ def get_attention_backend(
         )
         use_unfused_attention = False
     if context_parallel and use_flash_attention:
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug(
+                "Disabling FlashAttention as it does not support context parallelism with FP8"
+            )
+            use_flash_attention = False
         if "bottom_right" in attn_mask_type:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with"
@@ -3890,14 +3892,14 @@ class FlashAttention(torch.nn.Module):
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
         cp_comm_type: str = "p2p",
+        fp8: bool = False,
+        fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
-        assert (
-            query_layer.dtype in [torch.float16, torch.bfloat16]
-            and key_layer.dtype in [torch.float16, torch.bfloat16]
-            and value_layer.dtype in [torch.float16, torch.bfloat16]
-        ), "FlashAttention currently only supports FP16 and BF16."
+        assert all(
+            x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
+        ), "FlashAttention only supports FP16 and BF16 data types, or Float8Tensors."
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
         ), "FlashAttention currently only supports CUDA tensors."
@@ -3910,24 +3912,34 @@ class FlashAttention(torch.nn.Module):
 
         qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
 
-        if qkv_format == "sbhd":
-            # For now just 128, will make it more general in the future
-            if (
-                query_layer.shape[-1] == 128
-                and query_layer.shape[0] * query_layer.shape[1] >= 512
-                and qkv_layout == "sbh3d"
-            ):
-                query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(
-                    query_layer, key_layer, value_layer
-                )
-            else:
+        if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+            if qkv_format == "sbhd":
+                # For now just 128, will make it more general in the future
+                if (
+                    query_layer.shape[-1] == 128
+                    and query_layer.shape[0] * query_layer.shape[1] >= 512
+                    and qkv_layout == "sbh3d"
+                ):
+                    query_layer, key_layer, value_layer = _PrepareQKVForFA.apply(
+                        query_layer, key_layer, value_layer
+                    )
+                else:
+                    query_layer, key_layer, value_layer = [
+                        x.transpose(0, 1).contiguous() for x in (query_layer, key_layer, value_layer)
+                    ]
+            elif qkv_format in ["bshd", "thd"]:
                 query_layer, key_layer, value_layer = [
-                    x.transpose(0, 1).contiguous() for x in (query_layer, key_layer, value_layer)
+                    x.contiguous() for x in (query_layer, key_layer, value_layer)
                 ]
-        elif qkv_format in ["bshd", "thd"]:
-            query_layer, key_layer, value_layer = [
-                x.contiguous() for x in (query_layer, key_layer, value_layer)
-            ]
+        else:
+            if qkv_format == "sbhd":
+                query_layer._data, key_layer._data, value_layer._data = [
+                    x.transpose(0, 1).contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
+                ]
+            elif qkv_format in ["bshd", "thd"]:
+                query_layer._data, key_layer._data, value_layer._data = [
+                    x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
+                ]
 
         batch_size = query_layer.shape[0]
 
@@ -3951,9 +3963,14 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                     cu_seqlens_kv = cu_seqlens_q
-                    query_layer, key_layer, value_layer = PackTensors.apply(
-                        indices_q, query_layer, key_layer, value_layer
-                    )
+                    if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+                        query_layer, key_layer, value_layer = PackTensors.apply(
+                            indices_q, query_layer, key_layer, value_layer
+                        )
+                    else:
+                        query_layer._data, key_layer._data, value_layer._data = PackTensors.apply(
+                            indices_q, query_layer._data, key_layer._data, value_layer._data
+                        )
                 else:
                     if cu_seqlens_q is None or cu_seqlens_kv is None:
                         assert (
@@ -3964,8 +3981,12 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer = PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
+                    if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+                        query_layer = PackTensors.apply(indices_q, query_layer)
+                        key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
+                    else:
+                        query_layer._data = PackTensors.apply(indices_q, query_layer._data)
+                        key_layer._data, value_layer._data = PackTensors.apply(indices_kv, key_layer._data, value_layer._data)
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
@@ -3991,7 +4012,7 @@ class FlashAttention(torch.nn.Module):
                 seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                 max_seqlen_kv = seqlens_kv.max().item()
 
-        if context_parallel:
+        if context_parallel and all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
             assert (
                 alibi_slopes is None
             ), "Alibi slope bias addition is not supported with context parallelism."
@@ -4048,6 +4069,47 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_args_thd.append(max_seqlens_q)
                     fa_optional_forward_args_thd.append(max_seqlens_kv)
                 if _flash_attn_3_plus:
+                    if fp8:
+                        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                        if fp8_meta["recipe"].fp8_mha:
+                            assert all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
+                            ), "q/k/v must be Float8Tensors for FP8 MHA."
+                            fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
+                            query_layer, key_layer, value_layer = (x._data for x in [query_layer, key_layer, value_layer])
+                        else:
+                            # 1: qkv packed, 2: kv packed, 3: qkv separate
+                            qkv_group = len(qkv_layout.split("_"))
+                            if qkv_group == 1:
+                                dim = qkv_layout.find("3")
+                                qkv = _combine_tensors([query_layer, key_layer, value_layer], dim)
+                                qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+                                qkv_fp8 = cast_to_fp8(
+                                    qkv_c, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(qkv.shape)
+                                q_fp8, k_fp8, v_fp8 = _SplitAlongDim.apply(qkv_fp8, dim, [1, 1, 1])
+                                query_layer, key_layer, value_layer = [x.squeeze(dim) for x in [q_fp8, k_fp8, v_fp8]]
+                            if qkv_group == 2:
+                                q_fp8 = cast_to_fp8(
+                                    query_layer, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(query_layer.shape)
+                                dim = qkv_layout.split("_")[1].find("2")
+                                kv = _combine_tensors([key_layer, value_layer], dim)
+                                kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
+                                kv_fp8 = cast_to_fp8(
+                                    kv_c, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(kv.shape)
+                                k_fp8, v_fp8 = _SplitAlongDim.apply(kv_fp8, dim, [1, 1])
+                                key_layer, value_layer = [x.squeeze(dim) for x in [k_fp8, v_fp8]]
+                            if qkv_group == 3:
+                                query_layer = cast_to_fp8(
+                                    query_layer, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(query_layer.shape)
+                                key_layer = cast_to_fp8(
+                                    key_layer, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(key_layer.shape)
+                                value_layer = cast_to_fp8(
+                                    value_layer, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                                ).view(value_layer.shape)
                     output, _ = func(
                         query_layer,
                         key_layer,
@@ -4057,6 +4119,24 @@ class FlashAttention(torch.nn.Module):
                         causal="causal" in attn_mask_type,
                         deterministic=self.deterministic,
                     )
+                    if fp8:
+                        if fp8_meta["recipe"].fp8_mha:
+                            output = Float8Tensor(
+                                data=output,
+                                fp8_meta=fp8_meta,
+                                fp8_meta_forward=True,
+                                fp8_meta_index=META_O,
+                                fp8_dtype=fp8_dtype_forward,
+                                dtype=query_layer.dtype,
+                            )
+                        else:
+                            output = cast_from_fp8(
+                                output.view(-1, output.shape[-2] * output.shape[-1]),
+                                fp8_meta["scaling_fwd"],
+                                META_O,
+                                fp8_dtype_forward,
+                                TE_DType[query_layer.dtype],
+                            ).view(output.shape)
                 else:
                     output = func(
                         query_layer,
@@ -5586,11 +5666,9 @@ class FusedAttention(torch.nn.Module):
         assert (
             fused_attention_backend != tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend
         ), "No fused attention backend supports this input combination!"
-        assert (
-            (query_layer.dtype in [torch.float16, torch.bfloat16, torch.uint8])
-            and (key_layer.dtype in [torch.float16, torch.bfloat16, torch.uint8])
-            and (value_layer.dtype in [torch.float16, torch.bfloat16, torch.uint8])
-        ), "FusedAttention only supports FP16 and BF16 data types."
+        assert all(
+            x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
+        ), "FusedAttention only supports FP16 and BF16 data types, or Float8Tensors."
         assert (
             query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
         ), "FusedAttention only supports CUDA tensors."
