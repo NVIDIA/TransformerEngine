@@ -3708,7 +3708,6 @@ def get_qkv_layout(
 
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
-        stride = k.stride()
         check_strides_kv = tuple(sk / k.shape[-1] for sk in k.stride()[:-1]) == tuple(
             sv / v.shape[-1] for sv in v.stride()[:-1]
         )
@@ -4117,6 +4116,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         deterministic,
     ):
         is_input_fp8 = False
+        is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
             is_input_fp8 = isinstance(qkv, Float8Tensor)
             if is_input_fp8:
@@ -4165,7 +4165,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                 window_size,
                 rng_gen,
             )
-            if fp8_meta["recipe"].fp8_mha:
+            if is_output_fp8:
                 out_ret = Float8Tensor(
                     data=out_fp8,
                     fp8_meta=fp8_meta,
@@ -4183,22 +4183,24 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     qkv_dtype,
                 ).view(out_fp8.shape)
             out_save = out_ret
-            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
-                qkv = cast_from_fp8(
-                    qkv_c._data,
-                    fp8_meta["scaling_fwd"],
-                    META_QKV,
-                    fp8_dtype_forward,
-                    TE_DType[qkv.dtype],
-                ).view(qkv.shape)
-                out_save = cast_from_fp8(
-                    out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
-                    fp8_meta["scaling_fwd"],
-                    META_O,
-                    fp8_dtype_forward,
-                    qkv_dtype,
-                ).view(out_fp8.shape)
+            if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                if is_input_fp8:
+                    qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+                    qkv = cast_from_fp8(
+                        qkv_c._data,
+                        fp8_meta["scaling_fwd"],
+                        META_QKV,
+                        fp8_dtype_forward,
+                        TE_DType[qkv.dtype],
+                    ).view(qkv.shape)
+                if is_output_fp8:
+                    out_save = cast_from_fp8(
+                        out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
+                        fp8_meta["scaling_fwd"],
+                        META_O,
+                        fp8_dtype_forward,
+                        qkv_dtype,
+                    ).view(out_fp8.shape)
             fp8_tensors = (
                 qkv_fp8,
                 out_fp8,
@@ -4241,6 +4243,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (qkv, out_save) if not ctx.fp8 else (None, None)
         ctx.save_for_backward(
             *qkvo_tensors, cu_seqlens, cu_seqlens_padded, *fp8_tensors, *aux_ctx_tensors
@@ -4265,7 +4268,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        if ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
             ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -4322,7 +4325,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
                     )
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                         ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = d_out_f8tensor._scale_inv
                     else:
@@ -4501,6 +4504,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         deterministic,
     ):
         is_input_fp8 = False
+        is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
             assert isinstance(kv, q.__class__), "q and kv must have the same type."
             is_input_fp8 = isinstance(q, Float8Tensor)
@@ -4558,7 +4562,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 window_size,
                 rng_gen,
             )
-            if fp8_meta["recipe"].fp8_mha:
+            if is_output_fp8:
                 out_ret = Float8Tensor(
                     data=out_fp8,
                     fp8_meta=fp8_meta,
@@ -4576,25 +4580,27 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     qkv_dtype,
                 ).view(out_fp8.shape)
             out_save = out_ret
-            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                q = cast_from_fp8(
-                    q._data, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward, TE_DType[q.dtype]
-                ).view(q.shape)
-                kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
-                kv = cast_from_fp8(
-                    kv_c._data,
-                    fp8_meta["scaling_fwd"],
-                    META_QKV,
-                    fp8_dtype_forward,
-                    TE_DType[kv.dtype],
-                ).view(kv.shape)
-                out_save = cast_from_fp8(
-                    out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
-                    fp8_meta["scaling_fwd"],
-                    META_O,
-                    fp8_dtype_forward,
-                    qkv_dtype,
-                ).view(out_fp8.shape)
+            if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                if is_input_fp8:
+                    q = cast_from_fp8(
+                        q._data, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward, TE_DType[q.dtype]
+                    ).view(q.shape)
+                    kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
+                    kv = cast_from_fp8(
+                        kv_c._data,
+                        fp8_meta["scaling_fwd"],
+                        META_QKV,
+                        fp8_dtype_forward,
+                        TE_DType[kv.dtype],
+                    ).view(kv.shape)
+                if is_output_fp8:
+                    out_save = cast_from_fp8(
+                        out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
+                        fp8_meta["scaling_fwd"],
+                        META_O,
+                        fp8_dtype_forward,
+                        qkv_dtype,
+                    ).view(out_fp8.shape)
             fp8_tensors = (
                 q_fp8,
                 kv_fp8,
@@ -4642,6 +4648,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, kv, out_save) if not ctx.fp8 else (None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
@@ -4673,7 +4680,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        if ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
             ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -4734,7 +4741,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
                     )
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                         ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = d_out_f8tensor._scale_inv
                     else:
@@ -4945,6 +4952,7 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
     ):
         is_input_fp8 = False
+        is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -5024,7 +5032,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 window_size,
                 rng_gen,
             )
-            if fp8_meta["recipe"].fp8_mha:
+            if is_output_fp8:
                 out_ret = Float8Tensor(
                     data=out_fp8,
                     fp8_meta=fp8_meta,
@@ -5043,71 +5051,73 @@ class FusedAttnFunc(torch.autograd.Function):
                 ).view(out_fp8.shape)
             out_save = out_ret
 
-            if is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
-                qkv_group = len(qkv_layout.split("_"))
-                if qkv_group == 1:
-                    dim = qkv_layout.find("3")
-                    qkv = _combine_tensors([q, k, v], dim)
-                    qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
-                    qkv_no_fp8 = cast_from_fp8(
-                        qkv_c._data,
+                if is_input_fp8:
+                    qkv_group = len(qkv_layout.split("_"))
+                    if qkv_group == 1:
+                        dim = qkv_layout.find("3")
+                        qkv = _combine_tensors([q, k, v], dim)
+                        qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
+                        qkv_no_fp8 = cast_from_fp8(
+                            qkv_c._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[qkv.dtype],
+                        ).view(qkv.shape)
+                        q, k, v = _SplitAlongDim.apply(qkv_no_fp8, dim, [1, 1, 1])
+                        q, k, v = [x.squeeze(dim) for x in [q, k, v]]
+                    if qkv_group == 2:
+                        q = cast_from_fp8(
+                            q._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[q.dtype],
+                        ).view(q.shape)
+                        dim = qkv_layout.split("_")[1].find("2")
+                        kv = _combine_tensors([k, v], dim)
+                        kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
+                        kv_no_fp8 = cast_from_fp8(
+                            kv_c._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[kv.dtype],
+                        ).view(kv.shape)
+                        k, v = _SplitAlongDim.apply(kv_no_fp8, dim, [1, 1])
+                        k, v = [x.squeeze(dim) for x in [k, v]]
+                    if qkv_group == 3:
+                        q = cast_from_fp8(
+                            q._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[q.dtype],
+                        ).view(q.shape)
+                        k = cast_from_fp8(
+                            k._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[k.dtype],
+                        ).view(k.shape)
+                        v = cast_from_fp8(
+                            v._data,
+                            fp8_meta["scaling_fwd"],
+                            META_QKV,
+                            fp8_dtype_forward,
+                            TE_DType[v.dtype],
+                        ).view(v.shape)
+                if is_output_fp8:
+                    out_save = cast_from_fp8(
+                        out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
                         fp8_meta["scaling_fwd"],
-                        META_QKV,
+                        META_O,
                         fp8_dtype_forward,
-                        TE_DType[qkv.dtype],
-                    ).view(qkv.shape)
-                    q, k, v = _SplitAlongDim.apply(qkv_no_fp8, dim, [1, 1, 1])
-                    q, k, v = [x.squeeze(dim) for x in [q, k, v]]
-                if qkv_group == 2:
-                    q = cast_from_fp8(
-                        q._data,
-                        fp8_meta["scaling_fwd"],
-                        META_QKV,
-                        fp8_dtype_forward,
-                        TE_DType[q.dtype],
-                    ).view(q.shape)
-                    dim = qkv_layout.split("_")[1].find("2")
-                    kv = _combine_tensors([k, v], dim)
-                    kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
-                    kv_no_fp8 = cast_from_fp8(
-                        kv_c._data,
-                        fp8_meta["scaling_fwd"],
-                        META_QKV,
-                        fp8_dtype_forward,
-                        TE_DType[kv.dtype],
-                    ).view(kv.shape)
-                    k, v = _SplitAlongDim.apply(kv_no_fp8, dim, [1, 1])
-                    k, v = [x.squeeze(dim) for x in [k, v]]
-                if qkv_group == 3:
-                    q = cast_from_fp8(
-                        q._data,
-                        fp8_meta["scaling_fwd"],
-                        META_QKV,
-                        fp8_dtype_forward,
-                        TE_DType[q.dtype],
-                    ).view(q.shape)
-                    k = cast_from_fp8(
-                        k._data,
-                        fp8_meta["scaling_fwd"],
-                        META_QKV,
-                        fp8_dtype_forward,
-                        TE_DType[k.dtype],
-                    ).view(k.shape)
-                    v = cast_from_fp8(
-                        v._data,
-                        fp8_meta["scaling_fwd"],
-                        META_QKV,
-                        fp8_dtype_forward,
-                        TE_DType[v.dtype],
-                    ).view(v.shape)
-                out_save = cast_from_fp8(
-                    out_fp8.view(-1, out_fp8.shape[-2] * out_fp8.shape[-1]),
-                    fp8_meta["scaling_fwd"],
-                    META_O,
-                    fp8_dtype_forward,
-                    qkv_dtype,
-                ).view(out_fp8.shape)
+                        qkv_dtype,
+                    ).view(out_fp8.shape)
 
             fp8_tensors = (
                 q_fp8,
@@ -5167,6 +5177,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
@@ -5198,7 +5209,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        if ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
             ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
@@ -5263,7 +5274,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     fp8_dtype_backward = get_fp8_te_dtype(
                         ctx.fp8_meta["recipe"], fprop_tensor=False
                     )
-                    if ctx.fp8_meta["recipe"].fp8_mha:
+                    if ctx.is_output_fp8:
                         d_out_fp8 = d_out
                         ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = d_out_f8tensor._scale_inv
                     else:
