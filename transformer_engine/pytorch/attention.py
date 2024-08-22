@@ -4433,7 +4433,8 @@ class FlashAttention(torch.nn.Module):
                             ), "q/k/v must be Float8Tensors for FP8 MHA."
                             fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
                             query_layer, key_layer, value_layer = (
-                                x.to(activation_dtype).to(torch_dtype) for x in [query_layer, key_layer, value_layer]
+                                x.to(activation_dtype).to(torch_dtype)
+                                for x in [query_layer, key_layer, value_layer]
                             )
                         else:
                             # 1: qkv packed, 2: kv packed, 3: qkv separate

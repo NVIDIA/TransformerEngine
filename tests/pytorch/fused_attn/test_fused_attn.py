@@ -1318,17 +1318,10 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 def _rmse(a, b):
     return math.sqrt((torch.pow((a - b), 2) / a.numel()).sum())
 
+
 def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
-    logging.debug(
-        name_a+" min {:.6f} max {:.6f}".format(
-            a.min().item(), a.max().item()
-        )
-    )
-    logging.debug(
-        name_b+" min {:.6f} max {:.6f}".format(
-            b.min().item(), b.max().item()
-        )
-    )
+    logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
+    logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
     except Exception as e:
@@ -1342,6 +1335,7 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
         rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
     )
+
 
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -1384,13 +1378,37 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rmse_tol = 0.1
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if not is_training:
-        _error(flash_attn_fwd_fp8, fused_attn_fwd_f16, "flash_attn_fwd_fp8", "fused_attn_fwd_f16", atol, rtol, rmse_tol)
-    _error(fused_attn_fwd_fp8, fused_attn_fwd_f16, "fused_attn_fwd_fp8", "fused_attn_fwd_f16", atol, rtol, rmse_tol)
+        _error(
+            flash_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "flash_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+        )
+    _error(
+        fused_attn_fwd_fp8,
+        fused_attn_fwd_f16,
+        "fused_attn_fwd_fp8",
+        "fused_attn_fwd_f16",
+        atol,
+        rtol,
+        rmse_tol,
+    )
 
     if is_training:
         for i in range(len(param_names[:1])):
-           logging.debug("========== {:^25s} ==========".format(param_names[i]))
-           _error(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], f"fused_attn_bwd_fp8[{i}]", f"fused_attn_bwd_f16[{i}]", atol, rtol, rmse_tol)
+            logging.debug("========== {:^25s} ==========".format(param_names[i]))
+            _error(
+                fused_attn_bwd_fp8[i],
+                fused_attn_bwd_f16[i],
+                f"fused_attn_bwd_fp8[{i}]",
+                f"fused_attn_bwd_f16[{i}]",
+                atol,
+                rtol,
+                rmse_tol,
+            )
 
 
 def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_training):
@@ -1413,21 +1431,21 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_
 
     with fp8_model_init(enabled=fp8_mha):
         mha = MultiheadAttention(
-                hidden_size=config.hidden_size,
-                num_attention_heads=config.num_heads,
-                kv_channels=config.head_dim_qk,
-                num_gqa_groups=config.num_gqa_groups,
-                attention_dropout=config.dropout_p,
-                layer_number=1,
-                bias=True,
-                get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-                params_dtype=dtype,
-                input_layernorm=input_layernorm,
-                fuse_qkv_params=True,
-                attention_type="self",
-                qkv_weight_interleaved=True,
-                qkv_format=qkv_format,
-            ).to(dtype=dtype, device="cuda")
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_heads,
+            kv_channels=config.head_dim_qk,
+            num_gqa_groups=config.num_gqa_groups,
+            attention_dropout=config.dropout_p,
+            layer_number=1,
+            bias=True,
+            get_rng_state_tracker=get_dummy_cuda_rng_tracker,
+            params_dtype=dtype,
+            input_layernorm=input_layernorm,
+            fuse_qkv_params=True,
+            attention_type="self",
+            qkv_weight_interleaved=True,
+            qkv_format=qkv_format,
+        ).to(dtype=dtype, device="cuda")
         if not is_training:
             mha = mha.eval()
 
