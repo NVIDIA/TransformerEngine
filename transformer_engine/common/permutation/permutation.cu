@@ -120,7 +120,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
       frag_load_store_ptr[e] = T(frag_sum[e]);
     }
 
-    *(float4 *)(dest_row_ptr + i) = frag_load_store;
+    *reinterpret_cast<float4 *>(dest_row_ptr + i) = frag_load_store;
   }
 }
 
@@ -184,7 +184,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
         }
 
         T *dest_row_ptr = act_grad + dest_row * num_cols;
-        *(float4 *)(dest_row_ptr + i) = frag_load_store;
+        *reinterpret_cast<float4 *>(dest_row_ptr + i) = frag_load_store;
 
         if (hasProb) {
           // Inner product calculation for prob_grad in unpermute bwd
@@ -197,7 +197,7 @@ __global__ void moe_permute_kernel(const T *input_bwd, const T *input_fwd, T *ac
             frag_input_fwd[e] = TCompute(frag_load_store_ptr[e]);
 
           for (int e = 0; e < kElementsPerAccess; e++) {
-            accum[k] += float(frag_src[e] * frag_input_fwd[e]);
+            accum[k] += static_cast<float>(frag_src[e] * frag_input_fwd[e]);
           }
         }
       }

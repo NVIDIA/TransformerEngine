@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 
 """Linear API"""
-import torch
 import warnings
 from typing import Tuple
+import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
