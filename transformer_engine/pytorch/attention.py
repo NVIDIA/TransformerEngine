@@ -38,7 +38,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     AttnMaskType,
     FusedAttnBackend,
 )
-from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
+from transformer_engine.pytorch.fp8 import get_fp8_te_dtype, get_fp8_torch_dtype
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
@@ -4424,6 +4424,8 @@ class FlashAttention(torch.nn.Module):
                 if _flash_attn_3_plus:
                     if fp8:
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                        activation_dtype = query_layer.dtype
+                        torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
                         if fp8_meta["recipe"].fp8_mha:
                             assert all(
                                 isinstance(x, Float8Tensor)
@@ -4431,7 +4433,7 @@ class FlashAttention(torch.nn.Module):
                             ), "q/k/v must be Float8Tensors for FP8 MHA."
                             fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
                             query_layer, key_layer, value_layer = (
-                                x._data for x in [query_layer, key_layer, value_layer]
+                                x.to(activation_dtype).to(torch_dtype) for x in [query_layer, key_layer, value_layer]
                             )
                         else:
                             # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -4440,44 +4442,23 @@ class FlashAttention(torch.nn.Module):
                                 dim = qkv_layout.find("3")
                                 qkv = _combine_tensors([query_layer, key_layer, value_layer], dim)
                                 qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
-                                qkv_fp8 = cast_to_fp8(
-                                    qkv_c, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
-                                ).view(qkv.shape)
+                                qkv_fp8 = qkv_c.to(torch_dtype).view(qkv.shape)
                                 q_fp8, k_fp8, v_fp8 = _SplitAlongDim.apply(qkv_fp8, dim, [1, 1, 1])
                                 query_layer, key_layer, value_layer = [
                                     x.squeeze(dim) for x in [q_fp8, k_fp8, v_fp8]
                                 ]
                             if qkv_group == 2:
-                                q_fp8 = cast_to_fp8(
-                                    query_layer,
-                                    fp8_meta["scaling_fwd"],
-                                    META_QKV,
-                                    fp8_dtype_forward,
-                                ).view(query_layer.shape)
+                                q_fp8 = query_layer.to(torch_dtype)
                                 dim = qkv_layout.split("_")[1].find("2")
                                 kv = _combine_tensors([key_layer, value_layer], dim)
                                 kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
-                                kv_fp8 = cast_to_fp8(
-                                    kv_c, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
-                                ).view(kv.shape)
+                                kv_fp8 = kv_c.to(torch_dtype).view(kv.shape)
                                 k_fp8, v_fp8 = _SplitAlongDim.apply(kv_fp8, dim, [1, 1])
                                 key_layer, value_layer = [x.squeeze(dim) for x in [k_fp8, v_fp8]]
                             if qkv_group == 3:
-                                query_layer = cast_to_fp8(
-                                    query_layer,
-                                    fp8_meta["scaling_fwd"],
-                                    META_QKV,
-                                    fp8_dtype_forward,
-                                ).view(query_layer.shape)
-                                key_layer = cast_to_fp8(
-                                    key_layer, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
-                                ).view(key_layer.shape)
-                                value_layer = cast_to_fp8(
-                                    value_layer,
-                                    fp8_meta["scaling_fwd"],
-                                    META_QKV,
-                                    fp8_dtype_forward,
-                                ).view(value_layer.shape)
+                                query_layer, key_layer, value_layer = (
+                                    x.to(torch_dtype) for x in [query_layer, key_layer, value_layer]
+                                )
                     output, _ = func(
                         query_layer,
                         key_layer,
@@ -4487,24 +4468,21 @@ class FlashAttention(torch.nn.Module):
                         causal="causal" in attn_mask_type,
                         deterministic=self.deterministic,
                     )
-                    if fp8:
-                        if fp8_meta["recipe"].fp8_mha:
-                            output = Float8Tensor(
-                                data=output,
-                                fp8_meta=fp8_meta,
-                                fp8_meta_forward=True,
-                                fp8_meta_index=META_O,
-                                fp8_dtype=fp8_dtype_forward,
-                                dtype=query_layer.dtype,
-                            )
-                        else:
-                            output = cast_from_fp8(
-                                output.view(-1, output.shape[-2] * output.shape[-1]),
-                                fp8_meta["scaling_fwd"],
-                                META_O,
-                                fp8_dtype_forward,
-                                TE_DType[query_layer.dtype],
-                            ).view(output.shape)
+                    if fp8 and fp8_meta["recipe"].fp8_mha:
+                        output = cast_to_fp8(
+                            output,
+                            fp8_meta["scaling_fwd"],
+                            META_O,
+                            fp8_dtype_forward,
+                        )
+                        output = Float8Tensor(
+                            data=output,
+                            fp8_meta=fp8_meta,
+                            fp8_meta_forward=True,
+                            fp8_meta_index=META_O,
+                            fp8_dtype=fp8_dtype_forward,
+                            dtype=activation_dtype,
+                        )
                 else:
                     output = func(
                         query_layer,
@@ -7011,6 +6989,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_comm_type=self.cp_comm_type,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
+                    fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
+                    fp8_meta=self.fp8_meta,
                 )
 
             if use_fused_attention:

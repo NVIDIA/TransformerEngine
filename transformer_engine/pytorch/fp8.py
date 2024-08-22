@@ -37,6 +37,13 @@ def get_default_fp8_recipe() -> DelayedScaling:
     """FP8 recipe with default args."""
     return DelayedScaling()
 
+def get_fp8_torch_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> torch.dtype:
+    """Get fp8 data type according to recipe and tensor"""
+    if fp8_recipe.fp8_format == Format.E4M3 or (
+        fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
+    ):
+        return torch.float8_e4m3fn
+    return torch.float8_e5m2fn
 
 def get_fp8_te_dtype(fp8_recipe: DelayedScaling, fprop_tensor: bool = True) -> tex.DType:
     """Get fp8 data type according to recipe and tensor"""
