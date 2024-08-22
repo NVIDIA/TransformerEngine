@@ -15,7 +15,7 @@ from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import get_ub, get_workspace
-from ..basic import BasicLinear, Bias, CastFloat8, ReduceScatter
+from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     BasicOperation,
     FusedOperation,
@@ -37,7 +37,6 @@ class UserbuffersForwardLinear(FusedOperation):
         *,
         linear: BasicLinear,
         bias: Optional[Bias],
-        cast_fp8: Optional[CastFloat8],
         reduce_scatter: Optional[ReduceScatter],
     ) -> None:
 
@@ -45,16 +44,12 @@ class UserbuffersForwardLinear(FusedOperation):
         op_idxs = dict(
             linear=0,
             bias=None,
-            cast_fp8=None,
             reduce_scatter=None,
         )
         ops = [linear]
         if bias is not None:
             op_idxs["bias"] = len(ops)
             ops.append(bias)
-        if cast_fp8 is not None:
-            op_idxs["cast_fp8"] = len(ops)
-            ops.append(cast_fp8)
         if reduce_scatter is not None:
             op_idxs["reduce_scatter"] = len(ops)
             ops.append(reduce_scatter)
@@ -153,8 +148,6 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise ValueError("No FP8 metadata was provided for casting input to FP8")
             if weight_fp8_meta is None and not is_float8_tensor(weight):
                 raise ValueError("No FP8 metadata was provided for casting weight to FP8")
-            if output_fp8_meta is None and tensor_parallel_mode == "row":
-                raise ValueError("No FP8 metadata was provided for casting output to FP8")
         else:
             input_fp8_meta = None
             weight_fp8_meta = None
@@ -425,14 +418,6 @@ class UserbuffersForwardLinear(FusedOperation):
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
-        cast_fp8_op = None
-        cast_fp8_op_ctx = None
-        if self._op_idxs["cast_fp8"] is not None:
-            idx = self._op_idxs["cast_fp8"]
-            cast_fp8_op = self.basic_ops[idx]
-            cast_fp8_op_ctx = basic_op_ctxs[idx]
-            if basic_op_kwargs[idx]:
-                raise ValueError("FP8 cast operation forward does not expect keyword arguments")
         reduce_scatter_op = None
         if self._op_idxs["reduce_scatter"] is not None:
             idx = self._op_idxs["reduce_scatter"]
@@ -450,19 +435,9 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_fp8_compute:
             input_fp8_meta = linear_op.get_fp8_meta("input")
             weight_fp8_meta = linear_op.get_fp8_meta("param")
-            if cast_fp8_op is not None:
-                output_fp8_meta = cast_fp8_op.get_fp8_meta("input")
-            if output_fp8_meta is None:
-                next_op = basic_op_next_ops[-1]
-                if next_op is not None and next_op.num_fp8_scales("input") > 0:
-                    output_fp8_meta = next_op.get_fp8_meta("input")
-            if self.tensor_parallel_mode == "row" and output_fp8_meta is None:
-                raise RuntimeError(
-                    "Userbuffers implementation of row tensor-parallel linear with FP8 compute "
-                    "casts GEMM output to FP8, but could not find FP8 metadata to perform this "
-                    "cast. Either disable Userbuffers or insert CastFloat8 op between BasicLinear "
-                    "and ReduceScatter."
-                )
+            next_op = basic_op_next_ops[-1]
+            if next_op is not None and next_op.num_fp8_scales("input") > 0:
+                output_fp8_meta = next_op.get_fp8_meta("input")
             grad_output_fp8_meta = linear_op.get_fp8_meta("grad_output")
             prev_op = basic_op_prev_ops[0]
             if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
@@ -500,8 +475,6 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
         linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None
-        if cast_fp8_op is not None:
-            cast_fp8_op_ctx.cast_backward = with_fp8_compute and cast_fp8_op._cast_backward
 
         return output, [() for _ in range(len(self.basic_ops))]
 
@@ -543,16 +516,6 @@ def fuse_userbuffers_forward_linear(
         if linear.tensor_parallel_mode != "row" and isinstance(peek_next_op(), Bias):
             bias = pop_next_op()
 
-        # Check if next op is FP8 cast
-        cast_fp8 = None
-        next_op = peek_next_op()
-        if (
-            linear.tensor_parallel_mode != "column"
-            and isinstance(next_op, CastFloat8)
-            and next_op.num_fp8_scales("input") > 0
-        ):
-            cast_fp8 = pop_next_op()
-
         # Check if next op is reduce-scatter
         reduce_scatter = None
         if linear.tensor_parallel_mode is None and isinstance(peek_next_op(), ReduceScatter):
@@ -572,7 +535,6 @@ def fuse_userbuffers_forward_linear(
         op = UserbuffersForwardLinear(
             linear=linear,
             bias=bias,
-            cast_fp8=cast_fp8,
             reduce_scatter=reduce_scatter,
         )
         basic_op_idxs = [basic_op_idxs[0] for _, basic_op_idxs in window]

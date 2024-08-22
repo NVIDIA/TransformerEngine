@@ -450,13 +450,14 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     int m_chunk = m / _num_splits;
     int input_a_chunk_size = m_chunk * k;
     int output_chunk_size = n * m_chunk;
+    int bias_chunk_size = m_chunk;
     int workspace_size_chunk = workspaceSize / _stream_compute.size();
 
     // Get input, output, and workspace data pointers
     char *input_a_chunk_ptr = reinterpret_cast<char *>(A.data_ptr());
     char *output_buf_chunk_ptr = reinterpret_cast<char *>(_ubuf.data_ptr());
+    char *bias_chunk_ptr = reinterpret_cast<char *>(bias.data_ptr());
     char *workspace_ptr = reinterpret_cast<char *>(workspace.data_ptr());
-
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.data_ptr());
 
     // Catch up the default torch stream
@@ -477,27 +478,35 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       torch::Tensor input_a_chunk = torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
       torch::Tensor output_chunk =
           torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
+      torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
+                                  ? bias
+                                  : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
       torch::Tensor workspace_chunk =
           torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
       at::cuda::setCurrentCUDAStream(_stream_compute[0]);
       te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
-              output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+              output_chunk, D_scale, D_type, D_amax, bias_chunk, bias_type, pre_gelu_out, grad,
               workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator, _math_sms);
 
       for (int i = 1; i < _num_splits; i++) {
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
         output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
-
+        if (bias_chunk_ptr != nullptr) {
+          bias_chunk_ptr += bias_chunk_size * bias.element_size();
+        }
         torch::Tensor input_a_chunk =
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
         torch::Tensor output_chunk =
             torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
+        torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
+                                    ? bias
+                                    : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());
         at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
         te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
-                output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                output_chunk, D_scale, D_type, D_amax, bias_chunk, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
@@ -549,12 +558,15 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
         torch::Tensor output_chunk =
             torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
+        torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
+                                    ? bias
+                                    : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());
         at::cuda::setCurrentCUDAStream(_stream_compute[i % _stream_compute.size()]);
         te_gemm(input_a_chunk, A_scale_inverse, A_type, transa, B, B_scale_inverse, B_type, transb,
-                output_chunk, D_scale, D_type, D_amax, bias, bias_type, pre_gelu_out, grad,
+                output_chunk, D_scale, D_type, D_amax, bias_chunk, bias_type, pre_gelu_out, grad,
                 workspace_chunk, workspace_size_chunk, accumulate, use_split_accumulator,
                 _math_sms);
 
@@ -582,6 +594,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
         rs_output_ptr += m_chunk * rs_output.element_size();
         input_a_chunk_ptr += input_a_chunk_size * B.element_size();
         output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
+        if (bias_chunk_ptr != nullptr) {
+          bias_chunk_ptr += bias_chunk_size * bias.element_size();
+        }
       }
     }
     for (size_t i = 0; i < _stream_compute.size(); i++) {

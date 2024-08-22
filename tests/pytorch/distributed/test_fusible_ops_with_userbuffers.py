@@ -288,8 +288,6 @@ def _test_linear(
                 ops.append(bias_op)
         elif tensor_parallel_mode == "row":
             userbuffers_options = dict(comm_name="proj")
-            if fp8_compute:
-                userbuffers_options["comm_name"] = "fc1" ### TODO Remove
             linear_op = te_ops.BasicLinear(
                 in_features // world_size,
                 out_features,
@@ -301,8 +299,6 @@ def _test_linear(
             if bias:
                 bias_op = te_ops.Bias(out_features, device=device, dtype=dtype)
                 ops.append(bias_op)
-            if fp8_compute:
-                ops.append(te_ops.CastFloat8(backward=False))
             ops.append(te_ops.ReduceScatter(process_group))
         model = te_ops.Sequential(*ops)
     with torch.no_grad():
