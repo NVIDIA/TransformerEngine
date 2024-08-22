@@ -20,7 +20,7 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_backward_linear_add,
     fuse_forward_linear_bias_activation,
     fuse_forward_linear_bias_add,
-    fuse_forward_userbuffers_linear,
+    fuse_userbuffers_forward_linear,
 )
 
 
@@ -319,7 +319,7 @@ class OperationFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
-        ops = fuse_forward_userbuffers_linear(ops)
+        ops = fuse_userbuffers_forward_linear(ops)
         ops = fuse_forward_linear_bias_add(ops)
         ops = fuse_forward_linear_bias_activation(ops)
         return ops

@@ -16,7 +16,7 @@ from .forward_linear_bias_add import (
     ForwardLinearBiasAdd,
     fuse_forward_linear_bias_add,
 )
-from .userbuffers_linear import (
-    UserbuffersLinear,
-    fuse_forward_userbuffers_linear,
+from .userbuffers_forward_linear import (
+    UserbuffersForwardLinear,
+    fuse_userbuffers_forward_linear,
 )

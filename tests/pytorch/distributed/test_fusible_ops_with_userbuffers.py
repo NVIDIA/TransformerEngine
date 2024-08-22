@@ -23,7 +23,7 @@ from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
-from transformer_engine.pytorch.ops.fused import UserbuffersLinear
+from transformer_engine.pytorch.ops.fused import UserbuffersForwardLinear
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions
@@ -287,7 +287,9 @@ def _test_linear(
                 )
                 ops.append(bias_op)
         elif tensor_parallel_mode == "row":
-            userbuffers_options = dict(comm_name="fc1")
+            userbuffers_options = dict(comm_name="proj")
+            if fp8_compute:
+                userbuffers_options["comm_name"] = "fc1" ### TODO Remove
             linear_op = te_ops.BasicLinear(
                 in_features // world_size,
                 out_features,
@@ -299,6 +301,8 @@ def _test_linear(
             if bias:
                 bias_op = te_ops.Bias(out_features, device=device, dtype=dtype)
                 ops.append(bias_op)
+            if fp8_compute:
+                ops.append(te_ops.CastFloat8(backward=False))
             ops.append(te_ops.ReduceScatter(process_group))
         model = te_ops.Sequential(*ops)
     with torch.no_grad():
@@ -314,7 +318,7 @@ def _test_linear(
     # Check that forward operations have been fused
     forward_ops = model._module_groups[0]._forward_ops
     assert len(forward_ops) == 1
-    assert isinstance(forward_ops[0][0], UserbuffersLinear)
+    assert isinstance(forward_ops[0][0], UserbuffersForwardLinear)
 
     # Expected numerical error
     tols = dtype_tols(dtype)
@@ -373,7 +377,7 @@ if torch.cuda.device_count() > 1:
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
-    dtype: torch.dtype = torch.float32,
+    dtype: torch.dtype = torch.bfloat16,
     fp8: bool,
 ) -> None:
     """Launch parallel job that runs parallel tests"""
@@ -430,7 +434,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=16)
     parser.add_argument("--head-dim", type=int, default=32)
-    parser.add_argument("--dtype", type=str, default="float32")
+    parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--fp8", action="store_true")
     args = parser.parse_args()
 
