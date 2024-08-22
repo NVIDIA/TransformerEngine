@@ -6961,7 +6961,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if _flash_attn_3_plus:
                     assert (
                         not context_parallel
-                        and qkv_format == "bshd"
                         and self.attention_dropout == 0.0
                     ), "flash-attn 3 does not support context parallelism, dropout, "
                     f"or qkv_format={qkv_format}"
