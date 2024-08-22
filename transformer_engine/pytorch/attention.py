@@ -3327,11 +3327,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         cp_size = get_distributed_world_size(cp_group)
-        rank = get_distributed_rank(cp_group)
 
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
-        assert causal and not padding, f"{attn_mask_type} mask type is not supported!"
+        assert not padding, f"{attn_mask_type} mask type is not supported!"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -3347,7 +3346,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         assert (
             q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0
-        ), "Number of attention heads needs to be divisible by CP size!"
+        ), "The number of attention heads needs to be divisible by CP size!"
 
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -3370,7 +3369,13 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
         q, k, v = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
         # reorder the sequence chunks
+        chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
+        for rank in range(cp_size):
+            chunk_ids[rank] = rank
+            chunk_ids[rank+cp_size] = 2*cp_size-rank-1
         q, k, v = [torch.index_select(x, dim=seq_dim, index=chunk_ids) for x in [q, k, v]]
+        # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
+        q, k, v = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
 
         if use_fused_attention:
             out, aux_ctx_tensors = fused_attn_fwd(
@@ -3381,7 +3386,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 cu_seqlens_kv,
                 q,
                 k,
-                v
+                v,
                 TE_DType[q.dtype],
                 tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                 attn_scale=softmax_scale,
@@ -3396,6 +3401,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             softmax_lse, rng_state, *rest = aux_ctx_tensors
             attn_bias = rest[0] if len(rest) > 0 else None
         else:
+            batch_size = q.shape[0]
+            # [b, cp*s, np//cp, hn] -> [b*cp*s, np//cp, hn]
+            q, k, v = [x.view(-1, *x.shape[-2:]) for x in [q, k, v]]
             (
                 _,
                 _,
@@ -3419,19 +3427,27 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 return_softmax=False,
                 **fa_optional_forward_kwargs,
             )
+            # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
+            out = out.view(batch_size, -1, *out.shape[-2:])
 
-        # [b, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+2):])
+        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+1):])
         # reorder the sequence chunks
+        for rank in range(cp_size):
+            chunk_ids[2*rank] = rank
+            chunk_ids[2*rank+1] = 2*cp_size-rank-1
         out = torch.index_select(out, dim=seq_dim, index=chunk_ids)
-        # [b, cp*2, s//2, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        out = out.view(*out.shape[:seq_dim], cp_size, -1, *out.shape[(seq_dim+2):])
+        # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
         out = out.movedim(seq_dim, 0).contiguous()
-        out = out.view()
         out_ = torch.empty_like(out)
         torch.distributed.all_to_all_single(out_, out, group=cp_group)
         out = out_
-        # [cp, b, s, np//cp, hn] -> [b, s, np, hn] or [cp, s, b, np//cp, hn] -> [s, b, np, hn]
-        out = out.movedim(seq_dim, 0).contiguous()
+        # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
+        out = out.movedim(0, -3).contiguous()
+        # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
+        out = out.view(*out.shape[:-3], -1, out.shape[-1])
 
         ctx.save_for_backward(
             q,
