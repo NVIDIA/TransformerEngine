@@ -546,12 +546,6 @@ def get_attention_backend(
                     "with causal mask, no dropout, and qkv_format = bshd/sbhd"
                 )
                 use_fused_attention = False
-            elif context_parallel:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with context parallelism"
-                )
-                use_fused_attention = False
             elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
                 "no_mask",
                 "padding",
@@ -3397,6 +3391,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 attn_bias=attn_bias,
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                window_size=window_size,
             )
             softmax_lse, rng_state = aux_ctx_tensors
         else:
@@ -3675,7 +3670,7 @@ def attn_forward_func_with_cp(
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     )
     assert (
-        not sliding_window_attn or cp_comm_type != "p2p"
+        not sliding_window_attn or cp_comm_type == "a2a" or (cp_comm_type == "all_gather" and not use_fused_attention)
     ), "Context parallel implementation with P2P does not support sliding window attetnion!"
 
     args = (
