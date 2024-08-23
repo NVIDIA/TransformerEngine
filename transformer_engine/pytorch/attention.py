@@ -100,7 +100,9 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3  # pylint: disable=unused-import
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_forward as _flash_attn_forward_v3,
+    )  # pylint: disable=unused-import
     from flashattn_hopper.flash_attn_interface import (
         _flash_attn_backward as _flash_attn_backward_v3,
     )  # pylint: disable=unused-import
@@ -351,7 +353,10 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: Data type
-    if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [torch.Tensor, Float8Tensor]:
+    if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
+        torch.Tensor,
+        Float8Tensor,
+    ]:
         if use_flash_attention:
             logger.debug(
                 "Disabling FlashAttention due to unsupported QKV data type. "
