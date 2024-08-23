@@ -345,6 +345,7 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: Compute capability
+    global _flash_attn_3_plus, _use_flash_attn_3
     if device_compute_capability < (8, 0):
         if use_flash_attention:
             logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
@@ -352,6 +353,10 @@ def get_attention_backend(
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
             use_fused_attention = False
+    if device_compute_capability < (9, 0):
+        if use_flash_attention and _flash_attn_3_plus:
+            logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
+            _use_flash_attn_3 = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
@@ -425,7 +430,6 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Dropout
-    global _flash_attn_3_plus, _use_flash_attn_3
     if attention_dropout != 0.0 and use_flash_attention:
         if _flash_attn_3_plus and _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for dropout")
@@ -542,6 +546,18 @@ def get_attention_backend(
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
+    if (
+        use_flash_attention
+        and _flash_attn_3_plus
+        and attn_mask_type in ["causal", "padding_causal"]
+        and max_seqlen_q != max_seqlen_kv
+    ):
+        logger.warning(
+            "Disabling FlashAttention 3 as it only supports bottom-right-diagonal "
+            "causal mask since flash-attn 2.1. See "
+            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+        )
+        _use_flash_attn_3 = False
     if (
         use_flash_attention
         and _flash_attn_2_1_plus
