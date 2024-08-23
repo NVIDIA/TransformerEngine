@@ -6,6 +6,7 @@
 import collections
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
+from importlib.metadata import PackageNotFoundError
 import math
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -87,7 +88,7 @@ _use_flash_attn_3 = False
 try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
-except Exception:
+except PackageNotFoundError:
     warnings.warn(
         "To use flash-attn v3, please use the following commands to install: \n"
         """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
@@ -100,13 +101,10 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_forward as _flash_attn_forward_v3,
-    )  # pylint: disable=unused-import
-    from flashattn_hopper.flash_attn_interface import (
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3  # pylint: disable=unused-import
+    from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
         _flash_attn_backward as _flash_attn_backward_v3,
-    )  # pylint: disable=unused-import
-
+    )
     _use_flash_attn_3 = True
 
 if _flash_attn_version >= _flash_attn_version_required:
@@ -425,7 +423,7 @@ def get_attention_backend(
 
     # Filter: Dropout
     global _flash_attn_3_plus, _use_flash_attn_3
-    if self.attention_dropout != 0.0 and use_flash_attention:
+    if attention_dropout != 0.0 and use_flash_attention:
         if _flash_attn_3_plus and _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for dropout")
             _use_flash_attn_3 = False
