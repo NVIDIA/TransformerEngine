@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Linear layer with Userbuffers communication."""
+"""Linear layer forward with Userbuffers communication."""
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -97,19 +97,19 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Check device
         if device is None:
-            device = weight.device if out is None else out.device
+            device = weight.device
         device = canonicalize_device(device)
         if device.type != "cuda":
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype if out is None else out.dtype
+            dtype = weight.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
 
-        # Check input tensor dims
+        # Input tensor dims
         input_dims = tuple(input.size())
         weight_dims = tuple(weight.size())
         if len(weight_dims) != 2:
@@ -121,8 +121,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 "are not compatible"
             )
 
-        # Check output tensor dims
-        output_dims: list[int]
+        # Output tensor dims
         output_dims = list(input_dims)
         output_dims[0] = -1
         output_dims[-1] = weight_dims[0]
@@ -152,7 +151,11 @@ class UserbuffersForwardLinear(FusedOperation):
             input_fp8_meta = None
             weight_fp8_meta = None
             output_fp8_meta = None
-        with_fp8_output = with_fp8_compute and output_fp8_meta is not None
+        with_fp8_output = (
+            with_fp8_compute
+            and tensor_parallel_mode != "row"
+            and output_fp8_meta is not None
+        )
 
         # Get Userbuffers communicator
         ub_comm = get_ub(ub_comm_name + "_fprop")
@@ -418,12 +421,6 @@ class UserbuffersForwardLinear(FusedOperation):
             bias = bias_op.bias
             if basic_op_kwargs[idx]:
                 raise ValueError("Bias operation forward does not expect keyword arguments")
-        reduce_scatter_op = None
-        if self._op_idxs["reduce_scatter"] is not None:
-            idx = self._op_idxs["reduce_scatter"]
-            reduce_scatter_op = self.basic_ops[idx]
-            if basic_op_kwargs[idx]:
-                raise ValueError("Reduce-scatter operation forward does not expect keyword arguments")
 
         # FP8 metadata
         with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
@@ -483,6 +480,7 @@ def fuse_userbuffers_forward_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
 
+    # Sliding window in list of ops
     window = []
 
     def peek_next_op() -> Optional[FusibleOperation]:
