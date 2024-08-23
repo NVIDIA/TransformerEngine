@@ -23,9 +23,6 @@ _default_causal_mask = {}
 
 def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
-    if sq == 1:
-        return torch.zeros((1, sk), dtype=torch.bool, device="cuda")
-
     matrix_identifiers = (mask_type, sq, sk)
     if matrix_identifiers not in _default_causal_mask:
         diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1

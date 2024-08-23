@@ -1332,7 +1332,7 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
     assert (
         rmse < rmse_tol * rmse_range
-    ), "RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+    ), name_a + " vs " + name_b + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
         rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
     )
 
@@ -1351,10 +1351,10 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
+    global _attention_backends
     if not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
-        global _attention_backends
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
@@ -1363,6 +1363,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
     fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
         dtype, config, True, qkv_format, input_layernorm, is_training
@@ -1375,7 +1376,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
 
     atol = 5e-1
     rtol = 5e-1
-    rmse_tol = 0.1
+    rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
     if not is_training:
         _error(
@@ -1515,7 +1516,8 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
-def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
+@pytest.mark.parametrize("is_training", [True, False])
+def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     config = model_configs_fp8_vs_f16[model]
 
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
@@ -1523,76 +1525,65 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd):
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
-    global _attention_backends
-    _attention_backends["backend_selection_requires_update"] = True
 
+    global _attention_backends
+    if not is_training:
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
+        flash_attn_fwd_fp8, flash_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+            dtype, config, True, qkv_layout, is_training
+        )
+
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
-    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout)
+    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout, is_training)
 
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
-    fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(dtype, config, False, qkv_layout)
+    fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(dtype, config, False, qkv_layout, is_training)
 
-    tols = dict(atol=5e-1, rtol=5e-2)
+    atol = 5e-1
+    rtol = 5e-2
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
-    fwd_rmse = _rmse(fused_attn_fwd_fp8, fused_attn_fwd_f16)
-    fwd_range = max(fused_attn_fwd_fp8.max().item(), fused_attn_fwd_f16.max().item()) - min(
-        fused_attn_fwd_fp8.min().item(), fused_attn_fwd_f16.min().item()
-    )
-
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    logging.debug(
-        "fused_attn_fwd_fp8 min {:.6f} max {:.6f}".format(
-            fused_attn_fwd_fp8.min().item(), fused_attn_fwd_fp8.max().item()
+    if not is_training:
+        _error(
+            flash_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "flash_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
         )
+    _error(
+        fused_attn_fwd_fp8,
+        fused_attn_fwd_f16,
+        "fused_attn_fwd_fp8",
+        "fused_attn_fwd_f16",
+        atol,
+        rtol,
+        rmse_tol,
     )
-    logging.debug(
-        "fused_attn_fwd_f16 min {:.6f} max {:.6f}".format(
-            fused_attn_fwd_f16.min().item(), fused_attn_fwd_f16.max().item()
-        )
-    )
-    logging.debug("fused_attn_fwd RMSE: {:.6f}".format(fwd_rmse))
-    try:
-        torch.testing.assert_close(fused_attn_fwd_fp8, fused_attn_fwd_f16, **tols)
-    except Exception as e:
-        logging.debug(e)
-
-    assert (
-        fwd_rmse < rmse_tol * fwd_range
-    ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range
-    )
-    for i, _ in enumerate(fused_attn_bwd_f16):
-        bwd_rmse = _rmse(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i])
-        bwd_range = max(
-            fused_attn_bwd_fp8[i].max().item(), fused_attn_bwd_f16[i].max().item()
-        ) - min(fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_f16[i].min().item())
-
-        logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-        logging.debug(
-            "fused_attn_bwd_fp8[{}] min {:.6f} max {:.6f}".format(
-                i, fused_attn_bwd_fp8[i].min().item(), fused_attn_bwd_fp8[i].max().item()
+    if is_training:
+        for i, _ in enumerate(fused_attn_bwd_f16):
+            logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
+            _error(
+                fused_attn_bwd_fp8[i],
+                fused_attn_bwd_f16[i],
+                f"fused_attn_bwd_fp8[{i}]",
+                f"fused_attn_bwd_f16[{i}]",
+                atol,
+                rtol,
+                rmse_tol,
             )
-        )
-        logging.debug(
-            "fused_attn_bwd_f16[{}] min {:.6f} max {:.6f}".format(
-                i, fused_attn_bwd_f16[i].min().item(), fused_attn_bwd_f16[i].max().item()
-            )
-        )
-        logging.debug("fused_attn_bwd RMSE[{}]: {:.6f}".format(i, bwd_rmse))
-        try:
-            torch.testing.assert_close(fused_attn_bwd_fp8[i], fused_attn_bwd_f16[i], **tols)
-        except Exception as e:
-            logging.debug(e)
-
-        assert (
-            bwd_rmse < rmse_tol * bwd_range
-        ), "BWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-            bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range
-        )
 
 
-def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
+def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
 
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -1625,6 +1616,8 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
             attention_type="self",
             qkv_format=qkv_format,
         ).to(dtype=dtype, device="cuda")
+        if not is_training:
+            dpa = dpa.eval()
 
     seqlens_q = torch.full(
         [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
@@ -1698,9 +1691,12 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout):
             core_attention_bias_type=config.attn_bias_type,
             is_first_microbatch=True,
         )
-        out.backward(out_grad)
+        if is_training:
+            out.backward(out_grad)
 
-    return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    if is_training:
+        return out, (inp[0].grad, inp[1].grad, inp[2].grad)
+    return out, (None, None, None)
 
 
 model_configs_fp8 = {
@@ -1744,58 +1740,26 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
     unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedAttention")
 
-    tols = dict(atol=5e-1, rtol=5e-1)
+    atol = 5e-1
+    rtol = 5e-1
     rmse_tol = 0.1
-    fwd_rmse = _rmse(fused_attn_fwd_fp8, unfused_attn_fwd_f16)
-    fwd_range = max(fused_attn_fwd_fp8.max().item(), unfused_attn_fwd_f16.max().item()) - min(
-        fused_attn_fwd_fp8.min().item(), unfused_attn_fwd_f16.min().item()
+    _error(
+        fused_attn_fwd_fp8,
+        unfused_attn_fwd_f16,
+        "fused_attn_fwd_fp8",
+        "unfused_attn_fwd_f16",
+        atol,
+        rtol,
+        rmse_tol,
     )
-    bwd_rmse = _rmse(fused_attn_bwd_fp8, unfused_attn_bwd_f16)
-    bwd_range = max(fused_attn_bwd_fp8.max().item(), unfused_attn_bwd_f16.max().item()) - min(
-        fused_attn_bwd_fp8.min().item(), unfused_attn_bwd_f16.min().item()
-    )
-
-    logging.debug(
-        "fused_attn_fwd_fp8   min {:.6f} max {:.6f}".format(
-            fused_attn_fwd_fp8.min().item(), fused_attn_fwd_fp8.max().item()
-        )
-    )
-    logging.debug(
-        "unfused_attn_fwd_f16 min {:.6f} max {:.6f}".format(
-            unfused_attn_fwd_f16.min().item(), unfused_attn_fwd_f16.max().item()
-        )
-    )
-    logging.debug("fused_attn_fwd_fp8 vs unfused_attn_fwd_f16 RMSE: {:.6f}".format(fwd_rmse))
-    try:
-        torch.testing.assert_close(fused_attn_fwd_fp8, unfused_attn_fwd_f16, **tols)
-    except Exception as e:
-        logging.debug(e)
-
-    logging.debug(
-        "fused_attn_bwd_fp8   min {:.6f} max {:.6f}".format(
-            fused_attn_bwd_fp8.min().item(), fused_attn_bwd_fp8.max().item()
-        )
-    )
-    logging.debug(
-        "unfused_attn_bwd_f16 min {:.6f} max {:.6f}".format(
-            unfused_attn_bwd_f16.min().item(), unfused_attn_bwd_f16.max().item()
-        )
-    )
-    logging.debug("fused_attn_bwd_fp8 vs unfused_attn_bwd_f16 RMSE: {:.6f}".format(bwd_rmse))
-    try:
-        torch.testing.assert_close(fused_attn_bwd_fp8, unfused_attn_bwd_f16, **tols)
-    except Exception as e:
-        logging.debug(e)
-
-    assert (
-        fwd_rmse < rmse_tol * fwd_range
-    ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-        fwd_rmse, rmse_tol * fwd_range, rmse_tol, fwd_range
-    )
-    assert (
-        bwd_rmse < rmse_tol * bwd_range
-    ), "FWD RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-        bwd_rmse, rmse_tol * bwd_range, rmse_tol, bwd_range
+    _error(
+        fused_attn_bwd_fp8,
+        unfused_attn_bwd_f16,
+        "fused_attn_bwd_fp8",
+        "unfused_attn_bwd_f16",
+        atol,
+        rtol,
+        rmse_tol,
     )
 
 

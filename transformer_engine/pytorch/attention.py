@@ -82,11 +82,12 @@ _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
+_flash_attn_3_plus = False
+_use_flash_attn_3 = False
 try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
 except:
-    _flash_attn_3_plus = False
     warnings.warn(
         "To use flash-attn v3, please use the following commands to install: \n"
         """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
@@ -95,11 +96,13 @@ except:
         """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
     )
 else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward
-    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_backward
+    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flashattn_hopper.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_backward_v3
+    _use_flash_attn_3 = True
 
-if _flash_attn_version >= _flash_attn_version_required and not _flash_attn_3_plus:
+if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
@@ -548,6 +551,7 @@ def get_attention_backend(
     # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
     # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
     #                            |                        | converts window_size to an 'arbitrary' mask
+    global _flash_attn_3_plus, _use_flash_attn_3
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
@@ -592,6 +596,15 @@ def get_attention_backend(
         if (
             use_flash_attention
             and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+            and _flash_attn_3_plus
+        ):
+            logger.debug(
+                "Disabling FlashAttention 3 as it does not support sliding window attention"
+            )
+            _use_flash_attn_3 = False
+        if (
+            use_flash_attention
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
             and not _flash_attn_2_3_plus
         ):
             logger.debug(
@@ -608,6 +621,14 @@ def get_attention_backend(
     #                            |                              | bottom_right (converts to a 'post_scale_bias' bias)
     # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
     #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
+    if use_flash_attention and core_attention_bias_type == "alibi":
+        if _flash_attn_3_plus and _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention 3 for ALiBi")
+            _use_flash_attn_3 = False
+            if not _flash_attn_2_4_plus:
+                logger.debug("Disabling FlashAttention for ALiBi")
+                use_flash_attention = False
+
     if use_flash_attention and (
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
@@ -1089,7 +1110,7 @@ def _get_full_cu_seqlens(
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
-@jit_fuser
+@torch.compile
 def pack_tensor(
     indices: torch.Tensor,
     tensor: torch.Tensor,
@@ -1100,14 +1121,19 @@ def pack_tensor(
     padding_indice = torch.zeros(
         1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
     )
-    tensor = torch.cat((tensor, padding_indice), dim=0)
-
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    packed = torch.gather(tensor, 0, indices)
+    if isinstance(tensor, Float8Tensor):
+        tensor_data = torch.cat((tensor._data, padding_indice), dim=0)
+
+        packed = Float8Tensor.make_like(tensor, data=torch.gather(tensor_data, 0, indices))
+    else:
+        tensor = torch.cat((tensor, padding_indice), dim=0)
+
+        packed = torch.gather(tensor, 0, indices)
     return packed
 
 
-@jit_fuser
+@torch.compile
 def pack_2_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1121,7 +1147,7 @@ def pack_2_tensors(
     return t1_packed, t2_packed
 
 
-@jit_fuser
+@torch.compile
 def pack_3_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1137,7 +1163,7 @@ def pack_3_tensors(
     return t1_packed, t2_packed, t3_packed
 
 
-@jit_fuser
+@torch.compile
 def unpack_tensor(
     indices: torch.Tensor,
     dim0: int,
@@ -1150,12 +1176,16 @@ def unpack_tensor(
     unpacked = torch.zeros(
         dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
     )
-    unpacked.scatter_(0, indices, tensor)
-    unpacked = unpacked[0:-1, :, :]
+    if isinstance(tensor, Float8Tensor):
+        unpacked.scatter_(0, indices, tensor._data)
+        unpacked = Float8Tensor.make_like(tensor, data=unpacked[0:-1, :, :])
+    else:
+        unpacked.scatter_(0, indices, tensor)
+        unpacked = unpacked[0:-1, :, :]
     return unpacked
 
 
-@jit_fuser
+@torch.compile
 def unpack_2_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -1170,7 +1200,7 @@ def unpack_2_tensors(
     return t1_unpacked, t2_unpacked
 
 
-@jit_fuser
+@torch.compile
 def unpack_3_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -4291,6 +4321,11 @@ class FlashAttention(torch.nn.Module):
 
             if "padding" in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
+                # [b * s, h, d]
+                query_layer, key_layer, value_layer = [
+                    x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
+                    for x in [query_layer, key_layer, value_layer]
+                ]
 
                 if self.attention_type == "self":
                     assert (
@@ -4304,17 +4339,9 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                     cu_seqlens_kv = cu_seqlens_q
-                    if all(
-                        not isinstance(x, Float8Tensor)
-                        for x in [query_layer, key_layer, value_layer]
-                    ):
-                        query_layer, key_layer, value_layer = PackTensors.apply(
-                            indices_q, query_layer, key_layer, value_layer
-                        )
-                    else:
-                        query_layer._data, key_layer._data, value_layer._data = PackTensors.apply(
-                            indices_q, query_layer._data, key_layer._data, value_layer._data
-                        )
+                    query_layer, key_layer, value_layer = PackTensors.apply(
+                        indices_q, query_layer, key_layer, value_layer
+                    )
                 else:
                     if cu_seqlens_q is None or cu_seqlens_kv is None:
                         assert (
@@ -4325,19 +4352,10 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    if all(
-                        not isinstance(x, Float8Tensor)
-                        for x in [query_layer, key_layer, value_layer]
-                    ):
-                        query_layer = PackTensors.apply(indices_q, query_layer)
-                        key_layer, value_layer = PackTensors.apply(
-                            indices_kv, key_layer, value_layer
-                        )
-                    else:
-                        query_layer._data = PackTensors.apply(indices_q, query_layer._data)
-                        key_layer._data, value_layer._data = PackTensors.apply(
-                            indices_kv, key_layer._data, value_layer._data
-                        )
+                    query_layer = PackTensors.apply(indices_q, query_layer)
+                    key_layer, value_layer = PackTensors.apply(
+                        indices_kv, key_layer, value_layer
+                    )
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
@@ -4413,15 +4431,15 @@ class FlashAttention(torch.nn.Module):
                 if _flash_attn_2_5_7_plus:
                     fa_optional_forward_kwargs["block_table"] = None
                 fa_optional_forward_args_thd = []
-                if qkv_format in ["bshd", "sbhd"]:
-                    func = flash_attn_func
-                if qkv_format == "thd":
-                    func = flash_attn_varlen_func
+                if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
+                    func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
+                else:
+                    func = flash_attn_varlen_func if not _use_flash_attn_3 else flash_attn_varlen_func_v3
                     fa_optional_forward_args_thd.append(cu_seqlens_q)
                     fa_optional_forward_args_thd.append(cu_seqlens_kv)
-                    fa_optional_forward_args_thd.append(max_seqlens_q)
-                    fa_optional_forward_args_thd.append(max_seqlens_kv)
-                if _flash_attn_3_plus:
+                    fa_optional_forward_args_thd.append(max_seqlen_q)
+                    fa_optional_forward_args_thd.append(max_seqlen_kv)
+                if _use_flash_attn_3:
                     if fp8:
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                         activation_dtype = query_layer.dtype
@@ -4437,29 +4455,9 @@ class FlashAttention(torch.nn.Module):
                                 for x in [query_layer, key_layer, value_layer]
                             )
                         else:
-                            # 1: qkv packed, 2: kv packed, 3: qkv separate
-                            qkv_group = len(qkv_layout.split("_"))
-                            if qkv_group == 1:
-                                dim = qkv_layout.find("3")
-                                qkv = _combine_tensors([query_layer, key_layer, value_layer], dim)
-                                qkv_c = qkv.view(-1, qkv.shape[-3] * qkv.shape[-2] * qkv.shape[-1])
-                                qkv_fp8 = qkv_c.to(torch_dtype).view(qkv.shape)
-                                q_fp8, k_fp8, v_fp8 = _SplitAlongDim.apply(qkv_fp8, dim, [1, 1, 1])
-                                query_layer, key_layer, value_layer = [
-                                    x.squeeze(dim) for x in [q_fp8, k_fp8, v_fp8]
-                                ]
-                            if qkv_group == 2:
-                                q_fp8 = query_layer.to(torch_dtype)
-                                dim = qkv_layout.split("_")[1].find("2")
-                                kv = _combine_tensors([key_layer, value_layer], dim)
-                                kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
-                                kv_fp8 = kv_c.to(torch_dtype).view(kv.shape)
-                                k_fp8, v_fp8 = _SplitAlongDim.apply(kv_fp8, dim, [1, 1])
-                                key_layer, value_layer = [x.squeeze(dim) for x in [k_fp8, v_fp8]]
-                            if qkv_group == 3:
-                                query_layer, key_layer, value_layer = (
-                                    x.to(torch_dtype) for x in [query_layer, key_layer, value_layer]
-                                )
+                            query_layer, key_layer, value_layer = (
+                                x.to(torch_dtype) for x in [query_layer, key_layer, value_layer]
+                            )
                     output, _ = func(
                         query_layer,
                         key_layer,
@@ -4501,15 +4499,19 @@ class FlashAttention(torch.nn.Module):
 
         if qkv_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
-            output = (
-                output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1).contiguous()
-            )
+            if fp8 and fp8_meta["recipe"].fp8_mha:
+                output.reshape(batch_size * max_seqlen_q // cp_size, -1).transpose_2d()
+                output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
+            else:
+                output = (
+                    output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1).contiguous()
+                )
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
-            output = output.view(batch_size, max_seqlen_q // cp_size, -1).contiguous()
+            output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
         elif qkv_format == "thd":
             # thd -> t(hd)
-            output = output.view(output.shape[0], -1).contiguous()
+            output = output.reshape(output.shape[0], -1)
 
         return output
 
@@ -6927,7 +6929,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
-            global _attention_backends
+            global _attention_backends, _flash_attn_3_plus, _use_flash_attn_3
             if (
                 _attention_backends["attention_params"] is None
                 or attention_params != _attention_backends["attention_params"]
@@ -6935,6 +6937,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 _attention_backends["attention_params"] = attention_params
                 _attention_backends["backend_selection_requires_update"] = True
             if _attention_backends["backend_selection_requires_update"]:
+                _use_flash_attn_3 = _flash_attn_3_plus
                 (
                     use_flash_attention,
                     use_fused_attention,
@@ -6943,7 +6946,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _,
                 ) = get_attention_backend(attention_params)
                 if use_flash_attention:
-                    self.logger.info("Running with FlashAttention backend")
+                    self.logger.info("Running with FlashAttention backend (version %s)", _flash_attn_version if not _use_flash_attn_3 else _flash_attn_v3_version)
                 elif use_fused_attention:
                     self.logger.info(
                         "Running with FusedAttention backend (sub-backend %s)",
@@ -6958,7 +6961,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_unfused_attention = _attention_backends["use_unfused_attention"]
 
             if use_flash_attention:
-                if _flash_attn_3_plus:
+                if _use_flash_attn_3:
                     assert (
                         not context_parallel and self.attention_dropout == 0.0
                     ), "flash-attn 3 does not support context parallelism, dropout, "
