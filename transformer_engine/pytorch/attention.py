@@ -101,9 +101,9 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import (
+    from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
         _flash_attn_forward as _flash_attn_forward_v3,
-    )  # pylint: disable=unused-import
+    )
     from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
         _flash_attn_backward as _flash_attn_backward_v3,
     )
