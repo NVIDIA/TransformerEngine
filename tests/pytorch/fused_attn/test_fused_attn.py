@@ -209,12 +209,6 @@ model_configs_base = {
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
     "base_3_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
     "base_3_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "no_mask", "no_bias"),  # inference
-    "base_11_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),  # self , 0
-    "base_11_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),  # cross, 0
-    "base_12_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # self , 1
-    "base_12_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),  # cross, 1
-    "base_13_0": ModelConfig(8, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),  # inference
-    "base_13_1": ModelConfig(8, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),  # inference
 }
 
 
@@ -426,6 +420,10 @@ model_configs_mask = {
     "mask_8_1": ModelConfig(
         1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
+    "mask_9_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
+    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
+    "mask_10_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_10_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
 }
 
 
