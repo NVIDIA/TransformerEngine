@@ -87,7 +87,7 @@ _use_flash_attn_3 = False
 try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
-except:
+except Exception:
     warnings.warn(
         "To use flash-attn v3, please use the following commands to install: \n"
         """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
@@ -100,10 +100,10 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3  # pylint: disable=unused-import
     from flashattn_hopper.flash_attn_interface import (
         _flash_attn_backward as _flash_attn_backward_v3,
-    )
+    )  # pylint: disable=unused-import
 
     _use_flash_attn_3 = True
 
@@ -351,22 +351,23 @@ def get_attention_backend(
             use_fused_attention = False
 
     # Filter: Data type
-    if use_flash_attention and qkv_dtype not in [torch.bfloat16, torch.float16]:
-        logger.debug(
-            "Disabling FlashAttention due to unsupported QKV data type. "
-            "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-            "Found: qkv_dtype = %s.",
-            qkv_dtype,
-        )
-        use_flash_attention = False
-    if use_fused_attention and (qkv_dtype not in [torch.bfloat16, torch.float16]):
-        logger.debug(
-            "Disabling FusedAttention due to unsupported QKV data type. "
-            "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-            "Found: qkv_dtype = %s.",
-            qkv_dtype,
-        )
-        use_fused_attention = False
+    if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [torch.Tensor, Float8Tensor]:
+        if use_flash_attention:
+            logger.debug(
+                "Disabling FlashAttention due to unsupported QKV data type. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
+                "Found: qkv_dtype = %s.",
+                qkv_dtype,
+            )
+            use_flash_attention = False
+        if use_fused_attention:
+            logger.debug(
+                "Disabling FusedAttention due to unsupported QKV data type. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
+                "Found: qkv_dtype = %s.",
+                qkv_dtype,
+            )
+            use_fused_attention = False
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
@@ -417,6 +418,13 @@ def get_attention_backend(
             )
             use_flash_attention = False
 
+    # Filter: Dropout
+    global _flash_attn_3_plus, _use_flash_attn_3
+    if self.attention_dropout != 0.0 and use_flash_attention:
+        if _flash_attn_3_plus and _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention 3 for dropout")
+            _use_flash_attn_3 = False
+
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
     # ----------------------------------------------------------------------------------------------------
@@ -435,6 +443,9 @@ def get_attention_backend(
         )
         use_unfused_attention = False
     if context_parallel and use_flash_attention:
+        if _flash_attn_3_plus and _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention 3 for context parallelism")
+            _use_flash_attn_3 = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             logger.debug(
                 "Disabling FlashAttention as it does not support context parallelism with FP8"
@@ -465,6 +476,7 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_flash_attention = False
+
     if context_parallel and use_fused_attention:
         if "bottom_right" in attn_mask_type:
             logger.debug(
@@ -556,7 +568,6 @@ def get_attention_backend(
     # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
     # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
     #                            |                        | converts window_size to an 'arbitrary' mask
-    global _flash_attn_3_plus, _use_flash_attn_3
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
@@ -6973,12 +6984,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 use_unfused_attention = _attention_backends["use_unfused_attention"]
 
             if use_flash_attention:
-                if _use_flash_attn_3:
-                    assert (
-                        not context_parallel and self.attention_dropout == 0.0
-                    ), "flash-attn 3 does not support context parallelism, dropout, "
-                    f"or qkv_format={qkv_format}"
-
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(
                         query_layer.shape[-2],
