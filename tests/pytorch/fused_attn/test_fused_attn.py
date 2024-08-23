@@ -1330,10 +1330,13 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     rmse = _rmse(a, b)
     logging.debug(name_a + " vs " + name_b + " RMSE: {:.6f}".format(rmse))
     rmse_range = max(a.max().item(), b.max().item()) - min(a.min().item(), b.min().item())
-    assert (
-        rmse < rmse_tol * rmse_range
-    ), name_a + " vs " + name_b + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
-        rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+    assert rmse < rmse_tol * rmse_range, (
+        name_a
+        + " vs "
+        + name_b
+        + " RMSE {:.5f} is over tolerance {:.5f} ({:.5f} * {:.5f})".format(
+            rmse, rmse_tol * rmse_range, rmse_tol, rmse_range
+        )
     )
 
 
@@ -1540,10 +1543,14 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
-    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(dtype, config, True, qkv_layout, is_training)
+    fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
+        dtype, config, True, qkv_layout, is_training
+    )
 
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
-    fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(dtype, config, False, qkv_layout, is_training)
+    fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
+        dtype, config, False, qkv_layout, is_training
+    )
 
     atol = 5e-1
     rtol = 5e-2

@@ -97,9 +97,14 @@ except:
     )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flashattn_hopper.flash_attn_interface import flash_attn_varlen_func as flash_attn_varlen_func_v3
+    from flashattn_hopper.flash_attn_interface import (
+        flash_attn_varlen_func as flash_attn_varlen_func_v3,
+    )
     from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_forward_v3
-    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_backward_v3
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_backward as _flash_attn_backward_v3,
+    )
+
     _use_flash_attn_3 = True
 
 if _flash_attn_version >= _flash_attn_version_required:
@@ -4353,9 +4358,7 @@ class FlashAttention(torch.nn.Module):
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
                     query_layer = PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = PackTensors.apply(
-                        indices_kv, key_layer, value_layer
-                    )
+                    key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
@@ -4434,7 +4437,11 @@ class FlashAttention(torch.nn.Module):
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
-                    func = flash_attn_varlen_func if not _use_flash_attn_3 else flash_attn_varlen_func_v3
+                    func = (
+                        flash_attn_varlen_func
+                        if not _use_flash_attn_3
+                        else flash_attn_varlen_func_v3
+                    )
                     fa_optional_forward_args_thd.append(cu_seqlens_q)
                     fa_optional_forward_args_thd.append(cu_seqlens_kv)
                     fa_optional_forward_args_thd.append(max_seqlen_q)
@@ -4504,7 +4511,9 @@ class FlashAttention(torch.nn.Module):
                 output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
             else:
                 output = (
-                    output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1).contiguous()
+                    output.view(batch_size, max_seqlen_q // cp_size, -1)
+                    .transpose(0, 1)
+                    .contiguous()
                 )
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
@@ -6946,7 +6955,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _,
                 ) = get_attention_backend(attention_params)
                 if use_flash_attention:
-                    self.logger.info("Running with FlashAttention backend (version %s)", _flash_attn_version if not _use_flash_attn_3 else _flash_attn_v3_version)
+                    self.logger.info(
+                        "Running with FlashAttention backend (version %s)",
+                        _flash_attn_version if not _use_flash_attn_3 else _flash_attn_v3_version,
+                    )
                 elif use_fused_attention:
                     self.logger.info(
                         "Running with FusedAttention backend (sub-backend %s)",
