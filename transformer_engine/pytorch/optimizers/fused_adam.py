@@ -219,10 +219,8 @@ class FusedAdam(torch.optim.Optimizer):
                         assert (
                             state["master_param"].shape == p.shape
                         ), "Master weights shape must match model weights shape"
-                    else:
-                        state["master_param"] = None
 
-                p_master = state["master_param"]
+                p_master = state.get("master_param", None)
                 p_grad = p.grad
 
                 if self.master_weights and p_master is not None and p_master.grad is not None:
