@@ -3582,9 +3582,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         if ctx.fp8:
             if ctx.use_fused_attention:
-                fp8_dtype_forkward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
+                fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
-                fused_attn_qkv_dtype = fp8_dtype_forkward
+                fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
                 if ctx.fp8_meta["recipe"].fp8_mha:
