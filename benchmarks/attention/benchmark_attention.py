@@ -9,8 +9,6 @@ import numpy as np
 import torch
 import nvtx
 import transformer_engine
-
-sys.path.append("../../")
 from tests.pytorch.fused_attn.test_fused_attn import (
     ModelConfig,
     _get_attention_backends,
@@ -20,7 +18,7 @@ from tests.pytorch.fused_attn.test_fused_attn import (
 pd.set_option("display.precision", 4)
 
 # data type
-dtype = torch.float16
+dtype = torch.bfloat16
 # number of iterations after 3 warmup iterations
 num_iters = 3
 # checkpointing
@@ -40,8 +38,6 @@ model_configs = {
     "test_1": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),  # longer seq, mask
     "test_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "post_scale_bias"),  # bias
     "test_3": ModelConfig(2, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),  # GQA
-    "test_4": ModelConfig(2, 32, 4, 128, 16384, 16384, 0.0, "causal", "no_bias"),  # GQA
-    "test_5": ModelConfig(2, 16, 16, 128, 16384, 16384, 0.0, "causal", "no_bias"),  # MHA
 }
 
 
@@ -78,10 +74,10 @@ def benchmark_dot_product_attention(model, fused_attn_supported, flash_attn_supp
                 pad_between_seqs,
                 is_training,
             )
-        # if fused_attn_supported and flash_attn_supported:
-        #    torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
-        #    for i, _ in enumerate(flash_attn_bwd):
-        #        torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
+        if fused_attn_supported and flash_attn_supported:
+           torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
+           for i, _ in enumerate(flash_attn_bwd):
+               torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
 
     torch.cuda.cudart().cudaProfilerStart()
     torch.cuda.synchronize()
