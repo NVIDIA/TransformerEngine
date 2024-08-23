@@ -3315,6 +3315,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         deterministic,
         use_fused_attention,
         window_size,
+        fp8,
+        fp8_meta,
         cp_group,
     ):
         if softmax_scale is None:
@@ -3350,6 +3352,42 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
 
+        if fp8:
+            if use_fused_attention:
+                fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                fused_attn_qkv_dtype = fp8_dtype_forward
+                fused_attn_backend = FusedAttnBackend["FP8"]
+                if fp8_meta["recipe"].fp8_mha:
+                    assert (
+                        isinstance(q, Float8Tensor)
+                        and isinstance(k, Float8Tensor)
+                        and isinstance(v, Float8Tensor)
+                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
+                    q_fp8, k_fp8, v_fp8 = q, k, v
+                    q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
+                else:
+                    q_f16, k_f16, v_f16 = q, k, v
+                    q, k, v = [
+                        cast_to_fp8(
+                            x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                        ) for x in [q_f16, k_f16, v_f16]
+                    ]
+                fp8_meta_kwargs = {}
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
+                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history[0][META_S]
+                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history[0][META_O]
+            else:
+                assert False, "FP8 is only supported with Fused Attention!"
+        else:
+            if use_fused_attention:
+                fp8_meta_kwargs = {}
+                fused_attn_qkv_dtype = TE_DType[q.dtype]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
         # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
         q, k, v = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [q, k, v]]
         # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
@@ -3381,8 +3419,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 q,
                 k,
                 v,
-                TE_DType[q.dtype],
-                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                fused_attn_qkv_dtype,
+                fused_attn_backend,
                 attn_scale=softmax_scale,
                 dropout=dropout_p,
                 qkv_layout=qkv_layout,
@@ -3392,8 +3430,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 window_size=window_size,
+                **fp8_meta_kwargs,
             )
-            softmax_lse, rng_state = aux_ctx_tensors
+            if fp8:
+                softmax_lse, _, rng_state = aux_ctx_tensors
+            else:
+                softmax_lse, rng_state = aux_ctx_tensors
         else:
             ctx.batch_size = q.shape[0]
             # [b, cp*s, np//cp, hn] -> [b*cp*s, np//cp, hn]
@@ -3447,17 +3489,69 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b, s, np, hn] -> [b*s, np, hn]
             out = out.view(-1, *out.shape[-2:])
 
+        if fp8:
+            if fp8_meta["recipe"].fp8_mha:
+                out_fp8 = Float8Tensor(
+                    data=out,
+                    fp8_meta=fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=META_O,
+                    fp8_dtype=fp8_dtype_forward,
+                    dtype=q_fp8.dtype,
+                )
+                out = out_fp8._data
+                out_ret = out_fp8
+            else:
+                out_f16 = cast_from_fp8(
+                    out,
+                    fp8_meta["scaling_fwd"],
+                    META_O,
+                    fp8_dtype_forward,
+                    TE_DType[q_f16.dtype],
+                )
+                out_ret = out_f16
+        else:
+            out_ret = out
+
+        if fp8:
+            if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                q_save, k_save, v_save, out_save = q, k, v, out
+            elif fp8_meta["recipe"].fp8_mha:
+                q_fp8, k_fp8, v_fp8 = [
+                    Float8Tensor(
+                        data=x,
+                        fp8_meta=fp8_meta,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=META_QKV,
+                        fp8_dtype=fp8_dtype_forward,
+                        dtype=out_fp8.dtype,
+                    ) for x, x_fp8 in [q, k, v]
+                ]
+                q_save, k_save, v_save, out_save = q_fp8, k_fp8, v_fp8, out_fp8
+            else:
+                q_save, k_save, v_save, out_save = q_f16, k_f16, v_f16, out_f16
+        else:
+            q_save, k_save, v_save, out_save = q, k, v, out
+
+        if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            fp8_fwd_scales = fp8_meta["scaling_fwd"].scale.clone()
+            fp8_fwd_scale_invs = fp8_meta["scaling_fwd"].scale_inv.clone()
+        else:
+            fp8_fwd_scales, fp8_fwd_scale_invs = None, None
+
         ctx.save_for_backward(
-            q,
-            k,
-            v,
-            out,
+            q_save,
+            k_save,
+            v_save,
+            out_save,
             softmax_lse,
             rng_state,
             cu_seqlens_q,
             cu_seqlens_kv,
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
+            fp8_fwd_scales,
+            fp8_fwd_scale_invs,
         )
         ctx.cp_group = cp_group
         ctx.dropout_p = dropout_p
@@ -3470,7 +3564,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.window_size = window_size
         ctx.use_fused_attention = use_fused_attention
-        return out
+        ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
+        ctx.fp8_meta = fp8_meta
+        return out_ret
 
     @staticmethod
     def backward(ctx, dout):
@@ -3478,15 +3574,55 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors[:6]
         cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = ctx.saved_tensors[6:10]
+        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[10:12]
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
         causal = "causal" in ctx.attn_mask_type
+        seq_dim = ctx.qkv_format.index("s")
+
+        if ctx.fp8:
+            if ctx.use_fused_attention:
+                fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+                fused_attn_qkv_dtype = fp8_dtype_backward
+                fused_attn_dqkv_dtype = fp8_dtype_backward
+                fused_attn_backend = FusedAttnBackend["FP8"]
+                if ctx.fp8_meta["recipe"].fp8_mha:
+                    assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
+                    ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
+                    dout_fp8 = dout
+                    dout = dout_fp8._data
+                else:
+                    dout_f16 = dout
+                    dout = cast_to_fp8(
+                        dout_f16, ctx.fp8_meta["scaling_bwd"], META_DO, fp8_dtype_backward
+                    )
+                fp8_meta_kwargs = {}
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_fwd_scale_invs[META_QKV]
+                fp8_meta_kwargs["d_scale_s"] = fp8_fwd_scale_invs[META_S]
+                fp8_meta_kwargs["d_scale_o"] = fp8_fwd_scale_invs[META_O]
+                fp8_meta_kwargs["d_scale_do"] = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO]
+                fp8_meta_kwargs["d_scale_dp"] = ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP]
+                fp8_meta_kwargs["q_scale_s"] = fp8_fwd_scales[META_S]
+                fp8_meta_kwargs["q_scale_dp"] = ctx.fp8_meta["scaling_bwd"].scale[META_DP]
+                fp8_meta_kwargs["q_scale_dqkv"] = ctx.fp8_meta["scaling_bwd"].scale[META_DQKV]
+                fp8_meta_kwargs["amax_dp"] = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP]
+                fp8_meta_kwargs["amax_dqkv"] = ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV]
+            else:
+                assert False, "FP8 is only supported with Fused Attention!"
+        else:
+            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+                assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
+                q, k, v, out, dout = [x.from_float8(x.dtype) for x in [q, k, v, out, dout]]
+            if ctx.use_fused_attention:
+                fp8_meta_kwargs = {}
+                fused_attn_qkv_dtype = TE_DType[q.dtype]
+                fused_attn_dqkv_dtype = TE_DType[q.dtype]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if not ctx.use_fused_attention:
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
 
-        seq_dim = ctx.qkv_format.index("s")
         # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
         out, dout = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [out, dout]]
         # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
@@ -3517,7 +3653,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fa_optional_backward_kwargs["deterministic"] = ctx.deterministic
 
         if ctx.use_fused_attention:
-            aux_ctx_tensors = [softmax_lse, rng_state]
+            if ctx.fp8:
+                aux_ctx_tensors = [softmax_lse, softmax_lse, rng_state]
+            else:
+                aux_ctx_tensors = [softmax_lse, rng_state]
             dq, dk, dv, _ = fused_attn_bwd(
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
@@ -3528,10 +3667,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 v,
                 out,
                 dout,
-                TE_DType[q.dtype],
-                TE_DType[k.dtype],
+                fused_attn_qkv_dtype,
+                fused_attn_dqkv_dtype,
                 aux_ctx_tensors,
-                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
+                fused_attn_backend,
                 cu_seqlens_q_padded=cu_seqlens_q_padded,
                 cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                 attn_scale=ctx.softmax_scale,
@@ -3540,6 +3679,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 attn_mask_type=ctx.attn_mask_type,
                 attn_bias_type=ctx.attn_bias_type,
                 window_size=ctx.window_size,
+                **fp8_meta_kwargs,
             )
         else:
             out, dout = [x.view(-1, *x.shape[-2:]) for x in [out, dout]]
@@ -3586,11 +3726,36 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
         dq, dk, dv = [x.view(*x.shape[:-3], -1, x.shape[-1]) for x in [dq, dk, dv]]
 
+        if ctx.fp8:
+            if ctx.fp8_meta["recipe"].fp8_mha:
+                dq, dk, dv = [
+                    Float8Tensor(
+                        data=x,
+                        fp8_meta=ctx.fp8_meta,
+                        fp8_meta_forward=False,
+                        fp8_meta_index=META_DQKV,
+                        fp8_dtype=fp8_dtype_backward,
+                        dtype=dout_fp8.dtype,
+                    ) for x in [dq, dk, dv]
+                ]
+            else:
+                dq, dk, dv = [
+                    cast_from_fp8(
+                        x,
+                        ctx.fp8_meta["scaling_bwd"],
+                        META_DQKV,
+                        fp8_dtype_backward,
+                        TE_DType[dout_f16.dtype],
+                    ) for x in [dq, dk, dv]
+                ]
+
         return (
             None,
             dq,
             dk,
             dv,
+            None,
+            None,
             None,
             None,
             None,
@@ -3701,7 +3866,7 @@ def attn_forward_func_with_cp(
         args += (window_size, cp_group, cp_stream)
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += (window_size, cp_group)
+        args += (window_size, fp8, fp8_meta, cp_group)
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
