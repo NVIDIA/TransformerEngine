@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import torch
 
-from ...cpp_extensions import FP8TensorMeta, UbufOverlapAlgo, fp8_gemm, gemm
+from ...cpp_extensions import UbufOverlapAlgo, fp8_gemm, gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
@@ -26,6 +26,7 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
+    get_fp8_meta_from_fp8_tensor,
     is_float8_tensor,
     reshape,
 )
@@ -79,212 +80,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             self.sequence_parallel = True
 
     @staticmethod
-    def _functional_backward_dgrad(
-        grad_output_local: torch.Tensor,
-        weight: Optional[torch.Tensor],
-        *,
-        weight_requires_grad: bool,
-        device: torch.device,
-        dtype: torch.dtype,
-        tensor_parallel_mode: str,
-        tensor_parallel_group: Optional[torch.distributed.ProcessGroup],
-        tensor_parallel_size: int,
-        with_fp8_compute: bool,
-        with_fp8_grad_input: bool,
-        weight_fp8_meta: Optional[dict[str, Any]],
-        grad_output_fp8_meta: Optional[dict[str, Any]],
-        grad_input_fp8_meta: Optional[dict[str, Any]],
-        ub_comm_name: str,
-    ):
-
-        # Get Userbuffers communicator
-        ub_comm = get_ub(ub_comm_name + "_dgrad")
-        ub_local_buffer = ub_comm.get_ubuf_output(0)
-        ub_global_buffer = ub_comm.get_ubuf_output(1)
-        with_ub_reduce_scatter = tensor_parallel_mode == "column"
-        with_ub_all_gather = tensor_parallel_mode == "row"
-
-        # Choose Userbuffers communication algorithm
-        ub_algo = None
-        if with_ub_all_gather:
-            if with_fp8_compute and ub_comm.is_atomic_gemm():
-                ub_algo = UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
-            else:
-                ub_algo = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
-        elif with_ub_reduce_scatter:
-            ub_algo = UbufOverlapAlgo.BULK_OVERLAP_AG  ### TODO Is this right?
-        else:
-            raise RuntimeError("Could not choose Userbuffers communication algorithm")
-
-        # Cast grad output tensor to correct dtype
-        dy_local = grad_output_local
-        if with_fp8_compute and not is_float8_tensor(dy_local):
-            fp8_dtype = get_fp8_te_dtype(
-                grad_output_fp8_meta["recipe"],
-                fprop_tensor=False,
-            )
-            if with_ub_all_gather:
-                data = ub_local_buffer
-            else:
-                data = torch.empty_like(dy_local, dtype=torch.uint8)
-            dy_fp8 = Float8Tensor(
-                data=data,
-                fp8_meta=grad_output_fp8_meta,
-                fp8_meta_forward=False,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
-            )
-            with_cast_transpose = weight_requires_grad and not with_ub_all_gather
-            if with_cast_transpose:
-                dy_fp8.cast_transpose_(dy_local)
-            else:
-                dy_fp8.copy_(dy_local)
-            dy_local = dy_fp8
-        elif not with_fp8_compute and is_float8_tensor(dy_local):
-            if with_ub_all_gather:
-                dy_local = ub_local_buffer.copy_(dy_local)
-            else:
-                dy_local = dy_local.from_float8()
-
-        # Initialize buffers for UB all-gather if needed
-        dy = dy_local
-        if with_ub_all_gather:
-            if with_fp8_compute:
-                dy = Float8Tensor.make_like(dy_local, data=ub_global_buffer)
-                if dy_local._data.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(dy_local._data)
-            else:
-                dy = ub_global_buffer
-                if dy_local.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(dy_local)
-
-        # Check weight tensor
-        w = convert_tensor(
-            weight,
-            device=device,
-            dtype=dtype,
-            memory_format=torch.contiguous_format,
-        )
-        if with_fp8_compute and not is_float8_tensor(w):
-            fp8_dtype = get_fp8_te_dtype(
-                weight_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            w_fp8 = Float8Tensor(
-                data=torch.empty_like(w, dtype=torch.uint8),
-                fp8_meta=weight_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
-            )
-            w_fp8.cast_transpose_(w)
-            w = w_fp8
-        elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.from_float8()
-
-        # Construct grad input tensor
-        dx = None
-        dx_local = None
-        if with_ub_reduce_scatter:
-            # Initialize buffers for UB reduce-scatter
-            dx = ub_global_buffer
-            dx_local = torch.empty(
-                (dy.size(0) // tensor_parallel_size, w.size(-1)),
-                dtype=dtype,
-                device=device,
-            )
-        else:
-            # Allocate grad input tensor
-            if with_fp8_grad_input:
-                fp8_dtype = get_fp8_te_dtype(
-                    grad_input_fp8_meta["recipe"],
-                    fprop_tensor=False,
-                )
-                data = torch.empty(
-                    (dy.size(0), w.size(-1)),
-                    dtype=torch.uint8,
-                    device=device,
-                )
-                dx = Float8Tensor(
-                    data=data,
-                    fp8_meta=grad_input_fp8_meta,
-                    fp8_meta_forward=False,
-                    fp8_meta_index=0,
-                    fp8_dtype=fp8_dtype,
-                    dtype=dtype,
-                )
-            else:
-                dx = torch.empty(
-                    (dy.size(0), w.size(-1)),
-                    dtype=dtype,
-                    device=device,
-                )
-            dx_local = dx
-
-        # Perform dgrad GEMM
-        if with_fp8_compute:
-            kwargs = dict(
-                out=dx,
-                use_split_accumulator=False, ### TODO ?
-                ub_algo=ub_algo,
-                ub=ub_comm,
-            )
-            if with_ub_reduce_scatter:
-                kwargs["extra_output_tensor"] = dx_local
-            if with_fp8_grad_input:
-                if dx._fp8_meta is None:
-                    # Hackily create FP8TensorMeta if needed
-                    fp8_meta = FP8TensorMeta()
-                    fp8_meta.scale = dx._scale_inv.reciprocal()
-                    fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=device)
-                    fp8_meta.scale_inv = dx._scale_inv
-                    fp8_meta_index = 0
-                else:
-                    # Get FP8TensorMeta from Float8Tensor
-                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                        forward=dx._fp8_meta_forward,
-                    )
-                    fp8_meta = dx._fp8_meta[fp8_meta_key]
-                    fp8_meta_index = dx._fp8_meta_index
-                kwargs.update(
-                    dict(
-                        out=dx._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=dx._fp8_dtype,
-                    )
-                )
-            fp8_gemm(
-                w.transpose_2d(),
-                w._scale_inv,
-                0,
-                w._fp8_dtype,
-                dy._data,
-                dy._scale_inv,
-                0,
-                dy._fp8_dtype,
-                dy.dtype,
-                get_workspace(),
-                **kwargs,
-            )
-        else:
-            kwargs = dict(
-                layout="NN",
-                out=dx,
-                ub_algo=ub_algo,
-                ub=ub_comm,
-            )
-            if with_ub_reduce_scatter:
-                kwargs["extra_output_tensor"] = dx_local
-            gemm(w, dy, dx.dtype, get_workspace(), **kwargs)
-
-        return dx_local, dy
-
-    @staticmethod
     def _functional_backward(
         grad_output: torch.Tensor,
         input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
@@ -292,6 +87,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         input_dims: Iterable[int],
         weight_dims: Iterable[int],
         *,
+        input_requires_grad: bool = True,
         weight_requires_grad: bool = True,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
@@ -309,6 +105,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         ub_comm_name: str,
     ):
 
+        assert input_requires_grad  ### TODO Support optional
+        assert weight_requires_grad  ### TODO Support optional
+
         # Check device
         if device is None:
             device = weight.device
@@ -323,7 +122,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
 
-        # Check input tensor
+        # Input tensor dims
         output_dims = tuple(grad_output.size())
         input_dims = tuple(input_dims)
         weight_dims = tuple(weight_dims)
@@ -371,37 +170,290 @@ class UserbuffersBackwardLinear(FusedOperation):
             and grad_input_fp8_meta is not None
         )
 
-        # Perform dgrad GEMM
+        # Get Userbuffers communicators and algorithms
+        with_ub_all_gather_dy = False
+        with_ub_reduce_scatter_dx = False
+        with_ub_all_gather_x = False
+        ub_comm_dy = None
+        ub_comm_dx = None
+        ub_comm_x = None
+        ub_algo_dy = None
+        ub_algo_dx = None
+        ub_algo_x = None
+        if tensor_parallel_mode == "row":
+            with_ub_all_gather_dy = True
+            ub_comm_dy = get_ub(ub_comm_name + "_dgrad")
+            if with_fp8_compute and ub_comm_dy.is_atomic_gemm():
+                ub_algo_dy = UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+            else:
+                ub_algo_dy = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+        elif tensor_parallel_mode == "column":
+            with_ub_reduce_scatter_dx = True
+            with_ub_all_gather_x = True
+            ub_comm_dx = get_ub(ub_comm_name + "_wgrad")
+            ub_comm_x = get_ub(ub_comm_name + "_dgrad")
+            ub_algo_dx = UbufOverlapAlgo.BULK_OVERLAP_RS
+            ub_algo_x = UbufOverlapAlgo.BULK_OVERLAP_AG
+
+        # Check grad output tensor
         dy_local = reshape(
             grad_output,
             (-1, output_dims[-1]),
             device=device,
             dtype=dtype,
         )
-        dx_local, dy = UserbuffersBackwardLinear._functional_backward_dgrad(
-            grad_output_local=dy_local,
-            weight=weight,
-            weight_requires_grad=weight_requires_grad,
+        if with_fp8_compute and not is_float8_tensor(dy_local):
+            fp8_dtype = get_fp8_te_dtype(
+                grad_output_fp8_meta["recipe"],
+                fprop_tensor=False,
+            )
+            if with_ub_all_gather_dy:
+                data = ub_comm_dy.get_ubuf_output(0)
+            else:
+                data = torch.empty_like(dy_local, dtype=torch.uint8)
+            dy_fp8 = Float8Tensor(
+                data=data,
+                fp8_meta=grad_output_fp8_meta,
+                fp8_meta_forward=False,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
+                dtype=dtype,
+            )
+            if with_ub_all_gather_dy:
+                dy_fp8.copy_(dy_local)
+            else:
+                dy_fp8.cast_transpose_(dy_local)
+            dy_local = dy_fp8
+        elif not with_fp8_compute and is_float8_tensor(dy_local):
+            if with_ub_all_gather_dy:
+                ub_local_buffer = ub_comm_dy.get_ubuf_output(0)
+                dy_local = ub_local_buffer.copy_(dy_local)
+            else:
+                dy_local = dy_local.from_float8()
+
+        # Check input tensor
+        x_local = reshape(
+            input,
+            (-1, input_dims[-1]),
             device=device,
             dtype=dtype,
-            tensor_parallel_mode=tensor_parallel_mode,
-            tensor_parallel_group=tensor_parallel_group,
-            tensor_parallel_size=tensor_parallel_size,
-            with_fp8_compute=with_fp8_compute,
-            with_fp8_grad_input=with_fp8_grad_input,
-            weight_fp8_meta=weight_fp8_meta,
-            grad_output_fp8_meta=grad_output_fp8_meta,
-            grad_input_fp8_meta=grad_output_fp8_meta,
-            ub_comm_name=ub_comm_name,
         )
-        grad_input = reshape(dx_local, input_dims)
+        if with_fp8_compute and not is_float8_tensor(x_local):
+            fp8_dtype = get_fp8_te_dtype(
+                input_fp8_meta["recipe"],
+                fprop_tensor=True,
+            )
+            if with_ub_all_gather_x:
+                data = ub_comm_x.get_ubuf_output(0)
+            else:
+                data = torch.empty_like(x_local, dtype=torch.uint8)
+            x_fp8 = Float8Tensor(
+                data=data,
+                fp8_meta=input_fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
+                dtype=dtype,
+            )
+            if with_ub_all_gather_x:
+                x_fp8.copy_(x_local)
+            else:
+                x_fp8.cast_transpose_(x_local)
+            x_local = x_fp8
+        elif not with_fp8_compute and is_float8_tensor(x_local):
+            if with_ub_all_gather_x:
+                ub_local_buffer = ub_comm_x.get_ubuf_output(0)
+                x_local = ub_local_buffer.copy_(x_local)
+            else:
+                x_local = x_local.from_float8()
+
+        # Check weight tensor
+        w = convert_tensor(
+            weight,
+            device=device,
+            dtype=dtype,
+            memory_format=torch.contiguous_format,
+        )
+        if with_fp8_compute and not is_float8_tensor(w):
+            fp8_dtype = get_fp8_te_dtype(
+                weight_fp8_meta["recipe"],
+                fprop_tensor=True,
+            )
+            w_fp8 = Float8Tensor(
+                data=torch.empty_like(w, dtype=torch.uint8),
+                fp8_meta=weight_fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=0,
+                fp8_dtype=fp8_dtype,
+                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
+                dtype=dtype,
+            )
+            w_fp8.cast_transpose_(w)
+            w = w_fp8
+        elif not with_fp8_compute and is_float8_tensor(w):
+            w = w.from_float8()
+
+        # Initialize buffers for UB all-gather if needed
+        dy = dy_local
+        x = x_local
+        if with_ub_all_gather_dy:
+            ub_local_buffer = ub_comm_dy.get_ubuf_output(0)
+            ub_global_buffer = ub_comm_dy.get_ubuf_output(1)
+            if with_fp8_compute:
+                dy = Float8Tensor.make_like(dy_local, data=ub_global_buffer)
+                if dy_local._data.data_ptr() != ub_local_buffer.data_ptr():
+                    ub_local_buffer.copy_(dy_local._data)
+            else:
+                dy = ub_global_buffer
+                if dy_local.data_ptr() != ub_local_buffer.data_ptr():
+                    ub_local_buffer.copy_(dy_local)
+        if with_ub_all_gather_x:
+            ub_local_buffer = ub_comm_x.get_ubuf_output(0)
+            ub_global_buffer = ub_comm_x.get_ubuf_output(1)
+            if with_fp8_compute:
+                x = Float8Tensor.make_like(x_local, data=ub_global_buffer)
+                if x_local._data.data_ptr() != ub_local_buffer.data_ptr():
+                    ub_local_buffer.copy_(x_local._data)
+            else:
+                x = ub_global_buffer
+                if x_local.data_ptr() != ub_local_buffer.data_ptr():
+                    ub_local_buffer.copy_(x_local)
+
+        # Construct grad input tensor
+        dx = None
+        dx_local = None
+        if with_ub_reduce_scatter_dx:
+            # Initialize buffers for UB reduce-scatter
+            dx = ub_comm_dx.get_ubuf_output(1)
+            dx_local = ub_comm_dx.get_ubuf_output(0)
+        else:
+            # Allocate grad input tensor
+            if with_fp8_grad_input:
+                fp8_dtype = get_fp8_te_dtype(
+                    grad_input_fp8_meta["recipe"],
+                    fprop_tensor=False,
+                )
+                data = torch.empty(
+                    (dy.size(0), w.size(-1)),
+                    dtype=torch.uint8,
+                    device=device,
+                )
+                dx = Float8Tensor(
+                    data=data,
+                    fp8_meta=grad_input_fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    dtype=dtype,
+                )
+            else:
+                dx = torch.empty(
+                    (dy.size(0), w.size(-1)),
+                    dtype=dtype,
+                    device=device,
+                )
+            dx_local = dx
+
+        # Allocate grad input tensor
+        if grad_weight is None:
+            if accumulate_into_grad_weight:
+                raise ValueError(
+                    "Attempted to accumulate into grad weight buffer"
+                    "without providing grad weight"
+                )
+            grad_weight = torch.empty(
+                weight_dims,
+                dtype=dtype,
+                device=device,
+                memory_format=torch.contiguous_format,
+            )
+
+        # Perform dgrad GEMM
+        if with_fp8_compute:
+            kwargs = dict(
+                out=dx,
+                use_split_accumulator=True,
+            )
+            if with_ub_all_gather_dy:
+                kwargs["ub_algo"] = ub_algo_dy
+                kwargs["ub"] = ub_comm_dy
+            elif with_ub_all_gather_x:
+                kwargs["ub_algo"] = ub_algo_x
+                kwargs["ub"] = ub_comm_x
+            if with_fp8_grad_input:
+                fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(dx)
+                kwargs.update(
+                    dict(
+                        out=dx._data,
+                        out_index=fp8_meta_index,
+                        fp8_meta_tensor=fp8_meta,
+                        D_dtype=dx._fp8_dtype,
+                    )
+                )
+            fp8_gemm(
+                w.transpose_2d(),
+                w._scale_inv,
+                0,
+                w._fp8_dtype,
+                dy._data,
+                dy._scale_inv,
+                0,
+                dy._fp8_dtype,
+                dy.dtype,
+                get_workspace(),
+                **kwargs,
+            )
+        else:
+            kwargs = dict(
+                grad=True,
+                layout="NN",
+                out=dx,
+            )
+            if with_ub_all_gather_dy:
+                kwargs["ub_algo"] = ub_algo_dy
+                kwargs["ub"] = ub_comm_dy
+            elif with_ub_all_gather_x:
+                kwargs["ub_algo"] = ub_algo_x
+                kwargs["ub"] = ub_comm_x
+            gemm(w, dy, dx.dtype, get_workspace(), **kwargs)
 
         # Perform wgrad GEMM
-        if not weight_requires_grad:
-            grad_weight = None
+        if with_fp8_compute:
+            kwargs = dict(
+                accumulate=accumulate_into_grad_weight,
+                out=grad_weight,
+                use_split_accumulator=True,
+            )
+            if with_ub_reduce_scatter_dx:
+                kwargs["ub_algo"] = ub_algo_dx
+                kwargs["ub"] = ub_comm_dx
+            fp8_gemm(
+                x.transpose_2d(),
+                x._scale_inv,
+                0,
+                x._fp8_dtype,
+                dy.transpose_2d(),
+                dy._scale_inv,
+                0,
+                dy._fp8_dtype,
+                grad_weight.dtype,
+                get_workspace(),
+                **kwargs,
+            )
         else:
-            raise NotImplementedError()  ### TODO Implement
+            kwargs = dict(
+                accumulate=accumulate_into_grad_weight,
+                layout="NT",
+                out=grad_weight,
+            )
+            if with_ub_reduce_scatter_dx:
+                kwargs["ub_algo"] = ub_algo_dx
+                kwargs["ub"] = ub_comm_dx
+            gemm(x, dy, grad_weight.dtype, get_workspace(), **kwargs)
 
+        grad_input = reshape(dx_local, input_dims)
         return grad_input, grad_weight
 
     def fuser_backward(
@@ -452,6 +504,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight=linear_op.weight,
             input_dims=linear_op_ctx.input_dims,
             weight_dims=linear_op.weight.size(),
+            input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
             device=linear_op.device,
             dtype=linear_op.dtype,
@@ -467,8 +520,6 @@ class UserbuffersBackwardLinear(FusedOperation):
             grad_input_fp8_meta=linear_op_ctx.grad_input_fp8_meta,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
-        if accumulate_into_main_grad:
-            grad_weight = None
 
         # Clear input tensor if possible
         if linear_op_ctx.has_prev_op:
@@ -476,6 +527,8 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         # Return gradients
         grad_params = [() for _ in range(len(self.basic_ops))]
+        if accumulate_into_main_grad:
+            grad_weight = None
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
             grad_params[self._op_idxs["bias"]] = (grad_bias,)
@@ -487,16 +540,25 @@ def fuse_userbuffers_backward_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
 
+    # Return immediately if environment is not distributed
+    if (
+        not torch.distributed.is_initialized()
+        or torch.distributed.get_world_size() == 1
+    ):
+        return ops
+
     # Sliding window in list of ops
     window = []
 
     def peek_next_op() -> Optional[FusibleOperation]:
+        """Get next op in list of ops"""
         nonlocal ops
         if not ops:
             return None
         return ops[-1][0]
 
     def pop_next_op() -> FusibleOperation:
+        """Remove next op from list of ops and add to sliding window"""
         nonlocal ops, window
         window.insert(0, ops[-1])
         ops = ops[:-1]
@@ -530,10 +592,14 @@ def fuse_userbuffers_backward_linear(
         if reduce_scatter is None:
             if linear.tensor_parallel_mode is None:
                 continue
+            if linear.tensor_parallel_size == 1:
+                continue
             if linear.tensor_parallel_mode == "row" and bias is not None:
                 continue
         else:
             if linear.tensor_parallel_mode is not None:
+                continue
+            if reduce_scatter.process_group_size == 1:
                 continue
 
         # Replace window with fused op

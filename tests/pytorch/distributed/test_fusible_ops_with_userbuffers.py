@@ -336,10 +336,10 @@ def _test_linear(
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
     dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-    # dw_test = linear_op.weight.grad.to(dtype=torch.float64, device="cpu") ### TODO Restore
+    dw_test = linear_op.weight.grad.to(dtype=torch.float64, device="cpu")
     torch.testing.assert_close(y_test, y_ref, **tols)
     torch.testing.assert_close(dx_test, dx_ref, **tols)
-    # torch.testing.assert_close(dw_test, dw_ref, **tols) ### TODO Restore
+    torch.testing.assert_close(dw_test, dw_ref, **tols)
     # if bias: ### TODO Restore
     #     db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
     #     torch.testing.assert_close(db_test, db_ref, **tols)

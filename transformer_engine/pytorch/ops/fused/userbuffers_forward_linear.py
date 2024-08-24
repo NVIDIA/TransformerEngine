@@ -344,20 +344,7 @@ class UserbuffersForwardLinear(FusedOperation):
             if with_ub_reduce_scatter:
                 kwargs["extra_output_tensor"] = y_local
             if with_fp8_output:
-                if y._fp8_meta is None:
-                    # Hackily create FP8TensorMeta if needed
-                    fp8_meta = FP8TensorMeta()
-                    fp8_meta.scale = y._scale_inv.reciprocal()
-                    fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=device)
-                    fp8_meta.scale_inv = y._scale_inv
-                    fp8_meta_index = 0
-                else:
-                    # Get FP8TensorMeta from Float8Tensor
-                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                        forward=y._fp8_meta_forward,
-                    )
-                    fp8_meta = y._fp8_meta[fp8_meta_key]
-                    fp8_meta_index = y._fp8_meta_index
+                fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(y)
                 kwargs.update(
                     dict(
                         out=y._data,
@@ -480,16 +467,25 @@ def fuse_userbuffers_forward_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
 
+    # Return immediately if environment is not distributed
+    if (
+        not torch.distributed.is_initialized()
+        or torch.distributed.get_world_size() == 1
+    ):
+        return ops
+
     # Sliding window in list of ops
     window = []
 
     def peek_next_op() -> Optional[FusibleOperation]:
+        """Get next op in list of ops"""
         nonlocal ops
         if not ops:
             return None
         return ops[0][0]
 
     def pop_next_op() -> FusibleOperation:
+        """Remove next op from list of ops and add to sliding window"""
         nonlocal ops, window
         window.append(ops[0])
         ops = ops[1:]
@@ -523,10 +519,14 @@ def fuse_userbuffers_forward_linear(
         if reduce_scatter is None:
             if linear.tensor_parallel_mode is None:
                 continue
+            if linear.tensor_parallel_size == 1:
+                continue
             if linear.tensor_parallel_mode == "row" and bias is not None:
                 continue
         else:
             if linear.tensor_parallel_mode is not None:
+                continue
+            if reduce_scatter.process_group_size == 1:
                 continue
 
         # Replace window with fused op
