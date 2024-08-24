@@ -6,12 +6,12 @@
 
 import functools
 import glob
+import importlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
@@ -186,6 +186,11 @@ def cuda_path() -> Tuple[str, str]:
         raise FileNotFoundError(f"Could not find NVCC at {nvcc_bin}")
 
     return cuda_home, nvcc_bin
+
+
+@functools.lru_cache(maxsize=None)
+def cuda_archs() -> str:
+    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
 
 
 def cuda_version() -> Tuple[int, ...]:
