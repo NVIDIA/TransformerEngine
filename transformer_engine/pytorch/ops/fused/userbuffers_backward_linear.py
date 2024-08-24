@@ -89,11 +89,11 @@ class UserbuffersBackwardLinear(FusedOperation):
         *,
         input_requires_grad: bool = True,
         weight_requires_grad: bool = True,
+        bias_requires_grad: bool = False,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
         grad_weight: Optional[torch.Tensor] = None,
         accumulate_into_grad_weight: bool = False,
-        grad_bias: Optional[torch.Tensor] = None,
         tensor_parallel_mode: Optional[str] = None,
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         tensor_parallel_size: Optional[int] = None,
@@ -107,6 +107,9 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         assert input_requires_grad  ### TODO Support optional
         assert weight_requires_grad  ### TODO Support optional
+
+        # Configuration-specific outputs
+        extra_outputs = {}
 
         # Check device
         if device is None:
@@ -196,12 +199,25 @@ class UserbuffersBackwardLinear(FusedOperation):
             ub_algo_x = UbufOverlapAlgo.BULK_OVERLAP_AG
 
         # Check grad output tensor
+        # Note: Possibly fuse cast with computing grad bias
         dy_local = reshape(
             grad_output,
             (-1, output_dims[-1]),
             device=device,
             dtype=dtype,
         )
+        db = None
+        db_async = None
+        if bias_requires_grad and with_fp8_compute and with_ub_all_gather_dy:
+            # We don't have a grad bias impl that takes FP8 input. For
+            # cases where we cast to FP8 and all-gather, it's better
+            # to compute the grad bias on ungathered, non-FP8 values.
+            db = dy_local.sum(dim=0)
+            db_async = torch.distributed.all_reduce(
+                db,
+                group=tensor_parallel_group,
+                async_op=True,
+            )
         if with_fp8_compute and not is_float8_tensor(dy_local):
             fp8_dtype = get_fp8_te_dtype(
                 grad_output_fp8_meta["recipe"],
@@ -220,10 +236,20 @@ class UserbuffersBackwardLinear(FusedOperation):
                 fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
                 dtype=dtype,
             )
-            if with_ub_all_gather_dy:
-                dy_fp8.copy_(dy_local)
-            else:
+            if bias_requires_grad and db is None:
+                ### TODO Fused cast-transpose-dbias
                 dy_fp8.cast_transpose_(dy_local)
+                db = dy_local.sum(dim=0)
+                if with_ub_all_gather_dy:
+                    db_async = torch.distributed.all_reduce(
+                        db,
+                        group=tensor_parallel_group,
+                        async_op=True,
+                    )
+            elif not with_ub_all_gather_dy:
+                dy_fp8.cast_transpose_(dy_local)
+            else:
+                dy_fp8.copy_(dy_local)
             dy_local = dy_fp8
         elif not with_fp8_compute and is_float8_tensor(dy_local):
             if with_ub_all_gather_dy:
@@ -231,6 +257,23 @@ class UserbuffersBackwardLinear(FusedOperation):
                 dy_local = ub_local_buffer.copy_(dy_local)
             else:
                 dy_local = dy_local.from_float8()
+
+        if (
+            bias_requires_grad
+            and db is None
+            and with_fp8_compute
+            and with_ub_all_gather_dy
+        ):
+            # We don't have a fused grad bias impl that takes FP8
+            # input. For cases where we cast to FP8 and all-gather,
+            # it's better to compute the grad bias on ungathered,
+            # non-FP8 values.
+            db = dy_local.sum(dim=0)
+            db_async = torch.distributed.all_reduce(
+                db,
+                group=tensor_parallel_group,
+                async_op=True,
+            )
 
         # Check input tensor
         x_local = reshape(
@@ -418,6 +461,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 kwargs["ub_algo"] = ub_algo_x
                 kwargs["ub"] = ub_comm_x
             gemm(w, dy, dx.dtype, get_workspace(), **kwargs)
+        grad_input = reshape(dx_local, input_dims)
 
         # Perform wgrad GEMM
         if with_fp8_compute:
@@ -446,15 +490,30 @@ class UserbuffersBackwardLinear(FusedOperation):
             kwargs = dict(
                 accumulate=accumulate_into_grad_weight,
                 layout="NT",
+                grad=True,
+                use_bias=bias_requires_grad,
                 out=grad_weight,
             )
             if with_ub_reduce_scatter_dx:
                 kwargs["ub_algo"] = ub_algo_dx
                 kwargs["ub"] = ub_comm_dx
-            gemm(x, dy, grad_weight.dtype, get_workspace(), **kwargs)
+            grad_weight, db, _ = gemm(
+                x,
+                dy,
+                grad_weight.dtype,
+                get_workspace(),
+                **kwargs,
+            )
 
-        grad_input = reshape(dx_local, input_dims)
-        return grad_input, grad_weight
+        # Compute grad bias if needed
+        if db_async is not None:
+            db_async.wait()
+        if bias_requires_grad:
+            if db is None:
+                db = dy.sum(dim=0)
+            extra_outputs["bias"] = db
+
+        return grad_input, grad_weight, extra_outputs
 
     def fuser_backward(
         self,
@@ -497,8 +556,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             accumulate_into_main_grad = False
 
         # Linear backward pass
-        grad_bias = None  ### TODO Implement
-        grad_input, grad_weight = UserbuffersBackwardLinear._functional_backward(
+        retval = UserbuffersBackwardLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
             weight=linear_op.weight,
@@ -506,11 +564,11 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight_dims=linear_op.weight.size(),
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
+            bias_requires_grad=(bias_op is not None),
             device=linear_op.device,
             dtype=linear_op.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
-            grad_bias=grad_bias,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
@@ -520,6 +578,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             grad_input_fp8_meta=linear_op_ctx.grad_input_fp8_meta,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
+        grad_input, grad_weight, extra_outputs = retval
 
         # Clear input tensor if possible
         if linear_op_ctx.has_prev_op:
@@ -531,7 +590,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             grad_weight = None
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
-            grad_params[self._op_idxs["bias"]] = (grad_bias,)
+            grad_params[self._op_idxs["bias"]] = (extra_outputs["bias"],)
         grad_extra_inputs = [() for _ in range(len(self.basic_ops))]
         return grad_input, grad_params, grad_extra_inputs
 

@@ -340,9 +340,9 @@ def _test_linear(
     torch.testing.assert_close(y_test, y_ref, **tols)
     torch.testing.assert_close(dx_test, dx_ref, **tols)
     torch.testing.assert_close(dw_test, dw_ref, **tols)
-    # if bias: ### TODO Restore
-    #     db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
-    #     torch.testing.assert_close(db_test, db_ref, **tols)
+    if bias:
+        db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(db_test, db_ref, **tols)
 
 
 def run_parallel_tests(model_config: ModelConfig) -> None:
