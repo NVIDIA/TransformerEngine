@@ -7,10 +7,13 @@
 #include <transformer_engine/layer_norm.h>
 
 #include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <numeric>
 #include <vector>
 
 #include "../common.h"
-#include "ln.h"
+#include "norms.h"
 
 /*
 
@@ -32,120 +35,6 @@ Compute always in FP32
 */
 
 namespace transformer_engine {
-namespace layer_norm {
-
-using namespace transformer_engine;
-
-// Create registries and provide runtime versions of config hash functions.
-
-FwdTunedRegistry FWD_TUNED_FUNCS;
-BwdTunedRegistry BWD_TUNED_FUNCS;
-FwdGeneralRegistry FWD_GENERAL_FUNCS;
-BwdGeneralRegistry BWD_GENERAL_FUNCS;
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-uint32_t get_type_id(DType dtype) {
-  if (dtype == DType::kFloat16) {
-    return TypeId<fp16>::Value;
-  } else if (dtype == DType::kBFloat16) {
-    return TypeId<bf16>::Value;
-  } else if (dtype == DType::kFloat32) {
-    return TypeId<fp32>::Value;
-  } else if (dtype == DType::kFloat8E4M3) {
-    return TypeId<fp8e4m3>::Value;
-  } else {
-    NVTE_ERROR("Type not supported.");
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-uint64_t get_key(DType wtype, DType itype, DType otype, DType ctype, uint64_t hidden_size) {
-  using namespace layer_norm;
-  uint64_t type_key = get_type_id(wtype) | (get_type_id(itype) << 2) | (get_type_id(otype) << 4) |
-                      (get_type_id(ctype) << 6);
-  uint64_t launcher_key = (type_key << 32) | hidden_size;
-  return launcher_key;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-layer_norm::FwdFunction& get_fwd_launcher(DType wtype, DType itype, DType otype, DType ctype,
-                                          const layer_norm::FwdParams& params) {
-  // Look for tuned kernel
-  auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, params.cols);
-  auto is_aligned = [](const void* ptr) -> bool {
-    // Assume vectorized memory accesses are <=16B
-    return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
-  };
-  if (params.rows % 4 == 0 && is_aligned(params.x) && is_aligned(params.mu) &&
-      is_aligned(params.rs) && is_aligned(params.gamma) && is_aligned(params.beta) &&
-      is_aligned(params.z) && layer_norm::FWD_TUNED_FUNCS.count(tuned_key) > 0) {
-    return layer_norm::FWD_TUNED_FUNCS.at(tuned_key);
-  }
-
-  // Pick general kernel
-  auto general_key = layer_norm::get_key(wtype, itype, otype, ctype, 0);
-  if (layer_norm::FWD_GENERAL_FUNCS.count(general_key) == 0) {
-    NVTE_ERROR("FWD: Unsupported types.");
-  }
-  auto& general_func_map = layer_norm::FWD_GENERAL_FUNCS.at(general_key);
-  auto func_iter = general_func_map.lower_bound(params.cols);
-  if (func_iter == general_func_map.end()) {
-    // Hidden size is too big, need to use multi-CTA
-    return general_func_map.rbegin()->second;
-  } else {
-    return func_iter->second;
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-layer_norm::BwdFunction& get_bwd_launcher(DType wtype, DType itype, DType otype, DType ctype,
-                                          const layer_norm::BwdParams& params) {
-  // Look for tuned kernel
-  auto tuned_key = layer_norm::get_key(wtype, itype, otype, ctype, params.cols);
-  auto is_aligned = [](const void* ptr) -> bool {
-    // Assume vectorized memory accesses are <=16B
-    return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
-  };
-  if (params.rows % 4 == 0 && is_aligned(params.x) && is_aligned(params.mu) &&
-      is_aligned(params.rs) && is_aligned(params.gamma) && is_aligned(params.dz) &&
-      is_aligned(params.dx) && is_aligned(params.dbeta) && is_aligned(params.dgamma) &&
-      is_aligned(params.dbeta_part) && is_aligned(params.dgamma_part) &&
-      layer_norm::BWD_TUNED_FUNCS.count(tuned_key) > 0) {
-    return layer_norm::BWD_TUNED_FUNCS.at(tuned_key);
-  }
-
-  // Pick general kernel
-  auto general_key = layer_norm::get_key(wtype, itype, otype, ctype, 0);
-  if (layer_norm::BWD_GENERAL_FUNCS.count(general_key) == 0) {
-    NVTE_ERROR("BWD: Unsupported types.");
-  }
-  auto& general_func_map = layer_norm::BWD_GENERAL_FUNCS.at(general_key);
-  auto func_iter = general_func_map.lower_bound(params.cols);
-  if (func_iter == general_func_map.end()) {
-    // Hidden size is too big, need to use multi-CTA
-    return general_func_map.rbegin()->second;
-  } else {
-    return func_iter->second;
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-size_t product(const std::vector<size_t>& shape) {
-  size_t ret = 1;
-  for (auto s : shape) {
-    ret *= s;
-  }
-  return ret;
-}
-
-}  // namespace layer_norm
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const Tensor& gamma,  // hidden_size
@@ -153,111 +42,46 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
                    const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
                    const bool zero_centered_gamma) {
-  const auto itype = x.data.dtype;
-  const auto wtype = gamma.data.dtype;
-  const auto otype = z->data.dtype;
-  const bool fp8_out = is_fp8_dtype(otype);
-  const auto ctype = layer_norm::DType::kFloat32;
+  using namespace transformer_engine;
 
   NVTE_CHECK(x.data.shape.size() == 2);
-
-  const size_t rows = x.data.shape[0];
-  const size_t cols = x.data.shape[1];
-  const auto hidden_size = gamma.data.shape[0];
-
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
-  NVTE_CHECK(hidden_size == cols);
+  NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
 
   NVTE_CHECK(epsilon >= 0.f);
 
   NVTE_CHECK(z->data.shape == x.data.shape);
 
-  NVTE_CHECK(mu->data.shape == std::vector<size_t>{rows});
-  NVTE_CHECK(mu->data.dtype == ctype);
+  NVTE_CHECK(mu->data.shape == std::vector<size_t>{x.data.shape[0]});
+  NVTE_CHECK(mu->data.dtype == DType::kFloat32);
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{rows});
-  NVTE_CHECK(rsigma->data.dtype == ctype);
+  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
+  NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
 
-  layer_norm::LaunchParams<layer_norm::FwdParams> launch_params;
+  if (workspace->data.dptr != nullptr) {
+    CheckInputTensor(x, "x");
+    CheckInputTensor(gamma, "gamma");
+    CheckInputTensor(beta, "beta");
 
-  launch_params.multiprocessorCount = multiprocessorCount;
-  launch_params.stream = stream;
-
-  // Set the kernel runtime parameters.
-  layer_norm::FwdParams& params = launch_params.params;
-  params.rows = rows;
-  params.cols = cols;
-  params.x = x.data.dptr;
-  params.mu = mu->data.dptr;
-  params.rs = rsigma->data.dptr;
-  params.gamma = gamma.data.dptr;
-  params.beta = beta.data.dptr;
-  params.z = z->data.dptr;
-  params.epsilon = epsilon;
-  params.amax = z->amax.dptr;
-  params.scale = z->scale.dptr;
-  params.scale_inv = z->scale_inv.dptr;
-  params.fp8_out = fp8_out;
-  params.zero_centered_gamma = zero_centered_gamma;
-
-  // Request the kernel launcher.
-  auto launcher = layer_norm::get_fwd_launcher(wtype, itype, otype, ctype, params);
-
-  // Query the kernel-specific launch parameters.
-  launcher(launch_params, true);
-  if (launch_params.workspace_bytes == 0) {
-    launch_params.workspace_bytes = 1;
+    CheckOutputTensor(*z, "z");
+    CheckOutputTensor(*mu, "mu");
+    CheckOutputTensor(*rsigma, "rsigma");
   }
 
-  if (workspace->data.dptr == nullptr) {
-    NVTE_CHECK(barrier->data.dptr == nullptr);
+  // TODO: add check for GPU ARCH
 
-    workspace->data.dtype = layer_norm::DType::kByte;
-    workspace->data.shape = {launch_params.workspace_bytes};
-
-    barrier->data.dtype = layer_norm::DType::kInt32;
-    barrier->data.shape = {launch_params.barrier_size};
-
-    return;
+  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
+    printf("TE/cuDNN LayerNorm is WIP. There are known bugs. Use it at your own risk!\n");
+    NormFwdCudnn<NVTE_NORM_TYPE::LN_FWD_CUDNN> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma,
+                                                       stream, multiprocessorCount, workspace,
+                                                       zero_centered_gamma);
+    norms_launcher<NVTE_NORM_TYPE::LN_FWD_CUDNN>(NormFwd, workspace);
   } else {
-    NVTE_CHECK(workspace->data.dtype == layer_norm::DType::kByte);
-    NVTE_CHECK(workspace->data.shape == std::vector<size_t>{launch_params.workspace_bytes});
+    NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma, stream,
+                                                 multiprocessorCount, workspace, barrier,
+                                                 zero_centered_gamma);
+    norms_launcher<NVTE_NORM_TYPE::LN_FWD_TE>(NormFwd, workspace, barrier);
   }
-
-  if (launch_params.barrier_size > 0) {
-    NVTE_CHECK(barrier->data.dptr != nullptr);
-    NVTE_CHECK(barrier->data.dtype == layer_norm::DType::kInt32);
-    NVTE_CHECK(barrier->data.shape == std::vector<size_t>{launch_params.barrier_size});
-  }
-
-  // Tensor checks are delayed here in order to recover workspace sizes with null data
-  CheckInputTensor(x, "x");
-  CheckInputTensor(gamma, "gamma");
-  CheckInputTensor(beta, "beta");
-
-  CheckOutputTensor(*z, "z");
-  CheckOutputTensor(*mu, "mu");
-  CheckOutputTensor(*rsigma, "rsigma");
-
-  if (launch_params.barrier_size > 0) {
-    params.workspace = workspace->data.dptr;
-    params.barrier = reinterpret_cast<int*>(barrier->data.dptr);
-  }
-
-  // Clear buffers
-  if (params.fp8_out) {
-    cudaMemsetAsync(params.amax, 0, layer_norm::product(z->amax.shape) * typeToSize(z->amax.dtype),
-                    stream);
-  }
-  if (launch_params.barrier_size > 0) {
-    cudaMemsetAsync(params.barrier, 0,
-                    layer_norm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
-                    stream);
-  }
-
-  // Launch the kernel.
-  launcher(launch_params, false);
-
   return;
 }
 
@@ -267,27 +91,17 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
                    const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
                    const bool zero_centered_gamma) {
   using namespace transformer_engine;
-
-  auto itype = x.data.dtype;
-  auto wtype = gamma.data.dtype;
-  auto otype = wtype;
-  auto ctype = DType::kFloat32;
-
-  NVTE_CHECK(dz.data.dtype == otype);
-  NVTE_CHECK(mu.data.dtype == ctype);
-  NVTE_CHECK(rsigma.data.dtype == ctype);
+  NVTE_CHECK(dz.data.dtype == gamma.data.dtype);
+  NVTE_CHECK(mu.data.dtype == DType::kFloat32);
+  NVTE_CHECK(rsigma.data.dtype == mu.data.dtype);
 
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(dz.data.shape == x.data.shape);
-  auto rows = x.data.shape[0];
-  auto cols = x.data.shape[1];
 
-  auto hidden_size = gamma.data.shape[0];
-
-  NVTE_CHECK(mu.data.shape[0] == rows);
+  NVTE_CHECK(mu.data.shape[0] == x.data.shape[0]);
   NVTE_CHECK(mu.data.shape == rsigma.data.shape);
 
-  NVTE_CHECK(gamma.data.shape[0] == cols);
+  NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
 
   NVTE_CHECK(dx->data.shape == x.data.shape);
   NVTE_CHECK(dx->data.dtype == x.data.dtype);
@@ -298,93 +112,29 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_CHECK(dbeta->data.shape == gamma.data.shape);
   NVTE_CHECK(dbeta->data.dtype == gamma.data.dtype);
 
-  layer_norm::LaunchParams<layer_norm::BwdParams> launch_params;
-  launch_params.stream = stream;
-  launch_params.multiprocessorCount = multiprocessorCount;
+  if (workspace->data.dptr) {
+    CheckInputTensor(dz, "dz");
+    CheckInputTensor(x, "x");
+    CheckInputTensor(mu, "mu");
+    CheckInputTensor(rsigma, "rsigma");
+    CheckInputTensor(gamma, "gamma");
+    CheckOutputTensor(*dx, "dx");
+    CheckOutputTensor(*dgamma, "dgamma");
+    CheckOutputTensor(*dbeta, "dbeta");
+  }
 
-  // Set the kernel runtime parameters.
-  layer_norm::BwdParams& params = launch_params.params;
-  params.rows = rows;
-  params.cols = cols;
-  params.x = x.data.dptr;
-  params.mu = mu.data.dptr;
-  params.rs = rsigma.data.dptr;
-  params.gamma = gamma.data.dptr;
-  params.dz = dz.data.dptr;
-  params.dx = dx->data.dptr;
-  params.dbeta = dbeta->data.dptr;
-  params.dgamma = dgamma->data.dptr;
-  params.dbeta_part = dbeta_part->data.dptr;
-  params.dgamma_part = dgamma_part->data.dptr;
-  params.zero_centered_gamma = zero_centered_gamma;
-
-  auto launcher = layer_norm::get_bwd_launcher(wtype, itype, otype, ctype, params);
-
-  // Query the kernel-specific launch parameters.
-  launcher(launch_params, true);
-
-  // Populate shape and dtypes for FW to allocate memory
-  if (dgamma_part->data.dptr == nullptr) {
-    NVTE_CHECK(dbeta_part->data.dptr == nullptr);
-
-    dgamma_part->data.dtype = ctype;
-    dgamma_part->data.shape = {static_cast<uint64_t>(launch_params.params.ctas_per_col),
-                               hidden_size};
-
-    dbeta_part->data.dtype = ctype;
-    dbeta_part->data.shape = {static_cast<uint64_t>(launch_params.params.ctas_per_col),
-                              hidden_size};
-
-    workspace->data.dtype = layer_norm::DType::kByte;
-    workspace->data.shape = {launch_params.workspace_bytes};
-
-    barrier->data.dtype = layer_norm::DType::kInt32;
-    barrier->data.shape = {launch_params.barrier_size};
-
-    return;
+  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
+    printf("TE/cuDNN LayerNorm is WIP. There are known bugs. Use it at your own risk!\n");
+    NormBwdCudnn<NVTE_NORM_TYPE::LN_BWD_CUDNN> BwdNorm(dz, x, mu, rsigma, gamma, dx, dgamma, dbeta,
+                                                       stream, multiprocessorCount, workspace,
+                                                       zero_centered_gamma);
+    norms_launcher<NVTE_NORM_TYPE::LN_BWD_CUDNN>(BwdNorm, workspace);
   } else {
-    NVTE_CHECK(dbeta_part->data.dptr != nullptr);
-    auto pdw_shape =
-        std::vector<size_t>{static_cast<uint64_t>(launch_params.params.ctas_per_col), hidden_size};
-
-    NVTE_CHECK(dgamma_part->data.dtype == ctype);
-    NVTE_CHECK(dgamma_part->data.shape == pdw_shape);
-    NVTE_CHECK(dbeta_part->data.dtype == ctype);
-    NVTE_CHECK(dbeta_part->data.shape == pdw_shape);
+    NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE> BwdNorm(
+        dz, x, mu, rsigma, gamma, dx, dgamma, dbeta, dgamma_part, dbeta_part, stream,
+        multiprocessorCount, workspace, barrier, zero_centered_gamma);
+    norms_launcher<NVTE_NORM_TYPE::LN_BWD_TE>(BwdNorm, workspace, barrier, dgamma_part, dbeta_part);
   }
-
-  if (launch_params.barrier_size > 0) {
-    NVTE_CHECK(barrier->data.dptr != nullptr);
-    NVTE_CHECK(barrier->data.dtype == layer_norm::DType::kInt32);
-    NVTE_CHECK(barrier->data.shape == std::vector<size_t>{launch_params.barrier_size});
-  }
-
-  if (launch_params.workspace_bytes > 0) {
-    NVTE_CHECK(workspace->data.dptr != nullptr);
-    NVTE_CHECK(workspace->data.dtype == layer_norm::DType::kByte);
-    NVTE_CHECK(workspace->data.shape == std::vector<size_t>{launch_params.workspace_bytes});
-  }
-
-  // Tensor checks are delayed here in order to recover workspace sizes with null data
-  CheckInputTensor(dz, "dz");
-  CheckInputTensor(x, "x");
-  CheckInputTensor(mu, "mu");
-  CheckInputTensor(rsigma, "rsigma");
-  CheckInputTensor(gamma, "gamma");
-  CheckOutputTensor(*dx, "dx");
-  CheckOutputTensor(*dgamma, "dgamma");
-  CheckOutputTensor(*dbeta, "dbeta");
-
-  if (launch_params.barrier_size > 0) {
-    params.workspace = workspace->data.dptr;
-    params.barrier = reinterpret_cast<int*>(barrier->data.dptr);
-    cudaMemsetAsync(params.barrier, 0,
-                    layer_norm::product(barrier->data.shape) * typeToSize(barrier->data.dtype),
-                    stream);
-  }
-
-  // Launch the kernel.
-  launcher(launch_params, false);
 }
 }  // namespace transformer_engine
 
