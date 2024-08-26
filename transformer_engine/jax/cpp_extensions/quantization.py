@@ -157,7 +157,7 @@ class CastFP8Primitive(BasePrimitive):
             local_cx, local_updated_amax = CastFP8Primitive.impl(
                 x, amax, scale, scale_inv, out_dtype=out_dtype
             )
-            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax)
+            global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
 
             return local_cx, global_updated_amax
 

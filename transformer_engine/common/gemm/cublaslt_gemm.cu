@@ -255,7 +255,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              "Unable to find suitable cuBLAS GEMM algorithm");
   NVTE_CHECK_CUBLAS(status);
 
-  if (returnedResults == 0) throw std::runtime_error("Unable to find any suitable algorithms");
+  if (returnedResults == 0) NVTE_ERROR("Unable to find any suitable algorithms");
 
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_CUBLAS(cublasLtMatmul(handle, operationDesc,
@@ -268,6 +268,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    Ddesc, &heuristicResult.algo,            /* algo */
                                    workspace,                               /* workspace */
                                    workspaceSize, stream));                 /* stream */
+
+  // Update FP8 scale-inv in output tensor
+  if (is_fp8_dtype(outputD->data.dtype)) {
+    update_tensor_scale_inv(outputD, stream);
+  }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulPreferenceDestroy(preference));
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(Ddesc));
