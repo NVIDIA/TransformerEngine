@@ -57,13 +57,20 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+    if os.getenv("NVTE_UB_WITH_MPI"):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())],
+        cmake_flags=cmake_flags,
     )
 
 
