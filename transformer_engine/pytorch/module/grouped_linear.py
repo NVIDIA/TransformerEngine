@@ -36,6 +36,7 @@ from ..cpp_extensions import (
     fp8_cast_transpose_bgrad_fused,
     fp8_multi_cast_transpose_fused,
     fp8_grouped_gemm,
+    fp8_grouped_gemm_single_output,
     grouped_gemm,
 )
 from ..constants import GemmParallelModes, dist_group_type
@@ -168,18 +169,17 @@ class _GroupedLinear(torch.autograd.Function):
                 device=inputmats[0].device,
             )
 
-            _ = fp8_grouped_gemm(
+            _ = fp8_grouped_gemm_single_output(
                 [w._data for w in weights_fp8],
-                torch.cat(
-                    [w._scale_inv for w in weights_fp8]
-                ),  # avoiding torch.cat requires another interface,
+                [w._scale_inv for w in weights_fp8],
                 0,  # weight offset is 0 for the newly created _scale_inv
                 fp8_dtype_forward,
                 inputmats,
                 inputmat_scale_inv,
                 0,
                 fp8_dtype_forward,
-                torch.split(out, m_splits),
+                m_splits,
+                out,
                 activation_dtype,
                 get_multi_stream_cublas_workspace(),
                 bias=biases,
@@ -359,18 +359,17 @@ class _GroupedLinear(torch.autograd.Function):
                         dtype=ctx.activation_dtype,
                         device=grad_output.device,
                     )
-                    fp8_grouped_gemm(
+                    fp8_grouped_gemm_single_output(
                         [w.transpose_2d() for w in weights_fp8],
-                        torch.cat(
-                            [w._scale_inv for w in weights_fp8]
-                        ),  # avoiding torch.cat requires another interface
+                        [w._scale_inv for w in weights_fp8],
                         0,  # weight offset is 0 for the newly created _scale_inv
                         weights_fp8[0]._fp8_dtype,
                         grad_output_c,
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
                         _GRAD_OUTPUT,
                         fp8_dtype_backward,
-                        torch.split(dgrad, ctx.m_splits),
+                        ctx.m_splits,
+                        dgrad,
                         ctx.activation_dtype,
                         get_multi_stream_cublas_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
