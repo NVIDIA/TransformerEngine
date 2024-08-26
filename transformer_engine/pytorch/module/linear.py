@@ -86,8 +86,6 @@ class _Linear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
-        if is_input_fp8:
-            fp8_meta["scaling_fwd"].scale_inv[tex.FP8FwdTensors.GEMM1_INPUT] = inp._scale_inv[0]
 
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
