@@ -42,6 +42,9 @@ if not tex.device_supports_multicast():
 # Force GPU kernels to launch in the order they're executed by the host CPU
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
+# Clear torch.dynamo caches
+torch._dynamo.reset()
+
 
 def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggregate):
     test_path = TEST_ROOT / "run_gemm_with_overlap.py"
