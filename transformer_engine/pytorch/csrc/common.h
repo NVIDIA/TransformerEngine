@@ -11,6 +11,7 @@
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
@@ -21,9 +22,11 @@
 #include <cudnn.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
@@ -36,7 +39,7 @@
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
-#include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <cassert>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
