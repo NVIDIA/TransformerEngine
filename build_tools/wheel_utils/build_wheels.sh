@@ -9,6 +9,7 @@ BUILD_COMMON=${2:-true}
 BUILD_JAX=${3:-true}
 BUILD_PYTORCH=${4:-true}
 BUILD_PADDLE=${5:-true}
+BUILD_METAPACKAGE=${6:-true}
 
 export NVTE_RELEASE_BUILD=1
 export TARGET_BRANCH=${TARGET_BRANCH:-}
@@ -75,4 +76,10 @@ if $BUILD_PADDLE ; then
 
                 mv dist/* /wheelhouse/
 	fi
+fi
+
+if $BUILD_METAPACKAGE ; then
+        cd /TransformerEngine
+        NVTE_BUILD_METAPACKAGE python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
+        mv dist/* /wheelhouse/
 fi
