@@ -360,8 +360,8 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
                                     .set_stride({1, 1, 1, 1})
                                     .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
-      .set_mode(fe::PointwiseMode_t::CUDNN_POINTWISE_ADD)
-      .set_compute_data_type(te2cudnnDtype(ctype)));
+      .set_mode(fe::PointwiseMode_t::ADD)
+      .set_compute_data_type(te2cudnnDtype(ctype));
 
     gamma_node = _graph.pointwise(gamma_zero_node, one_node, centered_options);
   } else gamma_node = gamma_zero_node;
@@ -487,8 +487,8 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                     .set_stride({1, 1, 1, 1})
                                     .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
-      .set_mode(fe::PointwiseMode_t::CUDNN_POINTWISE_ADD)
-      .set_compute_data_type(te2cudnnDtype(ctype)));
+      .set_mode(fe::PointwiseMode_t::ADD)
+      .set_compute_data_type(te2cudnnDtype(ctype));
 
     gamma_node = _graph.pointwise(gamma_zero_node, one_node, centered_options);
   } else gamma_node = gamma_zero_node;
