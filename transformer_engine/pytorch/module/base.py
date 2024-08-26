@@ -109,7 +109,7 @@ def initialize_ub(
         local_size = tp_size
         self_node_idx = world_rank // tp_size
         num_nodes = world_size // tp_size
-        ub_callbacks = tex.UbufBootstrapCallbacks()
+        ub_callbacks = tex.CommOverlapHelper()
     else:
         assert (
             torch.distributed.is_initialized()
@@ -203,7 +203,7 @@ def initialize_ub(
                 flush=True,
             )
 
-        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
+        ub_callbacks = tex.CommOverlapHelper(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -303,12 +303,11 @@ def initialize_ub(
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
-        sample_buffer = torch.empty(
-            shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
-        )
+        dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
         if method == "ring_exchange":
-            ub_obj = tex.UbufP2PCommOverlap(
-                sample_buffer,  # Sample userbuffer
+            ub_obj = tex.CommOverlapP2P(
+                shape,  # Communication buffer shape
+                dtype,  # Communication buffer data type
                 world_rank,  # World rank
                 world_size,  # World size
                 local_rank,  # Rank within the node
@@ -316,19 +315,20 @@ def initialize_ub(
                 self_node_idx,  # Node ID
                 num_nodes,  # Number of nodes
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                set_sm_margin,  # Set SM margin
-                aggregate,  # Aggregate 2X GEMM chunks
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # Overlap with reduce scatter
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                use_ce,  # Use copy engine for P2P communications
-                ub_callbacks,
+                ub_callbacks,  # Helper for torch.distributed callbacks during bootstrapping
+                tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
+                num_max_steams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
+                use_ce=use_ce,
+                aggregate=aggregate,
             )
         else:
-            ub_obj = tex.UbufCommOverlap(
-                sample_buffer,  # Sample userbuffer
+            ub_obj = tex.CommOverlap(
+                shape,  # Communication buffer shape
+                dtype,  # Communication buffer data type
                 world_rank,  # World rank
                 world_size,  # World size
                 local_rank,  # Rank within the node
@@ -336,13 +336,13 @@ def initialize_ub(
                 self_node_idx,  # Node ID
                 num_nodes,  # Number of nodes
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                num_splits,  # Number of communication splits
-                set_sm_margin,  # Set SM margin
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                ub_callbacks,
+                ub_callbacks,  # Helper for torch.distributed callbacks during bootstrapping
+                num_splits=num_splits,
+                num_max_steams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
             )
         _ub_communicators[name] = ub_obj
 
