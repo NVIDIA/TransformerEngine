@@ -24,6 +24,9 @@ typedef MPI_Comm ExtComm;
 typedef char *ExtComm;
 #endif
 
+#define ExtAllgatherOp std::function<void(void *, size_t, void *, size_t, ExtComm)>
+#define ExtBarrierOp std::function<void(ExtComm)>
+
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
 #define NVTE_MAX_OPS 32
@@ -142,8 +145,8 @@ struct communicator {
   volatile int tail;
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
-  std::function<void(void *, size_t, void *, size_t, ExtComm)> _allgather;
-  std::function<void(ExtComm)> _barrier;
+  ExtAllgatherOp _allgather;
+  ExtBarrierOp _barrier;
 
   ExtComm comm_world,
       comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
@@ -161,23 +164,22 @@ typedef struct communicator communicator;
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer(void *atomic_ptr, int chunk_i, cudaStream_t stream);
 void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStream_t stream);
+void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, cudaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
 int create_communicator_grouped2(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes, int tensorgpus,
-    int tensornodes);
+    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
+    int pipenodes, int tensorgpus, int tensornodes);
 
 int create_communicator_grouped(
     communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-    std::function<void(ExtComm)> ext_barrier, int pipegpus, int pipenodes);
+    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
+    int pipenodes);
 
-int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
-                        int mynode, int numnodes,
-                        std::function<void(void *, size_t, void *, size_t, ExtComm)> ext_allgather,
-                        std::function<void(ExtComm)> ext_barrier);
+int create_communicator(
+    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
+    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier);
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes);
@@ -313,5 +315,7 @@ void destroy_communicator(communicator *comm);
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *input, void *output, float *scale, int num_inputs, int input_size,
                             cudaStream_t stream);
+
+void reduce_bf16(void *input, void *output, int num_inputs, int input_size, cudaStream_t stream);
 
 #endif  // TRANSFORMER_ENGINE_USERBUFFERS_H_
