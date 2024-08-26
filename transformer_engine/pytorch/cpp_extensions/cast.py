@@ -81,8 +81,7 @@ def cast_from_fp8(
 
     # Construct empty tensors if needed
     if scale_inv is None:
-        scale_inv = empty_tensor()
-        scale_inv_offset = 0
+        raise ValueError("Did not provide either `scale_inv` or `fp8_meta_tensor`")
 
     # Launch FP8 cast kernel
     return torch.ops.tex_ts.cast_from_fp8_ts(
