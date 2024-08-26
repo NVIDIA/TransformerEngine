@@ -1355,12 +1355,14 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
 
     global _attention_backends
     if not is_training:
+        if RoPE:
+            pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-            dtype, config, True, qkv_format, input_layernorm, is_training
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training
         )
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
