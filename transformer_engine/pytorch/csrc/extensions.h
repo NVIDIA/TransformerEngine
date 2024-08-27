@@ -517,7 +517,12 @@ class CommOverlapHelper : torch::CustomClassHolder {
   std::map<std::string, c10d::ProcessGroup *> pgs;
 
  public:
-  int myrank, numranks, mylocal, numlocal, mynode, numnodes;
+  int myrank = -1;
+  int numranks = -1;
+  int mylocal = -1;
+  int numlocal = -1;
+  int mynode = -1;
+  int numnodes = -1;
 
   CommOverlapHelper();
 
@@ -528,9 +533,9 @@ class CommOverlapHelper : torch::CustomClassHolder {
   ~CommOverlapHelper();
 
   void ub_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
-                    char *group);
+                    ExtComm comm);
 
-  void ub_barrier(char *group);
+  void ub_barrier(ExtComm comm);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {

@@ -103,6 +103,7 @@ if (NVTE_UB_WITH_MPI)
     find_package(MPI REQUIRED)
     target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
     target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
