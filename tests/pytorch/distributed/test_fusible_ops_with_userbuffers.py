@@ -44,6 +44,8 @@ if torch.cuda.device_count() < 2:
 
 @dataclasses.dataclass
 class ModelConfig:
+    """Tensor dimensions in Transformer model"""
+
     sequence_length: int
     batch_size: int
     num_heads: int
@@ -52,16 +54,13 @@ class ModelConfig:
     fp8: bool
 
     @property
-    def sequence_and_batch_size(self):
-        return self.sequence_length * self.batch_size
-
-    @property
     def hidden_size(self):
         return self.num_heads * self.head_dim
 
 
 @functools.cache
 def launcher() -> str:
+    """Launcher for current parallel job"""
     if "OMPI_COMM_WORLD_SIZE" in os.environ:
         return "ompi"
     if "TORCHELASTIC_RUN_ID" in os.environ:
@@ -166,7 +165,7 @@ def _test_linear(
     # Tensor dimensions
     out_features = model_config.hidden_size
     in_features = model_config.hidden_size
-    batch_size = model_config.sequence_and_batch_size
+    batch_size = model_config.sequence_length * model_config.batch_size
     in_shape = [batch_size, in_features]
     out_shape = [batch_size, out_features]
 
@@ -398,7 +397,7 @@ def test_fuser_ops_with_userbuffers(
     dtype: torch.dtype = torch.bfloat16,
     fp8: bool,
 ) -> None:
-    """Launch parallel job that runs parallel tests"""
+    """Launch parallel job and run tests"""
 
     # Skip invalid configurations
     if fp8 and not fp8_available:

@@ -38,6 +38,13 @@ from .._common import (
 )
 
 class UserbuffersBackwardLinear(FusedOperation):
+    """Linear backward implementation using Userbuffers
+
+    This operation is equivalent to a linear operation's backward
+    pass, but it uses Userbuffers to overlap tensor-parallel
+    communication with compute.
+
+    """
 
     def __init__(
         self,
@@ -104,11 +111,80 @@ class UserbuffersBackwardLinear(FusedOperation):
         tensor_parallel_size: Optional[int] = None,
         sequence_parallel: bool = False,
         with_fp8_compute: bool = False,
+        input_fp8_meta: Optional[dict[str, Any]] = None,
         weight_fp8_meta: Optional[dict[str, Any]] = None,
         grad_output_fp8_meta: Optional[dict[str, Any]] = None,
         grad_input_fp8_meta: Optional[dict[str, Any]] = None,
         ub_comm_name: str,
-    ):
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], dict]:
+        """Functional API for backward pass
+
+        Parameters
+        ----------
+        grad_output: torch.Tensor
+            Loss gradient w.r.t. output tensor
+        input: torch.Tensor, optional
+            Input tensor. Required to compute loss gradient w.r.t.
+            weight.
+        weight: torch.Tensor, optional
+            Weight tensor. Required to compute loss gradient w.r.t.
+            input.
+        input_dims: iterable of int
+            Input tensor dimensions
+        weight_dims: iterable of int
+            Weight tensor dimensions
+        weight_requires_grad: bool
+            Whether to compute loss gradient w.r.t. weight tensor
+        bias_requires_grad: bool
+            Whether to compute loss gradient w.r.t. bias tensor
+        device: torch.device, default = default CUDA device
+            Tensor device
+        dtype: torch.dtype, default = default dtype
+            Tensor datatype
+        grad_weight: torch.Tensor, optional
+            Loss gradient w.r.t. weight tensor
+        accumulate_into_grad_weight: bool, default = `False`
+            Add result to weight grad instead of overwriting
+        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+            Mode for tensor parallelism
+        tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+            Process group for tensor parallelism
+        sequence_parallel: bool, default = `False`
+            Whether to apply sequence parallelism together with tensor
+            parallelism, i.e. distributing input or output tensors
+            along outer dimension (sequence or batch dim) when not
+            distributing along inner dimension (embedding dim)
+        with_fp8_compute: bool, default = `False`
+            Whether to perform compute in FP8
+        input_fp8_meta: dict, optional
+            FP8 metadata for casting input tensor to FP8. Required for
+            FP8 compute if input is not already in FP8.
+        weight_fp8_meta: dict, optional
+            FP8 metadata for casting weight tensor to FP8. Required for
+            FP8 compute if weight is not already in FP8.
+        grad_output_fp8_meta: dict, optional
+            FP8 metadata for casting loss gradient w.r.t. output
+            tensor to FP8. Required if output grad is not already in
+            FP8.
+        grad_input_fp8_meta: dict, optional
+            FP8 metadata for casting loss gradient w.r.t. input
+            tensor to FP8
+        ub_comm_name: str
+            Layer type (e.g. "qkv", "proj", "fc1", "fc2"). This is
+            used to access the corresponding Userbuffers communicators
+            (e.g. "qkv_dgrad", "qkv_wgrad").
+
+        Returns
+        -------
+        torch.Tensor
+            Loss gradient w.r.t. input tensor
+        torch.Tensor
+            Loss gradient w.r.t. weight tensor
+        dict
+            Extra output tensors. "grad_bias" is loss gradient w.r.t.
+            the bias tensor.
+
+        """
 
         # Configuration-specific outputs
         extra_outputs = {}
@@ -166,6 +242,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             if grad_output_fp8_meta is None and not is_float8_tensor(grad_output):
                 raise ValueError("No FP8 metadata was provided for casting output gradient to FP8")
         else:
+            input_fp8_meta = None
             weight_fp8_meta = None
             grad_output_fp8_meta = None
             grad_input_fp8_meta = None
@@ -557,7 +634,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         if bias_requires_grad:
             if db is None:
                 db = dy.sum(dim=0)
-            extra_outputs["bias"] = db
+            extra_outputs["grad_bias"] = db
 
         return grad_input, grad_weight, extra_outputs
 
@@ -638,6 +715,9 @@ class UserbuffersBackwardLinear(FusedOperation):
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         grad_input, grad_weight, extra_outputs = retval
+        grad_bias = None
+        if bias_op is not None:
+            grad_bias = extra_outputs["grad_bias"]
 
         # Clear input tensor if possible
         if linear_op_ctx.has_prev_op:
@@ -649,7 +729,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             grad_weight = None
         grad_params[self._op_idxs["linear"]] = (grad_weight,)
         if bias_op is not None:
-            grad_params[self._op_idxs["bias"]] = (extra_outputs["bias"],)
+            grad_params[self._op_idxs["bias"]] = (grad_bias,)
         grad_extra_inputs = [() for _ in range(len(self.basic_ops))]
         return grad_input, grad_params, grad_extra_inputs
 
@@ -657,6 +737,20 @@ class UserbuffersBackwardLinear(FusedOperation):
 def fuse_userbuffers_backward_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
+    """Substitute linear operations with Userbuffers implementation
+
+    Parameters
+    ----------
+    ops: list of tuples
+        Forward pass operations and the indices of the corresponding
+        basic operations.
+
+    Returns
+    -------
+    ops: list of tuples
+        Updated forward pass operations
+
+    """
 
     # Return immediately if environment is not distributed
     if (

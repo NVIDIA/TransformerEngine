@@ -712,7 +712,7 @@ class BasicLinear(BasicOperation):
             FP8 metadata for casting loss gradient w.r.t. output
             tensor to FP8. Required if output grad is not already in
             FP8.
-        grad_output_fp8_meta: dict, optional
+        grad_input_fp8_meta: dict, optional
             FP8 metadata for casting loss gradient w.r.t. input
             tensor to FP8
 

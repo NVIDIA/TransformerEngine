@@ -31,6 +31,13 @@ from .._common import (
 )
 
 class UserbuffersForwardLinear(FusedOperation):
+    """Linear forward implementation using Userbuffers
+
+    This operation is equivalent to a linear operation's forward pass,
+    but it uses Userbuffers to overlap tensor-parallel communication
+    with compute.
+
+    """
 
     def __init__(
         self,
@@ -93,7 +100,54 @@ class UserbuffersForwardLinear(FusedOperation):
         weight_fp8_meta: Optional[dict[str, Any]] = None,
         output_fp8_meta: Optional[dict[str, Any]] = None,
         ub_comm_name: str,
-    ):
+    ) -> tuple[torch.Tensor, dict]:
+        """Functional API for forward pass
+
+        Parameters
+        ----------
+        input: torch.Tensor
+            Input tensor
+        weight: torch.Tensor
+            Weight tensor
+        bias: torch.Tensor, optional
+            Bias tensor
+        device: torch.device, default = default CUDA device
+            Tensor device
+        dtype: torch.dtype, default = default dtype
+            Tensor datatype
+        tensor_parallel_mode: {`None`, "column", "row"}, default = `None`
+            Mode for tensor parallelism
+        tensor_parallel_group: torch.distributed.ProcessGroup, default = world group
+            Process group for tensor parallelism
+        sequence_parallel: bool, default = `False`
+            Whether to apply sequence parallelism together with tensor
+            parallelism, i.e. distributing input or output tensors
+            along outer dimension (sequence or batch dim) when not
+            distributing along inner dimension (embedding dim)
+        with_fp8_compute: bool, default = `False`
+            Whether to perform compute in FP8
+        input_fp8_meta: dict, optional
+            FP8 metadata for casting input tensor to FP8. Required for
+            FP8 compute if input is not already in FP8.
+        weight_fp8_meta: dict, optional
+            FP8 metadata for casting weight tensor to FP8. Required for
+            FP8 compute if weight is not already in FP8.
+        output_fp8_meta: dict, optional
+            FP8 metadata for casting output tensor to FP8
+        ub_comm_name: str
+            Layer type (e.g. "qkv", "proj", "fc1", "fc2"). This is
+            used to access the corresponding Userbuffers communicators
+            (e.g. "qkv_fprop").
+
+        Returns
+        -------
+        torch.Tensor
+            Output tensor
+        dict
+            Extra output tensors. "input" is the input tensor,
+            possibly cast and reshaped from the provided input tensor.
+
+        """
 
         # Check device
         if device is None:
@@ -378,7 +432,12 @@ class UserbuffersForwardLinear(FusedOperation):
         # Reshape output tensor
         out = reshape(y_local, output_dims)
 
-        return out, x_local, w
+        # Return cast tensors
+        extra_outputs = dict(
+            input=x_local,
+            weight=w,
+        )
+        return out, extra_outputs
 
     def fuser_forward(
         self,
@@ -427,7 +486,7 @@ class UserbuffersForwardLinear(FusedOperation):
             raise RuntimeError("Linear op is missing dict for Userbuffers options")
 
         # Linear forward
-        output, x_local, _ = UserbuffersForwardLinear._functional_forward(
+        output, extra_outputs = UserbuffersForwardLinear._functional_forward(
             input=input_,
             weight=linear_op.weight,
             bias=bias,
@@ -443,6 +502,7 @@ class UserbuffersForwardLinear(FusedOperation):
             output_fp8_meta=output_fp8_meta,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
+        x_local = extra_outputs["input"]
 
         # Save state for backward pass
         linear_op_ctx.save_for_backward(x_local)
@@ -461,6 +521,20 @@ class UserbuffersForwardLinear(FusedOperation):
 def fuse_userbuffers_forward_linear(
     ops: list[tuple[FusibleOperation, list[int]]],
 ) -> list[tuple[FusibleOperation, list[int]]]:
+    """Substitute linear operations with Userbuffers implementation
+
+    Parameters
+    ----------
+    ops: list of tuples
+        Forward pass operations and the indices of the corresponding
+        basic operations.
+
+    Returns
+    -------
+    ops: list of tuples
+        Updated forward pass operations
+
+    """
 
     # Return immediately if environment is not distributed
     if (
