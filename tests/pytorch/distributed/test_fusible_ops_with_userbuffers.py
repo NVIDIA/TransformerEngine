@@ -153,6 +153,7 @@ def _test_linear(
     device: torch.device = "cuda",
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = True,
+    weight_requires_grad: bool = True,
 ) -> None:
     dtype = model_config.dtype
     fp8_compute = model_config.fp8
@@ -270,7 +271,18 @@ def _test_linear(
         linear_op = None
         bias_op = None
         if tensor_parallel_mode == "column":
-            userbuffers_options = dict(comm_name="qkv")
+            userbuffers_options = {}
+            if not weight_requires_grad:
+                if fp8_compute:
+                    userbuffers_options["comm_name"] = "fc1"
+                else:
+                    # There is a correctness bug with overlapping
+                    # dgrad reduce-scatter with dgrad GEMM. Fall back
+                    # to overlapping dgrad reduce-scatter with wgrad
+                    # GEMM, even though wgrad isn't needed.
+                    userbuffers_options["comm_name"] = "qkv"
+            else:
+                userbuffers_options["comm_name"] = "qkv"
             linear_op = te_ops.BasicLinear(
                 in_features,
                 out_features,
@@ -306,6 +318,7 @@ def _test_linear(
         model = te_ops.Sequential(*ops)
     with torch.no_grad():
         linear_op.weight.copy_(w_test)
+        linear_op.weight.requires_grad_(requires_grad=weight_requires_grad)
         if bias:
             bias_op.bias.copy_(b_test)
         del w_test
@@ -336,10 +349,11 @@ def _test_linear(
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
     dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-    dw_test = linear_op.weight.grad.to(dtype=torch.float64, device="cpu")
     torch.testing.assert_close(y_test, y_ref, **tols)
     torch.testing.assert_close(dx_test, dx_ref, **tols)
-    torch.testing.assert_close(dw_test, dw_ref, **tols)
+    if weight_requires_grad:
+        dw_test = linear_op.weight.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(dw_test, dw_ref, **tols)
     if bias:
         db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(db_test, db_ref, **tols)
@@ -357,14 +371,16 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
     for test_config in itertools.product(
         (False, True),  # bias
         ("column", "row"),  # tensor_parallel_mode
+        (False, True),  # weight_requires_grad
     ):
         if rank == 0:
             print(f"Running _test_linear with {test_config=}")
-        bias, tensor_parallel_mode = test_config
+        bias, tensor_parallel_mode, weight_requires_grad = test_config
         _test_linear(
             model_config=model_config,
             bias=bias,
             tensor_parallel_mode=tensor_parallel_mode,
+            weight_requires_grad=weight_requires_grad,
         )
 
 
@@ -456,6 +472,9 @@ def main() -> None:
         # Initialize Userbuffers
         group = world_group()  # Initialize NCCL
         bootstrap_backend = "mpi" if launcher() == "ompi" else "nccl"
+        userbuffer_configs = {
+            "fc1_dgrad": {"method": "pipeline"},  # Overlap dgrad RS with dgrad GEMM
+        }
         te.module.base.initialize_ub(
             [
                 model_config.sequence_length * model_config.batch_size,
@@ -465,6 +484,7 @@ def main() -> None:
             use_fp8=model_config.fp8,
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
+            ub_cfgs=userbuffer_configs,
         )
 
         # Run tests

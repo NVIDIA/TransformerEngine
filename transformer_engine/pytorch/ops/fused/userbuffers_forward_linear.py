@@ -172,18 +172,13 @@ class UserbuffersForwardLinear(FusedOperation):
             else:
                 ub_algo = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif with_ub_reduce_scatter:
-            if with_fp8_compute:
-                ub_algo = {
-                    (True, True): UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
-                    (True, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
-                    (False, True): UbufOverlapAlgo.ATOMIC_GEMM_RS,
-                    (False, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS,
-                }[(ub_comm.is_p2p_overlap(), ub_comm.is_atomic_gemm())]
-            else:
-                if ub_comm.is_p2p_overlap():
-                    ub_algo = UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
-                else:
-                    ub_algo = UbufOverlapAlgo.SPLIT_PIPELINED_RS
+            is_atomic_gemm = with_fp8_compute and ub_comm.is_atomic_gemm()
+            ub_algo = {
+                (True, True): UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
+                (True, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
+                (False, True): UbufOverlapAlgo.ATOMIC_GEMM_RS,
+                (False, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS,
+            }[(ub_comm.is_p2p_overlap(), is_atomic_gemm)]
         else:
             raise RuntimeError("Could not choose Userbuffers communication algorithm")
 

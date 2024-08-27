@@ -7,6 +7,7 @@
 from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
+import warnings
 
 import torch
 
@@ -92,7 +93,6 @@ class UserbuffersBackwardLinear(FusedOperation):
         input_dims: Iterable[int],
         weight_dims: Iterable[int],
         *,
-        input_requires_grad: bool = True,
         weight_requires_grad: bool = True,
         bias_requires_grad: bool = False,
         device: Optional[torch.device] = None,
@@ -109,9 +109,6 @@ class UserbuffersBackwardLinear(FusedOperation):
         grad_input_fp8_meta: Optional[dict[str, Any]] = None,
         ub_comm_name: str,
     ):
-
-        assert input_requires_grad  ### TODO Support optional
-        assert weight_requires_grad  ### TODO Support optional
 
         # Configuration-specific outputs
         extra_outputs = {}
@@ -179,6 +176,10 @@ class UserbuffersBackwardLinear(FusedOperation):
         )
 
         # Get Userbuffers communicators and algorithms
+        # Note: communication patterns are (1) overlap dy all-gather
+        # with dgrad GEMM, (2) overlap x all-gather with dgrad GEMM
+        # and dx reduce-scatter with wgrad GEMM, (3) overlap dx
+        # reduce-scatter with dgrad GEMM.
         with_ub_all_gather_dy = False
         with_ub_reduce_scatter_dx = False
         with_ub_all_gather_x = False
@@ -197,11 +198,22 @@ class UserbuffersBackwardLinear(FusedOperation):
                 ub_algo_dy = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif tensor_parallel_mode == "column":
             with_ub_reduce_scatter_dx = True
-            with_ub_all_gather_x = True
-            ub_comm_dx = get_ub(ub_comm_name + "_wgrad")
-            ub_comm_x = get_ub(ub_comm_name + "_dgrad")
-            ub_algo_dx = UbufOverlapAlgo.BULK_OVERLAP_RS
-            ub_algo_x = UbufOverlapAlgo.BULK_OVERLAP_AG
+            if weight_requires_grad:
+                with_ub_all_gather_x = True
+                ub_comm_dx = get_ub(ub_comm_name + "_wgrad")
+                ub_comm_x = get_ub(ub_comm_name + "_dgrad")
+                ub_algo_dx = UbufOverlapAlgo.BULK_OVERLAP_RS
+                ub_algo_x = UbufOverlapAlgo.BULK_OVERLAP_AG
+            else:
+                with_ub_all_gather_x = False
+                ub_comm_dx = get_ub(ub_comm_name + "_dgrad")
+                is_atomic_gemm = with_fp8_compute and ub_comm_dx.is_atomic_gemm()
+                ub_algo_dx = {
+                    (True, True): UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
+                    (True, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
+                    (False, True): UbufOverlapAlgo.ATOMIC_GEMM_RS,
+                    (False, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS,
+                }[(ub_comm_dx.is_p2p_overlap(), is_atomic_gemm)]
 
         # Check grad output tensor
         # Note: Possibly fuse cast with computing grad bias
@@ -294,41 +306,43 @@ class UserbuffersBackwardLinear(FusedOperation):
             )
 
         # Check input tensor
-        x_local = reshape(
-            input,
-            (-1, input_dims[-1]),
-            device=device,
-            dtype=dtype,
-        )
-        if with_fp8_compute and not is_float8_tensor(x_local):
-            fp8_dtype = get_fp8_te_dtype(
-                input_fp8_meta["recipe"],
-                fprop_tensor=True,
-            )
-            if with_ub_all_gather_x:
-                data = ub_comm_x.get_ubuf_output(0)
-            else:
-                data = torch.empty_like(x_local, dtype=torch.uint8)
-            x_fp8 = Float8Tensor(
-                data=data,
-                fp8_meta=input_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
+        x_local = None
+        if weight_requires_grad:
+            x_local = reshape(
+                input,
+                (-1, input_dims[-1]),
+                device=device,
                 dtype=dtype,
             )
-            if with_ub_all_gather_x:
-                x_fp8.copy_(x_local)
-            else:
-                x_fp8.cast_transpose_(x_local)
-            x_local = x_fp8
-        elif not with_fp8_compute and is_float8_tensor(x_local):
-            if with_ub_all_gather_x:
-                ub_local_buffer = ub_comm_x.get_ubuf_output(0)
-                x_local = ub_local_buffer.copy_(x_local)
-            else:
-                x_local = x_local.from_float8()
+            if with_fp8_compute and not is_float8_tensor(x_local):
+                fp8_dtype = get_fp8_te_dtype(
+                    input_fp8_meta["recipe"],
+                    fprop_tensor=True,
+                )
+                if with_ub_all_gather_x:
+                    data = ub_comm_x.get_ubuf_output(0)
+                else:
+                    data = torch.empty_like(x_local, dtype=torch.uint8)
+                x_fp8 = Float8Tensor(
+                    data=data,
+                    fp8_meta=input_fp8_meta,
+                    fp8_meta_forward=True,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
+                    dtype=dtype,
+                )
+                if with_ub_all_gather_x:
+                    x_fp8.copy_(x_local)
+                else:
+                    x_fp8.cast_transpose_(x_local)
+                x_local = x_fp8
+            elif not with_fp8_compute and is_float8_tensor(x_local):
+                if with_ub_all_gather_x:
+                    ub_local_buffer = ub_comm_x.get_ubuf_output(0)
+                    x_local = ub_local_buffer.copy_(x_local)
+                else:
+                    x_local = x_local.from_float8()
 
         # Check weight tensor
         w = convert_tensor(
@@ -388,7 +402,11 @@ class UserbuffersBackwardLinear(FusedOperation):
         if with_ub_reduce_scatter_dx:
             # Initialize buffers for UB reduce-scatter
             dx = ub_comm_dx.get_ubuf_output(1)
-            dx_local = ub_comm_dx.get_ubuf_output(0)
+            ub_local_buffer = ub_comm_dx.get_ubuf_output(0)
+            if with_ub_all_gather_x:
+                dx_local = ub_local_buffer
+            else:
+                dx_local = torch.empty_like(ub_local_buffer)
         else:
             # Allocate grad input tensor
             if with_fp8_grad_input:
@@ -443,6 +461,10 @@ class UserbuffersBackwardLinear(FusedOperation):
             elif with_ub_all_gather_x:
                 kwargs["ub_algo"] = ub_algo_x
                 kwargs["ub"] = ub_comm_x
+            elif with_ub_reduce_scatter_dx:
+                kwargs["ub_algo"] = ub_algo_dx
+                kwargs["ub"] = ub_comm_dx
+                kwargs["extra_output_tensor"] = dx_local
             if with_fp8_grad_input:
                 fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(dx)
                 kwargs.update(
@@ -478,11 +500,17 @@ class UserbuffersBackwardLinear(FusedOperation):
             elif with_ub_all_gather_x:
                 kwargs["ub_algo"] = ub_algo_x
                 kwargs["ub"] = ub_comm_x
+            elif with_ub_reduce_scatter_dx:
+                kwargs["ub_algo"] = ub_algo_dx
+                kwargs["ub"] = ub_comm_dx
+                kwargs["extra_output_tensor"] = dx_local
             gemm(w, dy, dx.dtype, get_workspace(), **kwargs)
         grad_input = reshape(dx_local, input_dims)
 
         # Perform wgrad GEMM
-        if with_fp8_compute:
+        if not weight_requires_grad:
+            pass
+        elif with_fp8_compute:
             kwargs = dict(
                 accumulate=accumulate_into_grad_weight,
                 out=grad_weight,
@@ -573,6 +601,20 @@ class UserbuffersBackwardLinear(FusedOperation):
         else:
             accumulate_into_main_grad = False
 
+        # Hackily workaround Userbuffers bug with non-FP8 dgrad
+        # reduce-scatter overlap
+        weight_requires_grad = linear_op_ctx.weight_requires_grad
+        if not linear_op_ctx.with_fp8_compute and not weight_requires_grad:
+            warnings.warn(
+                "There is a correctness bug when using Userbuffers "
+                "to overlap a dgrad reduce-scatter with a non-FP8 dgrad GEMM. "
+                "Hackily working around by overlapping dgrad reduce-scatter "
+                "with wgrad GEMM, even though wgrad isn't needed. "
+                "Please contact Transformer Engine team "
+                "if you encounter this use-case."
+            )
+            weight_requires_grad = True
+
         # Linear backward pass
         retval = UserbuffersBackwardLinear._functional_backward(
             grad_output=grad_output,
@@ -580,8 +622,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight=linear_op.weight,
             input_dims=linear_op_ctx.input_dims,
             weight_dims=linear_op.weight.size(),
-            input_requires_grad=linear_op_ctx.input_requires_grad,
-            weight_requires_grad=linear_op_ctx.weight_requires_grad,
+            weight_requires_grad=weight_requires_grad,
             bias_requires_grad=(bias_op is not None),
             device=linear_op.device,
             dtype=linear_op.dtype,
