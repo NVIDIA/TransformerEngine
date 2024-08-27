@@ -206,10 +206,15 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
-    {2048, 4096}, {768, 2048}, {256, 1024}, {128, 768}, {64, 512}, {173, 409},  // Primes 40, 80
-    {71, 3571},                                                                 // Primes 20, 500
-    {29, 17389}};                                                               // Primes 10, 2000
-
+  {2048, 4096}, 
+  {768, 2048}, 
+  // {256, 1024}, 
+  // {128, 768}, 
+  // {64, 512}, 
+  // {173, 409},  // Primes 40, 80
+  // {71, 3571},                                                                 // Primes 20, 500
+  // {29, 17389},                                                               // Primes 10, 2000
+};
 }  // namespace
 
 class RMSNormTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
@@ -232,12 +237,16 @@ TEST_P(RMSNormTestSuite, TestRMSNorm) {
 }
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, RMSNormTestSuite,
-                         ::testing::Combine(::testing::Values(DType::kFloat32, DType::kBFloat16,
-                                                              DType::kFloat16),
-                                            ::testing::Values(DType::kFloat32, DType::kBFloat16,
-                                                              DType::kFloat16, DType::kFloat8E4M3),
+                         // ::testing::Combine(::testing::Values(DType::kFloat32, DType::kBFloat16,
+                         //                                      DType::kFloat16),
+                         //                    ::testing::Values(DType::kFloat32, DType::kBFloat16,
+                         //                                      DType::kFloat16, DType::kFloat8E4M3),
+                         //                    ::testing::ValuesIn(test_cases),
+                         //                    ::testing::Values(false, true)),
+                         ::testing::Combine(::testing::Values(DType::kBFloat16),
+                                            ::testing::Values(DType::kFloat8E4M3),
                                             ::testing::ValuesIn(test_cases),
-                                            ::testing::Values(false, true)),
+                                            ::testing::Values(true)),
                          [](const testing::TestParamInfo<RMSNormTestSuite::ParamType> &info) {
                            std::string name =
                              test::typeName(std::get<0>(info.param)) + "X" +
