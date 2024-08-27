@@ -186,7 +186,6 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type='text/x-rst',
         ext_modules=ext_modules,
-        cmdclass=cmdclass,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8, <3.13",
         classifiers=[
