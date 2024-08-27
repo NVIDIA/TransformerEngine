@@ -239,9 +239,7 @@ def initialize_ub(
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
-        assert (
-            torch.distributed.is_backend_available(bootstrap_backend)
-        ), (
+        assert torch.distributed.is_backend_available(bootstrap_backend), (
             f"PyTorch must be compiled with '{bootstrap_backend}' support in order to bootstrap "
             + f"Userbuffers with '{bootstrap_backend}' collectives."
         )
