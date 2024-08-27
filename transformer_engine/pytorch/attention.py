@@ -390,7 +390,6 @@ def get_attention_backend(
                 "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
             )
             use_flash_attention = False
-            _use_flash_attn_3 = False
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
             use_unfused_attention = False

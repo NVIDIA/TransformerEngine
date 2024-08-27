@@ -22,10 +22,10 @@ from transformer_engine.pytorch.attention import (
     get_attention_backend,
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
+    _flash_attn_3_plus,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
-    _use_flash_attn_3,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -136,7 +136,6 @@ def _get_attention_backends(
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     alibi_slopes_shape = None
@@ -679,7 +678,6 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
@@ -1168,7 +1166,6 @@ def _run_transformer_layer(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
@@ -1353,8 +1350,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
-    global _attention_backends, _use_flash_attn_3
-    if _use_flash_attn_3 and not is_training:
+    if _flash_attn_3_plus and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1380,7 +1376,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _use_flash_attn_3 and not is_training:
+    if _flash_attn_3_plus and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1528,8 +1524,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    global _attention_backends, _use_flash_attn_3
-    if _use_flash_attn_3 and not is_training:
+    if _flash_attn_3_plus and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1556,7 +1551,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _use_flash_attn_3 and not is_training:
+    if _flash_attn_3_plus and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1779,7 +1774,6 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
@@ -1834,7 +1828,6 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
