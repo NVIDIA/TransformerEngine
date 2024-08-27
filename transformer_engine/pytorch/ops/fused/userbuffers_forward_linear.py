@@ -30,6 +30,7 @@ from .._common import (
     reshape,
 )
 
+
 class UserbuffersForwardLinear(FusedOperation):
     """Linear forward implementation using Userbuffers
 
@@ -191,9 +192,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 f"({tensor_parallel_size=}, {tensor_parallel_mode=})"
             )
         if not sequence_parallel:
-            raise RuntimeError(
-                f"Invalid configuration for Userbuffers ({sequence_parallel=})"
-            )
+            raise RuntimeError(f"Invalid configuration for Userbuffers ({sequence_parallel=})")
 
         # Check if FP8 is enabled
         if with_fp8_compute:
@@ -206,9 +205,7 @@ class UserbuffersForwardLinear(FusedOperation):
             weight_fp8_meta = None
             output_fp8_meta = None
         with_fp8_output = (
-            with_fp8_compute
-            and tensor_parallel_mode != "row"
-            and output_fp8_meta is not None
+            with_fp8_compute and tensor_parallel_mode != "row" and output_fp8_meta is not None
         )
 
         # Get Userbuffers communicator
@@ -537,10 +534,7 @@ def fuse_userbuffers_forward_linear(
     """
 
     # Return immediately if environment is not distributed
-    if (
-        not torch.distributed.is_initialized()
-        or torch.distributed.get_world_size() == 1
-    ):
+    if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
         return ops
 
     # Sliding window in list of ops

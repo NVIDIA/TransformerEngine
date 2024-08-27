@@ -37,6 +37,7 @@ from .._common import (
     reshape,
 )
 
+
 class UserbuffersBackwardLinear(FusedOperation):
     """Linear backward implementation using Userbuffers
 
@@ -233,9 +234,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 f"({tensor_parallel_size=}, {tensor_parallel_mode=})"
             )
         if not sequence_parallel:
-            raise RuntimeError(
-                f"Invalid configuration for Userbuffers ({sequence_parallel=})"
-            )
+            raise RuntimeError(f"Invalid configuration for Userbuffers ({sequence_parallel=})")
 
         # Check if FP8 is enabled
         if with_fp8_compute:
@@ -365,12 +364,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             else:
                 dy_local = dy_local.from_float8()
 
-        if (
-            bias_requires_grad
-            and db is None
-            and with_fp8_compute
-            and with_ub_all_gather_dy
-        ):
+        if bias_requires_grad and db is None and with_fp8_compute and with_ub_all_gather_dy:
             # We don't have a fused grad bias impl that takes FP8
             # input. For cases where we cast to FP8 and all-gather,
             # it's better to compute the grad bias on ungathered,
@@ -516,8 +510,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         if grad_weight is None:
             if accumulate_into_grad_weight:
                 raise ValueError(
-                    "Attempted to accumulate into grad weight buffer"
-                    "without providing grad weight"
+                    "Attempted to accumulate into grad weight bufferwithout providing grad weight"
                 )
             grad_weight = torch.empty(
                 weight_dims,
@@ -753,10 +746,7 @@ def fuse_userbuffers_backward_linear(
     """
 
     # Return immediately if environment is not distributed
-    if (
-        not torch.distributed.is_initialized()
-        or torch.distributed.get_world_size() == 1
-    ):
+    if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
         return ops
 
     # Sliding window in list of ops

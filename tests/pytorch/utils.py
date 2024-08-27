@@ -10,6 +10,7 @@ import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
+
 def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
     """Convert type name to PyTorch dtype"""
     if isinstance(dtype, torch.dtype):
@@ -47,6 +48,7 @@ def str_to_dtype(dtype: str | torch.dtype) -> torch.dtype:
         bool=torch.bool,
     )[name]
     return dtype
+
 
 def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     """Estimated numerical error for a datatype

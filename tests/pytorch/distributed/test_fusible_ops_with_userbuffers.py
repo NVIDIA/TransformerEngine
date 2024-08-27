@@ -407,9 +407,7 @@ def test_fuser_ops_with_userbuffers(
     command = []
     if tex.ubuf_built_with_mpi():
         python_exe = pathlib.Path(sys.executable).resolve()
-        command.extend(
-            ("mpirun", "-np", str(world_size), "--oversubscribe", "--quiet", python_exe)
-        )
+        command.extend(("mpirun", "-np", str(world_size), "--oversubscribe", "--quiet", python_exe))
     else:
         command.extend(("torchrun", f"--nproc_per_node={world_size}"))
 
@@ -491,6 +489,7 @@ def main() -> None:
 
         # Clean up
         te.module.base.destroy_ub()
+
 
 if __name__ == "__main__":
     main()

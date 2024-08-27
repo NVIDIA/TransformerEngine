@@ -478,9 +478,9 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       torch::Tensor input_a_chunk = torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
       torch::Tensor output_chunk =
           torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-      torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
-                                  ? bias
-                                  : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
+      torch::Tensor bias_chunk =
+          (bias_chunk_ptr == nullptr ? bias
+                                     : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
       torch::Tensor workspace_chunk =
           torch::from_blob(workspace_ptr, {workspace_size_chunk}, workspace.options());
       at::cuda::setCurrentCUDAStream(_stream_compute[0]);
@@ -498,9 +498,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
         torch::Tensor output_chunk =
             torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-        torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
-                                    ? bias
-                                    : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
+        torch::Tensor bias_chunk =
+            (bias_chunk_ptr == nullptr
+                 ? bias
+                 : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());
@@ -558,9 +559,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
             torch::from_blob(input_a_chunk_ptr, {m_chunk, k}, A.options());
         torch::Tensor output_chunk =
             torch::from_blob(output_buf_chunk_ptr, {n, m_chunk}, _ubuf.options());
-        torch::Tensor bias_chunk = (bias_chunk_ptr == nullptr
-                                    ? bias
-                                    : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
+        torch::Tensor bias_chunk =
+            (bias_chunk_ptr == nullptr
+                 ? bias
+                 : torch::from_blob(bias_chunk_ptr, {m_chunk}, bias.options()));
         torch::Tensor workspace_chunk =
             torch::from_blob(workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk,
                              {workspace_size_chunk}, workspace.options());
