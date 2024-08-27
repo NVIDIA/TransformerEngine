@@ -382,9 +382,15 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and is_training:
-            logger.debug("Disabling FlashAttention as it does not support FP8 training")
+        if use_flash_attention and not _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
             use_flash_attention = False
+        if use_flash_attention and is_training:
+            logger.debug(
+                "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
+            )
+            use_flash_attention = False
+            _use_flash_attn_3 = False
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
             use_unfused_attention = False
