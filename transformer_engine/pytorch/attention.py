@@ -385,7 +385,7 @@ def get_attention_backend(
         if use_flash_attention and not _use_flash_attn_3:
             logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
             use_flash_attention = False
-        if use_flash_attention and is_training:
+        if use_flash_attention and _use_flash_attn_3 and is_training:
             logger.debug(
                 "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
             )
