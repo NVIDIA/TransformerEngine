@@ -36,7 +36,6 @@ from ..cpp_extensions import (
     fp8_cast_transpose_bgrad_fused,
     fp8_multi_cast_transpose_fused,
     fp8_grouped_gemm,
-    fp8_grouped_gemm_single_output,
     grouped_gemm,
 )
 from ..constants import GemmParallelModes, dist_group_type
@@ -169,7 +168,7 @@ class _GroupedLinear(torch.autograd.Function):
                 device=inputmats[0].device,
             )
 
-            _ = fp8_grouped_gemm_single_output(
+            _ = fp8_grouped_gemm(
                 [w._data for w in weights_fp8],
                 [w._scale_inv for w in weights_fp8],
                 0,  # weight offset is 0 for the newly created _scale_inv
@@ -178,10 +177,10 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmat_scale_inv,
                 0,
                 fp8_dtype_forward,
-                m_splits,
                 out,
                 activation_dtype,
                 get_multi_stream_cublas_workspace(),
+                m_splits=m_splits,
                 bias=biases,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
@@ -359,7 +358,7 @@ class _GroupedLinear(torch.autograd.Function):
                         dtype=ctx.activation_dtype,
                         device=grad_output.device,
                     )
-                    fp8_grouped_gemm_single_output(
+                    fp8_grouped_gemm(
                         [w.transpose_2d() for w in weights_fp8],
                         [w._scale_inv for w in weights_fp8],
                         0,  # weight offset is 0 for the newly created _scale_inv
@@ -368,10 +367,10 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
                         _GRAD_OUTPUT,
                         fp8_dtype_backward,
-                        ctx.m_splits,
                         dgrad,
                         ctx.activation_dtype,
                         get_multi_stream_cublas_workspace(),
+                        m_splits=ctx.m_splits,
                         use_split_accumulator=_2X_ACC_DGRAD,
                     )
                 else:
