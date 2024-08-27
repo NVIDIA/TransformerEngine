@@ -565,7 +565,7 @@ std::vector<size_t> NormFwdCudnn<NormEnum>::get_workspace_shape() {
 
 template <NVTE_NORM_TYPE NormEnum>
 NormFwdCudnn<NormEnum>::~NormFwdCudnn() {
-  cudnnDestroy(_handle);
+  // cudnnDestroy(_handle);
 }
 
 template <NVTE_NORM_TYPE NormEnum, typename NormType>
