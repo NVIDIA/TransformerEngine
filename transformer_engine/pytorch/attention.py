@@ -4691,12 +4691,15 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
                     fp8_dtype_forward,
                     qkv_dtype,
                 ).view(out_fp8.shape)
-            fp8_tensors = (
-                qkv_fp8,
-                out_fp8,
-                fp8_meta["scaling_fwd"].scale.clone(),
-                fp8_meta["scaling_fwd"].scale_inv.clone(),
-            )
+            if fp8_meta["recipe"].fp8_mha or not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                fp8_tensors = (None, None, None, None)
+            else:
+                fp8_tensors = (
+                    qkv_fp8,
+                    out_fp8,
+                    fp8_meta["scaling_fwd"].scale.clone(),
+                    fp8_meta["scaling_fwd"].scale_inv.clone(),
+                )
         else:
             out_ret, aux_ctx_tensors = fused_attn_fwd_qkvpacked(
                 is_training,
@@ -5074,13 +5077,16 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                     fp8_dtype_forward,
                     qkv_dtype,
                 ).view(out_fp8.shape)
-            fp8_tensors = (
-                q_fp8,
-                kv_fp8,
-                out_fp8,
-                fp8_meta["scaling_fwd"].scale.clone(),
-                fp8_meta["scaling_fwd"].scale_inv.clone(),
-            )
+            if fp8_meta["recipe"].fp8_mha or not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                fp8_tensors = (None, None, None, None, None)
+            else:
+                fp8_tensors = (
+                    q_fp8,
+                    kv_fp8,
+                    out_fp8,
+                    fp8_meta["scaling_fwd"].scale.clone(),
+                    fp8_meta["scaling_fwd"].scale_inv.clone(),
+                )
         else:
             out_ret, aux_ctx_tensors = fused_attn_fwd_kvpacked(
                 is_training,
@@ -5575,14 +5581,26 @@ class FusedAttnFunc(torch.autograd.Function):
                     qkv_dtype,
                 ).view(out_fp8.shape)
 
-            fp8_tensors = (
-                q_fp8,
-                k_fp8,
-                v_fp8,
-                out_fp8,
-                fp8_meta["scaling_fwd"].scale.clone(),
-                fp8_meta["scaling_fwd"].scale_inv.clone(),
-            )
+            if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                fp8_tensors = (None, None, None, None, None, None)
+            #elif fp8_meta["recipe"].fp8_mha:
+            #    fp8_tensors = (
+            #        None,
+            #        None,
+            #        None,
+            #        None,
+            #        fp8_meta["scaling_fwd"].scale.clone(),
+            #        fp8_meta["scaling_fwd"].scale_inv.clone(),
+            #        )
+            else:
+                fp8_tensors = (
+                    q_fp8,
+                    k_fp8,
+                    v_fp8,
+                    out_fp8,
+                    fp8_meta["scaling_fwd"].scale.clone(),
+                    fp8_meta["scaling_fwd"].scale_inv.clone(),
+                )
         else:
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
