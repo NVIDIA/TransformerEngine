@@ -22,6 +22,10 @@ COPY --from=transformerengine . .
 # outside of Python, e.g. installed via apt.
 RUN pip install ninja pybind11
 
+# Install google logging lib for paddle ci as a hotfix.
+# TODO (ksivamai): fix in TE build
+RUN apt-get update && apt-get install -y libgoogle-glog-dev
+
 # Install Transformer Engine
 RUN <<"EOF" bash -e
   [[ "${FRAMEWORK}" =~ pytorch|all ]] \
