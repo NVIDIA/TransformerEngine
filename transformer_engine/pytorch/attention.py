@@ -3701,7 +3701,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
-                fused_attn_dqkv_dtype = TE_DType[q.dtype]
+                fused_attn_dqkv_dtype = TE_DType[dout.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if not ctx.use_fused_attention:
