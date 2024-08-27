@@ -146,7 +146,9 @@ class _ToFloat8Func(torch.autograd.Function):
             if isinstance(scale, torch.Tensor):
                 scale = scale.to(device=tensor.device, dtype=torch.float32)
                 if scale.numel() != 1:
-                    raise ValueError("Attempted to initialize Float8Tensor with invalid scale tensor")
+                    raise ValueError(
+                        "Attempted to initialize Float8Tensor with invalid scale tensor"
+                    )
             else:
                 if scale is None:
                     scale = 1
