@@ -99,27 +99,23 @@ def initialize_ub(
     _ub_communicators = {}
 
     if tex.ubuf_built_with_mpi():
-        # Userbuffers will ignore all these values when it is built with MPI, so these are just
-        # placeholders based on an assumption that tp_size covers all devices in a physical node.
+        # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
+        # an MPI_Init() here by creating a new MPI process group...
         assert torch.distributed.is_mpi_available()
-        mpi_group = torch.distributed.new_group(backend="mpi")
-        world_rank = torch.distributed.get_rank(mpi_group)
-        world_size = torch.distributed.get_world_size(mpi_group)
-        local_rank = world_rank % tp_size
-        local_size = tp_size
-        self_node_idx = world_rank // tp_size
-        num_nodes = world_size // tp_size
-        ub_callbacks = tex.CommOverlapHelper()
+        _ = torch.distributed.new_group(backend="mpi")
+        helper = tex.CommOverlapHelper()
     else:
+        # Bootstrapping with torch.distributed API, so check backend and construct
+        # intra/inter-node process groups...
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
-            if torch.distributed.is_gloo_available():
-                bootstrap_backend = "gloo"
-            elif torch.distributed.is_mpi_available():
+            if torch.distributed.is_mpi_available():
                 bootstrap_backend = "mpi"
+            elif torch.distributed.is_gloo_available():
+                bootstrap_backend = "gloo"
         else:
             assert bootstrap_backend in ["gloo", "mpi", "nccl"]
 
@@ -184,26 +180,33 @@ def initialize_ub(
                 ranks_per_node_list, backend=bootstrap_backend
             )
             local_rank = torch.distributed.get_rank(intra_node_group)
-            local_size = torch.distributed.get_world_size(intra_node_group)
             intra_node_ranks = torch.distributed.get_process_group_ranks(intra_node_group)
+
+            ranks_per_node_tensor = torch.tensor(ranks_per_node_list, dtype=int)
+            ranks_across_nodes_list = ranks_per_node_tensor.transpose(0, 1).tolist()
+            inter_node_group, _ = torch.distirbuted.new_subgroups_by_enumeration(
+                ranks_across_nodes_list, backend=bootstrap_backend
+            )
+
+            helper = tex.CommOverlapHelper(world_group, intra_node_group, inter_node_group)
 
         else:
             self_node_idx = 0
-            intra_node_group = world_group
             local_rank = world_rank
-            local_size = world_size
             intra_node_ranks = list(range(world_size))
 
+            helper = tex.CommOverlapHelper(world_group)
+
         if world_rank == 0:
-            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end="", flush=True)
+            print(f"!!! [UB] Number of NVLink domains: {num_nodes}\n", end="", flush=True)
         if local_rank == 0:
             print(
-                f"!!! [UB] Global ranks on node {self_node_idx}: {intra_node_ranks}\n",
+                f"!!! [UB] Global ranks in NVLink domain #{self_node_idx}: {intra_node_ranks}\n",
                 end="",
                 flush=True,
             )
 
-        ub_callbacks = tex.CommOverlapHelper(world_group, intra_node_group)
+
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -303,21 +306,15 @@ def initialize_ub(
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
-        dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
+        buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
-                dtype,  # Communication buffer data type
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                self_node_idx,  # Node ID
-                num_nodes,  # Number of nodes
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                ub_callbacks,  # Helper for torch.distributed callbacks during bootstrapping
                 tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
-                num_max_steams=_NUM_MAX_UB_STREAMS,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
                 num_comm_sm=num_sm,
                 set_sm_margin=set_sm_margin,
@@ -328,17 +325,11 @@ def initialize_ub(
         else:
             ub_obj = tex.CommOverlap(
                 shape,  # Communication buffer shape
-                dtype,  # Communication buffer data type
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                self_node_idx,  # Node ID
-                num_nodes,  # Number of nodes
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                ub_callbacks,  # Helper for torch.distributed callbacks during bootstrapping
                 num_splits=num_splits,
-                num_max_steams=_NUM_MAX_UB_STREAMS,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
                 comm_cga_size=cga_size,
                 num_comm_sm=num_sm,
                 set_sm_margin=set_sm_margin,

@@ -281,10 +281,10 @@ def _main(opts):
     if WORLD_RANK == 0:
         print("\n", end="", flush=True)
 
-    ub_callbacks = (
+    helper = (
         tex.CommOverlapHelper()
         if tex.ubuf_built_with_mpi()
-        else tex.CommOverlapHelper(bootstrap_pg, bootstrap_pg)
+        else tex.CommOverlapHelper(bootstrap_pg)
     )
 
     if opts.comm_type == tex.CommOverlapType.RS:
@@ -329,14 +329,8 @@ def _main(opts):
         tex.CommOverlapP2P(
             (outer_size, hidden_size),
             buffer_dtype,
-            WORLD_RANK,  # World rank
-            WORLD_SIZE,  # World size
-            LOCAL_RANK,  # Rank within the node
-            LOCAL_SIZE,  # Number of ranks/GPUs per node
-            0,  # Node ID
-            1,  # Number of nodes
+            helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            ub_callbacks,
             opts.comm_type,
             set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
             atomic_gemm=opts.atomic,
@@ -347,14 +341,8 @@ def _main(opts):
         else tex.CommOverlap(
             (outer_size, hidden_size),
             buffer_dtype,
-            WORLD_RANK,  # World rank
-            WORLD_SIZE,  # World size
-            LOCAL_RANK,  # Rank within the node
-            LOCAL_SIZE,  # Number of ranks/GPUs per node
-            0,  # Node ID
-            1,  # Number of nodes
+            helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            ub_callbacks,
             atomic_gemm=opts.atomic,
         )
     )
@@ -366,14 +354,8 @@ def _main(opts):
             tex.CommOverlapP2P(
                 (outer_size, hidden_size),
                 torch.uint8 if opts.fp8_output else torch.bfloat16,
-                WORLD_RANK,  # World rank
-                WORLD_SIZE,  # World size
-                LOCAL_RANK,  # Rank within the node
-                LOCAL_SIZE,  # Number of ranks/GPUs per node
-                0,  # Node ID
-                1,  # Number of nodes
+                helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                ub_callbacks,
                 tex.CommOverlapType.RS,
                 set_sm_margin=True,
                 atomic_gemm=True,
@@ -382,14 +364,8 @@ def _main(opts):
             else tex.CommOverlap(
                 (outer_size, hidden_size),
                 torch.uint8 if opts.fp8_output else torch.bfloat16,
-                WORLD_RANK,  # World rank
-                WORLD_SIZE,  # World size
-                LOCAL_RANK,  # Rank within the node
-                LOCAL_SIZE,  # Number of ranks/GPUs per node
-                0,  # Node ID
-                1,  # Number of nodes
+                helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                ub_callbacks,
                 atomic_gemm=True,
             )
         )

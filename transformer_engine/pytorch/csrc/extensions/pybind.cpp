@@ -224,13 +224,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Data structures
-  py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta", py::module_local())
+  py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
       .def(py::init<>())
       .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-  py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors", py::module_local())
+  py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
       .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
       .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
       .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
@@ -241,7 +241,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GEMM3_WEIGHT", transformer_engine::FP8FwdTensors::GEMM3_WEIGHT)
       .value("GEMM3_OUTPUT", transformer_engine::FP8FwdTensors::GEMM3_OUTPUT);
 
-  py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors", py::module_local())
+  py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
       .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
       .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
       .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
@@ -249,22 +249,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
       .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
 
-  py::class_<CommOverlapHelper>(m, "CommOverlapHelper", py::module_local())
+  py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
-      .def(py::init<c10d::ProcessGroup *, c10d::ProcessGroup *>(),
+      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>,
+                    std::optional<c10d::ProcessGroup *>>(),
            py::call_guard<py::gil_scoped_release>(),
-           py::arg("world_group"), py::arg("intra_node_group"));
+           py::arg("world_group"), py::arg("intra_node_group") = py::none(),
+           py::arg("inter_node_group") = py::none());
 
-  py::class_<CommOverlap>(m, "CommOverlap", py::module_local())
-      .def(py::init<const std::vector<size_t> &, at::ScalarType, int, int, int, int, int, int, int,
-                    CommOverlapHelper *, int, int, int, int, bool, bool>(),
+  py::class_<CommOverlap>(m, "CommOverlap")
+      .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
+                    int, int, bool, bool>(),
            py::call_guard<py::gil_scoped_release>(),
-           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("myrank"), py::arg("numranks"),
-           py::arg("mylocal"), py::arg("numlocal"), py::arg("mynode"), py::arg("numnodes"),
-           py::arg("tp_size"), py::arg("callbacks"), py::arg("num_splits") = 3,
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 2,
-           py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
-           py::arg("atomic_gemm") = false)
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("num_splits") = 3, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("comm_cga_size") = 2, py::arg("num_comm_sm") = 16,
+           py::arg("set_sm_margin") = true, py::arg("atomic_gemm") = false)
       .def("bulk_overlap", &CommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs", &CommOverlap::split_overlap_rs,
@@ -284,17 +284,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
        .def("is_fp8_ubuf", &CommOverlap::is_fp8_ubuf,
            py::call_guard<py::gil_scoped_release>());
 
-  py::class_<CommOverlapP2P>(m, "CommOverlapP2P", py::module_local())
-      .def(py::init<const std::vector<size_t> &, at::ScalarType, int, int, int, int, int, int, int,
-                    CommOverlapHelper *, transformer_engine::CommOverlapType, int, int, int,
-                    bool, bool, bool, bool>(),
+  py::class_<CommOverlapP2P>(m, "CommOverlapP2P")
+      .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
+                    transformer_engine::CommOverlapType, int, int, int, bool, bool, bool, bool>(),
            py::call_guard<py::gil_scoped_release>(),
-           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("myrank"), py::arg("numranks"),
-           py::arg("mylocal"), py::arg("numlocal"), py::arg("mynode"), py::arg("numnodes"),
-           py::arg("tp_size"), py::arg("callbacks"), py::arg("comm_type"),
-           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 2,
-           py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
-           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false)
+           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::arg("comm_type"), py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
+           py::arg("comm_cga_size") = 1, py::arg("num_comm_sm") = 1,
+           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
+           py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
