@@ -71,6 +71,7 @@ CommOverlapHelper::CommOverlapHelper() {
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
                                      std::optional<c10d::ProcessGroup *> intra_node_group_holder,
                                      std::optional<c10d::ProcessGroup *> inter_node_group_holder) {
+#ifndef NVTE_UB_WITH_MPI
   myrank = world_group->getRank();
   numranks = world_group->getSize();
   pgs.insert({"world", world_group});
@@ -78,10 +79,6 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
   backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
   if (intra_node_group_holder.has_value()) {
-    NVTE_CHECK(
-        inter_node_group_holder.has_value(),
-        "Internal TE error: Inter-node group cannot be `None` when intra-node group exists!");
-
     // Get local rank on node and number of local ranks
     c10d::ProcessGroup *intra_node_group = inter_node_group_holder.value();
     NVTE_CHECK(intra_node_group->getBackendType() == backend,
@@ -91,15 +88,32 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     numlocal = intra_node_group->getSize();
     pgs.insert({"intra", intra_node_group});
 
-    // Get node ID and number of nodes
-    c10d::ProcessGroup *inter_node_group = intra_node_group_holder.value();
-    NVTE_CHECK(inter_node_group->getBackendType() == backend,
-               "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
-               "group!", world_group->getBackendName());
-    mynode = inter_node_group->getRank();
-    numnodes = inter_node_group->getSize();
+    if (numlocal == numranks) {
+      // Intra-node group is same as the world group so there can only be 1 node
+      NVTE_CHECK(
+          mylocal == myrank,
+          "Internal TE error: Local rank must be equal to global rank when intra-node group size ",
+          "is equal to the world group size!");
+      mynode = 0;
+      numnodes = 1;
+    } else {
+      // Intra-node group is different than the world group so there must be multiple nodes
+      NVTE_CHECK(
+          inter_node_group_holder.has_value(),
+          "Internal TE error: Inter-node group cannot be `None` when intra-node group is not ",
+          "identical to the world_group!");
+
+      // Get node ID and number of nodes
+      c10d::ProcessGroup *inter_node_group = intra_node_group_holder.value();
+      NVTE_CHECK(
+          inter_node_group->getBackendType() == backend,
+          "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
+          "group!", world_group->getBackendName());
+      mynode = inter_node_group->getRank();
+      numnodes = inter_node_group->getSize();
+    }
   } else {
-    // There is only one node so local rank/size is equal to global rank/size
+    // Intra-node group is not set so we assume there is only 1 node
     mylocal = myrank;
     numlocal = numranks;
     pgs.insert({"intra", world_group});
@@ -109,16 +123,23 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
   }
 
   initialized = true;
+#else
+  NVTE_ERROR("Internal TE error: CommOverlapHelper cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_UB_WITH_MPI=1!");
+#endif
 }
 
 CommOverlapHelper::~CommOverlapHelper() {
+#ifndef NVTE_UB_WITH_MPI
   for (auto &pg : pgs) pg.second = nullptr;
   backend_is_nccl = false;
   initialized = false;
+#endif
 }
 
 void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void *localdata,
-                                     size_t localbytes, char *group) {
+                                     size_t localbytes, ExtComm group) {
+#ifndef NVTE_UB_WITH_MPI
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
 
@@ -141,29 +162,38 @@ void CommOverlapHelper::ub_allgather(void *globaldata, size_t globalbytes, void 
     globaltmp = torch::Tensor();
     localtmp = torch::Tensor();
   }
+#else
+  NVTE_ERROR("Internal TE error: CommOverlapHelper::ub_allgather is a no-op when TE is compiled ",
+             "with NVTE_UB_WITH_MPI=1!");
+#endif
 }
 
-void CommOverlapHelper::ub_barrier(char *group) {
+void CommOverlapHelper::ub_barrier(ExtComm group) {
+#ifndef NVTE_UB_WITH_MPI
   NVTE_CHECK(initialized, "Internal TE error: tex.CommOverlapHelper() is not initialized ",
              "with valid process groups!");
   auto work = pgs[group]->barrier();
   work->wait();
+#else
+  NVTE_ERROR("Internal TE error: CommOverlapHelper::ub_barrier is a no-op when TE is compiled ",
+             "with NVTE_UB_WITH_MPI=1!");
+#endif
 }
 
 /***************************************************************************************************
  * CommOverlap
  **************************************************************************************************/
 
-CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                         CommOverlapHelper *helper, int tp_size, int num_splits,
-                         int num_max_streams, int comm_cga_size, int num_comm_sm,
-                         bool set_sm_margin, bool atomic_gemm)
-    : te::CommOverlapBase(buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank,
-                          helper->numranks, helper->mylocal, helper->numlocal, helper->mynode,
-                          helper->numnodes, tp_size,
-                          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-                          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
-                          num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+CommOverlap::CommOverlap(
+    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
+    int tp_size, int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
+    bool set_sm_margin, bool atomic_gemm)
+    : te::CommOverlapBase(
+        buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+        helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+        std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
+        comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
 }
 
 /*
@@ -171,11 +201,10 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
 ** This function assumes the communication input is pre-copied to _ubuf
 */
 std::vector<at::Tensor> CommOverlap::bulk_overlap(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator,
     te::CommOverlapType comm_type, at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
@@ -209,11 +238,10 @@ std::vector<at::Tensor> CommOverlap::bulk_overlap(
 ** Split FPROP GEMM + ReduceScatter
 */
 void CommOverlap::atomic_gemm_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
     at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
@@ -230,16 +258,13 @@ void CommOverlap::atomic_gemm_overlap_rs(
 /*
 ** Split FPROP GEMM + ReduceScatter
 */
-void CommOverlap::split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                                   transformer_engine::DType A_type, bool transa, at::Tensor B,
-                                   at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                                   transformer_engine::DType B_type, bool transb, at::Tensor D,
-                                   at::Tensor D_scale, transformer_engine::DType D_type,
-                                   at::Tensor D_amax, at::Tensor bias,
-                                   transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
-                                   bool grad, at::Tensor workspace, size_t workspaceSize,
-                                   bool accumulate, bool use_split_accumulator, bool gemm_overlap,
-                                   at::Tensor rs_output) {
+void CommOverlap::split_overlap_rs(
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    size_t workspaceSize, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
+    at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
                                   pre_gelu_out, workspace)
@@ -295,17 +320,16 @@ torch::Tensor CommOverlap::get_ubuf_output(int comm_type) {
  * CommOverlapP2P
  **************************************************************************************************/
 
-CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                               CommOverlapHelper *helper, int tp_size,
-                               te::CommOverlapType comm_type, int num_max_streams,
-                               int comm_cga_size, int num_comm_sm, bool set_sm_margin,
-                               bool atomic_gemm, bool use_ce, bool aggregate)
+CommOverlapP2P::CommOverlapP2P(
+    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
+    int tp_size, te::CommOverlapType comm_type, int num_max_streams, int comm_cga_size,
+    int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate)
     : te::CommOverlapP2PBase(
-          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
-          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
-          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
+        buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+        helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+        std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
+        comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication
@@ -315,11 +339,10 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
 *phases.
 */
 void CommOverlapP2P::atomic_gemm_overlap_ag(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
@@ -340,11 +363,10 @@ void CommOverlapP2P::atomic_gemm_overlap_ag(
 *phases.
 */
 void CommOverlapP2P::split_overlap_ag(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
@@ -361,11 +383,10 @@ void CommOverlapP2P::split_overlap_ag(
 ** Split ReduceScatter + GEMM using P2P communication
 */
 void CommOverlapP2P::atomic_gemm_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
@@ -382,11 +403,10 @@ void CommOverlapP2P::atomic_gemm_overlap_rs(
 ** Split ReduceScatter + GEMM using P2P communication
 */
 void CommOverlapP2P::split_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-    transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-    int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
+    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
+    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,

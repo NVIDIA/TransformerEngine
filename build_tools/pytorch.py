@@ -11,7 +11,6 @@ import setuptools
 from .utils import (
     all_files_in_dir,
     cuda_archs,
-    cuda_path,
     cuda_version,
 )
 
@@ -56,9 +55,6 @@ def setup_pytorch_extension(
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
-    if bool(os.getenv("NVTE_UB_WITH_MPI", "0")):
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
-        nvcc_flags.append("-DNVTE_UB_WITH_MPI")
 
     cuda_architectures = cuda_archs()
 
@@ -84,6 +80,15 @@ def setup_pytorch_extension(
             if arch == "70":
                 continue  # Already handled
             nvcc_flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
+
+    if os.getenv("NVTE_UB_WITH_MPI") is not None:
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
+        mpi_path = Path(os.getenv("MPI_HOME"))
+        include_dirs.append(mpi_path / "include")
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+        nvcc_flags.append("-DNVTE_UB_WITH_MPI")
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
