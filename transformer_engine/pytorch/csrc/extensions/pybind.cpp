@@ -7,9 +7,8 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include "common/util/pybind_helper.h"
-
 #include "../extensions.h"
+#include "common/util/pybind_helper.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
@@ -253,20 +252,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>,
                     std::optional<c10d::ProcessGroup *>>(),
-           py::call_guard<py::gil_scoped_release>(),
-           py::arg("world_group"), py::arg("intra_node_group") = py::none(),
-           py::arg("inter_node_group") = py::none());
+           py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
+           py::arg("intra_node_group") = py::none(), py::arg("inter_node_group") = py::none());
 
   py::class_<CommOverlap>(m, "CommOverlap")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
                     int, int, bool, bool>(),
-           py::call_guard<py::gil_scoped_release>(),
-           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
+           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
+           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("num_splits") = 3, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
            py::arg("comm_cga_size") = 2, py::arg("num_comm_sm") = 16,
            py::arg("set_sm_margin") = true, py::arg("atomic_gemm") = false)
-      .def("bulk_overlap", &CommOverlap::bulk_overlap,
-           py::call_guard<py::gil_scoped_release>())
+      .def("bulk_overlap", &CommOverlap::bulk_overlap, py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs", &CommOverlap::split_overlap_rs,
            py::call_guard<py::gil_scoped_release>())
       .def("atomic_gemm_overlap_rs", &CommOverlap::atomic_gemm_overlap_rs,
@@ -277,22 +274,18 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("set_ubuf_scale_inv", &CommOverlap::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlap::is_atomic_gemm,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlap::is_p2p_overlap,
-           py::call_guard<py::gil_scoped_release>())
-       .def("is_fp8_ubuf", &CommOverlap::is_fp8_ubuf,
-           py::call_guard<py::gil_scoped_release>());
+      .def("is_atomic_gemm", &CommOverlap::is_atomic_gemm, py::call_guard<py::gil_scoped_release>())
+      .def("is_p2p_overlap", &CommOverlap::is_p2p_overlap, py::call_guard<py::gil_scoped_release>())
+      .def("is_fp8_ubuf", &CommOverlap::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>());
 
   py::class_<CommOverlapP2P>(m, "CommOverlapP2P")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
                     transformer_engine::CommOverlapType, int, int, int, bool, bool, bool, bool>(),
-           py::call_guard<py::gil_scoped_release>(),
-           py::arg("buffer_shape"), py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
-           py::arg("comm_type"), py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
-           py::arg("comm_cga_size") = 1, py::arg("num_comm_sm") = 1,
-           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
-           py::arg("use_ce") = true, py::arg("aggregate") = false)
+           py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
+           py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
+           py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
+           py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
+           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
@@ -307,8 +300,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>())
       .def("set_ubuf_scale_inv", &CommOverlapP2P::set_ubuf_scale_inv,
            py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlapP2P::is_fp8_ubuf,
-           py::call_guard<py::gil_scoped_release>())
+      .def("is_fp8_ubuf", &CommOverlapP2P::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>())
       .def("is_atomic_gemm", &CommOverlapP2P::is_atomic_gemm,
            py::call_guard<py::gil_scoped_release>())
       .def("is_p2p_overlap", &CommOverlapP2P::is_p2p_overlap,
