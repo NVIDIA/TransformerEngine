@@ -461,7 +461,7 @@ def _main(opts):
     else:
         ref_g = torch.matmul(inp_g, ker_g)
         if ub_obj2 is not None:
-            inp2_g = torch.nn.functional.gelu(ref_g)
+            inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
             ref2_g = torch.matmul(inp2_g, ker2_g)
 
     if opts.fp8:
