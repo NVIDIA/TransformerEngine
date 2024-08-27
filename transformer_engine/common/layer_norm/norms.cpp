@@ -336,29 +336,29 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   const auto batch_dim = static_cast<int32_t>(x.data.shape[0]);
   const auto hidden_dim = static_cast<int32_t>(x.data.shape[1]);
 
-  auto x_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto x_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                   .set_name("X")
                                   .set_dim({batch_dim, hidden_dim, 1, 1})
                                   .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
-  auto gamma_zero_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto gamma_zero_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                            .set_name("gamma_zero")
                                            .set_dim({1, hidden_dim, 1, 1})
                                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
                                            .set_data_type(te2cudnnDtype(wtype)));
-  auto beta_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto beta_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                      .set_name("bias")
                                      .set_dim({1, hidden_dim, 1, 1})
                                      .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
                                      .set_data_type(te2cudnnDtype(wtype)));
-  auto eps_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto eps_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                     .set_name("epsilon")
                                     .set_dim({1, 1, 1, 1})
                                     .set_stride({1, 1, 1, 1})
                                     .set_data_type(te2cudnnDtype(ctype)));
 
-  std::shared_ptr<fe::graph::Tensor_attributes> gamma_node, one_node;
+  std::shared_ptr<fe::graph::Tensor_attributes> gamma_tensor, one_tensor;
   if (zero_centered_gamma) {
-    one_node = _graph.tensor(fe::graph::Tensor_attributes()
+    one_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                  .set_name("one")
                                  .set_dim({1, 1, 1, 1})
                                  .set_stride({1, 1, 1, 1})
@@ -366,78 +366,78 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(te2cudnnDtype(ctype));
-    gamma_node = _graph.pointwise(gamma_zero_node, one_node, centered_options);
+    gamma_tensor = _graph.pointwise(gamma_zero_tensor, one_tensor, centered_options);
   } else
-    gamma_node = gamma_zero_node;
+    gamma_tensor = gamma_zero_tensor;
 
-  std::shared_ptr<fe::graph::Tensor_attributes> z_node, mean_node, inv_var_node;
+  std::shared_ptr<fe::graph::Tensor_attributes> z_tensor, mean_tensor, inv_var_tensor;
   if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_CUDNN) {
     auto norm_options = fe::graph::Layernorm_attributes()
                             .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
-                            .set_epsilon(eps_node);
-    auto ret = _graph.layernorm(x_node, gamma_node, beta_node, norm_options);
-    std::tie(z_node, mean_node, inv_var_node) = std::make_tuple(ret[0], ret[1], ret[2]);
-    mean_node->set_output(true).set_data_type(te2cudnnDtype(ctype));
+                            .set_epsilon(eps_tensor);
+    auto ret = _graph.layernorm(x_tensor, gamma_tensor, beta_tensor, norm_options);
+    std::tie(z_tensor, mean_tensor, inv_var_tensor) = std::make_tuple(ret[0], ret[1], ret[2]);
+    mean_tensor->set_output(true).set_data_type(te2cudnnDtype(ctype));
   } else {
     auto norm_options = fe::graph::Rmsnorm_attributes()
                             .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
-                            .set_epsilon(eps_node);
-    auto ret = _graph.rmsnorm(x_node, gamma_node, norm_options);
-    std::tie(z_node, inv_var_node) = std::make_tuple(ret[0], ret[1]);
+                            .set_epsilon(eps_tensor);
+    auto ret = _graph.rmsnorm(x_tensor, gamma_tensor, norm_options);
+    std::tie(z_tensor, inv_var_tensor) = std::make_tuple(ret[0], ret[1]);
   }
 
-  inv_var_node->set_output(true).set_data_type(te2cudnnDtype(ctype));
+  inv_var_tensor->set_output(true).set_data_type(te2cudnnDtype(ctype));
 
   const auto ZDtype = fp8_out ? ctype : otype;
-  z_node->set_output(!fp8_out).set_data_type(te2cudnnDtype(ZDtype));
+  z_tensor->set_output(!fp8_out).set_data_type(te2cudnnDtype(ZDtype));
 
-  std::shared_ptr<fe::graph::Tensor_attributes> z_fp8_node, amax_node, z_scale_node;
+  std::shared_ptr<fe::graph::Tensor_attributes> z_fp8_tensor, amax_tensor, z_scale_tensor;
   fe::graph::Pointwise_attributes z_scale_options;
   if (fp8_out) {
     // create a scale node
-    z_scale_node = _graph.tensor(fe::graph::Tensor_attributes()
+    z_scale_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                      .set_name("z_scale")
                                      .set_dim({1, 1, 1, 1})
                                      .set_stride({1, 1, 1, 1})
                                      .set_data_type(te2cudnnDtype(ctype)));
     z_scale_options = fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::MUL);
-    z_fp8_node = _graph.pointwise(z_node, z_scale_node, z_scale_options);
+    z_fp8_tensor = _graph.pointwise(z_tensor, z_scale_tensor, z_scale_options);
 
-    z_fp8_node->set_output(true).set_data_type(te2cudnnDtype(otype));
+    z_fp8_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
 
     // create an amax reduction node
-    amax_node = _graph.reduction(z_node, fe::graph::Reduction_attributes()
+    amax_tensor = _graph.reduction(z_tensor, fe::graph::Reduction_attributes()
                                              .set_mode(fe::ReductionMode_t::AMAX)
                                              .set_compute_data_type(te2cudnnDtype(ctype)));
-    amax_node->set_output(true).set_data_type(te2cudnnDtype(ctype)).set_dim({1, 1, 1, 1});
+    amax_tensor->set_output(true).set_data_type(te2cudnnDtype(ctype)).set_dim({1, 1, 1, 1});
   }
 
   _variant_pack = {
-      {x_node, x.data.dptr},
-      {inv_var_node, rsigma->data.dptr},
-      {gamma_node, gamma.data.dptr},
-      {eps_node, const_cast<float*>(&epsilon)},
+      {x_tensor, x.data.dptr},
+      {inv_var_tensor, rsigma->data.dptr},
+      {gamma_tensor, gamma.data.dptr},
+      {eps_tensor, const_cast<float*>(&epsilon)},
   };
 
   float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
-    _variant_pack.insert({{one_node, const_cast<float*>(&offset_scalar)}});
+    _variant_pack.insert({{one_tensor, const_cast<float*>(&offset_scalar)}});
   }
 
   if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_CUDNN)
     _variant_pack.insert({
-        {mean_node, mu->data.dptr},
-        {beta_node, beta.data.dptr},
+        {mean_tensor, mu->data.dptr},
+        {beta_tensor, beta.data.dptr},
     });
 
   if (fp8_out)
     _variant_pack.insert({
-        {z_scale_node, z->scale.dptr},
-        {amax_node, z->amax.dptr},
-        {z_fp8_node, z->data.dptr},
+        {z_scale_tensor, z->scale.dptr},
+        {amax_tensor, z->amax.dptr},
+        {z_fp8_tensor, z->data.dptr},
     });
   else
-    _variant_pack.insert({{z_node, z->data.dptr}});
+    _variant_pack.insert({{z_tensor, z->data.dptr}});
 }
 
 template <NVTE_NORM_TYPE NormEnum>
@@ -465,32 +465,32 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   const auto batch_dim = static_cast<int32_t>(x.data.shape[0]);
   const auto hidden_dim = static_cast<int32_t>(gamma.data.shape[0]);
 
-  auto x_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto x_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                   .set_name("x")
                                   .set_dim({batch_dim, hidden_dim, 1, 1})
                                   .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
-  auto dz_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto dz_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                    .set_name("dz")
                                    .set_dim({batch_dim, hidden_dim, 1, 1})
                                    .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
-  auto mean_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto mean_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                      .set_name("mean")
                                      .set_dim({batch_dim, 1, 1, 1})
                                      .set_stride({1, 1, 1, 1})
                                      .set_data_type(te2cudnnDtype(ctype)));
-  auto gamma_zero_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto gamma_zero_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                            .set_name("gamma")
                                            .set_dim({1, hidden_dim, 1, 1})
                                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
                                            .set_data_type(te2cudnnDtype(ctype)));
-  auto inv_var_node = _graph.tensor(fe::graph::Tensor_attributes()
+  auto inv_var_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                         .set_name("inv_var")
                                         .set_dim({batch_dim, 1, 1, 1})
                                         .set_stride({1, 1, 1, 1})
                                         .set_data_type(te2cudnnDtype(ctype)));
-  std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> gamma_node, one_node;
+  std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> gamma_tensor, one_tensor;
   if (zero_centered_gamma) {
-    one_node = _graph.tensor(fe::graph::Tensor_attributes()
+    one_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                  .set_name("one")
                                  .set_dim({1, 1, 1, 1})
                                  .set_stride({1, 1, 1, 1})
@@ -499,42 +499,42 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(te2cudnnDtype(ctype));
 
-    gamma_node = _graph.pointwise(gamma_zero_node, one_node, centered_options);
+    gamma_tensor = _graph.pointwise(gamma_zero_tensor, one_tensor, centered_options);
   } else
-    gamma_node = gamma_zero_node;
+    gamma_tensor = gamma_zero_tensor;
 
-  std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> dx_node, dgamma_node, dbeta_node;
+  std::shared_ptr<cudnn_frontend::graph::Tensor_attributes> dx_tensor, dgamma_tensor, dbeta_tensor;
   if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_CUDNN) {
     auto norm_options = fe::graph::Layernorm_backward_attributes().set_saved_mean_and_inv_variance(
-        mean_node, inv_var_node);
-    auto ret = _graph.layernorm_backward(dz_node, x_node, gamma_node, norm_options);
-    std::tie(dx_node, dgamma_node, dbeta_node) = std::make_tuple(ret[0], ret[1], ret[2]);
-    dbeta_node->set_output(true).set_data_type(te2cudnnDtype(otype));
+        mean_tensor, inv_var_tensor);
+    auto ret = _graph.layernorm_backward(dz_tensor, x_tensor, gamma_tensor, norm_options);
+    std::tie(dx_tensor, dgamma_tensor, dbeta_tensor) = std::make_tuple(ret[0], ret[1], ret[2]);
+    dbeta_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
   } else {
     auto norm_options = fe::graph::Rmsnorm_backward_attributes().has_dbias(false);
-    auto ret = _graph.rmsnorm_backward(dz_node, x_node, gamma_node, inv_var_node, norm_options);
-    std::tie(dx_node, dgamma_node, dbeta_node) = std::make_tuple(ret[0], ret[1], ret[2]);
-    if (dgamma_node != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
+    auto ret = _graph.rmsnorm_backward(dz_tensor, x_tensor, gamma_tensor, inv_var_tensor, norm_options);
+    std::tie(dx_tensor, dgamma_tensor, dbeta_tensor) = std::make_tuple(ret[0], ret[1], ret[2]);
+    if (dgamma_tensor != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
   }
-  dx_node->set_output(true).set_data_type(te2cudnnDtype(otype));
-  dgamma_node->set_output(true).set_data_type(te2cudnnDtype(otype));
+  dx_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
+  dgamma_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
 
-  NormBwdCudnn<NormEnum>::_variant_pack = {{x_node, x.data.dptr},
-                                           {dz_node, dz.data.dptr},
-                                           {inv_var_node, rsigma.data.dptr},
-                                           {gamma_node, gamma.data.dptr},
-                                           {dgamma_node, dgamma->data.dptr},
-                                           {dx_node, dx->data.dptr}};
+  NormBwdCudnn<NormEnum>::_variant_pack = {{x_tensor, x.data.dptr},
+                                           {dz_tensor, dz.data.dptr},
+                                           {inv_var_tensor, rsigma.data.dptr},
+                                           {gamma_tensor, gamma.data.dptr},
+                                           {dgamma_tensor, dgamma->data.dptr},
+                                           {dx_tensor, dx->data.dptr}};
 
   float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
-    NormBwdCudnn<NormEnum>::_variant_pack.insert({{one_node, const_cast<float*>(&offset_scalar)}});
+    NormBwdCudnn<NormEnum>::_variant_pack.insert({{one_tensor, const_cast<float*>(&offset_scalar)}});
   }
 
   if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_CUDNN)
     NormBwdCudnn<NormEnum>::_variant_pack.insert({
-        {mean_node, mu.data.dptr},
-        {dbeta_node, dbeta->data.dptr},
+        {mean_tensor, mu.data.dptr},
+        {dbeta_tensor, dbeta->data.dptr},
     });
 }
 
