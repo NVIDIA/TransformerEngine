@@ -23,18 +23,18 @@ namespace te = transformer_engine;
     assert(A_scale_inv.numel());                                                                   \
     A_scale_inv_ptr = A_scale_inv[A_fp8_index].data_ptr();                                         \
   }                                                                                                \
-  auto A_ = makeTransformerEngineTensor(A.data_ptr(),                                              \
-                                        std::vector<size_t>{(size_t)A.size(0), (size_t)A.size(1)}, \
-                                        A_type, nullptr, nullptr, A_scale_inv_ptr);                \
+  auto A_ = makeTransformerEngineTensor(                                                           \
+      A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,      \
+      nullptr, nullptr, A_scale_inv_ptr);                                                          \
   B = B.contiguous();                                                                              \
   void *B_scale_inv_ptr = nullptr;                                                                 \
   if (te::is_fp8_dtype(B_type)) {                                                                  \
     assert(B_scale_inv.numel());                                                                   \
     B_scale_inv_ptr = B_scale_inv[B_fp8_index].data_ptr();                                         \
   }                                                                                                \
-  auto B_ = makeTransformerEngineTensor(B.data_ptr(),                                              \
-                                        std::vector<size_t>{(size_t)B.size(0), (size_t)B.size(1)}, \
-                                        B_type, nullptr, nullptr, B_scale_inv_ptr);                \
+  auto B_ = makeTransformerEngineTensor(                                                           \
+      B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_type,      \
+      nullptr, nullptr, B_scale_inv_ptr);                                                          \
   void *D_amax_ptr = nullptr;                                                                      \
   void *D_scale_ptr = nullptr;                                                                     \
   if (te::is_fp8_dtype(D_type)) {                                                                  \
@@ -43,11 +43,11 @@ namespace te = transformer_engine;
     assert(D_scale.numel());                                                                       \
     D_scale_ptr = D_scale.data_ptr();                                                              \
   }                                                                                                \
-  auto D_ = makeTransformerEngineTensor(D.data_ptr(),                                              \
-                                        std::vector<size_t>{(size_t)D.size(0), (size_t)D.size(1)}, \
-                                        D_type, D_amax_ptr, D_scale_ptr, nullptr);                 \
-  auto bias_ = makeTransformerEngineTensor(bias.data_ptr(),                                        \
-                                           std::vector<size_t>{(size_t)bias.size(0)}, bias_type);  \
+  auto D_ = makeTransformerEngineTensor(                                                           \
+      D.data_ptr(), {static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,      \
+      D_amax_ptr, D_scale_ptr, nullptr);                                                           \
+  auto bias_ = makeTransformerEngineTensor(                                                        \
+      bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);         \
   const auto gelu_shape = (pre_gelu_out.data_ptr() == nullptr)                                     \
                               ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0))}     \
                               : std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),     \
@@ -55,7 +55,8 @@ namespace te = transformer_engine;
   auto pre_gelu_out_ = makeTransformerEngineTensor(                                                \
       pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type())); \
   auto workspace_ = makeTransformerEngineTensor(                                                   \
-      workspace.data_ptr(), std::vector<size_t>{(size_t)workspace.size(0)}, te::DType::kByte);
+      workspace.data_ptr(), std::vector<size_t>{static_cast<size_t>(workspace.size(0))},           \
+      te::DType::kByte);
 
 /***************************************************************************************************
  * CommOverlapHelper
