@@ -56,6 +56,9 @@ def setup_pytorch_extension(
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+    if bool(os.getenv("NVTE_UB_WITH_MPI", "0")):
+        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+        nvcc_flags.append("-DNVTE_UB_WITH_MPI")
 
     cuda_architectures = cuda_archs()
 
