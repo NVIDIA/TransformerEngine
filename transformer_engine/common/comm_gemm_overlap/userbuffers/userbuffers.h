@@ -19,9 +19,9 @@
 
 #ifdef NVTE_UB_WITH_MPI
 #include <mpi.h>
-typedef MPI_Comm ExtComm;
+#define ExtComm MPI_Comm
 #else
-typedef char *ExtComm;
+#define ExtComm const char *
 #endif
 
 #define ExtAllgatherOp std::function<void(void *, size_t, void *, size_t, ExtComm)>
@@ -148,9 +148,9 @@ struct communicator {
   ExtAllgatherOp _allgather;
   ExtBarrierOp _barrier;
 
-  ExtComm comm_world,
-      comm_inter,  // reduction group communicator (subset of the nodes) along GPU rail
-      comm_intra;  // full intranode (all ndev GPUS)
+  ExtComm comm_world;
+  ExtComm comm_inter;  // reduction group communicator (subset of the nodes) along GPU rail
+  ExtComm comm_intra;  // full intranode (all ndev GPUS)
 #ifdef NVTE_UB_WITH_MPI
   MPI_Request mpihndl[NVTE_MAX_SHARP];
 #endif

@@ -44,31 +44,19 @@ static MPI_Comm EXT_COMM_INTER;
   } while (false)
 
 void ub_mpi_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
-                      ExtComm group) {
-  // UB_MPI_CHECK(MPI_Allgather(localdata, localbytes, MPI_BYTE,
-  //                            globaldata, globalbytes, MPI_BYTE,
-  //                            static_cast<MPI_Comm>(group)));
-  MPI_Comm comm = static_cast<MPI_Comm>(group);
+                      ExtComm comm) {
   int numranks;
   UB_MPI_CHECK(MPI_Comm_size(comm, &numranks));
   assert(globalbytes == numranks * localbytes);
-
-  int myrank;
-  UB_MPI_CHECK(MPI_Comm_rank(comm, &myrank));
-  char *globaltarget = reinterpret_cast<char *>(globaldata) + (myrank * localbytes);
-  memcpy(globaltarget, localdata, localbytes);
-
-  for (int n = 0; n < numranks; n++) {
-    globaltarget = reinterpret_cast<char *>(globaldata) + (n * localbytes);
-    UB_MPI_CHECK(MPI_Bcast(globaltarget, localbytes, MPI_BYTE, n, comm));
-  }
+  UB_MPI_CHECK(
+      MPI_Allgather(localdata, localbytes, MPI_BYTE, globaldata, localbytes, MPI_BYTE, comm));
 }
 
-void ub_mpi_barrier(ExtComm group) { UB_MPI_CHECK(MPI_Barrier(static_cast<MPI_Comm>(group))); }
+void ub_mpi_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
 #else
-static char EXT_COMM_WORLD[] = "world";
-static char EXT_COMM_INTRA[] = "intra";
-static char EXT_COMM_INTER[] = "inter";
+#define EXT_COMM_WORLD "world"
+#define EXT_COMM_INTRA "intra"
+#define EXT_COMM_INTER "inter"
 #endif
 
 #define MULTICAST_GB_TOTAL 512
@@ -426,7 +414,7 @@ int create_communicator_mpi(communicator **comm) {
 
 void destroy_communicator(communicator *comm) {
   for (int hndl = 0; hndl < comm->free_region; hndl++) {
-    if (hndl > 0 && comm->use_mc && comm->mem_dealloc[hndl]) {
+    if (comm->use_mc && comm->mem_dealloc[hndl]) {
       for (int rank = 0; rank < comm->nvsize; rank++) {
         if (rank == comm->nvrank) {
           NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
