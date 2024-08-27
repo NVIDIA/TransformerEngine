@@ -11,8 +11,8 @@ import warnings
 
 import torch
 
+from transformer_engine_torch import UbufOverlapAlgo
 from ...cpp_extensions import (
-    UbufOverlapAlgo,
     fp8_cast_transpose_bgrad_fused,
     fp8_gemm,
     gemm,
@@ -21,13 +21,9 @@ from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import get_ub, get_workspace
+from ...utils import clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
-from ..op import (
-    BasicOperation,
-    FusedOperation,
-    FusibleOperation,
-    OperationContext,
-)
+from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
@@ -648,11 +644,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         linear_op = self.basic_ops[idx]
         linear_op_ctx = basic_op_ctxs[idx]
         bias_op = None
-        bias = None
         if self._op_idxs["bias"] is not None:
             idx = self._op_idxs["bias"]
             bias_op = self.basic_ops[idx]
-            bias = bias_op.bias
 
         # Saved tensors from forward pass
         (x_local,) = linear_op_ctx.saved_tensors

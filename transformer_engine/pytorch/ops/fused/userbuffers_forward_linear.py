@@ -10,7 +10,8 @@ from typing import Any, Optional
 
 import torch
 
-from ...cpp_extensions import FP8TensorMeta, UbufOverlapAlgo, fp8_gemm, gemm
+from transformer_engine_torch import UbufOverlapAlgo
+from ...cpp_extensions import fp8_gemm, gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
@@ -26,6 +27,7 @@ from .._common import (
     canonicalize_device,
     canonicalize_dtype,
     convert_tensor,
+    get_fp8_meta_from_fp8_tensor,
     is_float8_tensor,
     reshape,
 )

@@ -9,8 +9,9 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from ..cpp_extensions import FP8TensorMeta
+from transformer_engine_torch import FP8TensorMeta
 from ..float8_tensor import Float8Tensor
+from ..fp8 import FP8GlobalStateManager
 
 
 def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
