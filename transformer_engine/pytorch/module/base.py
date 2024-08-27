@@ -206,8 +206,6 @@ def initialize_ub(
                 flush=True,
             )
 
-
-
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
     _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)

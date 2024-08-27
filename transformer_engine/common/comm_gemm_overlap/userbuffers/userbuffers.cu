@@ -2499,13 +2499,12 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
 // reset counters kernel
 static __global__ void reset_counters_kernel(void *atomic_ptr, int num_chunks, bool allgather) {
   if (blockIdx.x == 0 && threadIdx.x == 0) {
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < num_chunks; i++) {
       ((unsigned int *)atomic_ptr)[i] = 1;
       ((unsigned int *)atomic_ptr)[i + num_chunks] = 0;
     }
-    if (allgather)
-      ((unsigned int *)atomic_ptr)[0] = 0;
+    if (allgather) ((unsigned int *)atomic_ptr)[0] = 0;
   }
 }
 

@@ -167,19 +167,19 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
 void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, cudaStream_t stream);
 
 /*  creates communicator, allocates all internal buffers if necessary */
-int create_communicator_grouped2(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes);
+int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
+                                 int numlocal, int mynode, int numnodes,
+                                 ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
+                                 int pipegpus, int pipenodes, int tensorgpus, int tensornodes);
 
-int create_communicator_grouped(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
-    int pipenodes);
+int create_communicator_grouped(communicator **comm, int myrank, int numranks, int mylocal,
+                                int numlocal, int mynode, int numnodes,
+                                ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
+                                int pipegpus, int pipenodes);
 
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier);
+int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
+                        int mynode, int numnodes, ExtAllgatherOp ext_allgather,
+                        ExtBarrierOp ext_barrier);
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
                                      int tensorgpus, int tensornodes);

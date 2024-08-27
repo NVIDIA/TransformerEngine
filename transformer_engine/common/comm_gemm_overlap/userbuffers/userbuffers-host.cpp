@@ -106,10 +106,10 @@ int pipe_rank(communicator *comm, int step) {
   return newnode * numlocal + newlocal;
 }
 
-int create_communicator_grouped2(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
-    int pipenodes, int tensorgpus, int tensornodes) {
+int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
+                                 int numlocal, int mynode, int numnodes,
+                                 ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
+                                 int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
   *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
@@ -345,17 +345,17 @@ int create_communicator_grouped2(
   return 0;
 }
 
-int create_communicator_grouped(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier, int pipegpus,
-    int pipenodes) {
+int create_communicator_grouped(communicator **comm, int myrank, int numranks, int mylocal,
+                                int numlocal, int mynode, int numnodes,
+                                ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
+                                int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
                                       ext_allgather, ext_barrier, pipegpus, pipenodes, 1, 1);
 }
 
-int create_communicator(
-    communicator **comm, int myrank, int numranks, int mylocal, int numlocal, int mynode,
-    int numnodes, ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier) {
+int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
+                        int mynode, int numnodes, ExtAllgatherOp ext_allgather,
+                        ExtBarrierOp ext_barrier) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
                                       ext_allgather, ext_barrier, 1, 1, 1, 1);
 }

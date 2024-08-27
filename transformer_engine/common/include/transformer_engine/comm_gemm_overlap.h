@@ -7,12 +7,11 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_COMMON_COMM_GEMM_OVERLAP_H_
 
-#include <functional>
-
 #include <cuda.h>
 #include <cuda_fp8.h>
-
 #include <transformer_engine/transformer_engine.h>
+
+#include <functional>
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
@@ -62,11 +61,10 @@ class CommOverlapCore {
   std::vector<cudaStream_t> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm;
 
-  CommOverlapCore(
-      int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits,
-      int num_max_streams, int comm_cga_size, int num_comm_sm, bool set_sm_margin, bool use_ce,
-      bool atomic_gemm);
+  CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+                  int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
+                  int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
+                  bool set_sm_margin, bool use_ce, bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 
@@ -88,12 +86,11 @@ class CommOverlapBase : public CommOverlapCore {
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
 
-  CommOverlapBase(
-      const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank, int numranks,
-      int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
-      int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-      int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
+  CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
+                  int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
+                  ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
+                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+                  int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
 
   ~CommOverlapBase();
 
@@ -101,29 +98,30 @@ class CommOverlapBase : public CommOverlapCore {
   ** Bulk GEMM + COMM
   ** This function assumes the communication input is pre-copied to _ubuf
   */
-  void bulk_overlap(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      CommOverlapType comm_type, const TensorWrapper &rs_output, cudaStream_t stream_main);
+  void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                    const TensorWrapper &D, const TensorWrapper &bias,
+                    const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace, bool grad,
+                    bool accumulate, bool use_split_accumulator, CommOverlapType comm_type,
+                    const TensorWrapper &rs_output, cudaStream_t stream_main);
 
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void atomic_gemm_overlap_rs(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      bool gemm_overlap, const TensorWrapper &rs_output, cudaStream_t stream_main);
+  void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
+                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                              bool grad, bool accumulate, bool use_split_accumulator,
+                              bool gemm_overlap, const TensorWrapper &rs_output,
+                              cudaStream_t stream_main);
 
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void split_overlap_rs(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      bool gemm_overlap, const TensorWrapper &rs_output, cudaStream_t stream_main);
+  void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        const TensorWrapper &D, const TensorWrapper &bias,
+                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                        bool grad, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
+                        const TensorWrapper &rs_output, cudaStream_t stream_main);
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {
@@ -144,13 +142,12 @@ class CommOverlapP2PBase : public CommOverlapCore {
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
 
-  CommOverlapP2PBase(
-      const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank, int numranks,
-      int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, CommOverlapType comm_type,
-      int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 1,
-      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-      bool atomic_gemm = false, bool aggregate = false);
+  CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
+                     int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
+                     ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
+                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
+                     int comm_cga_size = 1, int num_comm_sm = 1, bool set_sm_margin = false,
+                     bool use_ce = true, bool atomic_gemm = false, bool aggregate = false);
 
   ~CommOverlapP2PBase();
 
@@ -161,11 +158,11 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void atomic_gemm_overlap_ag(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      const TensorWrapper &B_copy, cudaStream_t stream_main);
+  void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
+                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                              bool grad, bool accumulate, bool use_split_accumulator,
+                              const TensorWrapper &B_copy, cudaStream_t stream_main);
 
   /*
   ** Split AllGather + GEMM using P2P communication
@@ -174,29 +171,29 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void split_overlap_ag(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      const TensorWrapper &B_copy, cudaStream_t stream_main);
+  void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        const TensorWrapper &D, const TensorWrapper &bias,
+                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                        bool grad, bool accumulate, bool use_split_accumulator,
+                        const TensorWrapper &B_copy, cudaStream_t stream_main);
 
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void atomic_gemm_overlap_rs(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      const TensorWrapper &rs_output, cudaStream_t stream_main);
+  void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
+                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                              bool grad, bool accumulate, bool use_split_accumulator,
+                              const TensorWrapper &rs_output, cudaStream_t stream_main);
 
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void split_overlap_rs(
-      const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-      const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-      const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-      const TensorWrapper &rs_output, cudaStream_t stream_main);
+  void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        const TensorWrapper &D, const TensorWrapper &bias,
+                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+                        bool grad, bool accumulate, bool use_split_accumulator,
+                        const TensorWrapper &rs_output, cudaStream_t stream_main);
 };  // CommOverlapP2PBase
 
 }  // namespace transformer_engine
