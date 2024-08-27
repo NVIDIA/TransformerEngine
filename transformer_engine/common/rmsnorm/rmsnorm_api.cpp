@@ -14,33 +14,7 @@
 #include "../layer_norm/norms.h"
 #include "transformer_engine/rmsnorm.h"
 
-/*
-
-Supported Type combinations:
-
-input    compute   weights   output
-=======================================
-fp32     fp32      fp32      fp32
-fp16     fp32      fp16      fp16
-bf16     fp32      bf16      bf16
-fp32     fp32      fp32      fp16
-fp32     fp32      fp32      bf16
-fp32     fp32      fp32      fp8
-fp16     fp32      fp16      fp8
-bf16     fp32      bf16      fp8
-
-Remarks:
-Input type = Weight type
-Compute always in FP32
-
-*/
-
 namespace transformer_engine {
-
-FwdTunedRegistry FWD_TUNED_FUNCS;
-BwdTunedRegistry BWD_TUNED_FUNCS;
-FwdGeneralRegistry FWD_GENERAL_FUNCS;
-BwdGeneralRegistry BWD_GENERAL_FUNCS;
 
 void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
                  Tensor *rsigma, cudaStream_t stream, const int multiprocessorCount,

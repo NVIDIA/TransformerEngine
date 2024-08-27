@@ -15,24 +15,6 @@
 #include "../common.h"
 #include "norms.h"
 
-/*
-
-Supported Type combinations:
-
-input    compute   weights   output
-=======================================
-fp32     fp32      fp32      fp32
-fp16     fp32      fp16      fp16
-bf16     fp32      bf16      bf16
-fp32     fp32      fp16      fp16
-fp32     fp32      bf16      bf16
-bf16     fp32      bf16      fp8
-
-Remarks:
-Output type = Weight type
-Compute always in FP32
-
-*/
 
 namespace transformer_engine {
 
