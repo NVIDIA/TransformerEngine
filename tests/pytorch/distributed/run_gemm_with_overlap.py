@@ -321,9 +321,11 @@ def _main(opts):
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
     buffer_dtype = torch.bfloat16
-    if (opts.fp8
+    if (
+        opts.fp8
         and not opts.bulk_overlap
-        and (opts.comm_type == tex.CommOverlapType.AG or opts.fp8_output)):
+        and (opts.comm_type == tex.CommOverlapType.AG or opts.fp8_output)
+    ):
         buffer_dtype = torch.uint8
     ub_obj = (
         tex.CommOverlapP2P(
@@ -721,7 +723,11 @@ def _main(opts):
             "p2p all-gather + " if opts.comm_type == tex.CommOverlapType.AG else "",
             "atomic " if opts.atomic else "",
             "GEMM",
-            (f" + {'p2p ' if opts.p2p else ''}reduce-scatter" if opts.comm_type == tex.CommOverlapType.RS else ""),
+            (
+                f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
+                if opts.comm_type == tex.CommOverlapType.RS
+                else ""
+            ),
         ]
     )
     timing_info = (
