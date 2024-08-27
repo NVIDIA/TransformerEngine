@@ -22,6 +22,7 @@ from transformer_engine.pytorch.attention import (
     get_attention_backend,
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
+    _flash_attn_3_plus,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
@@ -1357,6 +1358,8 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     if not is_training:
         if RoPE:
             pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
+        if not _flash_attn_3_plus:
+            pytest.skip("FP8 MHA requires Flash Attention 3.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1537,6 +1540,8 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
 
     global _attention_backends
     if not is_training:
+        if not _flash_attn_3_plus:
+            pytest.skip("FP8 DPA requires Flash Attention 3.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True

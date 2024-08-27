@@ -387,7 +387,7 @@ def get_attention_backend(
     if fp8 and fp8_meta["recipe"].fp8_dpa:
         if use_flash_attention and not _flash_attn_3_plus:
             logger.debug(
-                "Disabling FlashAttention as FlashAttention 3 is not available for FP8 DPA/FP8 MHA."
+                "Disabling FlashAttention as FlashAttention 2 does not support FP8 DPA/FP8 MHA."
             )
             use_flash_attention = False
         if use_flash_attention and is_training:
