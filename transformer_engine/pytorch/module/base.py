@@ -84,10 +84,139 @@ def initialize_ub(
     tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
-    ub_cfgs: Optional[dict] = None,
+    ub_cfgs: Optional[dict] = "nccl",
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
-    """Initialize communicators for TP comm overlap using userbuffers."""
+    r"""
+    Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
+    GEMM compute in te.Linear, te.LayerNormLinear and te.LayerNormMLP modules.
+
+    Parameters
+    ----------
+    shape : list
+            shape of the communication buffer, typically set to be the same as the global shape of
+            the input tensor to a te.TransformerLayer forward pass, with the sequence and batch
+            dimensions collapsed together -- i.e.: `(sequence_length * batch_size, hidden_size)`
+    tp_size : int
+              number of GPUs in the tensor-parallel process group
+    use_fp8 : bool = False
+              allocate the communication buffer for FP8 GEMM inputs/outputs
+    dtype : torch.dtype = torch.bfloat16
+            non-FP8 data type of the communication buffer when `use_fp8 = False`
+    ub_cfgs: dict = None
+             Configuration dictionary containing a Userbuffers options for each GEMM layer in a
+             te.TransformerLayer. Layers that are not configured by the user fall back on the
+             default options below:
+             {
+                 "qkv_fprop": {
+                     "method": "ring_exchange",
+                     "is_reduce_scatter": False,
+                     "num_sm": 1,
+                     "cga_size": 1,
+                     "set_sm_margin": False,
+                     "num_splits": tp_size,
+                     "aggregate": False,
+                     "atomic_gemm": False,
+                     "use_ce": True,
+                     "fp8_buf": True,
+                 },
+                 "qkv_dgrad": {
+                     "method": "bulk",
+                     "is_reduce_scatter": False,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "fp8_buf": True,
+                 },
+                 "qkv_wgrad": {
+                     "method": "bulk",
+                     "is_reduce_scatter": True,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "fp8_buf": True,
+                 },
+                 "proj_fprop": {
+                     "method": "pipeline",
+                     "is_reduce_scatter": True,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "num_splits": 4,
+                     "atomic_gemm": False,
+                     "fp8_buf": False,
+                 },
+                 "proj_dgrad": {
+                     "method": "ring_exchange",
+                     "is_reduce_scatter": False,
+                     "num_sm": 1,
+                     "cga_size": 1,
+                     "set_sm_margin": False,
+                     "num_splits": tp_size,
+                     "aggregate": False,
+                     "atomic_gemm": False,
+                     "use_ce": True,
+                     "fp8_buf": True,
+                 },
+                 "fc1_fprop": {
+                     "method": "ring_exchange",
+                     "is_reduce_scatter": False,
+                     "num_sm": 1,
+                     "cga_size": 1,
+                     "set_sm_margin": False,
+                     "num_splits": tp_size,
+                     "aggregate": False,
+                     "atomic_gemm": False,
+                     "use_ce": True,
+                     "fp8_buf": True,
+                 },
+                 "fc1_dgrad": {
+                     "method": "bulk",
+                     "is_reduce_scatter": False,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "fp8_buf": True,
+                 },
+                 "fc1_wgrad": {
+                     "method": "bulk",
+                     "is_reduce_scatter": True,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "fp8_buf": False,
+                 },
+                 "fc2_fprop": {
+                     "method": "pipeline",
+                     "is_reduce_scatter": True,
+                     "num_sm": 16,
+                     "cga_size": 2,
+                     "set_sm_margin": True,
+                     "num_splits": 4,
+                     "atomic_gemm": False,
+                     "fp8_buf": False,
+                 },
+                 "fc2_dgrad": {
+                     "method": "ring_exchange",
+                     "is_reduce_scatter": False,
+                     "num_sm": 1,
+                     "cga_size": 1,
+                     "set_sm_margin": False,
+                     "num_splits": tp_size,
+                     "aggregate": False,
+                     "atomic_gemm": False,
+                     "use_ce": True,
+                     "fp8_buf": True,
+                 },
+             }
+    bootstrap_backend : str = "nccl"
+                        `torch.distributed` communication backend for the all-gather, broadcast and
+                        barrier collectives during Userbuffers initialization. Not all backends are
+                        valid for every cluster configuration and distributed launch method even if
+                        they are available in PyTorch. Setting `NVTE_UB_WITH_MPI=1` when building
+                        TE overrides this option and always initializes Userbuffers with direct MPI
+                        calls in C++, which requires `MPI_HOME` to be set at compile time.
+    """
     if not tex.device_supports_multicast():
         assert bool(os.getenv("UB_SKIPMC", "0")), (
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
@@ -110,14 +239,12 @@ def initialize_ub(
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
-        if bootstrap_backend is None:
-            bootstrap_backend = "nccl"
-            if torch.distributed.is_mpi_available():
-                bootstrap_backend = "mpi"
-            elif torch.distributed.is_gloo_available():
-                bootstrap_backend = "gloo"
-        else:
-            assert bootstrap_backend in ["gloo", "mpi", "nccl"]
+        assert (
+            torch.distributed.is_backend_available(bootstrap_backend)
+        ), (
+            f"PyTorch must be compiled with '{bootstrap_backend}' support in order to bootstrap "
+            + f"Userbuffers with '{bootstrap_backend}' collectives."
+        )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
