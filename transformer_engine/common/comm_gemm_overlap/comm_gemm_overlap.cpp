@@ -94,8 +94,8 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
     NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
     NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
-    _counter = TensorWrapper(
-        counter_ptr, std::vector<size_t>{static_cast<size_t>(_num_splits * 2)}, DType::kInt32);
+    _counter = TensorWrapper(counter_ptr, std::vector<size_t>{static_cast<size_t>(_num_splits * 2)},
+                             DType::kInt32);
   }
   // CUDA event creation
   cudaEventCreateWithFlags(&_start_compute, 0);
