@@ -10,7 +10,12 @@ from typing import Any, Optional
 
 import torch
 
-from ...cpp_extensions import UbufOverlapAlgo, fp8_gemm, gemm
+from ...cpp_extensions import (
+    UbufOverlapAlgo,
+    fp8_cast_transpose_bgrad_fused,
+    fp8_gemm,
+    gemm,
+)
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
@@ -237,15 +242,28 @@ class UserbuffersBackwardLinear(FusedOperation):
                 dtype=dtype,
             )
             if bias_requires_grad and db is None:
-                ### TODO Fused cast-transpose-dbias
-                dy_fp8.cast_transpose_(dy_local)
-                db = dy_local.sum(dim=0)
+                # Fused cast-transpose-bgrad
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                    forward=dy_fp8._fp8_meta_forward,
+                )
+                db, data, data_transpose = fp8_cast_transpose_bgrad_fused(
+                    dy_local,
+                    dy_fp8._fp8_meta[fp8_meta_key],
+                    dy_fp8._fp8_meta_index,
+                    dy_fp8._fp8_dtype,
+                    scale_inv=dy_fp8._scale_inv,
+                )
                 if with_ub_all_gather_dy:
+                    dy_fp8._data.copy_(data)
                     db_async = torch.distributed.all_reduce(
                         db,
                         group=tensor_parallel_group,
                         async_op=True,
                     )
+                else:
+                    dy_fp8._data = data
+                    dy_fp8._transpose = data_transpose
+                    dy_fp8._transpose_invalid = False
             elif not with_ub_all_gather_dy:
                 dy_fp8.cast_transpose_(dy_local)
             else:
