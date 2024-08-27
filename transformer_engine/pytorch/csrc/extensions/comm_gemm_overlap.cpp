@@ -70,15 +70,43 @@ CommOverlapHelper::CommOverlapHelper() {
 }  // empty constructor for NVTE_UB_WITH_MPI=1
 
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     c10d::ProcessGroup *intra_node_group) {
+                                     std::optional<c10d::ProcessGroup *> intra_node_group_holder,
+                                     std::optional<c10d::ProcessGroup *> inter_node_group_holder) {
+myrank = world_group->getRank();
+numranks = world_group->getSize();
 pgs.insert({"world", world_group});
 c10d::ProcessGroup::BackendType backend = world_group->getBackendType();
 backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
-NVTE_CHECK(intra_node_group->getBackendType() == backend,
-            "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
-            "group!", world_group->getBackendName());
-pgs.insert({"intra", intra_node_group});
+if (intra_node_group_holder.has_value()) {
+  NVTE_CHECK(inter_node_group_holder.has_value(),
+             "Internal TE error: Inter-node group cannot be `None` when intra-node group exists!");
+
+  // Get local rank on node and number of local ranks
+  c10d::ProcessGroup *intra_node_group = inter_node_group_holder.value();
+  NVTE_CHECK(intra_node_group->getBackendType() == backend,
+             "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
+             "group!", world_group->getBackendName());
+  mylocal = intra_node_group->getRank();
+  numlocal = intra_node_group->getSize();
+  pgs.insert({"intra", intra_node_group});
+
+  // Get node ID and number of nodes
+  c10d::ProcessGroup *inter_node_group = intra_node_group_holder.value();
+  NVTE_CHECK(inter_node_group->getBackendType() == backend,
+             "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
+             "group!", world_group->getBackendName());
+  mynode = inter_node_group->getRank();
+  numnodes = inter_node_group->getSize();
+} else {
+  // There is only one node so local rank/size is equal to global rank/size
+  mylocal = myrank;
+  numlocal = numranks;
+  pgs.insert({"intra", world_group});
+
+  mynode = 0;
+  numnodes = 1;
+}
 
 initialized = true;
 }
@@ -127,15 +155,14 @@ work->wait();
  **************************************************************************************************/
 
 CommOverlap::CommOverlap(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, int myrank,
-    int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-    CommOverlapHelper *callbacks, int num_splits, int num_max_streams, int comm_cga_size,
-    int num_comm_sm, bool set_sm_margin, bool atomic_gemm)
+    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+    CommOverlapHelper *helper, int tp_size, int num_splits, int num_max_streams,
+    int comm_cga_size, int num_comm_sm, bool set_sm_margin, bool atomic_gemm)
     : te::CommOverlapBase(
-          buffer_shape, GetTransformerEngineDType(buffer_dtype),
-          myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
-          std::bind(&CommOverlapHelper::ub_allgather, callbacks, _1, _2, _3, _4, _5),
-          std::bind(&CommOverlapHelper::ub_barrier, callbacks, _1), num_splits, num_max_streams,
+          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
           comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {}
 
 /*
@@ -271,17 +298,17 @@ torch::Tensor CommOverlap::get_ubuf_output(int comm_type) {
  **************************************************************************************************/
 
 CommOverlapP2P::CommOverlapP2P(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, int myrank,
-    int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-    CommOverlapHelper *callbacks, transformer_engine::CommOverlapType comm_type,
-    int num_max_streams, int comm_cga_size, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
-    bool use_ce, bool aggregate)
+    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+    CommOverlapHelper *helper, int tp_size, te::CommOverlapType comm_type, int num_max_streams,
+    int comm_cga_size, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,  bool use_ce,
+    bool aggregate)
     : te::CommOverlapP2PBase(
-          buffer_shape, GetTransformerEngineDType(buffer_dtype),
-          myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
-          std::bind(&CommOverlapHelper::ub_allgather, callbacks, _1, _2, _3, _4, _5),
-          std::bind(&CommOverlapHelper::ub_barrier, callbacks, _1), comm_type, num_max_streams,
-          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
+          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type,
+          num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
+          aggregate) {}
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication

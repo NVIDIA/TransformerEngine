@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <optional>
+
 #include "common.h"
 #include "common/common.h"
 
@@ -515,9 +517,13 @@ class CommOverlapHelper : torch::CustomClassHolder {
   std::map<std::string, c10d::ProcessGroup *> pgs;
 
  public:
+  int myrank, numranks, mylocal, numlocal, mynode, numnodes;
+
   CommOverlapHelper();
 
-  CommOverlapHelper(c10d::ProcessGroup *world_group, c10d::ProcessGroup *intra_node_group);
+  CommOverlapHelper(c10d::ProcessGroup *world_group,
+                    std::optional<c10d::ProcessGroup *> intra_node_group_holder,
+                    std::optional<c10d::ProcessGroup *> inter_node_group_holder);
 
   ~CommOverlapHelper();
 
@@ -531,8 +537,7 @@ class CommOverlap : torch::CustomClassHolder,  public transformer_engine::CommOv
  public:
   CommOverlap(
       const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-      int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-      CommOverlapHelper *callbacks, int num_splits = 3,
+      CommOverlapHelper *helper, int tp_size, int num_splits = 3,
       int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
       int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
 
@@ -588,12 +593,11 @@ class CommOverlap : torch::CustomClassHolder,  public transformer_engine::CommOv
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
  public:
   CommOverlapP2P(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-    int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
-    CommOverlapHelper *callbacks, transformer_engine::CommOverlapType comm_type,
-    int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2, int num_comm_sm = 3,
-    bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
-    bool aggregate = false);
+      const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+      CommOverlapHelper *helper, int tp_size, transformer_engine::CommOverlapType comm_type,
+      int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+      int num_comm_sm = 3, bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+      bool aggregate = false);
 
   void set_ubuf_scale_inv(torch::Tensor scale_inv) {
     assert(scale_inv.numel());

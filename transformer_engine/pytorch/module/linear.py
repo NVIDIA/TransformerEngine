@@ -190,14 +190,14 @@ class _Linear(torch.autograd.Function):
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
                     if ub_obj_projout.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
                 else:
                     if ub_obj_projout.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
                 if ub_obj_projout.is_fp8_ubuf():
                     proj_out_index = tex.FP8FwdTensors.GEMM1_OUTPUT
                     meta_tensor = fp8_meta["scaling_fwd"]
@@ -269,9 +269,9 @@ class _Linear(torch.autograd.Function):
                 dim_size[1] = out_features
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
-                    ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                    ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
                 else:
-                    ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                    ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = out_features
@@ -407,9 +407,9 @@ class _Linear(torch.autograd.Function):
                 dim_size[0] = dim_size[0] * tp_world_size
                 ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
                 if ctx.ub_obj_gradout.is_atomic_gemm():
-                    ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                    ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
                 else:
-                    ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                    ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
 
             (
                 grad_output,
@@ -496,7 +496,7 @@ class _Linear(torch.autograd.Function):
                         layout="NN",
                         grad=True,
                         ub_algo=(
-                            tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                            tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
                             if ctx.ub_overlap_ag
                             else None
                         ),
