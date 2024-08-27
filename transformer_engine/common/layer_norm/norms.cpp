@@ -419,8 +419,8 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
       {eps_node, const_cast<float*>(&epsilon)},
   };
 
+  float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
-    float offset_scalar = 1.0f;
     _variant_pack.insert({{one_node, const_cast<float*>(&offset_scalar)}});
   }
 
@@ -526,16 +526,14 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                            {dgamma_node, dgamma->data.dptr},
                                            {dx_node, dx->data.dptr}};
 
+  float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
-    float offset_scalar = 1.0f;
     NormBwdCudnn<NormEnum>::_variant_pack.insert({{one_node, const_cast<float*>(&offset_scalar)}});
   }
 
   if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_CUDNN)
     NormBwdCudnn<NormEnum>::_variant_pack.insert({
         {mean_node, mu.data.dptr},
-        {gamma_node, gamma.data.dptr},
-        {dgamma_node, dgamma->data.dptr},
         {dbeta_node, dbeta->data.dptr},
     });
 }
