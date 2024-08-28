@@ -691,10 +691,28 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def detach(self) -> Float8Tensor:
-        return Float8Tensor.make_like(self, data=self._data, fp8_attrs=self._fp8_attrs)
+        return Float8Tensor.make_like(
+            self,
+            data=self._data,
+            fp8_attrs=self._fp8_attrs,
+            with_transpose_cache=(self._transpose is not None),
+            data_transpose=self._transpose,
+        )
 
     def clone(self) -> Float8Tensor:
-        return _IdentityFunc.apply(self, {"data": self._data.detach().clone()})
+        data = self._data.detach().clone()
+        data_transpose = None
+        with_transpose_cache = self._transpose is not None
+        if with_transpose_cache:
+            data_transpose = self._transpose.detach().clone()
+        return _IdentityFunc.apply(
+            self,
+            dict(
+                data=data,
+                with_transpose_cache=with_transpose_cache,
+                data_transpose=data_transpose,
+            ),
+        )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         return _ViewFunc.apply(self, shape)
@@ -855,6 +873,8 @@ class Float8Tensor(QuantizedTensor):
             data=self._data,
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
+            with_transpose_cache=(self._transpose is not None),
+            data_transpose=self._transpose,
         )
 
     def _reset_caches(self) -> None:
