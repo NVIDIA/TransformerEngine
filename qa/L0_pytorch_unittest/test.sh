@@ -23,3 +23,4 @@ pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py
 pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops_distributed.py
+pytest -v -s $TE_PATH/tests/pytorch/test_fp8_model_init.py
