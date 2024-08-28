@@ -10,13 +10,13 @@ import warnings
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine_torch import DType as TE_DType
 from ..constants import TE_DType as torch_to_transformer_engine_dtype
 from ..cpp_extensions import (
     cast_from_fp8,
     cast_to_fp8,
     fp8_cast_transpose_fused,
 )
-from ..cpp_extensions import DType as TE_DType
 from ..fp8 import FP8GlobalStateManager
 from ..utils import devices_match
 from .quantized_tensor import QuantizedTensor
@@ -519,27 +519,29 @@ class Float8Tensor(QuantizedTensor):
 
     def quantize_(
         self,
-        src: torch.Tensor,
+        tensor: torch.Tensor,
         *,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         noop_flag: Optional[torch.Tensor] = None,
-    ) -> Self:
+    ) -> Float8Tensor:
         """Update FP8 data
 
         Parameters
         ----------
-        src: torch.Tensor
+        tensor: torch.Tensor
             Tensor to copy from
         scale: torch.Tensor, optional
             Scaling factor to use for FP8 quantization
         amax: torch.Tensor, optional
             History of maximum absolute values. The first entry will
-            be updated with the absmax of `src`.
+            be updated with the absmax of `tensor`.
         noop_flag: torch.Tensor, optional
             float32 flag indicating whether to avoid performing update
 
         """
+        src = tensor
+        dst = self
 
         # In-place operations invalidate transpose cache
         self._reset_caches()
@@ -548,13 +550,13 @@ class Float8Tensor(QuantizedTensor):
         if isinstance(src, Float8Tensor):
 
             # Cast to plain tensor if FP8 dtypes don't match
-            if self._fp8_dtype != src._fp8_dtype:
-                return self.quantize_(src.dequantize())
+            if dst._fp8_dtype != src._fp8_dtype:
+                return dst.quantize_(src.dequantize())
 
             # Directly copy FP8 data
-            self._data.copy_(src._data.detach())
-            self._scale_inv.copy_(src._scale_inv.detach())
-            if self._fp8_meta is not None:
+            dst._data.copy_(src._data.detach())
+            dst._scale_inv.copy_(src._scale_inv.detach())
+            if dst._fp8_meta is not None:
                 src_amax: torch.Tensor
                 if src._fp8_meta is None:
                     src_min, src_max = src.dequantize().aminmax()
@@ -566,28 +568,28 @@ class Float8Tensor(QuantizedTensor):
                     fp8_meta_index = src._fp8_meta_index
                     src_amax = src._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
                 fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=self._fp8_meta_forward,
+                    forward=dst._fp8_meta_forward,
                 )
-                fp8_meta_index = self._fp8_meta_index
-                dst_amax = self._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
+                fp8_meta_index = dst._fp8_meta_index
+                dst_amax = dst._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
                 torch.maximum(src_amax, dst_amax, out=dst_amax)
-            if self._transpose is not None:
+            if dst._transpose is not None:
                 if src._transpose is None:
-                    self.transpose_2d(force_compute=True, fill_cache=True)
+                    dst.transpose_2d(force_compute=True, fill_cache=True)
                 else:
-                    self._transpose.copy_(src._transpose)
-                    self._transpose_invalid = False
+                    dst._transpose.copy_(src._transpose)
+                dst._transpose_invalid = False
             return self
 
         # Convert QuantizedTensor to plain tensor
         if isinstance(src, QuantizedTensor):
-            return self.quantize_(src.dequantize())
+            return dst.quantize_(src.dequantize())
 
         # Make sure input is in expected format
-        if src.size() != self.size():
-            src = src.expand(self.size())
-        if not devices_match(src.device, self.device):
-            src = src.to(device=self.device)
+        if src.size() != dst.size():
+            src = src.expand(dst.size())
+        if not devices_match(src.device, dst.device):
+            src = src.to(device=dst.device)
         if src.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             src = src.float()
         if not src.is_contiguous():
@@ -597,66 +599,65 @@ class Float8Tensor(QuantizedTensor):
         if scale is not None:
             if isinstance(scale, torch.Tensor):
                 if (
-                    not devices_match(scale.device, self.device)
+                    not devices_match(scale.device, dst.device)
                     or scale.dtype != torch.float32
                 ):
-                    scale = scale.to(device=self.device, dtype=torch.float32)
+                    scale = scale.to(device=dst.device, dtype=torch.float32)
             else:
-                scale = torch.full([1], scale, dtype=torch.float32, device=self.device)
+                scale = torch.full([1], scale, dtype=torch.float32, device=dst.device)
         if amax is not None:
             if amax.dim() < 2:
                 amax = amax.unsqueeze(0)
-            if not devices_match(amax.device, self.device):
+            if not devices_match(amax.device, dst.device):
                 raise ValueError(
-                    f"Invalid device for amax (expected {self.device}, found {amax.device})"
+                    f"Invalid device for amax (expected {dst.device}, found {amax.device})"
                 )
             if amax.dtype != torch.float32:
                 raise ValueError(f"Invalid dtype for amax (expected float32, found {amax.type})")
 
         # Default FP8 scaling factors
         fp8_meta = None
-        if self._fp8_meta is None:
+        if dst._fp8_meta is None:
             if scale is None:
-                scale = self._scale_inv.reciprocal()
+                scale = dst._scale_inv.reciprocal()
             if amax is None:
-                amax = torch.empty((1, 1), dtype=torch.float32, device=self.device)
+                amax = torch.empty((1, 1), dtype=torch.float32, device=dst.device)
         else:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                forward=self._fp8_meta_forward,
+                forward=dst._fp8_meta_forward,
             )
-            fp8_meta = self._fp8_meta[fp8_meta_key]
+            fp8_meta = dst._fp8_meta[fp8_meta_key]
 
         # Check local data
-        if not self._data.is_contiguous():
+        if not dst._data.is_contiguous():
             raise RuntimeError("Transformer Engine cast kernels require contiguous data")
 
         # Perform FP8 cast
-        if self._transpose is None:
+        if dst._transpose is None:
             cast_to_fp8(
                 src.view(1, -1),
                 fp8_meta,
-                self._fp8_meta_index,
-                self._fp8_dtype,
-                out=self._data.view(1, -1),
+                dst._fp8_meta_index,
+                dst._fp8_dtype,
+                out=dst._data.view(1, -1),
                 scale=scale,
                 amax=amax,
-                scale_inv=self._scale_inv,
+                scale_inv=dst._scale_inv,
             )
-            self._transpose_invalid = True
         else:
             fp8_cast_transpose_fused(
                 src.view(-1, src.size(-1)),
                 fp8_meta,
-                self._fp8_meta_index,
-                self._fp8_dtype,
-                cast_out=self._data,
-                transpose_out=self._transpose,
+                dst._fp8_meta_index,
+                dst._fp8_dtype,
+                cast_out=dst._data,
+                transpose_out=dst._transpose,
                 scale=scale,
                 amax=amax,
-                scale_inv=self._scale_inv,
+                scale_inv=dst._scale_inv,
                 noop_flag=noop_flag,
             )
-            self._transpose_invalid = False
+            dst._transpose_invalid = False
 
         # Callback hook to perform amax reduction after optimizer step
         post_optimizer_step_fwd_amax_reduction(self)

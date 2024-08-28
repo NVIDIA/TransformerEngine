@@ -63,7 +63,7 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement dequantize function"
         )
 
-    def quantize_(self, tensor: torch.Tensor) -> Self:
+    def quantize_(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Update quantized data in-place"""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement quantize_ function"
@@ -84,16 +84,16 @@ class QuantizedTensor(torch.Tensor):
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
 
     def float(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(tensor, dtype=torch.float32)
+        return _DequantizeFunc.apply(self, dtype=torch.float32)
 
     def bfloat16(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(tensor, dtype=torch.bfloat16)
+        return _DequantizeFunc.apply(self, dtype=torch.bfloat16)
 
     def half(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(tensor, dtype=torch.float16)
+        return _DequantizeFunc.apply(self, dtype=torch.float16)
 
     def cpu(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(tensor).cpu()
+        return _DequantizeFunc.apply(self).cpu()
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
         if other is self:
