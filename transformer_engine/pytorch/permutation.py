@@ -34,7 +34,7 @@ class _moe_permute(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Empty input check
         if not inp.numel():
-            return inp, torch.Tensor()
+            return inp, torch.tensor([], device=inp.device)
 
         # Device check
         assert inp.is_cuda, "TransformerEngine needs CUDA."
