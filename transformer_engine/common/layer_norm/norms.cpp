@@ -369,6 +369,7 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(te2cudnnDtype(ctype));
     gamma_tensor = _graph.pointwise(gamma_zero_tensor, one_tensor, centered_options);
+    gamma_tensor->set_output(false).set_data_type(te2cudnnDtype(wtype));
   } else
     gamma_tensor = gamma_zero_tensor;
 
@@ -458,6 +459,7 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   auto& _graph = NormBwdCudnn<NormEnum>::_graph;
   namespace fe = cudnn_frontend;
   const auto otype = gamma.data.dtype;
+  const auto wtype = gamma.data.dtype;
   const auto ctype = DType::kFloat32;
 
   _graph.set_io_data_type(te2cudnnDtype(x.data.dtype))
@@ -486,7 +488,7 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                              .set_name("gamma")
                                              .set_dim({1, hidden_dim, 1, 1})
                                              .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
-                                             .set_data_type(te2cudnnDtype(ctype)));
+                                             .set_data_type(te2cudnnDtype(wtype)));
   auto inv_var_tensor = _graph.tensor(fe::graph::Tensor_attributes()
                                           .set_name("inv_var")
                                           .set_dim({batch_dim, 1, 1, 1})
@@ -502,8 +504,8 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
                                 .set_compute_data_type(te2cudnnDtype(ctype));
-
     gamma_tensor = _graph.pointwise(gamma_zero_tensor, one_tensor, centered_options);
+    gamma_tensor->set_output(false).set_data_type(te2cudnnDtype(wtype));
   } else
     gamma_tensor = gamma_zero_tensor;
 
