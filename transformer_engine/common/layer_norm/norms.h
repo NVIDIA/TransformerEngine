@@ -362,7 +362,7 @@ class NormFwdCudnn : public NormBase {
 
   std::vector<size_t> get_workspace_shape() override;
 
-  ~NormFwdCudnn();
+  ~NormFwdCudnn() { cudnnDestroy(_handle); }
 
   cudnn_frontend::graph::Graph _graph;
   std::unordered_map<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>, void*>
