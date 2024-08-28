@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Tensor proxy class"""
+"""Tensor with quantized data"""
 
 from __future__ import annotations
 import abc
@@ -12,16 +12,16 @@ import torch
 from torch.utils._pytree import tree_map
 
 
-class _DecodeFunc(torch.autograd.Function):
-    """Autograd function to convert tensor proxy to standard tensor"""
+class _DequantizeFunc(torch.autograd.Function):
+    """Autograd function to convert quantized tensor to standard tensor"""
 
     @staticmethod
     def forward(
         _ctx: torch.autograd.function.FunctionCtx,  # unused
-        tensor: ProxyTensor,
+        tensor: QuantizedTensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        return tensor.proxy_decode(dtype=dtype)
+        return tensor.dequantize(dtype=dtype)
 
     @staticmethod
     def backward(
@@ -36,8 +36,8 @@ class _IdentityFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         _ctx: torch.autograd.function.FunctionCtx,  # unused
-        tensor: ProxyTensor,
-    ) -> ProxyTensor:
+        tensor: QuantizedTensor,
+    ) -> QuantizedTensor:
         return tensor.proxy_detach()
 
     @staticmethod
@@ -48,32 +48,30 @@ class _IdentityFunc(torch.autograd.Function):
         return grad
 
 
-class ProxyTensor(torch.Tensor):
-    """Proxy class for a tensor
+class QuantizedTensor(torch.Tensor):
+    """Abstract base class for tensor with quantized data
 
-    Tensor proxies do not store data like standard PyTorch tensors,
-    i.e. in a memory address that can be accessed with the data_ptr
-    method. Rather, they implement functions to encode/decode data in
-    some other data format. Otherwise they have the same interface as
-    standard PyTorch tensors, including support for PyTorch operations
-    that do not involve sharing data (e.g. view).
+    This is a proxy class with the interface of a standard PyTorch
+    tensor, but with data that has been encoded with some quantization
+    scheme. Derived classes should implement the quantization scheme
+    by overriding the `quantize_` and `dequantize` functions.
 
     """
 
-    def proxy_decode(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """Create standard PyTorch tensor with values from tensor proxy"""
+    def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """Convert quantized data to standard PyTorch tensor"""
         raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement proxy_decode function"
+            f"{self.__class__.__name__} class does not implement dequantize function"
         )
 
-    def proxy_encode_(self, tensor: torch.Tensor) -> Self:
-        """Update values in tensor proxy"""
+    def quantize_(self, tensor: torch.Tensor) -> Self:
+        """Update quantized data in-place"""
         raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement proxy_encode_ function"
+            f"{self.__class__.__name__} class does not implement quantize_ function"
         )
 
-    def proxy_detach(self) -> ProxyTensor:
-        """Create new tensor proxy with same encoded data
+    def proxy_detach(self) -> QuantizedTensor:
+        """Create new quantized tensor with same data
 
         Output tensor must be detached from the current autograd
         graph.
@@ -84,19 +82,19 @@ class ProxyTensor(torch.Tensor):
         )
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(data={self.proxy_decode(dtype=self.dtype)})"
+        return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
 
     def float(self) -> torch.Tensor:
-        return _DecodeFunc.apply(tensor, dtype=torch.float32)
+        return _DequantizeFunc.apply(tensor, dtype=torch.float32)
 
     def bfloat16(self) -> torch.Tensor:
-        return _DecodeFunc.apply(tensor, dtype=torch.bfloat16)
+        return _DequantizeFunc.apply(tensor, dtype=torch.bfloat16)
 
     def half(self) -> torch.Tensor:
-        return _DecodeFunc.apply(tensor, dtype=torch.float16)
+        return _DequantizeFunc.apply(tensor, dtype=torch.float16)
 
     def cpu(self) -> torch.Tensor:
-        return _DecodeFunc.apply(tensor).cpu()
+        return _DequantizeFunc.apply(tensor).cpu()
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
         if other is self:
@@ -118,11 +116,11 @@ class ProxyTensor(torch.Tensor):
         if func == torch.ops.aten.copy_.default:
             dst = args[0]
             src = args[1]
-            if isinstance(dst, ProxyTensor):
-                dst.proxy_encode_(src)
+            if isinstance(dst, QuantizedTensor):
+                dst.quantize_(src)
             else:
-                if isinstance(src, ProxyTensor):
-                    src = src.proxy_decode()
+                if isinstance(src, QuantizedTensor):
+                    src = src.dequantize()
                 dst.copy_(src)
             return None
 
@@ -131,21 +129,21 @@ class ProxyTensor(torch.Tensor):
             raise NotImplementedError("{cls.__name__} class does not support tensor views")
 
         def maybe_unwrap(arg):
-            if isinstance(arg, ProxyTensor):
-                return arg.proxy_decode(dtype=arg.dtype)
+            if isinstance(arg, QuantizedTensor):
+                return arg.dequantize(dtype=arg.dtype)
             return arg
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
             if (
-                    isinstance(arg, ProxyTensor)
+                    isinstance(arg, QuantizedTensor)
                     and isinstance(new_arg, torch.Tensor)
                     and hasattr(schema_arg, "alias_info")
                     and hasattr(schema_arg.alias_info, "is_write")
                     and schema_arg.alias_info.is_write
             ):
-                arg.proxy_encode_(new_arg)
+                arg.quantize_(new_arg)
 
-        # In-place op: decode proxy, perform op, and encode proxy
+        # In-place op: dequantize, perform op, and quantize
         if func._schema.is_mutable:
             new_args = tree_map(maybe_unwrap, args)
             new_kwargs = tree_map(maybe_unwrap, kwargs)
@@ -159,12 +157,12 @@ class ProxyTensor(torch.Tensor):
                 maybe_update_inplace(kwargs[kwarg], new_kwargs[new_kwarg], schema_arg)
             return None
 
-        # Default op: decode proxy and perform op
+        # Default op: dequantize and perform op
         args = tree_map(maybe_unwrap, args)
         if kwargs is not None:
             kwargs = tree_map(maybe_unwrap, kwargs)
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
 
-    # Do not force the ProxyTensor type on the returned tensor
+    # Do not force the QuantizedTensor type on the returned tensor
     __torch_function__ = classmethod(torch._C._disabled_torch_function_impl)

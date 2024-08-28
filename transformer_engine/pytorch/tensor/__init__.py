@@ -5,4 +5,4 @@
 """Custom tensor classes"""
 
 from .float8_tensor import Float8Tensor
-from .proxy_tensor import ProxyTensor
+from .quantized_tensor import QuantizedTensor

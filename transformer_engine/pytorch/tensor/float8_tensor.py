@@ -19,7 +19,7 @@ from ..cpp_extensions import (
 from ..cpp_extensions import DType as TE_DType
 from ..fp8 import FP8GlobalStateManager
 from ..utils import devices_match
-from .proxy_tensor import ProxyTensor
+from .quantized_tensor import QuantizedTensor
 
 aten = torch.ops.aten
 updated_fp8_params = {}
@@ -61,7 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        return tensor.proxy_decode(dtype=dtype)
+        return tensor.dequantize(dtype=dtype)
 
     @staticmethod
     def backward(
@@ -162,7 +162,7 @@ class _ToFloat8Func(torch.autograd.Function):
         )
 
         # Cast to FP8 tensor
-        out.proxy_encode_(tensor, scale=scale, amax=amax)
+        out.quantize_(tensor, scale=scale, amax=amax)
 
         return out
 
@@ -299,7 +299,7 @@ class _ReshapeFunc(torch.autograd.Function):
         return grad.reshape(ctx.shape), None
 
 
-class Float8Tensor(ProxyTensor):
+class Float8Tensor(QuantizedTensor):
     """Experimental tensor class with FP8 data
 
     The tensor presents as having a standard, higher-precision dtype,
@@ -491,7 +491,7 @@ class Float8Tensor(ProxyTensor):
         """
         return _FromFloat8Func.apply(self, dtype)
 
-    def proxy_decode(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+    def dequantize(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
 
         # Convert PyTorch dtype to TE dtype
         if dtype is None:
@@ -544,7 +544,7 @@ class Float8Tensor(ProxyTensor):
             with_transpose_cache,
         )
 
-    def proxy_encode_(
+    def quantize_(
         self,
         src: torch.Tensor,
         *,
@@ -576,7 +576,7 @@ class Float8Tensor(ProxyTensor):
 
             # Cast to plain tensor if FP8 dtypes don't match
             if self._fp8_dtype != src._fp8_dtype:
-                return self.proxy_encode_(src.proxy_decode())
+                return self.quantize_(src.dequantize())
 
             # Directly copy FP8 data
             self._data.copy_(src._data.detach())
@@ -584,7 +584,7 @@ class Float8Tensor(ProxyTensor):
             if self._fp8_meta is not None:
                 src_amax: torch.Tensor
                 if src._fp8_meta is None:
-                    src_min, src_max = src.proxy_decode().aminmax()
+                    src_min, src_max = src.dequantize().aminmax()
                     src_amax = torch.maximum(-src_min, src_max)
                 else:
                     fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
@@ -606,9 +606,9 @@ class Float8Tensor(ProxyTensor):
                     self._transpose_invalid = False
             return self
 
-        # Convert ProxyTensor to plain tensor
-        if isinstance(src, ProxyTensor):
-            return self.proxy_encode_(src.proxy_decode())
+        # Convert QuantizedTensor to plain tensor
+        if isinstance(src, QuantizedTensor):
+            return self.quantize_(src.dequantize())
 
         # Make sure input is in expected format
         if src.size() != self.size():
@@ -827,7 +827,7 @@ class Float8Tensor(ProxyTensor):
                 dtype=torch.uint8,
                 device=self.device,
             )
-        self.proxy_encode_(tensor, noop_flag=noop_flag)
+        self.quantize_(tensor, noop_flag=noop_flag)
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
