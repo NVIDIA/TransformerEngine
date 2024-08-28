@@ -3488,26 +3488,33 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
-        # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [q, k, v]]
-        # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        q, k, v = [x.movedim(-3, 0).contiguous() for x in [q, k, v]]
-        q_, k_, v_ = [torch.empty_like(x) for x in [q, k, v]]
-        for x_, x in zip([q_, k_, v_], [q, k, v]):
-            torch.distributed.all_to_all_single(x_, x, group=cp_group)
-        q, k, v = q_, k_, v_
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        q, k, v = [x.movedim(0, seq_dim).contiguous() for x in [q, k, v]]
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
-        # reorder the sequence chunks
         input_chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
         for rank in range(cp_size):
             input_chunk_ids[rank] = 2*rank
             input_chunk_ids[rank+cp_size] = 2*cp_size-2*rank-1
-        q, k, v = [torch.index_select(x, dim=seq_dim, index=input_chunk_ids) for x in [q, k, v]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-        q, k, v = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [q, k, v]]
+
+        a2a_outputs, a2a_reqs = [], []
+        for x in [q, k, v]:
+            # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+            x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
+            # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.movedim(-3, 0).contiguous()
+            x_ = torch.empty_like(x)
+            a2a_outputs.append(x_)
+            a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
+            a2a_reqs.append(a2a_req)
+        for i, (x_req, x) in enumerate(zip(a2a_reqs, a2a_outputs)):
+            x_req.wait()
+            # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.movedim(0, seq_dim).contiguous()
+            # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):])
+            # reorder the sequence chunks
+            x = torch.index_select(x, dim=seq_dim, index=input_chunk_ids)
+            # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
+            a2a_outputs[i] = x
+        q, k, v = a2a_outputs
 
         if use_fused_attention:
             out, aux_ctx_tensors = fused_attn_fwd(
@@ -3563,13 +3570,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
 
-        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+1):])
-        # reorder the sequence chunks
         output_chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
         for rank in range(cp_size):
             output_chunk_ids[2*rank] = rank
             output_chunk_ids[2*rank+1] = 2*cp_size-rank-1
+
+        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+1):])
+        # reorder the sequence chunks
         out = torch.index_select(out, dim=seq_dim, index=output_chunk_ids)
         # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
         out = out.view(*out.shape[:seq_dim], cp_size, -1, *out.shape[(seq_dim+2):])
