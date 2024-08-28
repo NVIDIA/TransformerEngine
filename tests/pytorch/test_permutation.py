@@ -221,7 +221,7 @@ def _test_permutation(
     te_permute_bwd_input = permute_bwd_input if fp8 else pytorch_permute_bwd_input.detach()
 
     te_permute_output, row_id_map = te_permute(
-        te_permute_fwd_input, te_dtype, indices, num_out_tokens
+        te_permute_fwd_input, indices, num_out_tokens
     )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
@@ -233,7 +233,7 @@ def _test_permutation(
     te_unpermute_fwd_input.requires_grad_(True)
     te_unpermute_bwd_input = unpermute_bwd_input if fp8 else pytorch_unpermute_bwd_input.detach()
 
-    te_unpermute_output = te_unpermute(te_unpermute_fwd_input, te_dtype, row_id_map, te_probs)
+    te_unpermute_output = te_unpermute(te_unpermute_fwd_input, row_id_map, te_probs)
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -305,7 +305,7 @@ def _test_permutation(
             lambda: pytorch_permute(pytorch_permute_fwd_input, indices, num_out_tokens)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_permute(te_permute_fwd_input, te_dtype, indices, num_out_tokens)
+            lambda: te_permute(te_permute_fwd_input, indices, num_out_tokens)
         )
         print(f"permute\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
@@ -333,7 +333,7 @@ def _test_permutation(
             lambda: pytorch_unpermute(pytorch_unpermute_fwd_input, sorted_indices, probs=probs)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_unpermute(te_unpermute_fwd_input, te_dtype, row_id_map, te_probs)
+            lambda: te_unpermute(te_unpermute_fwd_input, row_id_map, te_probs)
         )
         print(f"unpermute\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
