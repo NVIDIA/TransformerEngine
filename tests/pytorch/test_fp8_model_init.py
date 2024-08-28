@@ -29,12 +29,15 @@ class TestFP8ModelInit:
             model = te.Linear(768, 768)
 
         assert isinstance(model.weight, Float8Tensor), "Weight should be Float8Tensor"
-        assert not hasattr(model.weight, "._high_precision_init_val"), \
-            "_high_precision_init_val should not exist"
-        assert not hasattr(model.weight, "get_high_precision_init_val"), \
-            "get_high_precision_init_val() should not exist"
-        assert not hasattr(model.weight, "clear_high_precision_init_val"), \
-            "clear_high_precision_init_val() should not exist"
+        assert not hasattr(
+            model.weight, "._high_precision_init_val"
+        ), "_high_precision_init_val should not exist"
+        assert not hasattr(
+            model.weight, "get_high_precision_init_val"
+        ), "get_high_precision_init_val() should not exist"
+        assert not hasattr(
+            model.weight, "clear_high_precision_init_val"
+        ), "clear_high_precision_init_val() should not exist"
 
     def test_preserve_high_precision_init_val(self) -> None:
         """Test fp8_model_init with preserve_high_precision_init_val=True"""
@@ -42,12 +45,15 @@ class TestFP8ModelInit:
             model = te.Linear(768, 768)
 
         assert isinstance(model.weight, Float8Tensor), "Weight should be Float8Tensor"
-        assert hasattr(model.weight, "_high_precision_init_val"), \
-            "_high_precision_init_val not found"
-        assert hasattr(model.weight, "get_high_precision_init_val"), \
-            "get_high_precision_init_val() not found"
-        assert hasattr(model.weight, "clear_high_precision_init_val"), \
-            "clear_high_precision_init_val() not found"
+        assert hasattr(
+            model.weight, "_high_precision_init_val"
+        ), "_high_precision_init_val not found"
+        assert hasattr(
+            model.weight, "get_high_precision_init_val"
+        ), "get_high_precision_init_val() not found"
+        assert hasattr(
+            model.weight, "clear_high_precision_init_val"
+        ), "clear_high_precision_init_val() not found"
 
         high_precision = model.weight.get_high_precision_init_val()
         assert high_precision.device.type == "cpu", "high_precision_init_val is not on the CPU"
@@ -58,11 +64,14 @@ class TestFP8ModelInit:
             fp8_meta_index=model.weight._fp8_meta_index,
             amax=torch.empty(1, device="cuda"),  # Dummy amax to avoid overwriting history.
         )
-        assert torch.all(new_fp8._data == model.weight._data), \
-            "high_precision_init_val and model.weight are not equal"
+        assert torch.all(
+            new_fp8._data == model.weight._data
+        ), "high_precision_init_val and model.weight are not equal"
 
         model.weight.clear_high_precision_init_val()
-        assert model.weight.get_high_precision_init_val() is None, \
-            "clear_high_precision_init_val() not work"
-        assert not hasattr(model.weight, "._high_precision_init_val"), \
-            "clear_high_precision_init_val() not work"
+        assert (
+            model.weight.get_high_precision_init_val() is None
+        ), "clear_high_precision_init_val() not work"
+        assert not hasattr(
+            model.weight, "._high_precision_init_val"
+        ), "clear_high_precision_init_val() not work"

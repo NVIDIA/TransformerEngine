@@ -485,9 +485,9 @@ class FP8GlobalStateManager:
 
 @contextmanager
 def fp8_model_init(
-        enabled: bool = True,
-        preserve_high_precision_init_val: bool = False,
-    ) -> None:
+    enabled: bool = True,
+    preserve_high_precision_init_val: bool = False,
+) -> None:
     """
     Context manager for FP8 initialization of parameters.
 

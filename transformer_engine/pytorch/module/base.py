@@ -883,6 +883,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             #       a parameter so we always re-apply it just for extra safety.
             param = torch.nn.Parameter(param)
             if high_precision_init_val is not None:
+
                 def get(self):
                     if hasattr(self, "_high_precision_init_val"):
                         return self._high_precision_init_val
