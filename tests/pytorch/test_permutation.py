@@ -220,9 +220,7 @@ def _test_permutation(
     te_permute_fwd_input.requires_grad_(True)
     te_permute_bwd_input = permute_bwd_input if fp8 else pytorch_permute_bwd_input.detach()
 
-    te_permute_output, row_id_map = te_permute(
-        te_permute_fwd_input, indices, num_out_tokens
-    )
+    te_permute_output, row_id_map = te_permute(te_permute_fwd_input, indices, num_out_tokens)
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
     te_probs = None
