@@ -85,7 +85,7 @@ def initialize_ub(
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
-    bootstrap_backend: Union[str, torch.distributed.Backend] = "nccl",
+    bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
@@ -239,10 +239,18 @@ def initialize_ub(
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
-        assert torch.distributed.is_backend_available(bootstrap_backend), (
-            f"PyTorch must be compiled with '{bootstrap_backend}' support in order to bootstrap "
-            + f"Userbuffers with '{bootstrap_backend}' collectives."
-        )
+        if bootstrap_backend is None:
+            bootstrap_backend = "nccl"
+            if torch.distributed.is_mpi_available():
+                bootstrap_backend = "mpi"
+            elif torch.distributed.is_gloo_available():
+                bootstrap_backend = "gloo"
+        else:
+            assert bootstrap_backend in ["mpi", "gloo", "nccl"], "Invalid bootstrap backend!"
+            assert torch.distributed.is_backend_available(bootstrap_backend), (
+                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to bootstrap "
+                + f"Userbuffers with '{bootstrap_backend}' collectives."
+            )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
