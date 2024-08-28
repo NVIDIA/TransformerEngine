@@ -5,23 +5,25 @@
 """Installation script."""
 
 import os
+import time
 from pathlib import Path
 from typing import List, Tuple
 
 import setuptools
+from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
+from build_tools.te_version import te_version
 from build_tools.utils import (
+    cuda_archs,
     found_cmake,
     found_ninja,
     found_pybind11,
-    remove_dups,
     get_frameworks,
     install_and_import,
+    remove_dups,
     uninstall_te_fw_packages,
 )
-from build_tools.te_version import te_version
-
 
 frameworks = get_frameworks()
 current_file_path = Path(__file__).parent.resolve()
@@ -43,14 +45,25 @@ elif "jax" in frameworks:
 CMakeBuildExtension = get_build_ext(BuildExtension)
 
 
+class TimedBdist(bdist_wheel):
+    """Helper class to measure build time"""
+
+    def run(self):
+        start_time = time.perf_counter()
+        super().run()
+        total_time = time.perf_counter() - start_time
+        print(f"Total time for bdist_wheel: {total_time:.2f} seconds")
+
+
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
     # Project directory root
     root_path = Path(__file__).resolve().parent
+
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=[],
+        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())],
     )
 
 
@@ -76,6 +89,18 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         setup_reqs.append("ninja")
     if not found_pybind11():
         setup_reqs.append("pybind11")
+
+    # Framework-specific requirements
+    if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        if "pytorch" in frameworks:
+            install_reqs.extend(["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"])
+            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
+        if "jax" in frameworks:
+            install_reqs.extend(["jax", "flax>=0.7.1"])
+            test_reqs.extend(["numpy", "praxis"])
+        if "paddle" in frameworks:
+            install_reqs.append("paddlepaddle-gpu")
+            test_reqs.append("numpy")
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -141,7 +166,7 @@ if __name__ == "__main__":
         },
         description="Transformer acceleration library",
         ext_modules=ext_modules,
-        cmdclass={"build_ext": CMakeBuildExtension},
+        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8, <3.13",
         classifiers=[
             "Programming Language :: Python :: 3.8",

@@ -11,6 +11,26 @@
 #include "common/common.h"
 
 /***************************************************************************************************
+ * Permutation
+ **************************************************************************************************/
+
+std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
+    at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
+    int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num);
+
+at::Tensor moe_permute_bwd(at::Tensor input, const transformer_engine::DType dtype,
+                           at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
+                           int64_t topK);
+
+at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType dtype,
+                             at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
+                             int64_t topK);
+
+std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
+                                                     const transformer_engine::DType dtype,
+                                                     at::Tensor row_id_map, at::Tensor prob);
+
+/***************************************************************************************************
  * Attention
  **************************************************************************************************/
 
@@ -179,6 +199,11 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
                                 std::vector<at::Tensor> amax_output_list,
                                 std::vector<at::Tensor> scale_inv_output_list,
                                 transformer_engine::DType otype);
+
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_transpose_alloc(
+    std::vector<at::Tensor> input_list, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
+    std::vector<int> scale_indices, std::vector<int> amax_indices,
+    std::vector<int> scale_inv_indices, transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);
 
@@ -418,11 +443,18 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python);
 
+using transformer_engine::DType;
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay);
+
+void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
+                                std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                                const float beta1, const float beta2, const float epsilon,
+                                const int step, const int mode, const int bias_correction,
+                                const float weight_decay, DType fp8_dtype);
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        std::vector<std::vector<at::Tensor>> tensor_lists,
