@@ -482,15 +482,6 @@ class Float8Tensor(QuantizedTensor):
             ")"
         )
 
-    def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        """
-        Construct plain PyTorch tensor from Float8Tensor
-
-        By default the resulting tensor's dtype is the
-        Float8Tensor's nominal dtype.
-        """
-        return _FromFloat8Func.apply(self, dtype)
-
     def dequantize(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
 
         # Convert PyTorch dtype to TE dtype
@@ -517,32 +508,14 @@ class Float8Tensor(QuantizedTensor):
         out = out.view(self.size())
         return out
 
-    @classmethod
-    def to_float8(
-        cls,
-        tensor: torch.Tensor,
-        *,
-        fp8_meta: Optional[Dict[str, Any]] = None,
-        fp8_meta_forward: bool = True,
-        fp8_meta_index: Optional[int] = None,
-        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
-        scale: Optional[torch.Tensor] = None,
-        amax: Optional[torch.Tensor] = None,
-        scale_inv: Optional[torch.Tensor] = None,
-        with_transpose_cache: bool = False,
-    ):
-        """Construct Float8Tensor from plain PyTorch tensor"""
-        return _ToFloat8Func.apply(
-            tensor,
-            fp8_meta,
-            fp8_meta_forward,
-            fp8_meta_index,
-            fp8_dtype,
-            scale,
-            amax,
-            scale_inv,
-            with_transpose_cache,
-        )
+    def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        """
+        Construct plain PyTorch tensor from Float8Tensor
+
+        By default the resulting tensor's dtype is the
+        Float8Tensor's nominal dtype.
+        """
+        return _FromFloat8Func.apply(self, dtype)
 
     def quantize_(
         self,
@@ -690,7 +663,34 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def proxy_detach(self) -> Float8Tensor:
+    @classmethod
+    def to_float8(
+        cls,
+        tensor: torch.Tensor,
+        *,
+        fp8_meta: Optional[Dict[str, Any]] = None,
+        fp8_meta_forward: bool = True,
+        fp8_meta_index: Optional[int] = None,
+        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
+        scale: Optional[torch.Tensor] = None,
+        amax: Optional[torch.Tensor] = None,
+        scale_inv: Optional[torch.Tensor] = None,
+        with_transpose_cache: bool = False,
+    ):
+        """Construct Float8Tensor from plain PyTorch tensor"""
+        return _ToFloat8Func.apply(
+            tensor,
+            fp8_meta,
+            fp8_meta_forward,
+            fp8_meta_index,
+            fp8_dtype,
+            scale,
+            amax,
+            scale_inv,
+            with_transpose_cache,
+        )
+
+    def detach(self) -> Float8Tensor:
         return Float8Tensor.make_like(self, data=self._data, fp8_attrs=self._fp8_attrs)
 
     def clone(self) -> Float8Tensor:

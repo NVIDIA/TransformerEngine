@@ -5,7 +5,6 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-import abc
 from typing import Optional, Tuple
 
 import torch
@@ -38,7 +37,7 @@ class _IdentityFunc(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: QuantizedTensor,
     ) -> QuantizedTensor:
-        return tensor.proxy_detach()
+        return tensor.detach()
 
     @staticmethod
     def backward(
@@ -70,7 +69,7 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement quantize_ function"
         )
 
-    def proxy_detach(self) -> QuantizedTensor:
+    def detach(self) -> QuantizedTensor:
         """Create new quantized tensor with same data
 
         Output tensor must be detached from the current autograd
@@ -78,7 +77,7 @@ class QuantizedTensor(torch.Tensor):
 
         """
         raise NotImplementedError(
-            f"{self.__class__.__name__} class does not implement proxy_detach function"
+            f"{self.__class__.__name__} class does not implement detach function"
         )
 
     def __repr__(self) -> str:
@@ -110,7 +109,7 @@ class QuantizedTensor(torch.Tensor):
 
         # Detach op
         if func == torch.ops.aten.detach.default:
-            return args[0].proxy_detach()
+            return args[0].detach()
 
         # In-place copy op
         if func == torch.ops.aten.copy_.default:
