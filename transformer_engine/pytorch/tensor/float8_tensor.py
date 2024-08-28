@@ -61,27 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        if dtype is None:
-            dtype = tensor.dtype
-
-        # Make sure FP8 data is in expected format
-        data = tensor._data
-        if data.device.type != "cuda":
-            data = data.cuda()
-        if data.is_contiguous():
-            data = data.contiguous()
-
-        # Cast from FP8
-        out = cast_from_fp8(
-            data,
-            None,  # fp8_meta_tensor
-            None,  # fp8_tensor
-            tensor._fp8_dtype,
-            torch_to_transformer_engine_dtype[dtype],
-            scale_inv=tensor._scale_inv,
-        )
-        out = out.view(tensor.size())
-        return out
+        return tensor.proxy_decode(dtype=dtype)
 
     @staticmethod
     def backward(
@@ -512,7 +492,30 @@ class Float8Tensor(ProxyTensor):
         return _FromFloat8Func.apply(self, dtype)
 
     def proxy_decode(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        return self.from_float8(dtype=dtype)
+
+        # Convert PyTorch dtype to TE dtype
+        if dtype is None:
+            dtype = self.dtype
+        dtype = torch_to_transformer_engine_dtype[dtype]
+
+        # Make sure FP8 data is in expected format
+        data = self._data
+        if data.device.type != "cuda":
+            data = data.cuda()
+        if not data.is_contiguous():
+            data = data.contiguous()
+
+        # Cast from FP8
+        out = cast_from_fp8(
+            data.view(1, -1),
+            None,  # fp8_meta_tensor
+            None,  # fp8_tensor
+            self._fp8_dtype,
+            dtype,
+            scale_inv=self._scale_inv,
+        )
+        out = out.view(self.size())
+        return out
 
     @classmethod
     def to_float8(
