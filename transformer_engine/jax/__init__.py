@@ -5,13 +5,10 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import sys
-import subprocess
-import importlib
 import ctypes
 from importlib.metadata import version
 
-from transformer_engine.common import get_te_path
+from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
 
@@ -19,12 +16,10 @@ def _load_library():
     """Load shared library with Transformer Engine C extensions"""
     module_name = "transformer_engine_jax"
 
-    if subprocess.run([sys.executable, "-m", "pip", "show", module_name]).returncode == 0:
-        assert (
-            importlib.util.find_spec("transformer_engine") is not None
-        ), "Could not find `transformer-engine`."
-        assert (
-            importlib.util.find_spec("transformer_engine_cu12") is not None
+    if is_package_installed(module_name):
+        assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
+        assert is_package_installed(
+            "transformer_engine_cu12"
         ), "Could not find `transformer-engine-cu12`."
         assert version(module_name) == version("transformer-engine"), (
             "TransformerEngine package version mismatch. Found"
@@ -34,11 +29,8 @@ def _load_library():
             " transformer-engine[jax]==VERSION'"
         )
 
-    if (
-        subprocess.run([sys.executable, "-m", "pip", "show", "transformer-engine-cu12"]).returncode
-        == 0
-    ):
-        assert importlib.util.find_spec(module_name) is not None, (
+    if is_package_installed("transformer-engine-cu12"):
+        assert is_package_installed(module_name), (
             f"Could not find package {module_name}. Install transformer-engine using 'pip install"
             " transformer-engine[jax]==VERSION'"
         )
