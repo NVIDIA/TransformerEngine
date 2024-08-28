@@ -865,11 +865,16 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # If primary weights are in fp8, wrap the parameter as Float8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                dummy_amax = torch.empty(
+                    (1, 1),
+                    dtype=torch.float32,
+                    device=param.device,
+                )  # Dummy buffer to avoid overwriting amax history
                 param = Float8Tensor.to_float8(
                     param,
                     fp8_meta=self.fp8_meta,
                     fp8_meta_index=fp8_meta_index,
-                    amax=torch.empty(1, device="cuda"),  # Dummy amax to avoid overwriting history.
+                    amax=dummy_amax,
                 )
 
             # Redo parameter wrap in case we broke it above

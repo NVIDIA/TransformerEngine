@@ -18,6 +18,7 @@ from ..cpp_extensions import (
 )
 from ..cpp_extensions import DType as TE_DType
 from ..fp8 import FP8GlobalStateManager
+from ..utils import devices_match
 from .proxy_tensor import ProxyTensor
 
 aten = torch.ops.aten
@@ -155,7 +156,7 @@ class _ToFloat8Func(torch.autograd.Function):
         # Check scale-inverse
         if scale_inv is None:
             scale_inv = torch.empty([1], dtype=torch.float32, device=device)
-        elif scale_inv.device != device or scale_inv.dtype != dtype:
+        elif not devices_match(scale_inv.device, device) or scale_inv.dtype != dtype:
             scale_inv = scale_inv.to(device=device, dtype=torch.float32)
 
         # Transpose cache
@@ -443,7 +444,10 @@ class Float8Tensor(ProxyTensor):
             )
         if fp8_scale_inv.dim() != 1:
             fp8_scale_inv = fp8_scale_inv.reshape(1)
-        if fp8_scale_inv.device != self._data.device or fp8_scale_inv.dtype != torch.float32:
+        if (
+            not devices_match(fp8_scale_inv.device, self._data.device)
+            or fp8_scale_inv.dtype != torch.float32
+        ):
             fp8_scale_inv = fp8_scale_inv.to(
                 device=self._data.device,
                 dtype=torch.float32,
@@ -543,7 +547,23 @@ class Float8Tensor(ProxyTensor):
         *,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
+        noop_flag: Optional[torch.Tensor] = None,
     ) -> Self:
+        """Update FP8 data
+
+        Parameters
+        ----------
+        src: torch.Tensor
+            Tensor to copy from
+        scale: torch.Tensor, optional
+            Scaling factor to use for FP8 quantization
+        amax: torch.Tensor, optional
+            History of maximum absolute values. The first entry will
+            be updated with the absmax of `src`.
+        noop_flag: torch.Tensor, optional
+            float32 flag indicating whether to avoid performing update
+
+        """
 
         # In-place operations invalidate transpose cache
         self._reset_caches()
@@ -590,21 +610,35 @@ class Float8Tensor(ProxyTensor):
         # Make sure input is in expected format
         if src.size() != self.size():
             src = src.expand(self.size())
-        if src.device != self.device:
+        if not devices_match(src.device, self.device):
             src = src.to(device=self.device)
         if src.dtype not in (torch.float32, torch.bfloat16, torch.float16):
             src = src.float()
         if not src.is_contiguous():
             src = src.contiguous()
 
-        # FP8 scaling factors
-        fp8_meta = None
+        # Make sure FP8 scaling factors are in expected format
         if scale is not None:
             if isinstance(scale, torch.Tensor):
-                if scale.device != self.device or scale.dtype != torch.float32:
+                if (
+                    not devices_match(scale.device, self.device)
+                    or scale.dtype != torch.float32
+                ):
                     scale = scale.to(device=self.device, dtype=torch.float32)
             else:
                 scale = torch.full([1], scale, dtype=torch.float32, device=self.device)
+        if amax is not None:
+            if amax.dim() < 2:
+                amax = amax.unsqueeze(0)
+            if not devices_match(amax.device, self.device):
+                raise ValueError(
+                    f"Invalid device for amax (expected {self.device}, found {amax.device})"
+                )
+            if amax.dtype != torch.float32:
+                raise ValueError(f"Invalid dtype for amax (expected float32, found {amax.type})")
+
+        # Default FP8 scaling factors
+        fp8_meta = None
         if self._fp8_meta is None:
             if scale is None:
                 scale = self._scale_inv.reciprocal()
@@ -644,6 +678,7 @@ class Float8Tensor(ProxyTensor):
                 scale=scale,
                 amax=amax,
                 scale_inv=self._scale_inv,
+                noop_flag=noop_flag,
             )
             self._transpose_invalid = False
 
@@ -789,7 +824,7 @@ class Float8Tensor(ProxyTensor):
                 dtype=torch.uint8,
                 device=self.device,
             )
-        self.proxy_encode_(tensor)
+        self.proxy_encode_(tensor, noop_flag=noop_flag)
 
     @torch.no_grad()
     def reset_fp8_meta_scale_inv(self) -> None:
