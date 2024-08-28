@@ -3733,22 +3733,28 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
 
-        # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-        out, dout = [x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1]) for x in [out, dout]]
-        # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out, dout = [x.movedim(-3, 0).contiguous() for x in [out, dout]]
-        out_, dout_ = [torch.empty_like(x) for x in [out, dout]]
-        for x_, x in zip([out_, dout_], [out, dout]):
-            torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group)
-        out, dout = out_, dout_
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        out, dout = [x.movedim(0, seq_dim).contiguous() for x in [out, dout]]
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        out, dout = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):]) for x in [out, dout]]
-        # reorder the sequence chunks
-        out, dout = [torch.index_select(x, dim=seq_dim, index=input_chunk_ids) for x in [out, dout]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-        out, dout = [x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):]) for x in [out, dout]]
+        a2a_outputs, a2a_reqs = [], []
+        for x in [out, dout]:
+            # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+            x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
+            # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.movedim(-3, 0).contiguous()
+            x_ = torch.empty_like(x)
+            a2a_outputs.append(x_)
+            a2a_req = torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group, async_op=True)
+            a2a_reqs.append(a2a_req)
+        for i, (x_req, x) in enumerate(zip(a2a_reqs, a2a_outputs)):
+            x_req.wait()
+            # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.movedim(0, seq_dim).contiguous()
+            # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):])
+            # reorder the sequence chunks
+            x = torch.index_select(x, dim=seq_dim, index=input_chunk_ids)
+            # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
+            a2a_outputs[i] = x
+        out, dout = a2a_outputs
 
         fa_optional_backward_kwargs = {}
         if _flash_attn_2_3_plus:
@@ -3810,22 +3816,28 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
 
-        # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        dq, dk, dv = [x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+1):]) for x in [dq, dk, dv]]
-        # reorder the sequence chunks
-        dq, dk, dv = [torch.index_select(x, dim=seq_dim, index=output_chunk_ids) for x in [dq, dk, dv]]
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        dq, dk, dv = [x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):]) for x in [dq, dk, dv]]
-        # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        dq, dk, dv = [x.movedim(seq_dim, 0).contiguous() for x in [dq, dk, dv]]
-        dq_, dk_, dv_ = [torch.empty_like(x) for x in [dq, dk, dv]]
-        for x_, x in zip([dq_, dk_, dv_], [dq, dk, dv]):
-            torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group)
-        dq, dk, dv = dq_, dk_, dv_
-        # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
-        dq, dk, dv = [x.movedim(0, -3).contiguous() for x in [dq, dk, dv]]
-        # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
-        dq, dk, dv = [x.view(*x.shape[:-3], -1, x.shape[-1]) for x in [dq, dk, dv]]
+        a2a_outputs, a2a_reqs = [], []
+        for x in [dq, dk, dv]:
+            # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+1):])
+            # reorder the sequence chunks
+            x = torch.index_select(x, dim=seq_dim, index=output_chunk_ids)
+            # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):])
+            # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+            x = x.movedim(seq_dim, 0).contiguous()
+            x_ = torch.empty_like(x)
+            a2a_outputs.append(x_)
+            a2a_req = torch.distributed.all_to_all_single(x_, x, group=ctx.cp_group, async_op=True)
+            a2a_reqs.append(a2a_req)
+        for i, (x_req, x) in enumerate(zip(a2a_reqs, a2a_outputs)):
+            x_req.wait()
+            # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
+            x = x.movedim(0, -3).contiguous()
+            # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
+            x = x.view(*x.shape[:-3], -1, x.shape[-1])
+            a2a_outputs.append(x)
+        dq, dk, dv = a2a_outputs
 
         if ctx.fp8:
             if ctx.fp8_meta["recipe"].fp8_mha:
