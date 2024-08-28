@@ -5583,7 +5583,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 fp8_tensors = (None, None, None, None, None, None)
-            #elif fp8_meta["recipe"].fp8_mha:
+            # elif fp8_meta["recipe"].fp8_mha:
             #    fp8_tensors = (
             #        None,
             #        None,
