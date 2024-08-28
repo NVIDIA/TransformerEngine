@@ -75,6 +75,7 @@ class FP8GlobalStateManager:
     FP8_RECIPE = None
     FP8_DISTRIBUTED_GROUP = None
     FP8_PARAMETERS = False
+    HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
     FP8_AUTOCAST_DEPTH = 0
@@ -98,6 +99,7 @@ class FP8GlobalStateManager:
         cls.FP8_RECIPE = None
         cls.FP8_DISTRIBUTED_GROUP = None
         cls.FP8_PARAMETERS = False
+        cls.HIGH_PRECISION_INIT_VAL = False
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_GRAPH_CAPTURING = False
         cls.FP8_AUTOCAST_DEPTH = 0
@@ -259,6 +261,11 @@ class FP8GlobalStateManager:
     def with_fp8_parameters(cls) -> bool:
         """Should the parameters be stored as FP8"""
         return cls.FP8_PARAMETERS
+
+    @classmethod
+    def with_high_precision_init_val(cls) -> bool:
+        """Should the high precision initial values be stored with FP8 parameters"""
+        return cls.HIGH_PRECISION_INIT_VAL
 
     @classmethod
     def fp8_graph_capturing(cls) -> bool:
@@ -486,7 +493,10 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_model_init(enabled: bool = True) -> None:
+def fp8_model_init(
+    enabled: bool = True,
+    preserve_high_precision_init_val: bool = False,
+) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -496,6 +506,12 @@ def fp8_model_init(enabled: bool = True) -> None:
 
         with fp8_model_init(enabled=True):
             model = transformer_engine.pytorch.Linear(768, 768)
+
+        # Preserving high precision initial value to initialize master weight
+        with fp8_model_init(enabled=True, preserve_high_precision_init_val=True):
+            model = transformer_engine.pytorch.Linear(768, 768)
+        master_weight = model.weight.get_high_precision_init_val()
+        model.weight.clear_high_precision_init_val()
 
     Parameters
     ----------
@@ -510,15 +526,26 @@ def fp8_model_init(enabled: bool = True) -> None:
                precision copies of weights are already present in the optimizer.
              * inference, where only the FP8 copies of the parameters are used.
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
+    preserve_high_precision_init_val: bool, default = `False`
+             when enabled, store the high precision tensor used to initialize FP8 parameters
+             in CPU memory, and add two function attributes named `get_high_precision_init_val()`
+             and `clear_high_precision_init_val()` to FP8 parameters to get/clear this high
+             precision tensor. The purpose is that users can use this high-precision copy
+             to initialize master weights, avoiding the loss of precision that can occur when
+             using FP8 parameters directly. Note that after the master weights are initialized,
+             users should call `clear_high_precision_init_val()` to release this CPU memory.
 
              This functionality is *EXPERIMENTAL*.
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
     FP8GlobalStateManager.FP8_PARAMETERS = enabled
+    _high_precision_init_val = FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL
+    FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL = preserve_high_precision_init_val
     try:
         yield
     finally:
         FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
+        FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL = _high_precision_init_val
 
 
 @contextmanager

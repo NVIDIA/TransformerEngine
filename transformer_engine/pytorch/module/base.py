@@ -13,6 +13,7 @@ import struct
 from abc import ABC, abstractmethod
 from typing import Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
+from types import MethodType
 
 import torch
 import torch.nn.functional as F
@@ -389,6 +390,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
@@ -864,7 +866,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # If primary weights are in fp8, wrap the parameter as Float8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                if self.preserve_high_precision_init_val:
+                    high_precision_init_val = param.detach().cpu()
                 param = Float8Tensor.to_float8(
                     param,
                     fp8_meta=self.fp8_meta,
@@ -876,7 +881,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            setattr(self, name, torch.nn.Parameter(param))
+            param = torch.nn.Parameter(param)
+            if high_precision_init_val is not None:
+
+                def get(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        return self._high_precision_init_val
+                    else:
+                        return None
+
+                def clear(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        del self._high_precision_init_val
+
+                param._high_precision_init_val = high_precision_init_val
+                param.get_high_precision_init_val = MethodType(get, param)
+                param.clear_high_precision_init_val = MethodType(clear, param)
+
+            setattr(self, name, param)
 
     @abstractmethod
     def forward(self):
