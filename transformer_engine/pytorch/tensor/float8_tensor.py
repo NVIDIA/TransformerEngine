@@ -10,8 +10,13 @@ import warnings
 import torch
 import transformer_engine_torch as tex
 
-from ..constants import TE_DType
-from ..cpp_extensions import fp8_cast_transpose_fused
+from ..constants import TE_DType as torch_to_transformer_engine_dtype
+from ..cpp_extensions import (
+    cast_from_fp8,
+    cast_to_fp8,
+    fp8_cast_transpose_fused,
+)
+from ..cpp_extensions import DType as TE_DType
 from ..fp8 import FP8GlobalStateManager
 from .proxy_tensor import ProxyTensor
 
@@ -58,11 +63,13 @@ class _FromFloat8Func(torch.autograd.Function):
         if dtype is None:
             dtype = tensor.dtype
         data = tensor._data.contiguous().view(1, -1).detach()
-        out = tex.cast_from_fp8(
+        out = cast_from_fp8(
             data,
-            tensor._scale_inv,
+            None,  # fp8_meta_tensor
+            None,  # fp8_tensor
             tensor._fp8_dtype,
-            TE_DType[dtype],
+            torch_to_transformer_engine_dtype[dtype],
+            scale_inv=tensor._scale_inv,
         )
         out = out.view(tensor.size())
         return out
@@ -110,14 +117,21 @@ class _ToFloat8Func(torch.autograd.Function):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
     ) -> Float8Tensor:
 
-        # Extract data from FP8 meta tensors if provided
+        # Check input tensor
+        tensor = tensor.contiguous().cuda().detach()
+        if tensor.dtype not in (torch.float32, torch.bfloat16, torch.float16):
+            tensor = tensor.float()
+
+        # FP8 scale and amax history
+        fp8_meta_key = None
         if fp8_meta is not None:
+            # Get scale and amax from FP8 meta tensors
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                 forward=fp8_meta_forward,
             )
@@ -126,29 +140,29 @@ class _ToFloat8Func(torch.autograd.Function):
                     "To initialize Float8Tensor with FP8 meta tensors, "
                     "the FP8 meta tensor index must also be provided"
                 )
-            if scale is None:
-                scale = fp8_meta[fp8_meta_key].scale[fp8_meta_index]
+        else:
+            # Check scale
+            if isinstance(scale, torch.Tensor):
+                scale = scale.to(device=tensor.device, dtype=torch.float32)
+                if scale.numel() != 1:
+                    raise ValueError(
+                        "Attempted to initialize Float8Tensor with invalid scale tensor"
+                    )
+            else:
+                if scale is None:
+                    scale = 1
+                scale = torch.full(
+                    [1],
+                    scale,
+                    dtype=torch.float32,
+                    device=tensor.device,
+                )
+
+            # Check amax
             if amax is None:
-                amax = fp8_meta[fp8_meta_key].amax_history[0][fp8_meta_index]
-
-        # Check input tensor
-        tensor = tensor.contiguous().cuda().detach()
-        if tensor.dtype not in (torch.float32, torch.bfloat16, torch.float16):
-            tensor = tensor.float()
-
-        # Check scale
-        if not isinstance(scale, torch.Tensor):
-            if scale is None:
-                scale = 1
-            scale = torch.full(
-                [1],
-                scale,
-                dtype=torch.float32,
-                device=tensor.device,
-            )
-        if scale.numel() != 1:
-            raise ValueError("Attempted to initialize Float8Tensor with invalid scale tensor")
-        scale = scale.to(device=tensor.device, dtype=torch.float32)
+                amax = torch.empty((1, 1), dtype=torch.float32, device=tensor.device)
+            if not (amax.dim() == 2 and amax.is_cuda and amax.dtype == torch.float32):
+                raise ValueError("Attempted to initialize Float8Tensor with invalid amax tensor")
 
         # Check scale-inverse
         if scale_inv is None:
@@ -156,19 +170,15 @@ class _ToFloat8Func(torch.autograd.Function):
         else:
             scale_inv = scale_inv.to(device=tensor.device, dtype=torch.float32)
 
-        # Check amax
-        if amax is None:
-            amax = torch.empty_like(scale)
-        if not (amax.numel() == 1 and amax.is_cuda and amax.dtype == torch.float32):
-            raise ValueError("Attempted to initialize Float8Tensor with invalid amax tensor")
-
         # Cast data to FP8
-        data = tex.cast_to_fp8(
+        data = cast_to_fp8(
             tensor.view(1, -1),
-            scale,
-            amax,
-            scale_inv,
+            None if fp8_meta is None else fp8_meta[fp8_meta_key],
+            fp8_meta_index,
             fp8_dtype,
+            scale=scale,
+            amax=amax,
+            scale_inv=scale_inv,
         )
         data = data.view(tensor.size())
 
@@ -340,7 +350,7 @@ class Float8Tensor(ProxyTensor):
     fp8_meta_index: int, optional
                     Index to access in FP8 meta tensors. Required if
                     fp8_meta is provided and otherwise ignored.
-    fp8_dtype: transformer_engine_torch.DType, tex.DType.kFloat8E4M3
+    fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
     fp8_scale_inv: torch.Tensor
                    Reciprocal of the scaling factor applied when
@@ -361,7 +371,7 @@ class Float8Tensor(ProxyTensor):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         fp8_scale_inv: Optional[torch.Tensor] = None,
         dtype: torch.dtype = torch.float32,
     ):
@@ -410,10 +420,10 @@ class Float8Tensor(ProxyTensor):
 
         # FP8 dtype
         assert fp8_dtype in (
-            tex.DType.kFloat8E4M3,
-            tex.DType.kFloat8E5M2,
+            TE_DType.kFloat8E4M3,
+            TE_DType.kFloat8E5M2,
         ), f"Unsupported fp8_dtype {fp8_dtype}."
-        self._fp8_dtype: tex.DType = fp8_dtype
+        self._fp8_dtype: TE_DType = fp8_dtype
 
         # Transposed version of `_data`.
         self._transpose: Optional[Float8Tensor] = None
@@ -508,7 +518,7 @@ class Float8Tensor(ProxyTensor):
         fp8_meta: Optional[Dict[str, Any]] = None,
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
@@ -570,29 +580,31 @@ class Float8Tensor(ProxyTensor):
             src = src.contiguous()
 
         # FP8 scaling factors
-        scale: torch.Tensor
+        scale = None
+        amax = None
+        fp8_meta = None
         amax: torch.Tensor
         if self._fp8_meta is None:
             scale = self._scale_inv.reciprocal()
-            amax = torch.empty_like(scale)
+            amax = torch.empty((1, 1), dtype=torch.float32, device=self.device)
         else:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
                 forward=self._fp8_meta_forward,
             )
-            fp8_meta_index = self._fp8_meta_index
-            scale = self._fp8_meta[fp8_meta_key].scale[fp8_meta_index]
-            amax = self._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
+            fp8_meta = self._fp8_meta[fp8_meta_key]
 
         # Perform FP8 cast
         if not self._data.is_contiguous():
             raise RuntimeError("Transformer Engine cast kernels require contiguous data")
-        tex.cast_to_fp8_noalloc(
+        cast_to_fp8(
             src.view(1, -1),
-            scale,
-            self._data.view(1, -1),
-            amax,
-            self._scale_inv,
+            fp8_meta,
+            self._fp8_meta_index,
             self._fp8_dtype,
+            out=self._data.view(1, -1),
+            scale=scale,
+            amax=amax,
+            scale_inv=self._scale_inv,
         )
 
         # Callback hook to perform amax reduction after optimizer step
@@ -864,7 +876,7 @@ class Float8Tensor(ProxyTensor):
     def _make_in_reduce_ex(
         cls,
         data: torch.Tensor,
-        fp8_dtype: tex.DType,
+        fp8_dtype: TE_DType,
         fp8_scale_inv: torch.Tensor,
         dtype: torch.dtype,
     ) -> Float8Tensor:
