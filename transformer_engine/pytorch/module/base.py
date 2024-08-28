@@ -248,8 +248,8 @@ def initialize_ub(
         else:
             assert bootstrap_backend in ["mpi", "gloo", "nccl"], "Invalid bootstrap backend!"
             assert torch.distributed.is_backend_available(bootstrap_backend), (
-                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to bootstrap "
-                + f"Userbuffers with '{bootstrap_backend}' collectives."
+                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
+                f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
             )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
