@@ -209,13 +209,15 @@ def initialize_ub(
                      "fp8_buf": True,
                  },
              }
-    bootstrap_backend : str = "nccl"
+    bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
                         valid for every cluster configuration and distributed launch method even if
-                        they are available in PyTorch. Setting `NVTE_UB_WITH_MPI=1` when building
-                        TE overrides this option and always initializes Userbuffers with direct MPI
-                        calls in C++, which requires `MPI_HOME` to be set at compile time.
+                        they are available in PyTorch. When left unset, the initialization prefers
+                        to use the MPI backend, falling back first on Gloo and then NCCL if MPI is
+                        not available. Setting `NVTE_UB_WITH_MPI=1` when building TE overrides this
+                        option and always initializes Userbuffers with direct MPI calls in C++,
+                        which also requires `MPI_HOME=/path/to/mpi/root` to be set at compile time.
     """
     if not tex.device_supports_multicast():
         assert bool(os.getenv("UB_SKIPMC", "0")), (
