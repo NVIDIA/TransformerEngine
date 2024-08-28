@@ -21,7 +21,11 @@ def _load_library():
         assert is_package_installed(
             "transformer_engine_cu12"
         ), "Could not find `transformer-engine-cu12`."
-        assert version(module_name) == version("transformer-engine"), (
+        assert (
+            version(module_name)
+            == version("transformer-engine")
+            == version("transformer-engine-cu12")
+        ), (
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
             f" v{version('transformer-engine')}, and transformer-engine-cu12"
