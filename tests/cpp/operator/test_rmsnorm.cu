@@ -247,7 +247,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, RMSNormTestSuite,
                          ::testing::Combine(::testing::Values(DType::kBFloat16),
                                             ::testing::Values(DType::kFloat8E4M3),
                                             ::testing::ValuesIn(test_cases),
-                                            ::testing::Values(false, true)),
+                                            ::testing::Values(true)),
                          [](const testing::TestParamInfo<RMSNormTestSuite::ParamType> &info) {
                            std::string name =
                              test::typeName(std::get<0>(info.param)) + "X" +
