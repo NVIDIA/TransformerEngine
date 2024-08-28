@@ -84,8 +84,8 @@ def initialize_ub(
     tp_size: int,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
-    ub_cfgs: Optional[dict] = "nccl",
-    bootstrap_backend: Union[str, torch.distributed.Backend] = None,
+    ub_cfgs: Optional[dict] = None,
+    bootstrap_backend: Union[str, torch.distributed.Backend] = "nccl",
 ) -> None:
     r"""
     Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
@@ -309,7 +309,7 @@ def initialize_ub(
 
             ranks_per_node_tensor = torch.tensor(ranks_per_node_list, dtype=int)
             ranks_across_nodes_list = ranks_per_node_tensor.transpose(0, 1).tolist()
-            inter_node_group, _ = torch.distirbuted.new_subgroups_by_enumeration(
+            inter_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
                 ranks_across_nodes_list, backend=bootstrap_backend
             )
 
