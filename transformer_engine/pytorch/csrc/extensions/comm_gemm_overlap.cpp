@@ -184,16 +184,16 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
  * CommOverlap
  **************************************************************************************************/
 
-CommOverlap::CommOverlap(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
-    int tp_size, int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
-    bool set_sm_margin, bool atomic_gemm)
-    : te::CommOverlapBase(
-        buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
-        helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
-        std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
-        comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                         CommOverlapHelper *helper, int tp_size, int num_splits,
+                         int num_max_streams, int comm_cga_size, int num_comm_sm,
+                         bool set_sm_margin, bool atomic_gemm)
+    : te::CommOverlapBase(buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank,
+                          helper->numranks, helper->mylocal, helper->numlocal, helper->mynode,
+                          helper->numnodes, tp_size,
+                          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+                          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
+                          num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
 }
 
 /*
@@ -258,13 +258,15 @@ void CommOverlap::atomic_gemm_overlap_rs(
 /*
 ** Split FPROP GEMM + ReduceScatter
 */
-void CommOverlap::split_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
-    at::Tensor rs_output) {
+void CommOverlap::split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
+                                   te::DType A_type, bool transa, at::Tensor B,
+                                   at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
+                                   te::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
+                                   te::DType D_type, at::Tensor D_amax, at::Tensor bias,
+                                   te::DType bias_type, at::Tensor pre_gelu_out, bool grad,
+                                   at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                                   bool use_split_accumulator, bool gemm_overlap,
+                                   at::Tensor rs_output) {
   MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
                                   B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
                                   pre_gelu_out, workspace)
@@ -320,16 +322,17 @@ torch::Tensor CommOverlap::get_ubuf_output(int comm_type) {
  * CommOverlapP2P
  **************************************************************************************************/
 
-CommOverlapP2P::CommOverlapP2P(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
-    int tp_size, te::CommOverlapType comm_type, int num_max_streams, int comm_cga_size,
-    int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate)
+CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                               CommOverlapHelper *helper, int tp_size,
+                               te::CommOverlapType comm_type, int num_max_streams,
+                               int comm_cga_size, int num_comm_sm, bool set_sm_margin,
+                               bool atomic_gemm, bool use_ce, bool aggregate)
     : te::CommOverlapP2PBase(
-        buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
-        helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
-        std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-        std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-        comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
+          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
+          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication
