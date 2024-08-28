@@ -38,8 +38,8 @@ fi
 
 if $BUILD_JAX ; then
 	cd /TransformerEngine/transformer_engine/jax
-	/opt/python/cp38-cp38/bin/pip install jax jaxlib
-	/opt/python/cp38-cp38/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+	/opt/python/cp310-cp310/bin/pip install "jax[cuda12_local]" jaxlib
+	/opt/python/cp310-cp310/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
 	cp dist/* /wheelhouse/
 fi
 
@@ -80,6 +80,6 @@ fi
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
-        NVTE_BUILD_METAPACKAGE python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
+        NVTE_BUILD_METAPACKAGE=1 /opt/python/cp310-cp310/bin/python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
         mv dist/* /wheelhouse/
 fi

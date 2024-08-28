@@ -6,9 +6,12 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import subprocess
 import importlib
+import importlib.util
 import sys
 import torch
+from importlib.metadata import version
 
 from transformer_engine.common import get_te_path
 from transformer_engine.common import _get_sys_extension
@@ -16,15 +19,40 @@ from transformer_engine.common import _get_sys_extension
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
+    module_name = "transformer_engine_torch"
+
+    if subprocess.run([sys.executable, "-m", "pip", "show", module_name]).returncode == 0:
+        assert (
+            importlib.util.find_spec("transformer_engine") is not None
+        ), "Could not find `transformer-engine`."
+        assert (
+            importlib.util.find_spec("transformer_engine_cu12") is not None
+        ), "Could not find `transformer-engine-cu12`."
+        assert version(module_name) == version("transformer-engine"), (
+            "TransformerEngine package version mismatch. Found"
+            f" {module_name} v{version(module_name)}, transformer-engine"
+            f" v{version('transformer-engine')}, and transformer-engine-cu12"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
+            " transformer-engine[pytorch]==VERSION'"
+        )
+
+    if (
+        subprocess.run([sys.executable, "-m", "pip", "show", "transformer-engine-cu12"]).returncode
+        == 0
+    ):
+        assert importlib.util.find_spec(module_name) is not None, (
+            f"Could not find package {module_name}. Install transformer-engine using 'pip install"
+            " transformer-engine[pytorch]==VERSION'"
+        )
+
     extension = _get_sys_extension()
     try:
         so_dir = get_te_path() / "transformer_engine"
-        so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
         so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
-    module_name = "transformer_engine_torch"
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib

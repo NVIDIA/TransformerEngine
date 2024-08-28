@@ -22,7 +22,7 @@ from build_tools.utils import (
     get_frameworks,
     install_and_import,
     remove_dups,
-    uninstall_te_fw_packages,
+    uninstall_te_wheel_packages,
 )
 
 frameworks = get_frameworks()
@@ -113,15 +113,15 @@ if __name__ == "__main__":
 
     # Settings for building top level empty package for dependency management.
     if bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
-        assert (
-            bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))
+        assert bool(
+            int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
-        setup_requires= []
-        install_requires = [f"transformer_engine_cu12=={__version__}"],
+        setup_requires = []
+        install_requires = ([f"transformer_engine_cu12=={__version__}"],)
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
+        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {"": ["VERSION.txt"]}
         include_package_data = True
         extras_require = {"test": test_requires}
@@ -138,7 +138,7 @@ if __name__ == "__main__":
         if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
             # Remove residual FW packages since compiling from source
             # results in a single binary with FW extensions included.
-            uninstall_te_fw_packages()
+            uninstall_te_wheel_packages()
             if "pytorch" in frameworks:
                 from build_tools.pytorch import setup_pytorch_extension
 
@@ -182,9 +182,9 @@ if __name__ == "__main__":
             ],
         ),
         extras_require=extras_require,
-        description=("Transformer acceleration library"),
+        description="Transformer acceleration library",
         long_description=long_description,
-        long_description_content_type='text/x-rst',
+        long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
         python_requires=">=3.8, <3.13",
