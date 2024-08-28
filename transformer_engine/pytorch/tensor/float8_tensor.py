@@ -598,10 +598,7 @@ class Float8Tensor(QuantizedTensor):
         # Make sure FP8 scaling factors are in expected format
         if scale is not None:
             if isinstance(scale, torch.Tensor):
-                if (
-                    not devices_match(scale.device, dst.device)
-                    or scale.dtype != torch.float32
-                ):
+                if not devices_match(scale.device, dst.device) or scale.dtype != torch.float32:
                     scale = scale.to(device=dst.device, dtype=torch.float32)
             else:
                 scale = torch.full([1], scale, dtype=torch.float32, device=dst.device)

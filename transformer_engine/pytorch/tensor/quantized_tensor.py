@@ -29,6 +29,7 @@ class _DequantizeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         return grad, None
 
+
 class _IdentityFunc(torch.autograd.Function):
     """Autograd function to create tensor proxy with same data"""
 
@@ -134,11 +135,11 @@ class QuantizedTensor(torch.Tensor):
 
         def maybe_update_inplace(arg, new_arg, schema_arg):
             if (
-                    isinstance(arg, QuantizedTensor)
-                    and isinstance(new_arg, torch.Tensor)
-                    and hasattr(schema_arg, "alias_info")
-                    and hasattr(schema_arg.alias_info, "is_write")
-                    and schema_arg.alias_info.is_write
+                isinstance(arg, QuantizedTensor)
+                and isinstance(new_arg, torch.Tensor)
+                and hasattr(schema_arg, "alias_info")
+                and hasattr(schema_arg.alias_info, "is_write")
+                and schema_arg.alias_info.is_write
             ):
                 arg.quantize_(new_arg)
 
