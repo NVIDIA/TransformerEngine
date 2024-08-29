@@ -831,6 +831,21 @@ def get_attention_backend(
             )
             use_flash_attention = False
 
+    # Select FusedAttention for FP8
+    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
+    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
+    if (
+        use_flash_attention
+        and use_fused_attention
+        and fused_attention_backend == FusedAttnBackend["FP8"]
+        and _use_flash_attn_3
+    ):
+        logger.debug(
+            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
+            "supports more accurate scaling factors in FP8 execution"
+        )
+        use_flash_attention = False
+
     # Selected backend
     if use_flash_attention:
         use_fused_attention = False
