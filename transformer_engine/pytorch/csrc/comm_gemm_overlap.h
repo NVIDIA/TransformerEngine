@@ -197,8 +197,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
       cudaStream_t stream_tmp;
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream_tmp, cudaStreamNonBlocking,
-                                                   gemm_priority));
+      NVTE_CHECK_CUDA(
+          cudaStreamCreateWithPriority(&stream_tmp, cudaStreamNonBlocking, gemm_priority));
       _stream_compute.push_back(
           at::cuda::getStreamFromExternal(stream_tmp, stream_main.device_index()));
     }
@@ -247,26 +247,20 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   }
 
   void _set_stream_priority(at::cuda::CUDAStream stream, int priority) {
-    cudaLaunchAttributeValue attributes = { .priority = priority };
-    NVTE_CHECK_CUDA(cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority,
-                                           &attributes));
+    cudaLaunchAttributeValue attributes = {.priority = priority};
+    NVTE_CHECK_CUDA(
+        cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
   }
 
-  void set_comm_priority(int priority) {
-    _set_stream_priority(_stream_comm, priority);
-  }
+  void set_comm_priority(int priority) { _set_stream_priority(_stream_comm, priority); }
 
   void set_gemm_priority(int priority) {
-    for (auto stream: _stream_compute) _set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) _set_stream_priority(stream, priority);
   }
 
-  int get_comm_priority() {
-    return _stream_comm.priority();
-  }
+  int get_comm_priority() { return _stream_comm.priority(); }
 
-  int get_gemm_priority() {
-    return _stream_compute[0].priority();
-  }
+  int get_gemm_priority() { return _stream_compute[0].priority(); }
 
   /*
   ** Bulk GEMM + COMM
@@ -752,8 +746,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, tp_size); i++) {
       cudaStream_t stream_tmp;
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream_tmp, cudaStreamNonBlocking,
-                                                   gemm_priority));
+      NVTE_CHECK_CUDA(
+          cudaStreamCreateWithPriority(&stream_tmp, cudaStreamNonBlocking, gemm_priority));
       _stream_compute.push_back(
           at::cuda::getStreamFromExternal(stream_tmp, stream_main.device_index()));
     }
@@ -821,9 +815,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   }
 
   void _set_stream_priority(at::cuda::CUDAStream stream, int priority) {
-    cudaLaunchAttributeValue attributes = { .priority = priority };
-    NVTE_CHECK_CUDA(cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority,
-                                           &attributes));
+    cudaLaunchAttributeValue attributes = {.priority = priority};
+    NVTE_CHECK_CUDA(
+        cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
   }
 
   void set_comm_priority(int priority) {
@@ -832,16 +826,12 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   }
 
   void set_gemm_priority(int priority) {
-    for (auto stream: _stream_compute) _set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) _set_stream_priority(stream, priority);
   }
 
-  int get_comm_priority() {
-    return _stream_send.priority();
-  }
+  int get_comm_priority() { return _stream_send.priority(); }
 
-  int get_gemm_priority() {
-    return _stream_compute[0].priority();
-  }
+  int get_gemm_priority() { return _stream_compute[0].priority(); }
 
   /*
   ** Split AllGather + AtomicGEMM using P2P communication
