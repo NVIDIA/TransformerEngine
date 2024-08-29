@@ -3387,6 +3387,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         )
 
 
+@torch.compile
+def get_chunk_ids_for_a2a(cp_size, device):
+    """Compute sequence chunk ids for A2A communication."""
+    chunk_ids = torch.empty(2, 2*cp_size, dtype=torch.int32, device=device)
+    for rank in range(cp_size):
+        chunk_ids[0][rank] = 2*rank
+        chunk_ids[0][rank+cp_size] = 2*cp_size-2*rank-1
+        chunk_ids[1][2*rank] = rank
+        chunk_ids[1][2*rank+1] = 2*cp_size-rank-1
+    return chunk_ids
+
+
 class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     """
     Attention implementation with context parallelism.
@@ -3488,10 +3500,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
-        input_chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
-        for rank in range(cp_size):
-            input_chunk_ids[rank] = 2*rank
-            input_chunk_ids[rank+cp_size] = 2*cp_size-2*rank-1
+        chunk_ids = get_chunk_ids_for_a2a(cp_size, q.device)
 
         a2a_outputs, a2a_reqs = [], []
         for x in [q, k, v]:
@@ -3510,7 +3519,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):])
             # reorder the sequence chunks
-            x = torch.index_select(x, dim=seq_dim, index=input_chunk_ids)
+            x = torch.index_select(x, dim=seq_dim, index=chunk_ids[0])
             # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
             a2a_outputs[i] = x
@@ -3570,15 +3579,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
 
-        output_chunk_ids = torch.empty(2*cp_size, dtype=torch.int32, device=q.device)
-        for rank in range(cp_size):
-            output_chunk_ids[2*rank] = rank
-            output_chunk_ids[2*rank+1] = 2*cp_size-rank-1
-
         # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
         out = out.view(*out.shape[:seq_dim], cp_size * 2, -1, *out.shape[(seq_dim+1):])
         # reorder the sequence chunks
-        out = torch.index_select(out, dim=seq_dim, index=output_chunk_ids)
+        out = torch.index_select(out, dim=seq_dim, index=chunk_ids[1])
         # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
         out = out.view(*out.shape[:seq_dim], cp_size, -1, *out.shape[(seq_dim+2):])
         # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
@@ -3654,8 +3658,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             cu_seqlens_kv,
             cu_seqlens_q_padded,
             cu_seqlens_kv_padded,
-            input_chunk_ids,
-            output_chunk_ids,
             fp8_fwd_scales,
             fp8_fwd_scale_invs,
             *aux_ctx_tensors,
@@ -3681,9 +3683,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         q, k, v, out = ctx.saved_tensors[:4]
         cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = ctx.saved_tensors[4:8]
-        input_chunk_ids, output_chunk_ids = ctx.saved_tensors[8:10]
-        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[10:12]
-        aux_ctx_tensors = ctx.saved_tensors[12:]
+        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[8:10]
+        aux_ctx_tensors = ctx.saved_tensors[10:]
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
         causal = "causal" in ctx.attn_mask_type
@@ -3733,6 +3734,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out = out.view(ctx.batch_size, -1, *out.shape[-2:])
         dout = dout.view(*out.shape)
 
+        chunk_ids = get_chunk_ids_for_a2a(cp_size, q.device)
+
         a2a_outputs, a2a_reqs = [], []
         for x in [out, dout]:
             # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
@@ -3750,7 +3753,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+2):])
             # reorder the sequence chunks
-            x = torch.index_select(x, dim=seq_dim, index=input_chunk_ids)
+            x = torch.index_select(x, dim=seq_dim, index=chunk_ids[0])
             # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
             a2a_outputs[i] = x
@@ -3821,7 +3824,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim+1):])
             # reorder the sequence chunks
-            x = torch.index_select(x, dim=seq_dim, index=output_chunk_ids)
+            x = torch.index_select(x, dim=seq_dim, index=chunk_ids[1])
             # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
             x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):])
             # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
