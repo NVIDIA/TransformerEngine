@@ -953,6 +953,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fprop_tensor=fp8_meta_forward,
             )
             scale_inv = torch.empty([1], dtype=torch.float32, device=tensor.device)
+            data_transpose = None
+            if with_transpose:
+                data_transpose = torch.empty(
+                    (tensor.size(-1), tensor.numel() // tensor.size(-1)),
+                    dtype=torch.uint8,
+                    device=tensor.device,
+                )
             out = Float8Tensor(
                 data=torch.empty_like(tensor, dtype=torch.uint8),
                 fp8_meta=self.fp8_meta,
@@ -961,6 +968,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=scale_inv,
                 dtype=tensor.dtype,
+                with_transpose_cache=with_transpose,
+                data_transpose=data_transpose,
             )
             if cache_name is not None:
                 self._fp8_workspaces[cache_name] = out
@@ -973,33 +982,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if update_workspace:
             if tensor is None:
                 raise ValueError("tensor kwarg must be provided to update FP8 workspace")
-            if with_transpose:
-                out.cast_transpose_(
-                    tensor,
-                    noop_flag=skip_update_flag,
-                )
+            if is_in_onnx_export_mode():
+                # ONNX export does not support fused cast-transpose
+                # kernel and requires that FP8 scales can be
+                # represented with constant ops.
+                transpose_cache = out._transpose
+                out._transpose = None
+                out.quantize_(tensor)
+                out._scale_inv.fill_(out._scale_inv.item())
+                out._transpose = transpose_cache
             else:
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=out._fp8_meta_forward,
-                )
-                fp8_meta = out._fp8_meta[fp8_meta_key]
-                fp8_meta_index = out._fp8_meta_index
-                cast_to_fp8(
-                    tensor,
-                    fp8_meta,
-                    fp8_meta_index,
-                    out._fp8_dtype,
-                    out=out._data,
-                )
-                if is_in_onnx_export_mode():
-                    # ONNX export expects FP8 scales can be
-                    # represented with constant ops. However, copying
-                    # into a buffer involves an expand op for array
-                    # broadcasting. We work around this by filling the
-                    # buffer instead.
-                    out._scale_inv.fill_(fp8_meta.scale_inv[fp8_meta_index].item())
-                else:
-                    out._scale_inv.copy_(fp8_meta.scale_inv[fp8_meta_index])
+                out.quantize_(tensor, noop_flag=skip_update_flag)
 
         return out
 

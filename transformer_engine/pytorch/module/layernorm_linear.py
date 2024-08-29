@@ -47,6 +47,7 @@ from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
+from ..tensor import QuantizedTensor
 
 __all__ = ["LayerNormLinear"]
 
@@ -1148,14 +1149,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, Float8Tensor) for w in unfused_weights):
+            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
                         raise RuntimeError(
-                            "Splitting Float8Tensor into multiple params is not supported"
+                            "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    unfused_weights = [w.from_float8() for w in unfused_weights]
+                    unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = _noop_cat(

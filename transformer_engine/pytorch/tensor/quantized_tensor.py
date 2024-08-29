@@ -31,7 +31,7 @@ class _DequantizeFunc(torch.autograd.Function):
 
 
 class _IdentityFunc(torch.autograd.Function):
-    """Autograd function to create tensor proxy with same data"""
+    """Autograd function to create quantized tensor with same data"""
 
     @staticmethod
     def forward(

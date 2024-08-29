@@ -55,6 +55,7 @@ from ..constants import dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
+from ..tensor import QuantizedTensor
 from ._common import _apply_normalization
 
 __all__ = ["LayerNormMLP"]
@@ -1487,7 +1488,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 update_workspace = is_first_microbatch is None or is_first_microbatch
                 with_transpose = torch.is_grad_enabled()
                 if (
-                    is_fp8_activation_recompute_enabled()
+                    not with_transpose
+                    and is_fp8_activation_recompute_enabled()
                     and not in_fp8_activation_recompute_phase()
                 ):
                     with_transpose = True

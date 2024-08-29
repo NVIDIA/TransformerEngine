@@ -631,12 +631,16 @@ class Float8Tensor(QuantizedTensor):
 
         # Perform FP8 cast
         if dst._transpose is None:
+            dst_data = dst._data
+            if src.dim() > 2:
+                src = src.view(1, -1)
+                dst_data = dst_data.view(1, -1)
             cast_to_fp8(
-                src.view(1, -1),
+                src,
                 fp8_meta,
                 dst._fp8_meta_index,
                 dst._fp8_dtype,
-                out=dst._data.view(1, -1),
+                out=dst_data,
                 scale=scale,
                 amax=amax,
                 scale_inv=dst._scale_inv,
