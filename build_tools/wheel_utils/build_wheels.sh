@@ -22,11 +22,24 @@ git checkout $TARGET_BRANCH
 git submodule update --init --recursive
 
 if $BUILD_COMMON ; then
+        VERSION=`cat build_tools/VERSION.txt`
+        WHL_BASE="transformer_engine-${VERSION}"
+
+        # Create the wheel.
         /opt/python/cp38-cp38/bin/python setup.py bdist_wheel --verbose --python-tag=py3 --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+
+        # Repack the wheel for cuda specific package, i.e. cu12.
+        /opt/python/cp38-cp38/bin/wheel unpack dist/*
+        sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+        mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info"
+        /opt/python/cp38-cp38/bin/wheel pack ${WHL_BASE}
+
+        # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)
         IFS='-' read -ra whl_parts <<< "$whl_name"
-        whl_name_target="${whl_parts[0]}-${whl_parts[1]}-py3-none-${whl_parts[4]}"
-        mv dist/"$whl_name" /wheelhouse/"$whl_name_target"
+        whl_name_target="${whl_parts[0]}_cu12-${whl_parts[1]}-py3-none-${whl_parts[4]}"
+        rm -rf $WHL_BASE dist
+        mv *.whl /wheelhouse/"$whl_name_target"
 fi
 
 if $BUILD_PYTORCH ; then

@@ -6,6 +6,7 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import logging
 import importlib
 import importlib.util
 import sys
@@ -38,10 +39,11 @@ def _load_library():
         )
 
     if is_package_installed("transformer-engine-cu12"):
-        assert is_package_installed(module_name), (
-            f"Could not find package {module_name}. Install transformer-engine using 'pip install"
-            " transformer-engine[pytorch]==VERSION'"
-        )
+        if not is_package_installed(module_name):
+            logging.info(
+                f"Could not find package {module_name}. Install transformer-engine using 'pip"
+                " install transformer-engine[pytorch]==VERSION'"
+            )
 
     extension = _get_sys_extension()
     try:
