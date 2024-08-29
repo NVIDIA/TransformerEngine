@@ -194,6 +194,17 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
                           std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
                           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
                           num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+  // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
+  // for PyTorch to factor externally allocated memory into its memory pool and garbage collection
+  // threshold calculation.
+  _ubuf_torch = torch::from_blob(
+      _ubuf.dptr(), {static_cast<int64_t>(_ubuf.size(0)), static_cast<int64_t>(_ubuf.size(1))},
+      at::device(torch::kCUDA).dtype(buffer_dtype));
+  if (_atomic_gemm) {
+    _ubuf_counter = torch::from_blob(
+        _counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
+        at::device(torch::kCUDA).dtype(torch::kInt32));
+  }
 }
 
 /*
@@ -228,8 +239,7 @@ std::vector<at::Tensor> CommOverlap::bulk_overlap(
       (comm_type == te::CommOverlapType::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
   int output_c_dim1 = _ubuf.size(1);
   auto output_tensor =
-      torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1},
-                       torch::device(torch::kCUDA).dtype(GetATenDType(_ubuf.dtype())));
+      torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf_torch.options());
 
   return {D, output_tensor};
 }  // CommOverlap::bulk_overlap
@@ -332,7 +342,19 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
           helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
           std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {}
+          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {
+  // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
+  // for PyTorch to factor externally allocated memory into its memory pool and garbage collection
+  // threshold calculation.
+  _ubuf_torch = torch::from_blob(
+      _ubuf.dptr(), {static_cast<int64_t>(_ubuf.size(0)), static_cast<int64_t>(_ubuf.size(1))},
+      at::device(torch::kCUDA).dtype(buffer_dtype));
+  if (_atomic_gemm) {
+    _ubuf_counter = torch::from_blob(
+        _counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
+        at::device(torch::kCUDA).dtype(torch::kInt32));
+  }
+}
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication
@@ -457,6 +479,5 @@ torch::Tensor CommOverlapP2P::get_ubuf_output(int comm_type) {
   int output_c_dim0 =
       (_comm_type == te::CommOverlapType::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
   int output_c_dim1 = _ubuf.size(1);
-  return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1},
-                          torch::device(torch::kCUDA).dtype(GetATenDType(_ubuf.dtype())));
+  return torch::from_blob(ubuf_wt_ptr, {output_c_dim0, output_c_dim1}, _ubuf_torch.options());
 }
