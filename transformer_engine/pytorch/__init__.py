@@ -41,8 +41,9 @@ def _load_library():
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
             logging.info(
-                f"Could not find package {module_name}. Install transformer-engine using 'pip"
-                " install transformer-engine[pytorch]==VERSION'"
+                "Could not find package %s. Install transformer-engine using 'pip"
+                " install transformer-engine[pytorch]==VERSION'",
+                module_name,
             )
 
     extension = _get_sys_extension()
