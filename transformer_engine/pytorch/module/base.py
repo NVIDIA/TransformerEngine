@@ -875,6 +875,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     fp8_meta=self.fp8_meta,
                     fp8_meta_index=fp8_meta_index,
                     amax=dummy_amax,
+                    with_transpose_cache=torch.is_grad_enabled(),
                 )
 
             # Redo parameter wrap in case we broke it above
@@ -922,27 +923,30 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         skip_update_flag: torch.Tensor, optional
             GPU flag to skip updating the workspace. Take precedence
             over `update_workspace` if provided.
-        with_transpose: bool, default = `False`
-            Whether to initialize cached transpose in workspace.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
         """
 
-        # Construct workspace if needed
+        # Try getting workspace from cache
         out = None
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
-            # Gather cached Fp8 workspace if it's distributed
-            # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
-            #       for models initialized with Fp8 primary weights.
-            if (
-                not isinstance(out, Float8Tensor)
-                and fsdp_group is not None
-                and out._data.shape != tensor.data.shape
-            ):
-                _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
 
+        # Gather cached Fp8 workspace if it's distributed
+        # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
+        #       for models initialized with Fp8 primary weights.
+        if (
+            out is not None
+            and not isinstance(out, Float8Tensor)
+            and fsdp_group is not None
+            and out._data.shape != tensor.data.shape
+        ):
+            _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], out)
+
+        # Construct workspace if needed
         if out is None:
+
+            # FP8 data
             if tensor is None or fp8_meta_forward is None or fp8_meta_index is None:
                 raise ValueError(
                     "tensor, fp8_meta_forward, and fp8_meta_index kwargs "
@@ -952,25 +956,39 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.fp8_meta["recipe"],
                 fprop_tensor=fp8_meta_forward,
             )
+            data = torch.empty_like(tensor, dtype=torch.uint8)
             scale_inv = torch.empty([1], dtype=torch.float32, device=tensor.device)
+
+            # Transpose cache
+            with_transpose_cache = torch.is_grad_enabled()
+            if (
+                not with_transpose_cache
+                and is_fp8_activation_recompute_enabled()
+                and not in_fp8_activation_recompute_phase()
+            ):
+                with_transpose_cache = True
             data_transpose = None
-            if with_transpose:
+            if with_transpose_cache:
                 data_transpose = torch.empty(
                     (tensor.size(-1), tensor.numel() // tensor.size(-1)),
                     dtype=torch.uint8,
                     device=tensor.device,
                 )
+
+            # Construct FP8 tensor
             out = Float8Tensor(
-                data=torch.empty_like(tensor, dtype=torch.uint8),
+                data=data,
                 fp8_meta=self.fp8_meta,
                 fp8_meta_forward=fp8_meta_forward,
                 fp8_meta_index=fp8_meta_index,
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=scale_inv,
                 dtype=tensor.dtype,
-                with_transpose_cache=with_transpose,
+                with_transpose_cache=with_transpose_cache,
                 data_transpose=data_transpose,
             )
+
+            # Update cache
             if cache_name is not None:
                 self._fp8_workspaces[cache_name] = out
             update_workspace = True
