@@ -36,7 +36,9 @@ if $BUILD_COMMON ; then
 
         # Repack the wheel for cuda specific package, i.e. cu12.
         /opt/python/cp38-cp38/bin/wheel unpack dist/*
+        # From python 3.10 to 3.11, the package name delimiter in metadata got changed from - (hyphen) to _ (underscore).
         sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
+        sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
         mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VERSION}.dist-info"
         /opt/python/cp38-cp38/bin/wheel pack ${WHL_BASE}
 
