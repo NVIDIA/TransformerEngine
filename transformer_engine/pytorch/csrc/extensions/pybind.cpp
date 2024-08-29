@@ -252,7 +252,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communication)
   py::class_<ubuf::UbufCommOverlap>(m, "UbufCommOverlap")
       .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, int, bool, int,
-                    bool, ubuf::UbufBootstrapCallbacks &>(),
+                    bool, ubuf::UbufBootstrapCallbacks &, int, int>(),
+           py::call_guard<py::gil_scoped_release>(), py::arg("sample_tensor"), py::arg("myrank"),
+           py::arg("numranks"), py::arg("mylocal"), py::arg("numlocal"), py::arg("mynode"),
+           py::arg("numnodes"), py::arg("tp_size"), py::arg("num_comm_sm"), py::arg("num_cga_size"),
+           py::arg("num_splits"), py::arg("set_sm_margin"), py::arg("num_max_streams"),
+           py::arg("atomic_gemm"), py::arg("callbacks"), py::arg("comm_priority") = -1,
+           py::arg("gemm_priority") = -1)
+      .def("set_comm_priority", &ubuf::UbufCommOverlap::set_comm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_gemm_priority", &ubuf::UbufCommOverlap::set_gemm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_comm_priority", &ubuf::UbufCommOverlap::get_comm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_gemm_priority", &ubuf::UbufCommOverlap::get_gemm_priority,
            py::call_guard<py::gil_scoped_release>())
       .def("bulk_overlap", &ubuf::UbufCommOverlap::bulk_overlap,
            py::call_guard<py::gil_scoped_release>())
@@ -278,7 +291,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // communication)
   py::class_<ubuf::UbufP2PCommOverlap>(m, "UbufP2PCommOverlap")
       .def(py::init<torch::Tensor &, int, int, int, int, int, int, int, int, int, bool, bool, int,
-                    bool, bool, bool, ubuf::UbufBootstrapCallbacks &>(),
+                    bool, bool, bool, ubuf::UbufBootstrapCallbacks &, int, int>(),
+           py::call_guard<py::gil_scoped_release>(), py::arg("sample_tensor"), py::arg("myrank"),
+           py::arg("numranks"), py::arg("mylocal"), py::arg("numlocal"), py::arg("mynode"),
+           py::arg("numnodes"), py::arg("tp_size"), py::arg("num_comm_sm"), py::arg("num_cga_size"),
+           py::arg("set_sm_margin"), py::arg("aggregate"), py::arg("num_max_streams"),
+           py::arg("is_reduce_scatter"), py::arg("atomic_gemm"), py::arg("use_ce"),
+           py::arg("callbacks"), py::arg("comm_priority") = -1, py::arg("gemm_priority") = -1)
+      .def("set_comm_priority", &ubuf::UbufP2PCommOverlap::set_comm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_gemm_priority", &ubuf::UbufP2PCommOverlap::set_gemm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_comm_priority", &ubuf::UbufP2PCommOverlap::get_comm_priority,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_gemm_priority", &ubuf::UbufP2PCommOverlap::get_gemm_priority,
            py::call_guard<py::gil_scoped_release>())
       .def("split_overlap_ag_p2p", &ubuf::UbufP2PCommOverlap::split_overlap_ag,
            py::call_guard<py::gil_scoped_release>())
