@@ -3836,7 +3836,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             x = x.movedim(0, -3).contiguous()
             # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
             x = x.view(*x.shape[:-3], -1, x.shape[-1])
-            a2a_outputs.append(x)
+            a2a_outputs[i] = x
         dq, dk, dv = a2a_outputs
 
         if ctx.fp8:
