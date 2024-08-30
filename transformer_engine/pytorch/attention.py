@@ -3536,7 +3536,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
-                else:
+                elif int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                     q_f16, k_f16, v_f16 = q, k, v
                     q, k, v = [
                         cast_to_fp8(
@@ -3560,6 +3560,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         chunk_ids = get_chunk_ids_for_a2a(cp_size, q.device)
         q, k, v = flash_attn_a2a_communicate([q, k, v], chunk_ids[0], seq_dim, cp_size, cp_group, cp_stream, True)
+
+        if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            q_f16, k_f16, v_f16 = q, k, v
+            q, k, v = [
+                cast_to_fp8(
+                    x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
+                ) for x in [q_f16, k_f16, v_f16]
+            ]
 
         if use_fused_attention:
             out, aux_ctx_tensors = fused_attn_fwd(
