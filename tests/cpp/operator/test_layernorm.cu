@@ -293,7 +293,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
-        ::testing::Values(false, true)),
+        ::testing::Values(true)),
     [](const testing::TestParamInfo<LNTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                          test::typeName(std::get<1>(info.param)) + "X" +

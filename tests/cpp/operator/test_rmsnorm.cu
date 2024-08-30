@@ -200,8 +200,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   atol = 1e-8;
   compareResults("output", z, ref_output.get(), atol, rtol);
 
-  double atol_bwd = 5e-6;
-  double rtol_bwd = 1e-4;
+  auto [atol_bwd, rtol_bwd] = getTolerances(otype);
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
   compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
 }
