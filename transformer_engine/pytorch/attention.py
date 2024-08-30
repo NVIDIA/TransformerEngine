@@ -74,6 +74,9 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
+_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
 _flash_attn_max_version = PkgVersion("2.6.3")
@@ -89,13 +92,14 @@ try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
 except PackageNotFoundError:
-    warnings.warn(
-        "To use flash-attn v3, please use the following commands to install: \n"
-        """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
-        """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
-        """(3) mkdir -p $python_path/flashattn_hopper \n"""
-        """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
-    )
+    if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
+        warnings.warn(
+            "To use flash-attn v3, please use the following commands to install: \n"
+            """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
+            """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
+            """(3) mkdir -p $python_path/flashattn_hopper \n"""
+            """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
+        )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flashattn_hopper.flash_attn_interface import (
@@ -136,10 +140,6 @@ _log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
-
-_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 
 _attention_backends = {
     "attention_params": None,
@@ -382,8 +382,13 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and is_training:
-            logger.debug("Disabling FlashAttention as it does not support FP8 training")
+        if use_flash_attention and not _use_flash_attn_3:
+            logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
+            use_flash_attention = False
+        if use_flash_attention and _use_flash_attn_3 and is_training:
+            logger.debug(
+                "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
+            )
             use_flash_attention = False
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
@@ -825,6 +830,21 @@ def get_attention_backend(
                 "for performance reasons"
             )
             use_flash_attention = False
+
+    # Select FusedAttention for FP8
+    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
+    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
+    if (
+        use_flash_attention
+        and use_fused_attention
+        and fused_attention_backend == FusedAttnBackend["FP8"]
+        and _use_flash_attn_3
+    ):
+        logger.debug(
+            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
+            "supports more accurate scaling factors in FP8 execution"
+        )
+        use_flash_attention = False
 
     # Selected backend
     if use_flash_attention:
