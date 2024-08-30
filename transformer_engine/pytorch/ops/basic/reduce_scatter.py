@@ -11,7 +11,7 @@ import torch
 
 from ...tensor import Float8Tensor, QuantizedTensor
 from ..op import BasicOperation, OperationContext
-from .._common import convert_tensor, is_float8_tensor
+from .._common import convert_tensor
 
 
 class ReduceScatter(BasicOperation):

@@ -33,8 +33,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )

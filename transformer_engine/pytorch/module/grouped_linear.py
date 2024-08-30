@@ -28,8 +28,6 @@ from ..utils import (
 from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
 )
 from ..cpp_extensions import (
     cast_to_fp8,
@@ -743,13 +741,6 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             weight_tensors_fp8 = [None] * self.num_gemms
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 for i in range(self.num_gemms):
                     if isinstance(weight_tensors[i], Float8Tensor):
                         # Make sure transpose cache is valid, if present

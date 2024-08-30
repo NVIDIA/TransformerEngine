@@ -42,8 +42,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     use_reentrant_activation_recompute,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
@@ -55,7 +53,6 @@ from ..constants import dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
-from ..tensor import QuantizedTensor
 from ._common import _apply_normalization
 
 __all__ = ["LayerNormMLP"]
