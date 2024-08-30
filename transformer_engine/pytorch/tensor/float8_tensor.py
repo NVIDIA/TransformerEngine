@@ -157,7 +157,6 @@ class _ToFloat8Func(torch.autograd.Function):
             fp8_dtype=fp8_dtype,
             fp8_scale_inv=scale_inv,
             dtype=dtype,
-            with_transpose_cache=with_transpose_cache,
             data_transpose=data_transpose,
         )
 
@@ -347,7 +346,6 @@ class Float8Tensor(QuantizedTensor):
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         fp8_scale_inv: Optional[torch.Tensor] = None,
         dtype: torch.dtype = torch.float32,
-        with_transpose_cache: bool = False,
         data_transpose: Optional[torch.Tensor] = None,
     ):
 
@@ -435,14 +433,8 @@ class Float8Tensor(QuantizedTensor):
         self._scale_inv: Optional[torch.Tensor] = fp8_scale_inv
 
         # FP8 transpose cache
-        self._transpose: Optional[Float8Tensor] = None
-        self._transpose_invalid: bool = True
-        if with_transpose_cache:
-            if data_transpose is None:
-                self.transpose_2d(force_compute=True, fill_cache=True)
-            else:
-                self._transpose = data_transpose
-                self._transpose_invalid = False
+        self._transpose: Optional[Float8Tensor] = data_transpose
+        self._transpose_invalid: bool = self._transpose is None
 
         return self
 
@@ -697,21 +689,18 @@ class Float8Tensor(QuantizedTensor):
             self,
             data=self._data,
             fp8_attrs=self._fp8_attrs,
-            with_transpose_cache=(self._transpose is not None),
             data_transpose=self._transpose,
         )
 
     def clone(self) -> Float8Tensor:
         data = self._data.detach().clone()
         data_transpose = None
-        with_transpose_cache = self._transpose is not None
-        if with_transpose_cache:
+        if self._transpose is not None:
             data_transpose = self._transpose.detach().clone()
         return _IdentityFunc.apply(
             self,
             dict(
                 data=data,
-                with_transpose_cache=with_transpose_cache,
                 data_transpose=data_transpose,
             ),
         )
@@ -875,7 +864,6 @@ class Float8Tensor(QuantizedTensor):
             data=self._data,
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
-            with_transpose_cache=(self._transpose is not None),
             data_transpose=self._transpose,
         )
 

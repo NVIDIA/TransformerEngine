@@ -9,8 +9,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from ..tensor.float8_tensor import Float8Tensor
-from .utils import (
+from ..tensor import Float8Tensor
+from ..utils import (
     canonicalize_device,  # pylint: disable=unused-import
     canonicalize_dtype,  # pylint: disable=unused-import
     devices_match,  # pylint: disable=unused-import
@@ -50,12 +50,22 @@ def convert_tensor(
 
     # Convert FP8 tensor
     if is_float8_tensor(tensor):
-        data = tensor._data.to(device=device, memory_format=memory_format)
+        data = tensor._data
+        if not devices_match(device, data.device):
+            data = data.to(device=device)
+        if memory_format != torch.preserve_format and not data.is_contiguous(
+            memory_format=memory_format
+        ):
+            data = data.contiguous(memory_format=memory_format)
+        data_transpose = None
+        if tensor._transpose is not None:
+            data_transpose = tensor._data.to(device=device)
         return Float8Tensor.make_like(
             tensor,
             data=data,
             fp8_attrs=tensor._fp8_attrs,
             dtype=dtype,
+            data_transpose=data_transpose,
         )
 
     # Convert standard PyTorch tensor

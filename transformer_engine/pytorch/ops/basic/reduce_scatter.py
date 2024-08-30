@@ -9,11 +9,8 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
+from ...tensor import Float8Tensor, QuantizedTensor
+from ..op import BasicOperation, OperationContext
 from .._common import convert_tensor, is_float8_tensor
 
 
@@ -63,8 +60,8 @@ class ReduceScatter(BasicOperation):
 
         # Check input tensor
         x = input_
-        if is_float8_tensor(x):
-            x = x.from_float8()
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize()
         x = x.contiguous()
 
         # Perform reduce-scatter
@@ -96,7 +93,7 @@ class ReduceScatter(BasicOperation):
         # Perform all-gather
         dy = convert_tensor(grad_output, memory_format=torch.contiguous_format)
         dx = None
-        if is_float8_tensor(dy):
+        if isinstance(dy, Float8Tensor):
             dx = Float8Tensor.make_like(
                 dy,
                 data=torch.empty(
@@ -111,6 +108,8 @@ class ReduceScatter(BasicOperation):
                 group=self.process_group,
             )
         else:
+            if isinstance(dy, QuantizedTensor):
+                dy = dy.dequantize()
             dx = torch.empty(input_dims, dtype=dy.dtype, device=dy.device)
             torch.distributed.all_gather_into_tensor(
                 dx,

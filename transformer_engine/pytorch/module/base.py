@@ -897,7 +897,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         cache_name: Optional[str] = None,
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
-        with_transpose: bool = False,
         fsdp_group: dist_group_type = None,
     ) -> Float8Tensor:
         """Get FP8 workspace buffer and maybe update its values
@@ -984,7 +983,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=scale_inv,
                 dtype=tensor.dtype,
-                with_transpose_cache=with_transpose_cache,
                 data_transpose=data_transpose,
             )
 
