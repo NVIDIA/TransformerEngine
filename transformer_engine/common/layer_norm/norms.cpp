@@ -329,6 +329,9 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   const bool fp8_out = is_fp8_dtype(otype);
   const auto ctype = DType::kFloat32;
 
+  _epsilon = epsilon;
+  _scalar_offset = 1.0f;
+
   _graph.set_io_data_type(te2cudnnDtype(itype))
       .set_intermediate_data_type(te2cudnnDtype(ctype))
       .set_compute_data_type(te2cudnnDtype(ctype));
@@ -418,13 +421,13 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   _variant_pack = {
       {x_tensor, x.data.dptr},
       {inv_var_tensor, rsigma->data.dptr},
-      {eps_tensor, const_cast<float*>(&epsilon)},
+      {eps_tensor, reinterpret_cast<void*>(&_epsilon)},
   };
 
-  float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
     _variant_pack.insert(
-        {{one_tensor, const_cast<float*>(&offset_scalar)}, {gamma_zero_tensor, gamma.data.dptr}});
+        {{one_tensor, reinterpret_cast<void*>(&_scalar_offset)},
+        {gamma_zero_tensor, gamma.data.dptr}});
   } else {
     _variant_pack.insert({{gamma_tensor, gamma.data.dptr}});
   }
