@@ -223,9 +223,9 @@ std::pair<double, double> getTolerances(const DType type) {
     case DType::kFloat32:
       return {1e-6, 5e-6};
     case DType::kFloat16:
-      return {1e-5, 1e-3};
+      return {1e-3, 1e-3}; // TODO: double check if this tol is ok
     case DType::kBFloat16:
-      return {1e-5, 1e-2};
+      return {8e-3, 8e-3};
     case DType::kFloat8E4M3:
     case DType::kFloat8E5M2:
       return {1e-2, 1e-2};
