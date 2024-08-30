@@ -3417,12 +3417,12 @@ def reorder_sequence_chunks_for_a2a(x, chunk_ids, seq_dim, cp_size, before_attn)
         # reorder the sequence chunks
         x = torch.index_select(x, dim=seq_dim, index=chunk_ids)
     else:
-        # reorder the sequence chunks
-        x = torch.index_select(x, dim=seq_dim, index=chunk_ids)
-        # [b, cp*2, s//2, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):])
-        # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        # [b, cp*2, s//2, np//cp, hn] -> [cp*2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
         x = x.movedim(seq_dim, 0).contiguous()
+        # reorder the sequence chunks
+        x = torch.index_select(x, dim=0, index=chunk_ids)
+        # [cp*2, b, s//2, np//cp, hn] -> [cp, 2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, 2, s//2, b, np//cp, hn]
+        x = x.view(cp_size, 2, *x.shape[1:])
     return x
 
 
@@ -3463,10 +3463,10 @@ def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group
                 with torch.cuda.stream(cp_stream):
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
-                    # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
-                    x = x.movedim(0, -3).contiguous()
-                    # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
-                    a2a_outputs[i - 2] = x.view(*x.shape[:-3], -1, x.shape[-1])
+                    # [cp, 2, b, s//2, np//cp, hn] -> [b, 2, s//2, cp, np//cp, hn] or [cp, 2, s//2, b, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
+                    x = x.movedim(0, -3).movedim(0, seq_dim).contiguous()
+                    # [b, 2, s//2, cp, np//cp, hn] -> [b*s, np, hn] or [2, s//2, b, cp, np//cp, hn] -> [s*b, np, hn]
+                    a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
@@ -3532,6 +3532,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
+        batch_dim = qkv_format.index("b")
         seq_dim = qkv_format.index("s")
         assert (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
@@ -3584,6 +3585,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 ) for x in [q_f16, k_f16, v_f16]
             ]
 
+        batch_size = q.shape[batch_dim]
         if use_fused_attention:
             out, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
@@ -3608,7 +3610,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fp8_meta_kwargs,
             )
         else:
-            ctx.batch_size = q.shape[0]
             # [b, cp*s, np//cp, hn] -> [b*cp*s, np//cp, hn]
             q, k, v = [x.view(-1, *x.shape[-2:]) for x in [q, k, v]]
             (
@@ -3636,13 +3637,17 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             )
             aux_ctx_tensors = [softmax_lse, rng_state]
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
-            out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+            out = out.view(batch_size, -1, *out.shape[-2:])
 
         out = flash_attn_a2a_communicate(out, chunk_ids[1], seq_dim, cp_size, cp_group, cp_stream, False)
 
-        if not use_fused_attention:
-            # [b, s, np, hn] -> [b*s, np, hn]
-            out = out.view(-1, *out.shape[-2:])
+        if use_fused_attention:
+            if qkv_format == "bshd":
+                # [b*s, np, hn] -> [b, s, np, hn]
+                out = out.view(batch_size, -1, *out.shape[-2:])
+            elif qkv_format == "sbhd":
+                # [s*b, np, hn] -> [s, b, np, hn]
+                out = out.view(-1, batch_size, *out.shape[-2:])
 
         if fp8:
             if fp8_meta["recipe"].fp8_mha:
@@ -3707,6 +3712,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fp8_fwd_scale_invs,
             *aux_ctx_tensors,
         )
+        ctx.batch_size = batch_size
         ctx.cp_group = cp_group
         ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
@@ -3844,6 +3850,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
 
         dq, dk, dv = flash_attn_a2a_communicate([dq, dk, dv], chunk_ids[1], seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, False)
+
+        if ctx.qkv_format == "bshd":
+            dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
+        elif ctx.qkv_format == "sbhd":
+            dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
         if ctx.fp8:
             if ctx.fp8_meta["recipe"].fp8_mha:
