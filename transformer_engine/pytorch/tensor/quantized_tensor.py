@@ -164,5 +164,9 @@ class QuantizedTensor(torch.Tensor):
         out = super().__torch_dispatch__(func, types, args, kwargs)
         return out
 
-    # Do not force the QuantizedTensor type on the returned tensor
-    __torch_function__ = classmethod(torch._C._disabled_torch_function_impl)
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        # Do not force the QuantizedTensor type on the returned tensor
+        return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
