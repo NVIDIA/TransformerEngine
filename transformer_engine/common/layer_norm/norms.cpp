@@ -367,6 +367,7 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
                                    .set_name("one")
                                    .set_dim({1, 1, 1, 1})
                                    .set_stride({1, 1, 1, 1})
+                                   .set_data_type(te2cudnnDtype(wtype))
                                    .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
@@ -425,9 +426,8 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   };
 
   if (zero_centered_gamma) {
-    _variant_pack.insert(
-        {{one_tensor, reinterpret_cast<void*>(&_scalar_offset)},
-        {gamma_zero_tensor, gamma.data.dptr}});
+    _variant_pack.insert({{one_tensor, reinterpret_cast<void*>(&_scalar_offset)},
+                          {gamma_zero_tensor, gamma.data.dptr}});
   } else {
     _variant_pack.insert({{gamma_tensor, gamma.data.dptr}});
   }
@@ -464,6 +464,8 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   const auto otype = gamma.data.dtype;
   const auto wtype = gamma.data.dtype;
   const auto ctype = DType::kFloat32;
+
+  this->_scalar_offset = 1.0f;
 
   _graph.set_io_data_type(te2cudnnDtype(x.data.dtype))
       .set_intermediate_data_type(te2cudnnDtype(ctype))
@@ -503,6 +505,7 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                    .set_name("one")
                                    .set_dim({1, 1, 1, 1})
                                    .set_stride({1, 1, 1, 1})
+                                   .set_data_type(te2cudnnDtype(wtype))
                                    .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
@@ -538,7 +541,8 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
     NormBwdCudnn<NormEnum>::_variant_pack.insert(
-        {{one_tensor, const_cast<float*>(&offset_scalar)}, {gamma_zero_tensor, gamma.data.dptr}});
+        {{one_tensor, reinterpret_cast<void*>(&this->_scalar_offset)},
+         {gamma_zero_tensor, gamma.data.dptr}});
   } else {
     NormBwdCudnn<NormEnum>::_variant_pack.insert({{gamma_tensor, gamma.data.dptr}});
   }
