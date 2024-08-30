@@ -3423,21 +3423,11 @@ def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [], []
     if before_attn:
-        for i in range(len(a2a_inputs) + 1):
-            if i < len(a2a_inputs):
-                x = a2a_inputs[i]
-                # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-                x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
-                # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-                x = x.movedim(-3, 0).contiguous()
-                x_ = torch.empty_like(x)
-                a2a_outputs.append(x_)
-                a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
-                a2a_reqs.append(a2a_req)
-            if i > 0:
+        for i in range(len(a2a_inputs) + 2):
+            if i > 1:
                 with torch.cuda.stream(cp_stream):
-                    a2a_reqs[i - 1].wait()
-                    x = a2a_outputs[i - 1]
+                    a2a_reqs[i - 2].wait()
+                    x = a2a_outputs[i - 2]
                     # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
                     x = x.movedim(0, seq_dim).contiguous()
                     # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
@@ -3446,9 +3436,22 @@ def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group
                     x = torch.index_select(x, dim=seq_dim, index=chunk_ids)
                     # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
                     x = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim+2):])
-                    a2a_outputs[i - 1] = x
+                    a2a_outputs[i - 2] = x
+            if i > 0 and i < len(a2a_inputs) + 1:
+                x = a2a_inputs[i-1]
+                x_ = torch.empty_like(x)
+                a2a_outputs.append(x_)
+                a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
+                a2a_reqs.append(a2a_req)
+            if i < len(a2a_inputs):
+                x = a2a_inputs[i]
+                # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+                x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
+                # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                x = x.movedim(-3, 0).contiguous()
+                a2a_inputs[i] = x
     else:
-        for i in range(len(a2a_inputs) + 1):
+        for i in range(len(a2a_inputs) + 2):
             if i < len(a2a_inputs):
                 x = a2a_inputs[i]
                 # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
@@ -3459,19 +3462,22 @@ def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group
                 x = x.view(*x.shape[:seq_dim], cp_size, -1, *x.shape[(seq_dim+2):])
                 # [b, cp, s, np//cp, hn] -> [cp, b, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
                 x = x.movedim(seq_dim, 0).contiguous()
+                a2a_inputs[i] = x
+            if i > 0 and i < len(a2a_inputs) + 1:
+                x = a2a_inputs[i - 1]
                 x_ = torch.empty_like(x)
                 a2a_outputs.append(x_)
                 a2a_req = torch.distributed.all_to_all_single(x_, x, group=cp_group, async_op=True)
                 a2a_reqs.append(a2a_req)
-            if i > 0:
+            if i > 1:
                 with torch.cuda.stream(cp_stream):
-                    a2a_reqs[i - 1].wait()
-                    x = a2a_outputs[i - 1]
+                    a2a_reqs[i - 2].wait()
+                    x = a2a_outputs[i - 2]
                     # [cp, b, s, np//cp, hn] -> [b, s, cp, np//cp, hn] or [cp, s, b, np//cp, hn] -> [s, b, cp, np//cp, hn]
                     x = x.movedim(0, -3).contiguous()
                     # [b, s, cp, np//cp, hn] -> [b, s, np, hn] or [s, b, cp, np//cp, hn] -> [s, b, np, hn]
                     x = x.view(*x.shape[:-3], -1, x.shape[-1])
-                    a2a_outputs[i - 1] = x
+                    a2a_outputs[i - 2] = x
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
