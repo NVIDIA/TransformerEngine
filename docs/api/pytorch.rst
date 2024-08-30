@@ -44,3 +44,7 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 
 .. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
+
+.. autoapifunction:: transformer_engine.pytorch.moe_permute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_unpermute
