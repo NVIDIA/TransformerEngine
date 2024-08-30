@@ -1531,10 +1531,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
-                    if int(os.getenv("NVTE_CP_CORRECTION_IN_FP32", "1")):
-                        cp_correction_dtype = torch.float32
-                    else:
-                        cp_correction_dtype = q_fp8.dtype
                 else:
                     q_f16, k_f16, v_f16 = q, k, v
                     q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
@@ -1543,10 +1539,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
                             for x in [k_f16, v_f16]
                         ]
-                    if int(os.getenv("NVTE_CP_CORRECTION_IN_FP32", "1")):
-                        cp_correction_dtype = torch.float32
-                    else:
-                        cp_correction_dtype = q_f16.dtype
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
                 fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
@@ -2051,7 +2043,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             fp8_meta["scaling_fwd"],
                             META_O_CP,
                             fp8_dtype_forward,
-                            TE_DType[cp_correction_dtype],
+                            TE_DType[torch.float32],
                         )
                     if i == 1:
                         out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
@@ -2272,10 +2264,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
                 dout_dtype = dout.dtype
-                if int(os.getenv("NVTE_CP_CORRECTION_IN_FP32", "1")):
-                    cp_correction_dtype = torch.float32
-                else:
-                    cp_correction_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
@@ -2878,7 +2866,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     ctx.fp8_meta["scaling_bwd"],
                     META_DQKV_CP,
                     fp8_dtype_backward,
-                    TE_DType[cp_correction_dtype],
+                    TE_DType[torch.float32],
                 )
                 for x in [dq_fp8, dkv_fp8]
             ]
