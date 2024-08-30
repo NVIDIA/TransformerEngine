@@ -329,8 +329,10 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   const bool fp8_out = is_fp8_dtype(otype);
   const auto ctype = DType::kFloat32;
 
+  _scalar_offset = std::make_unique<char[]>(typeToSize(wtype));
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_offset.get())) = (cpp_dtype)1.0f;);
   _epsilon = epsilon;
-  _scalar_offset = 1.0f;
 
   _graph.set_io_data_type(te2cudnnDtype(itype))
       .set_intermediate_data_type(te2cudnnDtype(ctype))
@@ -426,7 +428,7 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
   };
 
   if (zero_centered_gamma) {
-    _variant_pack.insert({{one_tensor, reinterpret_cast<void*>(&_scalar_offset)},
+    _variant_pack.insert({{one_tensor, reinterpret_cast<void*>(_scalar_offset.get())},
                           {gamma_zero_tensor, gamma.data.dptr}});
   } else {
     _variant_pack.insert({{gamma_tensor, gamma.data.dptr}});
@@ -465,7 +467,10 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   const auto wtype = gamma.data.dtype;
   const auto ctype = DType::kFloat32;
 
-  this->_scalar_offset = 1.0f;
+  this->_scalar_offset = std::make_unique<char[]>(typeToSize(wtype));
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      wtype, cpp_dtype,
+      *(reinterpret_cast<cpp_dtype*>(this->_scalar_offset.get())) = (cpp_dtype)1.0f;);
 
   _graph.set_io_data_type(te2cudnnDtype(x.data.dtype))
       .set_intermediate_data_type(te2cudnnDtype(ctype))
@@ -541,7 +546,7 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
   float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
     NormBwdCudnn<NormEnum>::_variant_pack.insert(
-        {{one_tensor, reinterpret_cast<void*>(&this->_scalar_offset)},
+        {{one_tensor, reinterpret_cast<void*>(this->_scalar_offset.get())},
          {gamma_zero_tensor, gamma.data.dptr}});
   } else {
     NormBwdCudnn<NormEnum>::_variant_pack.insert({{gamma_tensor, gamma.data.dptr}});

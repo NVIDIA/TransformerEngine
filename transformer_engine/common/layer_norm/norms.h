@@ -369,8 +369,9 @@ class NormFwdCudnn : public NormBase {
       _variant_pack;
   cudnnHandle_t _handle;
   void* _workspace;
+
   float _epsilon;
-  float _scalar_offset;
+  std::unique_ptr<char[]> _scalar_offset;
 };
 
 template <NVTE_NORM_TYPE NormEnum>
