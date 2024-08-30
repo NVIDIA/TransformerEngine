@@ -3657,7 +3657,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         fp8_meta_index=META_QKV,
                         fp8_dtype=fp8_dtype_forward,
                         dtype=out_fp8.dtype,
-                    ) for x, x_fp8 in [q, k, v]
+                    ) for x in [q, k, v]
                 ]
                 q_save, k_save, v_save, out_save = q_fp8, k_fp8, v_fp8, out_fp8
             else:
