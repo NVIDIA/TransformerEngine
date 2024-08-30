@@ -475,4 +475,12 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
 
+/***************************************************************************************************
+ * padding
+ **************************************************************************************************/
+
+void fused_multi_row_padding(at::Tensor input, at::Tensor output,
+                             std::vector<size_t> input_row_list,
+                             std::vector<size_t> padded_input_row_list);
+
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
