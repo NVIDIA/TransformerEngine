@@ -6,7 +6,7 @@ set -e
 
 : "${TE_PATH:=/opt/transformerengine}"
 
-pip install wheel
+pip install wheel pydantic
 
 cd $TE_PATH
 pip uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-paddle
