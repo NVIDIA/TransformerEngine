@@ -150,7 +150,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   Tensor dx({ N, H }, itype);
   Tensor dgamma({ H }, wtype);
   Tensor dbeta({ H }, wtype);
-  Tensor workspace, barrier, dgamma_part, dbeta_part;
+  Tensor workspace_fwd, workspace_bwd, barrier, dgamma_part, dbeta_part;
 
   fillUniform(&input);
   fillUniform(&gamma);
@@ -173,12 +173,12 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   auto fwd_function = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
                z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-               workspace.data(), barrier.data());
-  workspace = Tensor(workspace.shape(), workspace.dtype());
+               workspace_fwd.data(), barrier.data());
+  workspace_fwd = Tensor(workspace_fwd.shape(), workspace_fwd.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   fwd_function(input.data(), gamma.data(), beta.data(), epsilon,
                z.data(), mu.data(), rsigma.data(), 0, prop.multiProcessorCount,
-               workspace.data(), barrier.data());
+               workspace_fwd.data(), barrier.data());
 
   // Backward kernel
   auto bwd_function = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
@@ -187,8 +187,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                dx.data(), dgamma.data(), dbeta.data(),
                dgamma_part.data(), dbeta_part.data(),
                0, prop.multiProcessorCount,
-               workspace.data(), barrier.data());
-  workspace = Tensor(workspace.shape(), workspace.dtype());
+               workspace_bwd.data(), barrier.data());
+  workspace_bwd = Tensor(workspace_bwd.shape(), workspace_bwd.dtype());
   barrier = Tensor(barrier.shape(), barrier.dtype());
   dgamma_part = Tensor(dgamma_part.shape(), dgamma_part.dtype());
   dbeta_part = Tensor(dbeta_part.shape(), dbeta_part.dtype());
@@ -197,7 +197,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
                dx.data(), dgamma.data(), dbeta.data(),
                dgamma_part.data(), dbeta_part.data(),
                0, prop.multiProcessorCount,
-               workspace.data(), barrier.data());
+               workspace_bwd.data(), barrier.data());
 
   // Reference implementations
   // use the GPU stats to tighten the tolerances
@@ -290,10 +290,8 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     LNTestSuite,
     ::testing::Combine(
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
-        ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<LNTestSuite::ParamType>& info) {

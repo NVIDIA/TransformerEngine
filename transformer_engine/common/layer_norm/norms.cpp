@@ -532,7 +532,7 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
     auto ret =
         _graph.rmsnorm_backward(dz_tensor, x_tensor, gamma_tensor, inv_var_tensor, norm_options);
     std::tie(dx_tensor, dgamma_tensor, dbeta_tensor) = std::make_tuple(ret[0], ret[1], ret[2]);
-    if (dgamma_tensor != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
+    if (dbeta_tensor != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
   }
   dx_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
   dgamma_tensor->set_output(true).set_data_type(te2cudnnDtype(otype));
@@ -589,8 +589,7 @@ void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier, Tensor* 
   Norm.initialize();
 
   // Populate shape and dtypes for FW to allocate memory
-  void* test_ptr = IF_TE_BWD_NORMS<NormEnum>() ? dgamma_part->data.dptr : workspace->data.dptr;
-  if (test_ptr == nullptr) {
+  if (workspace->data.dptr == nullptr) {
     if constexpr (IF_TE_BWD_NORMS<NormEnum>()) {
       NVTE_CHECK(dgamma_part->data.dptr == nullptr);
       dgamma_part->data.dtype = DType::kFloat32;
