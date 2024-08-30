@@ -57,15 +57,11 @@ def convert_tensor(
             memory_format=memory_format
         ):
             data = data.contiguous(memory_format=memory_format)
-        data_transpose = None
-        if tensor._transpose is not None:
-            data_transpose = tensor._data.to(device=device)
         return Float8Tensor.make_like(
             tensor,
             data=data,
             fp8_attrs=tensor._fp8_attrs,
             dtype=dtype,
-            data_transpose=data_transpose,
         )
 
     # Convert standard PyTorch tensor

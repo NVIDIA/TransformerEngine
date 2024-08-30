@@ -376,8 +376,10 @@ class Float8Tensor(QuantizedTensor):
         # Note: We store FP8 attributes in a dictionary so we can
         # share them between tensors with the same data, e.g. detached
         # tensors.
-        self._fp8_attrs: dict = {}
-        if fp8_attrs is not None:
+        self._fp8_attrs: dict
+        if fp8_attrs is None:
+            self._fp8_attrs = {}
+        else:
             self._fp8_attrs = fp8_attrs
             return self
 
@@ -689,7 +691,6 @@ class Float8Tensor(QuantizedTensor):
             self,
             data=self._data,
             fp8_attrs=self._fp8_attrs,
-            data_transpose=self._transpose,
         )
 
     def clone(self) -> Float8Tensor:
@@ -864,7 +865,6 @@ class Float8Tensor(QuantizedTensor):
             data=self._data,
             fp8_attrs=self._fp8_attrs,
             dtype=dtype,
-            data_transpose=self._transpose,
         )
 
     def _reset_caches(self) -> None:
@@ -899,11 +899,7 @@ class Float8Tensor(QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(
-                tensor,
-                data=data_view,
-                fp8_attrs=tensor._fp8_attrs,
-            )
+            return Float8Tensor.make_like(tensor, data=data_view)
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)

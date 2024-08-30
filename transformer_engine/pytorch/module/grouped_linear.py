@@ -752,13 +752,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                     with_transpose = True
                 for i in range(self.num_gemms):
                     if isinstance(weight_tensors[i], Float8Tensor):
-                        # Fill transpose cache in FP8 tensor if needed
-                        update_transpose_cache = with_transpose
-                        if update_transpose_cache:
-                            update_transpose_cache = (
-                                is_first_microbatch or skip_fp8_weight_update is not None
-                            )
-                        if update_transpose_cache:
+                        # Make sure transpose cache is valid, if present
+                        # Note: Transpose cache may have been invalidated
+                        # externally, e.g. by optimizer.
+                        if weight_tensors[i]._transpose is not None:
                             weight_tensors[i].transpose_2d(
                                 fill_cache=True,
                                 noop_flag=skip_fp8_weight_update,
@@ -773,7 +770,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                             cache_name=(None if is_first_microbatch is None else f"weight{i}"),
                             update_workspace=update_workspace,
                             skip_update_flag=skip_fp8_weight_update,
-                            with_transpose=with_transpose,
                         )
 
             from ..cpu_offload import CPUOffloadEnabled
