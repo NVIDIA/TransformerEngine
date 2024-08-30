@@ -166,9 +166,12 @@ void te_grouped_gemm_single_output(
         makeTransformerEngineTensor(dptr, shape, dtype, amax_dptr, scale_dptr, scale_inv_dptr));
     return tensor_wrappers.back().data();
   };
+  NVTE_CHECK(D.is_contiguous(), "D must be contiguous.");
   void* d_i_ptr = reinterpret_cast<void*>(D.data_ptr());
   for (size_t i = 0; i < A.size(); i++) {
     if (m_splits[i] == 0) continue;
+    NVTE_CHECK(A[i].is_contiguous(), "A[", i, "] must be contiguous.");
+    NVTE_CHECK(B[i].is_contiguous(), "B[", i, "] must be contiguous.");
     te_A.emplace_back(make_tensor(
         A[i].data_ptr(), {static_cast<size_t>(A[i].size(0)), static_cast<size_t>(A[i].size(1))},
         A_type, nullptr, nullptr, getDataPtr(A_scale_inverse[i], A_offset)));
