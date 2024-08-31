@@ -3977,7 +3977,7 @@ def attn_forward_func_with_cp(
     )
     assert (
         not sliding_window_attn or cp_comm_type == "a2a" or (cp_comm_type == "all_gather" and not use_fused_attention)
-    ), "Context parallel implementation with P2P does not support sliding window attetnion!"
+    ), "The context parallel running configs cannot support sliding window attetnion!"
 
     args = (
         is_training,
