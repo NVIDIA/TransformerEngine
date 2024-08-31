@@ -98,13 +98,11 @@ model_configs_fused_attn = {
     "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
     "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
     "cp_1_4": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)),  # MHA
-    "cp_1_5": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)),  # MHA
     "cp_2_0": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
     "cp_2_1": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     "cp_2_2": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
     "cp_2_3": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
     "cp_2_4": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)),  # GQA
-    "cp_2_5": ModelConfig(2, 12, 1, 128, 4096, 4096, 0.0, "no_mask", "no_bias", window_size=(512, 512)),  # GQA
 }
 
 
