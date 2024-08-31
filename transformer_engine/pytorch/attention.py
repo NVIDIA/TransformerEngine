@@ -3409,6 +3409,7 @@ def get_chunk_ids_for_a2a(cp_size, device):
 
 @torch.compile
 def reorder_sequence_chunks_for_a2a(x, chunk_ids, seq_dim, cp_size, before_attn):
+    """Reorder sequence chunk for A2A communication."""
     if before_attn:
         # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
         x = x.movedim(0, seq_dim).contiguous()
@@ -3426,7 +3427,16 @@ def reorder_sequence_chunks_for_a2a(x, chunk_ids, seq_dim, cp_size, before_attn)
     return x
 
 
-def flash_attn_a2a_communicate(a2a_inputs, chunk_ids, seq_dim, cp_size, cp_group, cp_stream, before_attn):
+def flash_attn_a2a_communicate(
+    a2a_inputs: Union[torch.Tensor, List[torch.Tensor]],
+    chunk_ids: torch.Tensor,
+    seq_dim: int,
+    cp_size: int,
+    cp_group: dist_group_type,
+    cp_stream: torch.cuda.Stream,
+    before_attn: bool,
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """A2A communication for context parallelism."""
     a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     if before_attn:
