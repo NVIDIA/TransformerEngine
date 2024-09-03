@@ -4,6 +4,7 @@
 
 """FW agnostic user-end APIs"""
 
+import sys
 import glob
 import sysconfig
 import subprocess
@@ -13,6 +14,16 @@ import platform
 from pathlib import Path
 
 import transformer_engine
+
+
+def is_package_installed(package):
+    """Checks if a pip package is installed."""
+    return (
+        subprocess.run(
+            [sys.executable, "-m", "pip", "show", package], capture_output=True, check=False
+        ).returncode
+        == 0
+    )
 
 
 def get_te_path():

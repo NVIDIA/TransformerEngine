@@ -296,7 +296,7 @@ def install_and_import(package):
     globals()[main_package] = importlib.import_module(main_package)
 
 
-def uninstall_te_fw_packages():
+def uninstall_te_wheel_packages():
     subprocess.check_call(
         [
             sys.executable,
@@ -304,6 +304,7 @@ def uninstall_te_fw_packages():
             "pip",
             "uninstall",
             "-y",
+            "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_paddle",
             "transformer_engine_jax",
