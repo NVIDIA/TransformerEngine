@@ -3241,9 +3241,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     out_ = out_per_step[i]
                     dout_ = dout.select(seq_dim, i).contiguous().view(out_.shape)
                     if ctx.use_fused_attention:
-                        dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
-                            torch.empty_like(x) for x in [q_, k_, v_]
-                        ]
                         aux_ctx_tensors = [softmax_lse_per_step[i], rng_states[i]]
                         dq_per_step[i], dk_per_step[i], dv_per_step[i], _ = fused_attn_bwd(
                             ctx.max_seqlen_q,
