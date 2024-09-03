@@ -115,6 +115,11 @@ void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int 
       if (pre_gelu_out[i].data_ptr() != nullptr) pre_gelu_out[i].zero_();
       continue;
     }
+
+    NVTE_CHECK(A[i].is_contiguous(), "A[", i, "] must be contiguous.");
+    NVTE_CHECK(B[i].is_contiguous(), "B[", i, "] must be contiguous.");
+    NVTE_CHECK(D[i].is_contiguous(), "D[", i, "] must be contiguous.");
+
     te_A.emplace_back(make_tensor(
         A[i].data_ptr(), {static_cast<size_t>(A[i].size(0)), static_cast<size_t>(A[i].size(1))},
         A_type, nullptr, nullptr, getDataPtr(A_scale_inverse, A_offset + i)));
