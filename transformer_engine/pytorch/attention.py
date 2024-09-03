@@ -3025,6 +3025,20 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
 
+        # [b, s, np, hn] or [s, b, np, hn] -> [s, b, np, hn]
+        k, v = [x.movedim(seq_dim, 0).contiguous() for x in [k, v]]
+
+        # [s, b, np, hn] -> [cp, s, b, np, hn]
+        k_ag, _ = gather_along_first_dim(k, cp_group)
+        v_ag, _ = gather_along_first_dim(v, cp_group)
+        cp_stream.wait_stream(torch.cuda.current_stream())
+
+        # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
+        q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim+1):])
+        # [cp, s, b, np, hn] -> [cp*2, s//2, b, np, hn]
+        k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
+        v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
+
         max_seqlen_q = max_seqlen_q // (2 * cp_size)
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
@@ -3032,24 +3046,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
         cu_seqlens_kv_padded = cu_seqlens_kv_padded // (2 * cp_size)
 
-        if causal:
-            if qkv_format == "bshd":
-                # [b, s, np, hn] -> [b, 2, s//2, np, hn]
-                q = q.view(q.shape[0], 2, q.shape[1] // 2, *q.shape[2:])
-                # [b, s, np, hn] -> [s, b, np, hn]
-                k, v = [x.transpose(0, 1).contiguous() for x in [k, v]]
-            elif qkv_format == "sbhd":
-                # [s, b, np, hn] -> [2, s//2, b, np, hn]
-                q = q.view(2, q.shape[0] // 2, *q.shape[1:])
-
         # create two streams to resolve wave quantization issue of Flash Attn in each step
         flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
-
-        k_ag, _ = gather_along_first_dim(k, cp_group)
-        v_ag, _ = gather_along_first_dim(v, cp_group)
-        cp_stream.wait_stream(torch.cuda.current_stream())
-        k_ag = k_ag.view(2 * cp_size, k.shape[0] // 2, *k.shape[1:])
-        v_ag = v_ag.view(2 * cp_size, v.shape[0] // 2, *v.shape[1:])
 
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
         chunk_ids_for_kv_ag_per_step = [None, None]
@@ -3075,32 +3073,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     )
                     chunk_ids_for_kv_ag_per_step[i] = chunk_ids_for_kv_ag
                     num_kv_chunks = chunk_ids_for_kv_ag.numel()
-                    if qkv_format == "bshd":
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                        q_ = q[:, i].contiguous()
-                        # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
-                        k_ = (
-                            torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-                            .movedim(2, 0)
-                            .contiguous()
-                            .view(k.shape[1], -1, *k.shape[-2:])
-                        )
-                        v_ = (
-                            torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
-                            .movedim(2, 0)
-                            .contiguous()
-                            .view(v.shape[1], -1, *v.shape[-2:])
-                        )
-                    elif qkv_format == "sbhd":
-                        # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                        q_ = q[i].contiguous()
-                        # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
-                        k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag).view(
-                            -1, *k.shape[-3:]
-                        )
-                        v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag).view(
-                            -1, *v.shape[-3:]
-                        )
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q.select(seq_dim, i).contiguous()
+                    # [cp*2, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn] or [num_kv_chunks*sq//2, b, np, hn]
+                    k_, v_ = [
+                        torch.index_select(x, dim=0, index=chunk_ids_for_kv_ag).view(-1, *x.shape[-3:]).movedim(0, seq_dim).contiguous() for x in [k_ag, v_ag]
+                    ]
                     if use_fused_attention:
                         out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
                             is_training,
@@ -3145,10 +3123,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
             if i > 0:
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
-                    if qkv_format == "bshd":
-                        out[:, i - 1].copy_(out_per_step[i - 1].view_as(out[:, i - 1]))
-                    elif qkv_format == "sbhd":
-                        out[i - 1].copy_(out_per_step[i - 1].view_as(out[i - 1]))
+                    out.select(seq_dim, i-1).copy_(out_per_step[i - 1].view(out.select(seq_dim, i-1).shape))
 
         torch.cuda.current_stream().wait_stream(cp_stream)
 
@@ -3200,9 +3175,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         softmax_lse_per_step = ctx.saved_tensors[11:13]
         rng_states = ctx.saved_tensors[13:15]
 
+        seq_dim = ctx.qkv_format.index("s")
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
 
-        dout = dout.view_as(q)
+        dout = dout.view(q.shape)
         dq = torch.empty_like(q)
         dk = torch.zeros(
             (2 * cp_size, k.shape[0] // 2, *k.shape[1:]), dtype=k.dtype, device=k.device
@@ -3236,35 +3212,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 with torch.cuda.stream(flash_attn_streams[i]):
                     chunk_ids_for_kv_ag = chunk_ids_for_kv_ag_per_step[i]
                     num_kv_chunks = chunk_ids_for_kv_ag.numel()
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q.select(seq_dim, i).contiguous()
+                    # [cp*2, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn] or [num_kv_chunks*sq//2, b, np, hn]
+                    k_, v_ = [
+                        torch.index_select(x, dim=0, index=chunk_ids_for_kv_ag).view(-1, *x.shape[-3:]).movedim(0, seq_dim).contiguous() for x in [k_ag, v_ag]
+                    ]
                     out_ = out_per_step[i]
-                    if ctx.qkv_format == "bshd":
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                        q_ = q[:, i].contiguous()
-                        # [num_kv_chunks, sq//2, b, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
-                        k_ = (
-                            torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-                            .movedim(2, 0)
-                            .contiguous()
-                            .view(k.shape[1], -1, *k.shape[-2:])
-                        )
-                        v_ = (
-                            torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
-                            .movedim(2, 0)
-                            .contiguous()
-                            .view(v.shape[1], -1, *v.shape[-2:])
-                        )
-                        dout_ = dout[:, i].contiguous().view_as(out_)
-                    elif ctx.qkv_format == "sbhd":
-                        # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                        q_ = q[i].contiguous()
-                        # [num_kv_chunks, sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
-                        k_ = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag).view(
-                            -1, *k.shape[-3:]
-                        )
-                        v_ = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag).view(
-                            -1, *v.shape[-3:]
-                        )
-                        dout_ = dout[i].contiguous().view_as(out_)
+                    dout_ = dout.select(seq_dim, i).contiguous().view(out_.shape)
                     if ctx.use_fused_attention:
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
@@ -3295,6 +3250,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             deterministic=ctx.deterministic,
                         )
                     else:
+                        batch_size = k_.shape[0]
                         q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
@@ -3320,34 +3276,28 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             rng_state=rng_states[i],
                             **fa_optional_backward_kwargs,
                         )
+                        # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
+                        dq_per_step[i] = dq_per_step[i].view(dq[:, i].shape)
+                        # [b*num_kv_chunks*sq//2, np, hn] -> [b, num_kv_chunks*sq//2, np, hn]
+                        dk_per_step[i], dv_per_step[i] = [
+                            x.view(
+                                batch_size, -1, *x.shape[-2:]
+                            ) for x in [dk_per_step[i], dv_per_step[i]]
+                        ]
 
             if i > 0:
                 with torch.cuda.stream(flash_attn_streams[i - 1]):
                     chunk_ids_for_kv_ag = chunk_ids_for_kv_ag_per_step[i - 1]
                     num_kv_chunks = chunk_ids_for_kv_ag.numel()
-                    if ctx.qkv_format == "bshd":
-                        dq[:, i - 1].copy_(dq_per_step[i - 1].view_as(dq[:, i - 1]))
-                        dk_per_step[i - 1] = (
-                            dk_per_step[i - 1]
-                            .view(k.shape[1], num_kv_chunks, -1, *k.shape[-2:])
-                            .movedim(0, 2)
-                            .contiguous()
-                        )
-                        dv_per_step[i - 1] = (
-                            dv_per_step[i - 1]
-                            .view(v.shape[1], num_kv_chunks, -1, *v.shape[-2:])
-                            .movedim(0, 2)
-                            .contiguous()
-                        )
-                    elif ctx.qkv_format == "sbhd":
-                        dq[i - 1].copy_(dq_per_step[i - 1].view_as(dq[i - 1]))
-                        dk_per_step[i - 1] = dk_per_step[i - 1].view(
-                            num_kv_chunks, -1, *k.shape[-3:]
-                        )
-                        dv_per_step[i - 1] = dv_per_step[i - 1].view(
-                            num_kv_chunks, -1, *v.shape[-3:]
-                        )
-
+                    dq.select(seq_dim, i-1).copy_(dq_per_step[i-1])
+                    # [b, num_kv_chunks*sq//2, np, hn] or [num_kv_chunks*sq//2, b, np, hn] -> [num_kv_chunks*sq//2, b, np, hn]
+                    dk_per_step[i - 1], dv_per_step[i - 1] = [
+                        x.movedim(seq_dim, 0).contiguous() for x in [dk_per_step[i-1], dv_per_step[i-1]]
+                    ]
+                    # [num_kv_chunks*sq//2, b, np, hn] -> [num_kv_chunks, sq//2, b, np, hn]
+                    dk_per_step[i - 1], dv_per_step[i - 1] = [
+                        x.view(num_kv_chunks, -1, *x.shape[-3:]) for x in [dk_per_step[i-1], dv_per_step[i-1]]
+                    ]
                     # wait until dkv update of last step is done
                     if i > 1:
                         flash_attn_streams[i - 1].wait_event(dkv_update_done)
@@ -3363,12 +3313,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dk, _ = reduce_scatter_along_first_dim(dk, ctx.cp_group)
         dv, _ = reduce_scatter_along_first_dim(dv, ctx.cp_group)
 
-        if ctx.qkv_format == "bshd":
-            dq = dq.view(dq.shape[0], -1, *dq.shape[-2:])
-            dk = dk.transpose(0, 1).contiguous()
-            dv = dv.transpose(0, 1).contiguous()
-        elif ctx.qkv_format == "sbhd":
-            dq = dq.view(-1, *dq.shape[-3:])
+        dq = dq.view(*dq.shape[:seq_dim], -1, *dq.shape[(seq_dim+2):])
+        dk = dk.movedim(0, seq_dim).contiguous()
+        dv = dv.movedim(0, seq_dim).contiguous()
 
         return (
             None,
