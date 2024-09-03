@@ -1835,8 +1835,14 @@ void fused_attn_fp8_fwd_impl_v1(
       generateMatrixStrides(b, h, s_q, s_kv, d, o_stride.data(), layout,
                             NVTE_QKV_Matrix::NVTE_O_Matrix);
       O->set_output(true).set_dim({b, h, s_q, d}).set_stride(o_stride);
-      amax_o->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-      amax_s->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+      amax_o->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
+      amax_s->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
 
       Stats->set_output(true)
           .set_data_type(fe::DataType_t::FLOAT)
@@ -2182,10 +2188,22 @@ void fused_attn_fp8_bwd_impl_v1(
       dQ->set_output(true).set_dim({b, h, s_q, d}).set_stride(q_stride);
       dK->set_output(true).set_dim({b, hg, s_kv, d}).set_stride(k_stride);
       dV->set_output(true).set_dim({b, hg, s_kv, d}).set_stride(v_stride);
-      amax_dQ->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-      amax_dK->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-      amax_dV->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
-      amax_dP->set_output(true).set_dim({1, 1, 1, 1}).set_data_type(fe::DataType_t::FLOAT);
+      amax_dQ->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
+      amax_dK->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
+      amax_dV->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
+      amax_dP->set_output(true)
+          .set_dim({1, 1, 1, 1})
+          .set_stride({1, 1, 1, 1})
+          .set_data_type(fe::DataType_t::FLOAT);
 
       dO->set_data_type(bwd_tensor_type);
       dQ->set_data_type(bwd_tensor_type);

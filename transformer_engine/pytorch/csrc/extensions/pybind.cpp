@@ -10,6 +10,12 @@
 #include "../extensions.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // Permutation functions
+  m.def("moe_permute_fwd", moe_permute_fwd);
+  m.def("moe_permute_bwd", moe_permute_bwd);
+  m.def("moe_unpermute_fwd", moe_unpermute_fwd);
+  m.def("moe_unpermute_bwd", moe_unpermute_bwd);
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
@@ -189,6 +195,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "performed for L2 norm computation, and tensors are not updated)",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_adam_fp8", &multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,

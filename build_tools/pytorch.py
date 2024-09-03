@@ -10,8 +10,9 @@ import setuptools
 
 from .utils import (
     all_files_in_dir,
-    cuda_version,
+    cuda_archs,
     cuda_path,
+    cuda_version,
 )
 
 
@@ -48,8 +49,6 @@ def setup_pytorch_extension(
     ]
     nvcc_flags = [
         "-O3",
-        "-gencode",
-        "arch=compute_70,code=sm_70",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -60,6 +59,11 @@ def setup_pytorch_extension(
         "--expt-extended-lambda",
         "--use_fast_math",
     ]
+
+    cuda_architectures = cuda_archs()
+
+    if "70" in cuda_architectures:
+        nvcc_flags.extend(["-gencode", "arch=compute_70,code=sm_70"])
 
     # Version-dependent CUDA options
     try:
@@ -73,12 +77,13 @@ def setup_pytorch_extension(
             (
                 "--threads",
                 os.getenv("NVTE_BUILD_THREADS_PER_JOB", "1"),
-                "-gencode",
-                "arch=compute_80,code=sm_80",
-                "-gencode",
-                "arch=compute_90,code=sm_90",
             )
         )
+
+        if "80" in cuda_architectures:
+            nvcc_flags.extend(["-gencode", "arch=compute_80,code=sm_80"])
+        if "90" in cuda_architectures:
+            nvcc_flags.extend(["-gencode", "arch=compute_90,code=sm_90"])
 
     # Libraries
     library_dirs = []
