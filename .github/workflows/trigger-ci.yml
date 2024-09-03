@@ -33,6 +33,7 @@ jobs:
            || github.actor == 'Oleg-Goncharov'
            || github.actor == 'phu0ngng'
            || github.actor == 'xrennvidia'
+           || github.actor == 'yaox12'
          )
     steps:
       - name: Check if comment is issued by authorized person
