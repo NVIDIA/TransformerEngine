@@ -62,10 +62,6 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
         pytest.skip(
             "CP implementation with KV all-gather does not support THD format yet!"
         )
-    if cp_comm_type == "all_gather" and "causal" not in config.attn_mask_type:
-        pytest.skip(
-            f"CP implementation with KV all-gather does not support {config.attn_mask_type} yet!"
-        )
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip(
             "CP implementation with KV all-gather does not support bias yet!"
@@ -158,10 +154,6 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
     if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip(
             "FP8 attention cannot work with sliding window yet!"
-        )
-    if cp_comm_type == "all_gather" and "causal" not in config.attn_mask_type:
-        pytest.skip(
-            f"CP implementation with KV all-gather does not support {config.attn_mask_type} yet!"
         )
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip(
