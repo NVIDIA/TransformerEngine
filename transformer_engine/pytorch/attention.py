@@ -5643,15 +5643,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
         if CPUOffloadEnabled:
             if ctx.fp8:
-                tensor_list = []
-                for t in fp8_tensors:
-                    tensor_list.append(t)
-                for t in aux_ctx_tensors:
-                    tensor_list.append(t)
+                tensor_list = fp8_tensors.extend(aux_ctx_tensors)
             else:
-                tensor_list = [q, k, v, out_save]
-                for t in aux_ctx_tensors:
-                    tensor_list.append(t)
+                tensor_list = [q, k, v, out_save].extend(aux_ctx_tensors)
 
             qkv_layout = "sbhd_sbhd_sbhd"
             for tensor in tensor_list:
