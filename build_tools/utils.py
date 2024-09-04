@@ -6,12 +6,12 @@
 
 import functools
 import glob
+import importlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import importlib
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
@@ -188,6 +188,11 @@ def cuda_path() -> Tuple[str, str]:
     return cuda_home, nvcc_bin
 
 
+@functools.lru_cache(maxsize=None)
+def cuda_archs() -> str:
+    return os.getenv("NVTE_CUDA_ARCHS", "70;80;89;90")
+
+
 def cuda_version() -> Tuple[int, ...]:
     """CUDA Toolkit version as a (major, minor) tuple."""
     # Query NVCC for version info
@@ -296,7 +301,7 @@ def install_and_import(package):
     globals()[main_package] = importlib.import_module(main_package)
 
 
-def uninstall_te_fw_packages():
+def uninstall_te_wheel_packages():
     subprocess.check_call(
         [
             sys.executable,
@@ -304,6 +309,7 @@ def uninstall_te_fw_packages():
             "pip",
             "uninstall",
             "-y",
+            "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_paddle",
             "transformer_engine_jax",
