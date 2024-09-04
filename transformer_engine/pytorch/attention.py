@@ -2982,7 +2982,7 @@ def get_kv_seq_info_after_all_gather(
         window_size_left = -1
     else:
         seq_start_idx = max(0, local_chunk_end_idx - max_seqlen_q - window_size[0])
-        window_size_left += (seq_end_idx - local_chunk_end_idx)
+        window_size_left = window_size[0] + seq_end_idx - local_chunk_end_idx
 
     seq_range = torch.arange(
         seq_start_idx,
@@ -3034,8 +3034,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
         assert not padding, f"{attn_mask_type} mask type is not supported!"
-        assert (cu_seqlens_q_padded == cu_seqlens_q)
-        assert (cu_seqlens_kv_padded == cu_seqlens_kv)
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -3097,7 +3095,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 with torch.cuda.stream(flash_attn_streams[i]):
                     kv_seq_range_per_step[i], window_size_per_step[i] = \
                     get_kv_seq_info_after_all_gather(
-                        local_seq_chunk_ids[1],
+                        local_seq_chunk_ids[i],
                         cp_size,
                         max_seqlen_q,
                         max_seqlen_kv,
@@ -3176,12 +3174,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_q,
             cu_seqlens_q_padded,
             *kv_seq_range_per_step,
-            *window_size_per_step,
             *cu_seqlens_kv_per_step,
             *out_per_step,
             *softmax_lse_per_step,
             *rng_states,
         )
+        ctx.window_size_per_step = window_size_per_step
         ctx.cp_group = cp_group
         ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
@@ -3200,11 +3198,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = ctx.saved_tensors[:5]
         kv_seq_range_per_step = ctx.saved_tensors[5:7]
-        window_size_per_step = ctx.saved_tensors[7:9]
-        cu_seqlens_kv_per_step = ctx.saved_tensors[9:11]
-        out_per_step = ctx.saved_tensors[11:13]
-        softmax_lse_per_step = ctx.saved_tensors[13:15]
-        rng_states = ctx.saved_tensors[15:17]
+        cu_seqlens_kv_per_step = ctx.saved_tensors[7:9]
+        out_per_step = ctx.saved_tensors[9:11]
+        softmax_lse_per_step = ctx.saved_tensors[11:13]
+        rng_states = ctx.saved_tensors[13:15]
+        window_size_per_step = ctx.window_size_per_step
 
         seq_dim = ctx.qkv_format.index("s")
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
@@ -3341,8 +3339,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dk = dk.view(2 * cp_size, -1, *dk.shape[-3:])
         dv = dv.view(2 * cp_size, -1, *dv.shape[-3:])
         chunk_ids_for_kv_ag = get_seq_chunk_ids_for_reordering(cp_size, dk.device, False)
-        k_ag = torch.index_select(k_ag, dim=0, index=chunk_ids_for_kv_ag)
-        v_ag = torch.index_select(v_ag, dim=0, index=chunk_ids_for_kv_ag)
+        dk = torch.index_select(dk, dim=0, index=chunk_ids_for_kv_ag)
+        dv = torch.index_select(dv, dim=0, index=chunk_ids_for_kv_ag)
         # [cp*2, s//2, b, np, hn] -> [cp*s, b, np, hn]
         dk = dk.view(-1, *dk.shape[-3:])
         dv = dv.view(-1, *dv.shape[-3:])
