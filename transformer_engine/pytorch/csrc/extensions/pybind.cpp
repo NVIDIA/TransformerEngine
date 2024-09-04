@@ -226,8 +226,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-  m.def("device_supports_multicast", &ubuf::device_supports_multicast,
-        py::call_guard<py::gil_scoped_release>());
+  m.def("get_stream_priority_range", &transformer_engine::cuda::stream_priority_range,
+        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);
+
+  m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,
+        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);
 
   m.def("ubuf_built_with_mpi", &ubuf::ubuf_built_with_mpi,
         py::call_guard<py::gil_scoped_release>());
@@ -257,8 +260,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("numranks"), py::arg("mylocal"), py::arg("numlocal"), py::arg("mynode"),
            py::arg("numnodes"), py::arg("tp_size"), py::arg("num_comm_sm"), py::arg("num_cga_size"),
            py::arg("num_splits"), py::arg("set_sm_margin"), py::arg("num_max_streams"),
-           py::arg("atomic_gemm"), py::arg("callbacks"), py::arg("comm_priority") = -1,
-           py::arg("gemm_priority") = -1)
+           py::arg("atomic_gemm"), py::arg("callbacks"), py::arg("comm_priority") = 0,
+           py::arg("gemm_priority") = 0)
       .def("set_comm_priority", &ubuf::UbufCommOverlap::set_comm_priority,
            py::call_guard<py::gil_scoped_release>())
       .def("set_gemm_priority", &ubuf::UbufCommOverlap::set_gemm_priority,
@@ -297,7 +300,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("numnodes"), py::arg("tp_size"), py::arg("num_comm_sm"), py::arg("num_cga_size"),
            py::arg("set_sm_margin"), py::arg("aggregate"), py::arg("num_max_streams"),
            py::arg("is_reduce_scatter"), py::arg("atomic_gemm"), py::arg("use_ce"),
-           py::arg("callbacks"), py::arg("comm_priority") = -1, py::arg("gemm_priority") = -1)
+           py::arg("callbacks"), py::arg("comm_priority") = 0, py::arg("gemm_priority") = 0)
       .def("set_comm_priority", &ubuf::UbufP2PCommOverlap::set_comm_priority,
            py::call_guard<py::gil_scoped_release>())
       .def("set_gemm_priority", &ubuf::UbufP2PCommOverlap::set_gemm_priority,

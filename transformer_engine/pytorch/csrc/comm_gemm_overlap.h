@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
 
+#include <utility>
+
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -22,8 +24,6 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #include "common/common.h"
-#include "common/util/cuda_driver.h"
-#include "common/util/logging.h"
 #include "common/util/system.h"
 #include "extensions.h"
 #include "userbuffers/userbuffers.h"
@@ -36,16 +36,11 @@ using namespace std::placeholders;
 
 namespace ubuf {
 
-bool device_supports_multicast() {
-  int dev, supports_multicast;
-  CUdevice cudev;
-
-  NVTE_CHECK_CUDA(cudaGetDevice(&dev));
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, dev);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &supports_multicast,
-                              CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
-
-  return static_cast<bool>(supports_multicast);
+void set_stream_priority(at::cuda::CUDAStream stream, int priority) {
+  cudaLaunchAttributeValue attributes;
+  attributes.priority = priority;
+  NVTE_CHECK_CUDA(
+      cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
 }
 
 bool ubuf_built_with_mpi() {
@@ -139,6 +134,7 @@ struct UbufBase {
   static inline communicator *_ub_comm{nullptr};
   static inline bool comm_created{false};
 };
+
 struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   int _tp_id;
   int _tp_size;
@@ -162,8 +158,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   UbufCommOverlap(torch::Tensor sample, int myrank, int numranks, int mylocal, int numlocal,
                   int mynode, int numnodes, int tp_size, int num_comm_sm, int comm_cga_size,
                   int num_splits, bool set_sm_margin, int num_max_streams, bool atomic_gemm,
-                  UbufBootstrapCallbacks &callbacks, int comm_priority = -1,
-                  int gemm_priority = -1) {
+                  UbufBootstrapCallbacks &callbacks, int comm_priority = 0,
+                  int gemm_priority = 0) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
@@ -193,7 +189,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       printf("!!! [UB] Register UBuf %d\n", _ub_reg);
     }
 
-    _set_stream_priority(_stream_comm, comm_priority);
+    // if priorities are zero, use max priority for comm and min priority for GEMM
+    if (gemm_priority == 0 && comm_priority == 0)
+      std::tie(gemm_priority, comm_priority) = transformer_engine::cuda::stream_priority_range();
+    set_stream_priority(_stream_comm, comm_priority);
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
       cudaStream_t stream_tmp;
@@ -246,16 +245,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     }
   }
 
-  void _set_stream_priority(at::cuda::CUDAStream stream, int priority) {
-    cudaLaunchAttributeValue attributes = {.priority = priority};
-    NVTE_CHECK_CUDA(
-        cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
-  }
-
-  void set_comm_priority(int priority) { _set_stream_priority(_stream_comm, priority); }
+  void set_comm_priority(int priority) { set_stream_priority(_stream_comm, priority); }
 
   void set_gemm_priority(int priority) {
-    for (auto stream : _stream_compute) _set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) set_stream_priority(stream, priority);
   }
 
   int get_comm_priority() { return _stream_comm.priority(); }
@@ -692,8 +685,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
                      int mynode, int numnodes, int tp_size, int num_comm_sm, int comm_cga_size,
                      bool set_sm_margin, bool aggregate2, int num_max_streams,
                      bool is_reduce_scatter, bool atomic_gemm, bool use_ce,
-                     UbufBootstrapCallbacks &callbacks, int comm_priority = -1,
-                     int gemm_priority = -1) {
+                     UbufBootstrapCallbacks &callbacks, int comm_priority = 0,
+                     int gemm_priority = 0) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {
@@ -741,8 +734,11 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       ubuf_byte_ptr += ubuf_chunk_bytes;
     }
 
-    _set_stream_priority(_stream_send, comm_priority);
-    _set_stream_priority(_stream_recv, comm_priority);
+    // if priorities are zero, use max priority for comm and min priority for GEMM
+    if (gemm_priority == 0 && comm_priority == 0)
+      std::tie(gemm_priority, comm_priority) = transformer_engine::cuda::stream_priority_range();
+    set_stream_priority(_stream_send, comm_priority);
+    set_stream_priority(_stream_recv, comm_priority);
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, tp_size); i++) {
       cudaStream_t stream_tmp;
@@ -814,19 +810,13 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     }
   }
 
-  void _set_stream_priority(at::cuda::CUDAStream stream, int priority) {
-    cudaLaunchAttributeValue attributes = {.priority = priority};
-    NVTE_CHECK_CUDA(
-        cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
-  }
-
   void set_comm_priority(int priority) {
-    _set_stream_priority(_stream_send, priority);
-    _set_stream_priority(_stream_recv, priority);
+    set_stream_priority(_stream_send, priority);
+    set_stream_priority(_stream_recv, priority);
   }
 
   void set_gemm_priority(int priority) {
-    for (auto stream : _stream_compute) _set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) set_stream_priority(stream, priority);
   }
 
   int get_comm_priority() { return _stream_send.priority(); }

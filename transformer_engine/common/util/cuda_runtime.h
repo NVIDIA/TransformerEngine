@@ -38,6 +38,22 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief Minimum and maximum stream priorities supported on device
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return Minimum and maximum stream priorities (zero if device does not support priorities)
+ */
+std::pair<int, int> stream_priority_range(int device_id = -1);
+
+/* \brief Check if device supports CUDA Multicast features
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return Support status for CUDA Multicast for given device ID
+ */
+bool supports_multicast(int device_id = -1);
+
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
