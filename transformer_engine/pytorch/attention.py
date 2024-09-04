@@ -3037,6 +3037,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
         assert not padding, f"{attn_mask_type} mask type is not supported!"
+        if use_fused_attention and causal and "bottom_right" not in attn_mask_type:
+            attn_mask_type = attn_mask_type + "_bottom_right"
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
@@ -3088,6 +3090,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         kv_seq_range_per_step = [None, None]
         window_size_per_step = [None, None]
         cu_seqlens_kv_per_step = [None, None]
+        cu_seqlens_kv_padded_per_step = [None, None]
         out_per_step = [None, None]
         softmax_lse_per_step = [None, None]
         rng_states = [None, None]
@@ -3096,25 +3099,33 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    kv_seq_range_per_step[i], window_size_per_step[i] = \
-                    get_kv_seq_info_after_all_gather(
-                        local_seq_chunk_ids[i],
-                        cp_size,
-                        max_seqlen_q,
-                        max_seqlen_kv,
-                        window_size,
-                        causal,
-                        k.device,
-                    )
-                    attn_mask_type = "causal_bottom_right" if window_size_per_step[i][1] == 0 else "no_mask"
-                    max_seqlen_kv_ = kv_seq_range_per_step[i].shape[0]
-                    cu_seqlens_kv_per_step[i] = _get_full_cu_seqlens(k.shape[1], max_seqlen_kv_, k.device)
                     # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                     q_ = q.select(seq_dim, i).contiguous()
-                    # [cp*s, b, np, hn] -> [b, s_range, np, hn] or [s_range, b, np, hn]
-                    k_, v_ = [
-                        x.movedim(0, seq_dim).index_select(dim=seq_dim, index=kv_seq_range_per_step[i]) for x in [k_ag, v_ag]
-                    ]
+                    if window_size == (-1, -1):
+                        window_size_per_step[i] = (-1, -1)
+                        max_seqlen_kv_ = k_ag.shape[0]
+                        cu_seqlens_kv_per_step[i] = cu_seqlens_kv
+                        cu_seqlens_kv_padded_per_step[i] = cu_seqlens_kv_padded
+                        # [cp*s, b, np, hn] -> [b, cp*s, np, hn] or [cp*s, b, np, hn]
+                        k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_ag, v_ag]]
+                    else:
+                        kv_seq_range_per_step[i], window_size_per_step[i] = \
+                        get_kv_seq_info_after_all_gather(
+                            local_seq_chunk_ids[i],
+                            cp_size,
+                            max_seqlen_q,
+                            max_seqlen_kv,
+                            window_size,
+                            causal,
+                            k.device,
+                        )
+                        max_seqlen_kv_ = kv_seq_range_per_step[i].shape[0]
+                        cu_seqlens_kv_per_step[i] = _get_full_cu_seqlens(k.shape[1], max_seqlen_kv_, k.device)
+                        cu_seqlens_kv_padded_per_step[i] = cu_seqlens_kv_per_step[i]
+                        # [cp*s, b, np, hn] -> [b, s_range, np, hn] or [s_range, b, np, hn]
+                        k_, v_ = [
+                            x.movedim(0, seq_dim).index_select(dim=seq_dim, index=kv_seq_range_per_step[i]) for x in [k_ag, v_ag]
+                        ]
                     if use_fused_attention:
                         out_per_step[i], [softmax_lse_per_step[i], rng_states[i]] = fused_attn_fwd(
                             is_training,
@@ -3134,7 +3145,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             attn_bias_type=attn_bias_type,
                             attn_bias=attn_bias,
                             cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded_per_step[i],
                             window_size=window_size_per_step[i],
                         )
                     else:
@@ -3150,7 +3161,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 max_seqlen_kv_,
                                 dropout_p,
                                 softmax_scale,
-                                causal="causal" in attn_mask_type,
+                                causal=causal,
                                 return_softmax=False,
                                 window_size=window_size_per_step[i],
                                 **fa_optional_forward_kwargs,
@@ -3179,6 +3190,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             cu_seqlens_q_padded,
             *kv_seq_range_per_step,
             *cu_seqlens_kv_per_step,
+            *cu_seqlens_kv_padded_per_step,
             *out_per_step,
             *softmax_lse_per_step,
             *rng_states,
@@ -3191,6 +3203,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.softmax_scale = softmax_scale
         ctx.qkv_format = qkv_format
         ctx.attn_bias_type = attn_bias_type
+        ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         return out
@@ -3203,9 +3216,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = ctx.saved_tensors[:5]
         kv_seq_range_per_step = ctx.saved_tensors[5:7]
         cu_seqlens_kv_per_step = ctx.saved_tensors[7:9]
-        out_per_step = ctx.saved_tensors[9:11]
-        softmax_lse_per_step = ctx.saved_tensors[11:13]
-        rng_states = ctx.saved_tensors[13:15]
+        cu_seqlens_kv_padded_per_step = ctx.saved_tensors[9:11]
+        out_per_step = ctx.saved_tensors[11:13]
+        softmax_lse_per_step = ctx.saved_tensors[13:15]
+        rng_states = ctx.saved_tensors[15:17]
         window_size_per_step = ctx.window_size_per_step
 
         seq_dim = ctx.qkv_format.index("s")
@@ -3250,14 +3264,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    attn_mask_type = "causal_bottom_right" if window_size_per_step[i][1] == 0 else "no_mask"
-                    max_seqlen_kv = kv_seq_range_per_step[i].shape[0]
                     # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
                     q_ = q.select(seq_dim, i).contiguous()
-                    # [cp*s, b, np, hn] -> [b, s_range, np, hn] or [s_range, b, np, hn]
-                    k_, v_ = [
-                        x.movedim(0, seq_dim).index_select(dim=seq_dim, index=kv_seq_range_per_step[i]) for x in [k_ag, v_ag]
-                    ]
+                    if window_size_per_step[i] == (-1, -1) or kv_seq_range_per_step[i].shape[0] == k_ag.shape[0]:
+                        max_seqlen_kv = k_ag.shape[0]
+                        # [cp*s, b, np, hn] -> [b, cp*s, np, hn] or [cp*s, b, np, hn]
+                        k_, v_ = [x.movedim(0, seq_dim).contiguous() for x in [k_ag, v_ag]]
+                    else:
+                        max_seqlen_kv = kv_seq_range_per_step[i].shape[0]
+                        # [cp*s, b, np, hn] -> [b, s_range, np, hn] or [s_range, b, np, hn]
+                        k_, v_ = [
+                            x.movedim(0, seq_dim).index_select(dim=seq_dim, index=kv_seq_range_per_step[i]) for x in [k_ag, v_ag]
+                        ]
                     out_ = out_per_step[i]
                     dout_ = dout.select(seq_dim, i).contiguous().view(out_.shape)
                     if ctx.use_fused_attention:
@@ -3277,11 +3295,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             aux_ctx_tensors,
                             tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen,
                             cu_seqlens_q_padded=cu_seqlens_q_padded,
-                            cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
+                            cu_seqlens_kv_padded=cu_seqlens_kv_padded_per_step[i],
                             attn_scale=ctx.softmax_scale,
                             dropout=ctx.dropout_p,
                             qkv_layout=qkv_layout,
-                            attn_mask_type=attn_mask_type,
+                            attn_mask_type=ctx.attn_mask_type,
                             attn_bias_type=ctx.attn_bias_type,
                             window_size=window_size_per_step[i],
                             deterministic=ctx.deterministic,
@@ -3308,7 +3326,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_kv,
                             ctx.dropout_p,
                             ctx.softmax_scale,
-                            "causal" in attn_mask_type,
+                            "causal" in ctx.attn_mask_type,
                             window_size=window_size_per_step[i],
                             rng_state=rng_states[i],
                             **fa_optional_backward_kwargs,
@@ -3332,8 +3350,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     # wait until dkv update of last step is done
                     if i > 1:
                         flash_attn_streams[i - 1].wait_event(dkv_update_done)
-                    dk.index_add_(0, kv_seq_range_per_step[i-1], dk_per_step[i - 1])
-                    dv.index_add_(0, kv_seq_range_per_step[i-1], dv_per_step[i - 1])
+                    if kv_seq_range_per_step[i-1] is None or kv_seq_range_per_step[i-1].shape[0] == dk.shape[0]:
+                        dk.add_(dk_per_step[i-1])
+                        dv.add_(dv_per_step[i-1])
+                    else:
+                        dk.index_add_(0, kv_seq_range_per_step[i-1], dk_per_step[i - 1])
+                        dv.index_add_(0, kv_seq_range_per_step[i-1], dv_per_step[i - 1])
                     if i < len(local_seq_chunk_ids):
                         flash_attn_streams[i - 1].record_event(dkv_update_done)
 
