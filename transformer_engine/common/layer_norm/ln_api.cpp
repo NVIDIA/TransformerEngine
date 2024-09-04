@@ -15,7 +15,6 @@
 #include "../common.h"
 #include "norms.h"
 
-
 namespace transformer_engine {
 
 void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
