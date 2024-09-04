@@ -53,7 +53,6 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   // TODO: add check for GPU ARCH
 
   if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
-    printf("TE/cuDNN LayerNorm is WIP. There are known bugs. Use it at your own risk!\n");
     NormFwdCudnn<NVTE_NORM_TYPE::LN_FWD_CUDNN> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma,
                                                        stream, multiprocessorCount, workspace,
                                                        zero_centered_gamma);
@@ -106,7 +105,6 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   }
 
   if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
-    printf("TE/cuDNN LayerNorm is WIP. There are known bugs. Use it at your own risk!\n");
     NormBwdCudnn<NVTE_NORM_TYPE::LN_BWD_CUDNN> BwdNorm(dz, x, mu, rsigma, gamma, dx, dgamma, dbeta,
                                                        stream, multiprocessorCount, workspace,
                                                        zero_centered_gamma);

@@ -543,7 +543,6 @@ NormBwdCudnn<NormEnum>::NormBwdCudnn(const Tensor& dz, const Tensor& x, const Te
                                            {dgamma_tensor, dgamma->data.dptr},
                                            {dx_tensor, dx->data.dptr}};
 
-  float offset_scalar = 1.0f;
   if (zero_centered_gamma) {
     NormBwdCudnn<NormEnum>::_variant_pack.insert(
         {{one_tensor, reinterpret_cast<void*>(this->_scalar_offset.get())},
