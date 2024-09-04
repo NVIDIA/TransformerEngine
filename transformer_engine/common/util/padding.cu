@@ -21,8 +21,7 @@ namespace {
 // Parameters to tune
 constexpr int n_warps_per_tile = 4;
 constexpr int threads_per_block = THREADS_PER_WARP * n_warps_per_tile;
-constexpr int desired_load_size = 8;
-constexpr int desired_store_size = 8;
+constexpr int desired_load_store_size = 8;
 constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
 
 struct MultiPaddingArgs {
@@ -42,11 +41,9 @@ struct MultiPaddingArgs {
   int num_tensors;
 };
 
-template <int nvec_in, int nvec_out, typename CType, typename IType, typename OType>
+template <int nvec, typename Type>
 __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiPaddingArgs args) {
-  using IVec = Vec<IType, nvec_in>;
-  using OVecC = Vec<OType, nvec_in>;
-  using OVecT = Vec<OType, nvec_out>;
+  using Vec = Vec<Type, nvec>;
 
   // Thread indices
   // Note: Block is interpreted as a warp_size x num_warps grid
@@ -58,11 +55,11 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   const int bid = blockIdx.x;
 
   // Input tensors are divided into tiles
-  // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  constexpr int tile_dim_m = THREADS_PER_WARP * nvec_out;
-  constexpr int tile_dim_n = THREADS_PER_WARP * nvec_in;
+  // Note: Each tile is a warp_size x warp_size grid of nvec x nvec subtiles
+  constexpr int tile_dim_m = THREADS_PER_WARP * nvec;
+  constexpr int tile_dim_n = THREADS_PER_WARP * nvec;
 
-  // Number of nvec_out x nvec_in subtiles for each thread to
+  // Number of nvec x nvec subtiles for each thread to
   // load/store
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
@@ -71,8 +68,8 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   while (args.block_range[tensor_id + 1] <= bid) {
     ++tensor_id;
   }
-  const IType* input = reinterpret_cast<const IType*>(args.input_list[tensor_id]);
-  OType* output = reinterpret_cast<OType*>(args.output_list[tensor_id]);
+  const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
+  Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int padded_num_rows = args.padded_num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
@@ -88,40 +85,38 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   // Load input and store to registers
   // Note: Each thread loads n_iterations subtiles, casts to output
   // type, and transposes in registers.
-  OType local_zero = static_cast<OType>(0.f);
+  Type local_zero = static_cast<Type>(0.f);
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
 #pragma unroll
-    for (int i2 = 0; i2 < nvec_out; ++i2) {
-      const int row = tile_row + i1 * nvec_out + i2;
-      const int col = tile_col + j1 * nvec_in;
-      IVec local_input;
-      OVecC local_output;
+    for (int i2 = 0; i2 < nvec; ++i2) {
+      const int row = tile_row + i1 * nvec + i2;
+      const int col = tile_col + j1 * nvec;
+      Vec local_input;
+      Vec local_output;
       local_input.clear();
       if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec_in; ++j2) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
             local_input.data.elt[j2] = input[row * row_length + col + j2];
           }
         }
       }
 #pragma unroll
-      for (int j2 = 0; j2 < nvec_in; ++j2) {
-        const CType x = CType(local_input.data.elt[j2]);
-        const OType y = OType(x);
-        local_output.data.elt[j2] = y;
+      for (int j2 = 0; j2 < nvec; ++j2) {
+        local_output.data.elt[j2] = local_input.data.elt[j2];
       }
       if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec_in; ++j2) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
             output[row * row_length + col + j2] = local_output.data.elt[j2];
           }
         }
       } else if (row < padded_num_rows) {
         // padding
-        for (int j2 = 0; j2 < nvec_in; ++j2) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
           if (col + j2 < row_length) {
             output[row * row_length + col + j2] = local_zero;
           }
@@ -143,16 +138,15 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
   }
 
   // Check that tensor properties are valid
-  DType itype = input_list[0]->data.dtype;
-  DType otype = output_list[0]->data.dtype;
+  DType type = input_list[0]->data.dtype;
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     const auto& input = *input_list[tensor_id];
     const auto& output = *output_list[tensor_id];
     CheckInputTensor(input, "multi_padding_input_" + std::to_string(tensor_id));
     CheckInputTensor(output, "multi_padding_output_" + std::to_string(tensor_id));
 
-    NVTE_CHECK(input.data.dtype == itype, "Input tensor types do not match.");
-    NVTE_CHECK(output.data.dtype == otype, "Output tensor types do not match.");
+    NVTE_CHECK(input.data.dtype == type, "Input tensor types do not match.");
+    NVTE_CHECK(output.data.dtype == type, "Output tensor types do not match.");
 
     NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions.");
     NVTE_CHECK(output.data.shape[0] == padded_num_rows_list[tensor_id],
@@ -160,9 +154,9 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
   }
 
   // Input matrices are divided into tiles
-  // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
-  const int tile_dim_m = THREADS_PER_WARP * desired_store_size / typeToSize(otype);
-  const int tile_dim_n = THREADS_PER_WARP * desired_load_size / typeToSize(itype);
+  // Note: Each tile is a warp_size x warp_size grid of nvec x nvec subtiles
+  const int tile_dim_m = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
+  const int tile_dim_n = THREADS_PER_WARP * desired_load_store_size / typeToSize(type);
 
   // Add tensors to kernel argument struct
   MultiPaddingArgs kernel_args;
@@ -172,14 +166,10 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
     // Launch kernel if argument struct is full
     if (kernel_args.num_tensors == kMaxTensorsPerKernel) {
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          itype, InputType,
-          TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-              otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-              constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-              const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-              multi_padding_kernel<nvec_in, nvec_out, fp32, InputType, OutputType>
-              <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
-      );                                                                    // NOLINT(*)
+          type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+          const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
+          multi_padding_kernel<nvec, Type>
+          <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
       kernel_args.num_tensors = 0;
     }
 
@@ -205,14 +195,10 @@ void multi_padding(const std::vector<Tensor*> input_list, std::vector<Tensor*> o
   // Launch kernel
   if (kernel_args.num_tensors > 0) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-        itype, InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);
-            constexpr int nvec_out = desired_store_size / sizeof(OutputType);
-            const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
-            multi_padding_kernel<nvec_in, nvec_out, fp32, InputType, OutputType>
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
-    );                                                                    // NOLINT(*)
+        type, Type, constexpr int nvec = desired_load_store_size / sizeof(Type);
+        const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];
+        multi_padding_kernel<nvec, Type>
+        <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args););  // NOLINT(*)
   }
 }
 

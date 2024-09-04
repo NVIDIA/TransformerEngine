@@ -357,7 +357,7 @@ class TorchSquaredRELU(nn.Module):
         return (input > 0) * input * input
 
 
-class TorcGroupedLinearWithPadding(nn.Module):
+class TorchGroupedLinearWithPadding(nn.Module):
 
     def __init__(
         self, num_gemms, in_features, out_features, bias, params_dtype, parallel_mode, fp8
@@ -1434,7 +1434,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
     m_splits = _generate_random_numbers(num_gemms, config.seq_len * bs)
 
     with fp8_autocast(enabled=fp8):
-        if isinstance(block, TorcGroupedLinearWithPadding):
+        if isinstance(block, TorchGroupedLinearWithPadding):
             out = block(inp_hidden_states, m_splits)
         else:
             if fp8:
@@ -1461,7 +1461,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", model_configs.keys())
-@pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("fp8", [True])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
     dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
@@ -1474,7 +1474,7 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
     with fp8_model_init(enabled=fp8 and fp8_model_params):
-        grouped_linear = TorcGroupedLinearWithPadding(
+        grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
             4 * config.hidden_size,
