@@ -7,8 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_COMM_GEMM_OVERLAP_H_
 
-#include <utility>
-
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -22,6 +20,7 @@
 #include <torch/types.h>
 
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <utility>
 
 #include "common/common.h"
 #include "common/util/system.h"
@@ -158,8 +157,7 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
   UbufCommOverlap(torch::Tensor sample, int myrank, int numranks, int mylocal, int numlocal,
                   int mynode, int numnodes, int tp_size, int num_comm_sm, int comm_cga_size,
                   int num_splits, bool set_sm_margin, int num_max_streams, bool atomic_gemm,
-                  UbufBootstrapCallbacks &callbacks, int comm_priority = 0,
-                  int gemm_priority = 0) {
+                  UbufBootstrapCallbacks &callbacks, int comm_priority = 0, int gemm_priority = 0) {
     // Initialize userbuf communicator
     if (!comm_created) {
       if (myrank == 0) {

@@ -153,16 +153,14 @@ std::pair<int, int> stream_priority_range(int device_id) {
   }
   int min_priority, max_priority;
   NVTE_CHECK_CUDA(cudaDeviceGetStreamPriorityRange(&min_priority, &max_priority));
-  if (device_id >= 0)
-    NVTE_CHECK_CUDA(cudaSetDevice(ori_dev));
+  if (device_id >= 0) NVTE_CHECK_CUDA(cudaSetDevice(ori_dev));
   return std::make_pair(min_priority, max_priority);
 }
 
 bool supports_multicast(int device_id) {
   int result;
   CUdevice cudev;
-  if (device_id < 0)
-    NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+  if (device_id < 0) NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
                               CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
