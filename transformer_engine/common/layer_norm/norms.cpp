@@ -361,7 +361,8 @@ NormFwdCudnn<NormEnum>::NormFwdCudnn(const Tensor& x, const Tensor& gamma, const
                                       .set_name("epsilon")
                                       .set_dim({1, 1, 1, 1})
                                       .set_stride({1, 1, 1, 1})
-                                      .set_data_type(te2cudnnDtype(ctype)));
+                                      .set_data_type(te2cudnnDtype(ctype))
+                                      .set_is_pass_by_value(true));
 
   std::shared_ptr<fe::graph::Tensor_attributes> gamma_tensor, one_tensor;
   if (zero_centered_gamma) {
