@@ -489,6 +489,8 @@ class Float8Tensor(QuantizedTensor):
             data = data.cuda()
         if not data.is_contiguous():
             data = data.contiguous()
+        if data.dim() != 2:
+            data = data.view(1, -1)
 
         # Cast from FP8
         out = cast_from_fp8(
@@ -499,7 +501,10 @@ class Float8Tensor(QuantizedTensor):
             dtype,
             scale_inv=self._scale_inv,
         )
-        out = out.view(self.size())
+
+        # Make sure output is in expected format
+        if out.size() != self.size():
+            out = out.view(self.size())
         return out
 
     def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -550,7 +555,7 @@ class Float8Tensor(QuantizedTensor):
             # Directly copy FP8 data
             dst._data.copy_(src._data.detach())
             dst._scale_inv.copy_(src._scale_inv.detach())
-            if dst._fp8_meta is not None:
+            if amax is not None or dst._fp8_meta is not None:
                 src_amax: torch.Tensor
                 if src._fp8_meta is None:
                     src_min, src_max = src.dequantize().aminmax()
@@ -561,11 +566,17 @@ class Float8Tensor(QuantizedTensor):
                     )
                     fp8_meta_index = src._fp8_meta_index
                     src_amax = src._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=dst._fp8_meta_forward,
-                )
-                fp8_meta_index = dst._fp8_meta_index
-                dst_amax = dst._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
+                dst_amax: torch.Tensor
+                if amax is None:
+                    fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
+                        forward=dst._fp8_meta_forward,
+                    )
+                    fp8_meta_index = dst._fp8_meta_index
+                    dst_amax = dst._fp8_meta[fp8_meta_key].amax_history[0, fp8_meta_index]
+                else:
+                    dst_amax = amax
+                    if dst_amax.dim() > 0:
+                        dst_amax = dst_amax[tuple([0] * dst_amax.dim())]
                 torch.maximum(src_amax, dst_amax, out=dst_amax)
             if dst._transpose is not None:
                 if src._transpose is None:
@@ -597,7 +608,7 @@ class Float8Tensor(QuantizedTensor):
             else:
                 scale = torch.full([1], scale, dtype=torch.float32, device=dst.device)
         if amax is not None:
-            if amax.dim() < 2:
+            while amax.dim() < 2:
                 amax = amax.unsqueeze(0)
             if not devices_match(amax.device, dst.device):
                 raise ValueError(
@@ -626,7 +637,7 @@ class Float8Tensor(QuantizedTensor):
         # Perform FP8 cast
         if dst._transpose is None:
             dst_data = dst._data
-            if src.dim() > 2:
+            if src.dim() != 2:
                 src = src.view(1, -1)
                 dst_data = dst_data.view(1, -1)
             cast_to_fp8(

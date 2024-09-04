@@ -303,10 +303,10 @@ class TestFloat8Tensor:
         assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."
 
         # Inplace update test
-        x = x_fp8.from_float8() + 0.5
         x_fp8 += 0.5
         assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d())
+        x = x_fp8.from_float8()
+        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8._transpose)
         x_t = x.transpose(0, 1)
         torch.testing.assert_close(x_fp8_t, x_t, **tols)
 
