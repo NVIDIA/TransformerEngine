@@ -246,22 +246,26 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
   }
   compareResults("output", z, ref_output.get(), atol, rtol);
 
-  // double atol_bwd = 1e-4;
-  // double rtol_bwd = 1e-4;
-  auto [atol_bwd, rtol_bwd] = getTolerances(otype);
+  double atol_bwd = 1e-3;
+  double rtol_bwd = 1e-3;
+  if (otype == DType::kBFloat16 || otype == DType::kFloat8E4M3){
+    atol_bwd = 8e-3;
+    rtol_bwd = 8e-3;
+  }
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
   compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
   compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
-                                                     // {768, 1024},
-                                                     // {256, 65536},
-                                                     // {128, 6144},
-                                                     // {64, 2304},
-                                                     // {229, 541},   // Primes 50, 100
-                                                     // {71, 3571},   // Primes 20, 500
-                                                     // {29, 17389} // Primes 10, 2000
+std::vector<std::pair<size_t, size_t>> test_cases = {
+  {2048, 12288},
+  {768, 1024},
+  {256, 65536},
+  {128, 6144},
+  {64, 2304},
+  {229, 541},   // Primes 50, 100
+  {71, 3571},   // Primes 20, 500
+  {29, 17389} // Primes 10, 2000
 };
 
 }  // namespace
@@ -294,7 +298,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
-        ::testing::Values(true)),
+        ::testing::Values(false, true)),
     [](const testing::TestParamInfo<LNTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                          test::typeName(std::get<1>(info.param)) + "X" +
