@@ -2964,11 +2964,14 @@ def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
 
 @torch.compile
 def get_kv_seq_info_after_all_gather(
-    local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, device
+    local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, causal, device
 ):
     """Compute KV sequence index range and update window size after all-gather."""
     local_chunk_end_idx = (local_chunk_id + 1) * max_seqlen_kv
     full_seq_end_idx = max_seqlen_kv * cp_size * 2
+
+    if window_size is None:
+        window_size = (-1, 0) if causal else (-1, -1)
 
     if window_size[1] == -1:
         seq_end_idx = full_seq_end_idx
@@ -3100,6 +3103,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         max_seqlen_q,
                         max_seqlen_kv,
                         window_size,
+                        causal,
                         k.device,
                     )
                     attn_mask_type = "causal_bottom_right" if window_size_per_step[i][1] == 0 else "no_mask"
