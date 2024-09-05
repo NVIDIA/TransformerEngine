@@ -78,6 +78,16 @@ FusedAttnBackend = {
 BACKEND_F16m512_FP8_THREADS_PER_CTA = 128
 BACKEND_F16arb_ELTS_PER_THREADS = 16
 
+META_QKV = tex.FP8FwdTensors.GEMM1_OUTPUT
+META_DQKV = tex.FP8BwdTensors.GRAD_OUTPUT1
+META_O = tex.FP8FwdTensors.GEMM2_INPUT
+META_DO = tex.FP8BwdTensors.GRAD_INPUT2
+META_S = tex.FP8FwdTensors.GEMM3_OUTPUT
+META_DP = tex.FP8BwdTensors.GRAD_INPUT3
+# repurpose some unused amax history buffers for partial results of CP fwd and bwd
+META_O_CP = tex.FP8FwdTensors.GEMM2_OUTPUT
+META_DQKV_CP = tex.FP8BwdTensors.GRAD_INPUT1
+
 
 def fused_attn_fwd_qkvpacked(
     is_training: bool,
@@ -89,11 +99,17 @@ def fused_attn_fwd_qkvpacked(
     attn_bias: torch.Tensor = None,
     cu_seqlens_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
@@ -128,16 +144,28 @@ def fused_attn_fwd_qkvpacked(
                 cumulative sequence offsets for QKV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
                 if None, use 1.0/sqrt(head_dim_qk) as the default
@@ -248,11 +276,17 @@ def fused_attn_fwd_qkvpacked(
         qkv_dtype,
         cu_seqlens_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
@@ -448,11 +482,17 @@ def fused_attn_fwd_kvpacked(
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
@@ -496,16 +536,28 @@ def fused_attn_fwd_kvpacked(
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
                 if None, use 1.0/sqrt(head_dim_qk) as the default
@@ -621,11 +673,17 @@ def fused_attn_fwd_kvpacked(
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
@@ -843,11 +901,17 @@ def fused_attn_fwd(
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
+    d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
+    d_scale_s_offset: int = META_S,
     q_scale_s: torch.Tensor = None,
+    q_scale_s_offset: int = META_S,
     q_scale_o: torch.Tensor = None,
+    q_scale_o_offset: int = META_O,
     amax_s: torch.Tensor = None,
+    amax_s_offset: int = META_S,
     amax_o: torch.Tensor = None,
+    amax_o_offset: int = META_O,
     attn_scale: float = None,
     dropout: float = 0.0,
     fast_zero_fill: bool = True,
@@ -894,17 +958,29 @@ def fused_attn_fwd(
     cu_seqlens_kv_padded: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
     d_scale_qkv: torch.Tensor, default = None
-                input tensor for the dequantization of Q, K and V in FP8 computations
+                input tensor for the dequantization of QKV in FP8 computations
+    d_scale_qkv_offset: int, default = META_QKV
+                offset in d_scale_qkv for QKV
     d_scale_s: torch.Tensor, default = None
                 input tensor for the dequantization of S in FP8 computations, S = Softmax(Q * K.T)
+    d_scale_s_offset: int, default = META_S
+                offset in d_scale_s for S
     q_scale_s: torch.Tensor, default = None
                 input tensor for the quantization of S in FP8 computations, S = Softmax(Q * K.T)
+    q_scale_s_offset: int, default = META_S
+                offset in q_scale_s for S
     q_scale_o: torch.Tensor, default = None
                 input tensor for the quantization of O in FP8 computations
+    q_scale_o_offset: int, default = META_O
+                offset in q_scale_o for O
     amax_s: torch.Tensor, default = None
                 output tensor, amax of S, used by the next iteration in FP8 computations
+    amax_s_offset: int, default = META_S
+                offset in amax_s for S
     amax_o: torch.Tensor, default = None
                 output tensor, amax of O, used by the next iteration in FP8 computations
+    amax_o_offset: int, default = META_O
+                offset in amax_o for O
     attn_scale: float, default = None
                 if not None, use attn_scale as the attention scale for Q*K.T BMM;
                 if None, use 1.0/sqrt(head_dim_qk) as the default
@@ -1023,11 +1099,17 @@ def fused_attn_fwd(
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
         d_scale_qkv,
+        d_scale_qkv_offset,
         d_scale_s,
+        d_scale_s_offset,
         q_scale_s,
+        q_scale_s_offset,
         q_scale_o,
+        q_scale_o_offset,
         amax_s,
+        amax_s_offset,
         amax_o,
+        amax_o_offset,
         attn_bias,
         rng_gen,
         rng_elts_per_thread,
