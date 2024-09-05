@@ -177,7 +177,7 @@ class _GroupedLinear(torch.autograd.Function):
                 inputmat_scale_inv,
                 0,
                 fp8_dtype_forward,
-                out,
+                [out],
                 activation_dtype,
                 get_multi_stream_cublas_workspace(),
                 m_splits=m_splits,
@@ -367,7 +367,7 @@ class _GroupedLinear(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
                         _GRAD_OUTPUT,
                         fp8_dtype_backward,
-                        dgrad,
+                        [dgrad],
                         ctx.activation_dtype,
                         get_multi_stream_cublas_workspace(),
                         m_splits=ctx.m_splits,
@@ -413,7 +413,7 @@ class _GroupedLinear(torch.autograd.Function):
                                 inp._data if isinstance(inp, Float8Tensor) else inp
                                 for inp in inputmats_t
                             ],
-                            inputmat_scale_inv,
+                            [inputmat_scale_inv],
                             0,
                             fp8_dtype_forward,
                             grad_output_t,
