@@ -3012,11 +3012,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         k,
         v,
         cu_seqlens_q,
-        cu_seqlens_kv,
         max_seqlen_q,
         max_seqlen_kv,
         cu_seqlens_q_padded,
-        cu_seqlens_kv_padded,
         dropout_p,
         softmax_scale,
         qkv_format,
@@ -3380,8 +3378,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
-            None,
-            None,
             None,
             None,
             None,
@@ -4000,7 +3996,7 @@ def attn_forward_func_with_cp(
         or (cp_comm_type == "all_gather" and not use_fused_attention)
     ), "The context parallel running configs cannot support sliding window attetnion!"
 
-    args = (
+    args = [
         is_training,
         q,
         k,
@@ -4019,16 +4015,18 @@ def attn_forward_func_with_cp(
         attn_bias,
         deterministic,
         use_fused_attention,
-    )
+    ]
 
     if cp_comm_type == "p2p":
-        args += (fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream)
+        args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
-        args += (window_size, cp_group, cp_stream)
+        args.pop(5)
+        args.pop(8)
+        args += [window_size, cp_group, cp_stream]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += (window_size, fp8, fp8_meta, cp_group, cp_stream)
+        args += [window_size, fp8, fp8_meta, cp_group, cp_stream]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
