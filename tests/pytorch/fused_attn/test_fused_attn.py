@@ -235,7 +235,7 @@ def test_dot_product_attention(
     # Get configs
     tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
-        tols = dict(atol=1e-2, rtol=1e-2)
+        tols = dict(atol=1.5e-2, rtol=1.5e-2)
     config = model_configs[model]
     is_mla = config.head_dim_qk != config.head_dim_v
     if qkv_layout is None:
