@@ -1860,7 +1860,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
 
     fp8_grouped_gemm(
         A_fp8,
-        scale_inv,
+        [scale_inv],
         0,  # A_offset
         tex.DType.kFloat8E4M3,
         B_fp8,
