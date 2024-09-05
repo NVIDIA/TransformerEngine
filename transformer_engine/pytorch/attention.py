@@ -3569,12 +3569,18 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         for x in [q_f16, k_f16, v_f16]
                     ]
                 fp8_meta_kwargs = {}
-                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv[META_QKV]
-                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv[META_S]
-                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale[META_S]
-                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale[META_O]
-                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history[0][META_S]
-                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history[0][META_O]
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_qkv_offset"] = META_QKV
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_o_offset"] = META_O
+                fp8_meta_kwargs["amax_s"] = fp8_meta["scaling_fwd"].amax_history
+                fp8_meta_kwargs["amax_s_offset"] = META_S
+                fp8_meta_kwargs["amax_o"] = fp8_meta["scaling_fwd"].amax_history
+                fp8_meta_kwargs["amax_o_offset"] = META_O
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
