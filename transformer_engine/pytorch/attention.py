@@ -3090,12 +3090,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    if qkv_format == "bshd":
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                        q_ = q[:, i].contiguous()
-                    elif qkv_format == "sbhd":
-                        # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                        q_ = q[i].contiguous()
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q.select(seq_dim, i).contiguous()
                     kv_seq_range_per_step[i], window_size_per_step[i] = \
                     get_kv_seq_info_after_all_gather(
                         local_seq_chunk_ids[i],
@@ -3250,12 +3246,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
                 with torch.cuda.stream(flash_attn_streams[i]):
-                    if ctx.qkv_format == "bshd":
-                        # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
-                        q_ = q[:, i].contiguous()
-                    elif ctx.qkv_format == "sbhd":
-                        # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                        q_ = q[i].contiguous()
+                    # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] or [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
+                    q_ = q.select(seq_dim, i).contiguous()
                     seq_start_idx, seq_end_idx = kv_seq_range_per_step[i][0] , kv_seq_range_per_step[i][1]
                     max_seqlen_kv = seq_end_idx - seq_start_idx
                     k_, v_ = [x[seq_start_idx : seq_end_idx] for x in [k_ag, v_ag]]
