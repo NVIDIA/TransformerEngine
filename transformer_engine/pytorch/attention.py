@@ -3001,7 +3001,7 @@ def get_kv_seq_info_after_all_gather(
 class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
     """
     Attention implementation with context parallelism. KV all-gather between CP ranks is exposed.
-    Refer section 3.3.2 of `The Llama 3 Herd of Models <https://arxiv.org/pdf/2407.21783>`_.
+    Refer section 3.3.2 of `The Llama 3 Herd of Models <https://arxiv.org/abs/2407.21783>`_.
     """
 
     @staticmethod
@@ -3481,7 +3481,7 @@ def flash_attn_a2a_communicate(
 class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Like Ulysses, applying A2A to QKVO.
-    Refer the paper `DeepSpeed Ulysses <https://arxiv.org/pdf/2309.14509>`_.
+    Refer the paper `DeepSpeed Ulysses <https://arxiv.org/abs/2309.14509>`_.
     """
 
     @staticmethod
