@@ -43,6 +43,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     NormFwdCudnn<RMS_FWD_CUDNN> NormFwd(x, gamma, empty, epsilon, z, &empty, rsigma, stream,
                                         multiprocessorCount, workspace, zero_centered_gamma);
     norms_launcher<NVTE_NORM_TYPE::RMS_FWD_CUDNN>(NormFwd, workspace);
+    if (is_fp8_dtype(z->data.dtype)) ComputeScaleInv(z);
   } else {
     NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE> NormFwd(x, gamma, empty, epsilon, z, &empty, rsigma,
                                                   stream, multiprocessorCount, workspace, barrier,

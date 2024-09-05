@@ -56,6 +56,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                                                        stream, multiprocessorCount, workspace,
                                                        zero_centered_gamma);
     norms_launcher<NVTE_NORM_TYPE::LN_FWD_CUDNN>(NormFwd, workspace);
+    if (is_fp8_dtype(z->data.dtype)) ComputeScaleInv(z);
   } else {
     NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma, stream,
                                                  multiprocessorCount, workspace, barrier,

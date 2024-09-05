@@ -386,6 +386,8 @@ template <NVTE_NORM_TYPE NormEnum, typename NormType>
 void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier = nullptr,
                     Tensor* dgamma_part = nullptr, Tensor* dbeta_part = nullptr);
 
+void ComputeScaleInv(Tensor* z);
+
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_H_
