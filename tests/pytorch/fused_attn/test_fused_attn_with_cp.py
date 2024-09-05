@@ -55,33 +55,28 @@ def get_bash_arguments(**kwargs):
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     if cp_comm_type == "p2p" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip(
-            "CP implementation with KV P2P does not support sliding window yet!"
-        )
+        pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and qkv_format == "thd":
-        pytest.skip(
-            "CP implementation with KV all-gather does not support THD format yet!"
-        )
+        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            "CP implementation with KV all-gather does not support bias yet!"
-        )
+        pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if cp_comm_type == "a2a" and qkv_format == "thd":
-        pytest.skip(
-            "CP implementation with QKVO A2A does not support THD format yet!"
-        )
+        pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
     if cp_comm_type == "a2a" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            "CP implementation with QKVO A2A does not support bias yet!"
-        )
+        pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
     if cp_comm_type == "a2a" and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
         pytest.skip(
-            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
+            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
+            f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
 
     subprocess.run(
         get_bash_arguments(
-            dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FlashAttention", cp_comm_type=cp_comm_type
+            dtype=dtype,
+            model=model,
+            qkv_format=qkv_format,
+            kernel_backend="FlashAttention",
+            cp_comm_type=cp_comm_type,
         ),
         check=True,
     )
@@ -93,12 +88,16 @@ model_configs_fused_attn = {
     "cp_1_1": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # MHA
     "cp_1_2": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # MHA
     "cp_1_3": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # MHA
-    "cp_1_4": ModelConfig(2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)),  # MHA
+    "cp_1_4": ModelConfig(
+        2, 12, 12, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+    ),  # MHA
     "cp_2_0": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias"),  # GQA
     "cp_2_1": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "no_bias"),  # GQA
     "cp_2_2": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "post_scale_bias"),  # GQA
     "cp_2_3": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "no_mask", "post_scale_bias"),  # GQA
-    "cp_2_4": ModelConfig(2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)),  # GQA
+    "cp_2_4": ModelConfig(
+        2, 12, 2, 128, 4096, 4096, 0.0, "causal", "no_bias", window_size=(512, 0)
+    ),  # GQA
 }
 
 
@@ -110,31 +109,19 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a"])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
-        pytest.skip(
-            "THD format is only supported on sm90+!"
-        )
+        pytest.skip("THD format is only supported on sm90+!")
     if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
-        pytest.skip(
-            "CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!"
-        )
+        pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
 
     config = model_configs_fused_attn[model]
     if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
-        pytest.skip(
-            "THD format does not support QGA/MQA yet!"
-        )
+        pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
-        pytest.skip(
-            "THD format does not support post_scale_bias yet!"
-        )
+        pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
-        pytest.skip(
-            "CP implementation with KV all-gather does not support THD format yet!"
-        )
+        pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if qkv_format == "thd" and cp_comm_type == "a2a":
-        pytest.skip(
-            "CP implementation with QKVO A2A does not support THD format yet!"
-        )
+        pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
     if config.window_size != (-1, 0) and config.window_size != (-1, -1) and cp_comm_type != "a2a":
         pytest.skip(
             "Sliding window attention only can be supported with the implementation of QKVO A2A!"
@@ -144,33 +131,28 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
         )
     if dtype == "fp8" and qkv_format == "thd":
-        pytest.skip(
-            "FP8 attention cannot work with THD format yet!"
-        )
+        pytest.skip("FP8 attention cannot work with THD format yet!")
     if dtype == "fp8" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            "FP8 attention cannot work with bias yet!"
-        )
+        pytest.skip("FP8 attention cannot work with bias yet!")
     if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
-        pytest.skip(
-            "FP8 attention cannot work with sliding window yet!"
-        )
+        pytest.skip("FP8 attention cannot work with sliding window yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            "CP implementation with KV all-gather does not support bias yet!"
-        )
+        pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if cp_comm_type == "a2a" and config.attn_bias_type != "no_bias":
-        pytest.skip(
-            "CP implementation with QKVO A2A does not support bias yet!"
-        )
+        pytest.skip("CP implementation with QKVO A2A does not support bias yet!")
     if cp_comm_type == "a2a" and (config.num_heads % 2 != 0 or config.num_gqa_groups % 2 != 0):
         pytest.skip(
-            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
+            f"CP implementation with QKVO A2A requires num_heads ({config.num_heads}) and"
+            f" num_gqa_groups ({config.num_gqa_groups}) to be divisible by cp_size (2)!"
         )
 
     subprocess.run(
         get_bash_arguments(
-            dtype=dtype, model=model, qkv_format=qkv_format, kernel_backend="FusedAttention", cp_comm_type=cp_comm_type
+            dtype=dtype,
+            model=model,
+            qkv_format=qkv_format,
+            kernel_backend="FusedAttention",
+            cp_comm_type=cp_comm_type,
         ),
         check=True,
     )
