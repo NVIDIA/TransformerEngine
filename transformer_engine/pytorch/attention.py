@@ -3434,7 +3434,7 @@ def flash_attn_a2a_communicate(
     a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
     if before_attn:
         for i in range(len(a2a_inputs) + 2):
-            if i > 0 and i < len(a2a_inputs) + 1:
+            if 0 < i < len(a2a_inputs) + 1:
                 a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
@@ -3457,7 +3457,7 @@ def flash_attn_a2a_communicate(
                 a2a_inputs[i] = x.movedim(-3, 0).contiguous()
     else:
         for i in range(len(a2a_inputs) + 2):
-            if i > 0 and i < len(a2a_inputs) + 1:
+            if 0 < i < len(a2a_inputs) + 1:
                 a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
                 a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
                     a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
