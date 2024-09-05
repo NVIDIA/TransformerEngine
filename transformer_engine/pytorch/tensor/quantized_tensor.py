@@ -85,13 +85,13 @@ class QuantizedTensor(torch.Tensor):
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
 
     def float(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(self, dtype=torch.float32)
+        return _DequantizeFunc.apply(self, torch.float32)
 
     def bfloat16(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(self, dtype=torch.bfloat16)
+        return _DequantizeFunc.apply(self, torch.bfloat16)
 
     def half(self) -> torch.Tensor:
-        return _DequantizeFunc.apply(self, dtype=torch.float16)
+        return _DequantizeFunc.apply(self, torch.float16)
 
     def cpu(self) -> torch.Tensor:
         return _DequantizeFunc.apply(self).cpu()
