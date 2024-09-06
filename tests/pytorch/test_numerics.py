@@ -7,6 +7,7 @@ import os
 from typing import Dict, List, Optional
 import pytest
 import copy
+import random
 
 import torch
 import torch.nn as nn
@@ -30,6 +31,8 @@ from transformer_engine.pytorch import (
     TransformerLayer,
     LayerNorm,
     InferenceParams,
+    Fp8Padding,
+    Fp8Unpadding,
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
@@ -352,6 +355,40 @@ class TorchQuickGELU(nn.Module):
 class TorchSquaredRELU(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return (input > 0) * input * input
+
+
+class TorchGroupedLinearWithPadding(nn.Module):
+
+    def __init__(
+        self, num_gemms, in_features, out_features, bias, params_dtype, parallel_mode, fp8
+    ) -> None:
+        super().__init__()
+
+        self.padding = Fp8Padding(num_gemms)
+        self.linear_fn = GroupedLinear(
+            num_gemms,
+            in_features,
+            out_features,
+            bias=bias,
+            params_dtype=params_dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+        )
+        self.unpadding = Fp8Unpadding(num_gemms)
+
+        self.fp8 = fp8
+
+    def forward(self, inp: torch.Tensor, m_splits: List[int]) -> torch.Tensor:
+        if self.fp8:
+            orig_m_splits = m_splits
+            inp, m_splits = self.padding(inp, m_splits)
+
+        out = self.linear_fn(inp, m_splits)
+
+        if self.fp8:
+            out = self.unpadding(out, orig_m_splits)
+
+        return out
 
 
 _supported_act = {
@@ -1326,6 +1363,158 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
         fp8_model_params=True,
         parallel_mode=parallel_mode,
     )
+
+
+def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
+
+    def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
+        """Padding tensor shapes to multiples of 16."""
+        padded_tokens_per_expert = [
+            (num_tokens + 15) // 16 * 16 for num_tokens in tokens_per_expert
+        ]
+        hidden_states = torch.split(hidden_states, tokens_per_expert)
+        padded_hidden_states = []
+        for hidden_state, actual_num_tokens, padded_num_tokens in zip(
+            hidden_states, tokens_per_expert, padded_tokens_per_expert
+        ):
+            padded_hidden_states.append(hidden_state)
+            if padded_num_tokens > actual_num_tokens:
+                pad_tensor = torch.zeros(
+                    padded_num_tokens - actual_num_tokens,
+                    hidden_state.shape[1],
+                    dtype=hidden_state.dtype,
+                    device=hidden_state.device,
+                )
+                padded_hidden_states.append(pad_tensor)
+        padded_hidden_states = torch.cat(padded_hidden_states, dim=0)
+        return padded_hidden_states, padded_tokens_per_expert
+
+    def _unpad_tensor_for_fp8(padded_hidden_states, actual_tokens_per_expert, tokens_per_expert):
+        inputmats = torch.split(
+            padded_hidden_states.view(-1, padded_hidden_states.shape[-1]), tokens_per_expert
+        )
+        hidden_states = torch.cat(
+            [
+                grad_output_mat[: actual_tokens_per_expert[i]]
+                for i, grad_output_mat in enumerate(inputmats)
+            ],
+            dim=0,
+        )
+
+        return hidden_states
+
+    def _generate_random_numbers(n, total_sum):
+        if n <= 0:
+            return []
+
+        # reset seed
+        random.seed(seed)
+
+        breaks = sorted(random.sample(range(1, total_sum), n - 1))
+        random_numbers = (
+            [breaks[0]]
+            + [breaks[i] - breaks[i - 1] for i in range(1, n - 1)]
+            + [total_sum - breaks[-1]]
+        )
+
+        return random_numbers
+
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.seq_len * bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    m_splits = _generate_random_numbers(num_gemms, config.seq_len * bs)
+
+    with fp8_autocast(enabled=fp8):
+        if isinstance(block, TorchGroupedLinearWithPadding):
+            out = block(inp_hidden_states, m_splits)
+        else:
+            if fp8:
+                padded_inp_hidden_states, padding_m_splits = _pad_tensor_for_fp8(
+                    inp_hidden_states, m_splits
+                )
+                padded_inp_hidden_states = block(padded_inp_hidden_states, padding_m_splits)
+                out = _unpad_tensor_for_fp8(padded_inp_hidden_states, m_splits, padding_m_splits)
+            else:
+                out = block(inp_hidden_states, m_splits)
+
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_padding_grouped_linear_accuracy(
+    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+):
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    config = model_configs[model]
+    if config.seq_len % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        grouped_linear = TorchGroupedLinearWithPadding(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            fp8=fp8,
+        ).eval()
+
+    with fp8_model_init(enabled=fp8 and fp8_model_params):
+        ref_grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        inner_grouped_linear = grouped_linear.linear_fn
+        for i in range(num_gemms):
+            setattr(
+                ref_grouped_linear,
+                f"weight{i}",
+                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
+            )
+
+    outputs = _test_padding_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, fp8
+    )
+    outputs_ref = _test_padding_grouped_linear_accuracy(
+        ref_grouped_linear, num_gemms, bs, dtype, config, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):

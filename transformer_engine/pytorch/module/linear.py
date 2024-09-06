@@ -84,12 +84,10 @@ class _Linear(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-        is_first_module_in_mha: bool,
+        fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
-        if is_input_fp8:
-            fp8_meta["scaling_fwd"].scale_inv[tex.FP8FwdTensors.GEMM1_INPUT] = inp._scale_inv[0]
 
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -112,14 +110,6 @@ class _Linear(torch.autograd.Function):
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if isinstance(inputmat, Float8Tensor):
                 inputmat_scale_inv = inputmat._scale_inv
-                if (
-                    not fp8_meta["recipe"].override_linear_precision.wgrad
-                    and is_grad_enabled
-                    and weight.requires_grad
-                    and not sequence_parallel
-                ):
-                    # FP8 input for forward, FP8 input transpose for backward wgrad
-                    inputmat_t = inputmat.transpose_2d()
             else:
                 inputmat_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
                 if (
@@ -173,7 +163,7 @@ class _Linear(torch.autograd.Function):
 
             assert isinstance(weight_fp8, Float8Tensor)
 
-            if is_first_module_in_mha:
+            if fp8_output:
                 proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                     tex.FP8FwdTensors.GEMM1_OUTPUT,
                     fp8_meta["scaling_fwd"],
@@ -242,7 +232,7 @@ class _Linear(torch.autograd.Function):
                 fp8_meta_tensor=meta_tensor,
                 D_dtype=proj_out_tetype,
             )
-            if is_first_module_in_mha:
+            if fp8_output:
                 out = Float8Tensor(
                     data=out,
                     fp8_meta=fp8_meta,
@@ -641,7 +631,7 @@ class _Linear(torch.autograd.Function):
             None,  # ub_overlap_rs
             None,  # ub_overlap_ag
             None,  # ub_name
-            None,  # is_first_module_in_mha
+            None,  # fp8_output
             None,  # fsdp_group
         )
 
@@ -980,7 +970,7 @@ class Linear(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-        is_first_module_in_mha: Optional[bool] = False,
+        fp8_output: Optional[bool] = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1031,8 +1021,6 @@ class Linear(TransformerEngineBaseModule):
             is_first_microbatch,
             allow_non_contiguous=isinstance(inp, Float8Tensor),
         ) as inp:
-
-            is_first_module_in_mha = is_first_module_in_mha and self.fp8_meta["recipe"].fp8_mha
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
@@ -1116,7 +1104,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.ub_name,
-                is_first_module_in_mha,
+                fp8_output,
                 self.fsdp_group,
             )
             out = linear_fn(*args)

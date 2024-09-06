@@ -71,6 +71,7 @@ list(APPEND transformer_engine_SOURCES
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
+     util/padding.cu
      util/cuda_driver.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
