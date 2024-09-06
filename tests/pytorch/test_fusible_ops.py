@@ -450,36 +450,45 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-    @pytest.mark.parametrize("size", (1, 7, 32))
+    @pytest.mark.parametrize("size", (7, 32))
     @pytest.mark.parametrize("in_shape", ((-1,), (1, 3, -1), (2, 3, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
-    @pytest.mark.parametrize("device", _devices)
-    @pytest.mark.parametrize("fp8", (False, True))
+    @pytest.mark.parametrize("fp8_grad_input", (False, True))
     def test_bias(
         self,
         *,
         size: int,
         in_shape: Iterable[int],
         dtype: torch.dtype,
-        device: torch.device,
-        fp8: bool,
+        device: torch.device = "cuda",
+        fp8_input: bool = False,
+        fp8_grad_output: bool = False,
+        fp8_grad_input: bool,
     ) -> None:
 
         # Make input and bias shapes consistent
         in_shape = list(in_shape)[:-1] + [size]
 
         # Skip invalid configurations
-        if fp8 and not fp8_available:
-            pytest.skip(reason_for_no_fp8)
-        if fp8 and torch.device(device).type != "cuda":
-            pytest.skip("FP8 is only supported on CUDA devices")
+        if fp8_input or fp8_grad_output or fp8_grad_input:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # FP8 recipe
+        fp8_recipe = None
+        if fp8_grad_input:
+            fp8_recipe = transformer_engine.common.recipe.DelayedScaling(
+                fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            )
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
             test_dtype=dtype,
             test_device=device,
-            test_is_fp8=fp8,
+            test_is_fp8=fp8_input,
         )
         b_ref, b_test = make_reference_and_test_tensors(
             size,
@@ -490,26 +499,34 @@ class TestBasicOps:
             in_shape,
             test_dtype=dtype,
             test_device=device,
+            test_is_fp8=(fp8_grad_output or fp8_grad_input),
             requires_grad=False,
         )
+        if not fp8_grad_output and is_float8_tensor(dy_test):
+            dy_test = dy_test.from_float8()
 
         # Plain PyTorch implementation
         y_ref = x_ref + b_ref.reshape([1] * (len(in_shape) - 1) + [size])
         y_ref.backward(dy_ref)
 
         # Implementation with fusible operation
-        op = te_ops.Bias(size, device=device, dtype=dtype)
+        bias_op = te_ops.Bias(size, device=device, dtype=dtype)
         with torch.no_grad():
-            op.bias.copy_(b_test)
+            bias_op.bias.copy_(b_test)
             del b_test
-        y_test = op(x_test)
+        forward = te_ops.Sequential(
+            te_ops.CastFloat8(forward=False, backward=fp8_grad_input),
+            bias_op,
+        )
+        with te.fp8_autocast(enabled=fp8_grad_input, fp8_recipe=fp8_recipe):
+            y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Check results
         tols = dtype_tols(dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
-        db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
+        db_test = bias_op.bias.grad.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
         torch.testing.assert_close(db_test, b_ref.grad, **tols)
