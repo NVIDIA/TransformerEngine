@@ -248,7 +248,9 @@ def initialize_ub(
             elif torch.distributed.is_gloo_available():
                 bootstrap_backend = "gloo"
         else:
-            assert bootstrap_backend in ["mpi", "gloo", "nccl"], "Invalid bootstrap backend!"
+            assert bootstrap_backend in ["gloo", "mpi", "nccl"], (
+                "Invalid torch.distributed backend for bootstrapping Userbuffers!"
+            )
             assert torch.distributed.is_backend_available(bootstrap_backend), (
                 f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
                 f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
@@ -258,17 +260,16 @@ def initialize_ub(
         world_rank = torch.distributed.get_rank(world_group)
         world_size = torch.distributed.get_world_size(world_group)
 
-        # Construct an intra-node communicator based on global ranks that share the same hostname
+        # We have single-node NVLink so we can color based on physical node hostnames.
         # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
-        #       address on that interface instead of the hostname. This can help avoid issues when
-        #       different hosts have the same hostname on Kubernetes clusters.
-        hostname = socket.gethostname()
-        ifname = os.getenv(
-            "NVTE_UB_SOCKET_IFNAME",
-            os.getenv("NCCL_SOCKET_IFNAME", os.getenv("GLOO_SOCKET_IFNAME")),
-        )
-
+        #       address on that interface instead of the hostname. Otherwise, allow the user to
+        #       set a network interface via NVTE_UB_SOCKET_IFNAME variable. This can help avoid
+        #       issues when  different hosts have the same hostname on managed clusters.
+        mydomain = socket.gethostname()
+        ifname = os.getenv(f"{bootstrap_backend.upper()}_SOCKET_IFNAME",
+                            os.getenv("NVTE_UB_SOCKET_IFNAME"))
         if ifname is not None:
+<<<<<<< HEAD
             # Make sure the ifname found in the environment is a valid network interface
             if ifname in [name for _, name in socket.if_nameindex()]:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -289,53 +290,53 @@ def initialize_ub(
                     + "which is known to fail on virtual clusters like Kubernetes. If Userbuffers "
                     + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
                     + "your environment to the correct network interface."
-                )
                 warnings.warn(ifname_warning, UserWarning)
 
-        hostnames = [None for _ in range(world_size)]
-        torch.distributed.all_gather_object(hostnames, hostname, world_group)
-        unique_hosts = []
-        for host in hostnames:
-            if host not in unique_hosts:
-                unique_hosts.append(host)
-        num_nodes = len(unique_hosts)
+        # Allgather the domain colors across ranks and reduce to a list of unique domains
+        domain_per_rank_list = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(domain_per_rank_list, mydomain, world_group)
+        unique_domains = []
+        for domain in domain_per_rank_list:
+            if domain not in unique_domains:
+                unique_domains.append(domain)
+        num_domains = len(unique_domains)
 
-        if num_nodes > 1:
-            ranks_per_node_list = [[] for _ in range(num_nodes)]
-            self_node_idx = -1
-            for i, host in enumerate(hostnames):
-                node_idx = unique_hosts.index(host)
-                ranks_per_node_list[node_idx].append(i)
-                if host == hostname:
-                    self_node_idx = node_idx
-            assert self_node_idx >= 0, "Internal TE error!"
+        if num_domains > 1:
+            # DP/TP model replicated on multiple NVLink domains
+            ranks_per_domain_list = [[] for _ in range(num_domains)]
+            mydomain_idx = -1
+            for i, domain in enumerate(domain_per_rank_list):
+                domain_idx = unique_domains.index(domain)
+                ranks_per_domain_list[domain_idx].append(i)
+                if domain == mydomain:
+                    mydomain_idx = domain_idx
+            assert mydomain_idx >= 0, "Internal TE error!"
 
-            intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                ranks_per_node_list, backend=bootstrap_backend
+            intra_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                ranks_per_domain_list, backend=bootstrap_backend
             )
-            local_rank = torch.distributed.get_rank(intra_node_group)
-            intra_node_ranks = torch.distributed.get_process_group_ranks(intra_node_group)
+            local_rank = torch.distributed.get_rank(intra_domain_group)
 
-            ranks_per_node_tensor = torch.tensor(ranks_per_node_list, dtype=int)
-            ranks_across_nodes_list = ranks_per_node_tensor.transpose(0, 1).tolist()
-            inter_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                ranks_across_nodes_list, backend=bootstrap_backend
+            inter_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                [ list(ranks) for ranks in zip(*ranks_per_domain_list) ],
+                backend=bootstrap_backend,
             )
 
-            helper = tex.CommOverlapHelper(world_group, intra_node_group, inter_node_group)
+            helper = tex.CommOverlapHelper(world_group, intra_domain_group, inter_domain_group)
 
         else:
-            self_node_idx = 0
+            # TP model on single NVLink domain, no replication, no data-parallelism
+            mydomain_idx = 0
             local_rank = world_rank
-            intra_node_ranks = list(range(world_size))
+            intra_domain_ranks = list(range(world_size))
 
             helper = tex.CommOverlapHelper(world_group)
 
         if world_rank == 0:
-            print(f"!!! [UB] Number of NVLink domains: {num_nodes}\n", end="", flush=True)
+            print(f"!!! [UB] Number of NVLink domains: {num_domains}\n", end="", flush=True)
         if local_rank == 0:
             print(
-                f"!!! [UB] Global ranks in NVLink domain #{self_node_idx}: {intra_node_ranks}\n",
+                f"!!! [UB] Global ranks on domain {mydomain_idx}: {intra_domain_ranks}\n",
                 end="",
                 flush=True,
             )
