@@ -528,7 +528,7 @@ class CommOverlapHelper : torch::CustomClassHolder {
 
   CommOverlapHelper(c10d::ProcessGroup *world_group,
                     std::optional<c10d::ProcessGroup *> intra_node_group_holder,
-                    std::optional<c10d::ProcessGroup *> inter_node_group_holder);
+                    std::optional<c10d::ProcessGroup *> inter_node_group_holde);
 
   ~CommOverlapHelper();
 
@@ -685,6 +685,5 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                         size_t workspaceSize, bool accumulate, bool use_split_accumulator,
                         at::Tensor rs_output);
 };  // CommOverlapP2P
->>>>>>> 7f2dcc5 (added TE/PyTorch wrappers for refactored comm+GEMM overlap code in TE/common)
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
