@@ -999,7 +999,6 @@ class Linear(TransformerEngineBaseModule):
         if (
             self._fusible_ops_are_supported
             and is_first_microbatch is None
-            and not is_first_module_in_mha
             and not self.fp8_calibration
             and not CPUOffloadEnabled
             and self.fsdp_group is None

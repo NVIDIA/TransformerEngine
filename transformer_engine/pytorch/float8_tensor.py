@@ -58,6 +58,8 @@ class _FromFloat8Func(torch.autograd.Function):
     ) -> torch.Tensor:
         if dtype is None:
             dtype = tensor.dtype
+        if tensor.numel() == 0:
+            return torch.empty_like(tensor._data, dtype=dtype)
         data = tensor._data.contiguous().view(1, -1).detach()
         out = tex.cast_from_fp8(
             data,
@@ -536,7 +538,12 @@ class Float8Tensor(torch.Tensor):
         return self.from_float8().cpu()
 
     def clone(self) -> Float8Tensor:
-        return _IdentityFunc.apply(self, {"data": self._data.detach().clone()})
+        with torch.no_grad():
+            init_kwargs = dict(
+                data=self._data.clone(),
+                fp8_scale_inv=self._scale_inv.clone(),
+            )
+        return _IdentityFunc.apply(self, init_kwargs)
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         return _ViewFunc.apply(self, shape)
