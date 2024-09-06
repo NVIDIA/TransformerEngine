@@ -201,9 +201,8 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
       _ubuf.dptr(), {static_cast<int64_t>(_ubuf.size(0)), static_cast<int64_t>(_ubuf.size(1))},
       at::device(torch::kCUDA).dtype(buffer_dtype));
   if (_atomic_gemm) {
-    _ubuf_counter = torch::from_blob(
-        _counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
-        at::device(torch::kCUDA).dtype(torch::kInt32));
+    _ubuf_counter = torch::from_blob(_counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
+                                     at::device(torch::kCUDA).dtype(torch::kInt32));
   }
 }
 
@@ -350,9 +349,8 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
       _ubuf.dptr(), {static_cast<int64_t>(_ubuf.size(0)), static_cast<int64_t>(_ubuf.size(1))},
       at::device(torch::kCUDA).dtype(buffer_dtype));
   if (_atomic_gemm) {
-    _ubuf_counter = torch::from_blob(
-        _counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
-        at::device(torch::kCUDA).dtype(torch::kInt32));
+    _ubuf_counter = torch::from_blob(_counter.dptr(), {static_cast<int64_t>(_num_splits * 2)},
+                                     at::device(torch::kCUDA).dtype(torch::kInt32));
   }
 }
 

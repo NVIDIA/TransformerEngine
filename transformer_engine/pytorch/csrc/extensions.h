@@ -605,6 +605,7 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
  private:
   torch::Tensor _ubuf_torch;
   torch::Tensor _ubuf_counter;
+
  public:
   CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                  CommOverlapHelper *helper, int tp_size,
