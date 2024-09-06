@@ -855,6 +855,96 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
 
+    @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
+    @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (4, 1, 16)))
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_input", (False, True))
+    @pytest.mark.parametrize("fp8_output", (False, True))
+    def test_activation(
+        self,
+        *,
+        activation: str,
+        out_shape: Iterable[int],
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_input: bool,
+        fp8_output: bool,
+    ) -> None:
+        """Activation functions"""
+
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        if activation in ("geglu", "reglu", "swiglu"):
+            in_shape[-1] *= 2
+
+        # Skip invalid configurations
+        if fp8_input or fp8_output:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=fp8_input,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        y_ref: torch.Tensor
+        if activation == "gelu":
+            y_ref = torch.nn.functional.gelu(x_ref, approximate="tanh")
+        elif activation == "relu":
+            y_ref = torch.nn.functional.relu(x_ref)
+        elif activation == "geglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.gelu(x1, approximate="tanh") * x2
+        elif activation == "reglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.relu(x1) * x2
+        elif activation == "swiglu":
+            x1, x2 = x_ref.chunk(2, dim=-1)
+            y_ref = torch.nn.functional.silu(x1) * x2
+        else:
+            raise ValueError(f"Unexpected activation function ({activation})")
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        make_op = dict(
+            gelu=te_ops.GELU,
+            relu=te_ops.ReLU,
+            geglu=te_ops.GEGLU,
+            reglu=te_ops.ReGLU,
+            swiglu=te_ops.SwiGLU,
+        )[activation]
+        forward = te_ops.Sequential(
+            make_op(),
+            te_ops.CastFloat8(forward=fp8_output, backward=False),
+        )
+        with te.fp8_autocast(enabled=fp8_output):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if fp8_output:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
+
 class TestFusedOps:
     """Tests for fused operations"""
 
