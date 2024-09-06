@@ -248,9 +248,11 @@ def initialize_ub(
             elif torch.distributed.is_gloo_available():
                 bootstrap_backend = "gloo"
         else:
-            assert bootstrap_backend in ["gloo", "mpi", "nccl"], (
-                "Invalid torch.distributed backend for bootstrapping Userbuffers!"
-            )
+            assert bootstrap_backend in [
+                "gloo",
+                "mpi",
+                "nccl",
+            ], "Invalid torch.distributed backend for bootstrapping Userbuffers!"
             assert torch.distributed.is_backend_available(bootstrap_backend), (
                 f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
                 f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
@@ -266,10 +268,10 @@ def initialize_ub(
         #       set a network interface via NVTE_UB_SOCKET_IFNAME variable. This can help avoid
         #       issues when  different hosts have the same hostname on managed clusters.
         mydomain = socket.gethostname()
-        ifname = os.getenv(f"{bootstrap_backend.upper()}_SOCKET_IFNAME",
-                            os.getenv("NVTE_UB_SOCKET_IFNAME"))
+        ifname = os.getenv(
+            f"{bootstrap_backend.upper()}_SOCKET_IFNAME", os.getenv("NVTE_UB_SOCKET_IFNAME")
+        )
         if ifname is not None:
-<<<<<<< HEAD
             # Make sure the ifname found in the environment is a valid network interface
             if ifname in [name for _, name in socket.if_nameindex()]:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -290,6 +292,7 @@ def initialize_ub(
                     + "which is known to fail on virtual clusters like Kubernetes. If Userbuffers "
                     + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
                     + "your environment to the correct network interface."
+                )
                 warnings.warn(ifname_warning, UserWarning)
 
         # Allgather the domain colors across ranks and reduce to a list of unique domains
@@ -318,7 +321,7 @@ def initialize_ub(
             local_rank = torch.distributed.get_rank(intra_domain_group)
 
             inter_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                [ list(ranks) for ranks in zip(*ranks_per_domain_list) ],
+                [list(ranks) for ranks in zip(*ranks_per_domain_list)],
                 backend=bootstrap_backend,
             )
 
