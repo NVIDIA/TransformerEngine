@@ -48,11 +48,13 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     const std::vector<int64_t> window_size, const at::Tensor cu_seqlens, const at::Tensor QKV,
     const transformer_engine::DType qkv_type, const c10::optional<at::Tensor> cu_seqlens_padded,
-    const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
-    const c10::optional<at::Tensor> scale_S, const c10::optional<at::Tensor> scale_O,
-    c10::optional<at::Tensor> amax_S, c10::optional<at::Tensor> amax_O,
-    const c10::optional<at::Tensor> Bias, const c10::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread);
+    const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
+    const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
+    const c10::optional<at::Tensor> scale_S, const int scale_S_offset,
+    const c10::optional<at::Tensor> scale_O, const int scale_O_offset,
+    c10::optional<at::Tensor> amax_S, const int amax_S_offset, c10::optional<at::Tensor> amax_O,
+    const int amax_O_offset, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
     size_t max_seqlen, float attn_scale, float p_dropout, bool set_zero, NVTE_QKV_Layout qkv_layout,
@@ -75,11 +77,13 @@ std::vector<at::Tensor> fused_attn_fwd_kvpacked(
     const at::Tensor KV, const transformer_engine::DType qkv_type,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
-    const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
-    const c10::optional<at::Tensor> scale_S, const c10::optional<at::Tensor> scale_O,
-    c10::optional<at::Tensor> amax_S, c10::optional<at::Tensor> amax_O,
-    const c10::optional<at::Tensor> Bias, const c10::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread);
+    const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
+    const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
+    const c10::optional<at::Tensor> scale_S, const int scale_S_offset,
+    const c10::optional<at::Tensor> scale_O, const int scale_O_offset,
+    c10::optional<at::Tensor> amax_S, const int amax_S_offset, c10::optional<at::Tensor> amax_O,
+    const int amax_O_offset, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd_kvpacked(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -104,11 +108,13 @@ std::vector<at::Tensor> fused_attn_fwd(
     const at::Tensor K, const at::Tensor V, const transformer_engine::DType qkv_type,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
-    const c10::optional<at::Tensor> descale_QKV, const c10::optional<at::Tensor> descale_S,
-    const c10::optional<at::Tensor> scale_S, const c10::optional<at::Tensor> scale_O,
-    c10::optional<at::Tensor> amax_S, c10::optional<at::Tensor> amax_O,
-    const c10::optional<at::Tensor> Bias, const c10::optional<at::Generator> rng_gen,
-    size_t rng_elts_per_thread);
+    const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
+    const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
+    const c10::optional<at::Tensor> scale_S, const int scale_S_offset,
+    const c10::optional<at::Tensor> scale_O, const int scale_O_offset,
+    c10::optional<at::Tensor> amax_S, const int amax_S_offset, c10::optional<at::Tensor> amax_O,
+    const int amax_O_offset, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd(
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
@@ -345,13 +351,18 @@ at::Tensor rmsnorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight, fl
  **************************************************************************************************/
 
 at::Tensor cast_to_fp8(const at::Tensor &input, const at::Tensor &scale, at::Tensor amax,
-                       at::Tensor scale_inv, transformer_engine::DType otype);
+                       at::Tensor scale_inv, transformer_engine::DType otype,
+                       const int scale_offset = 0, const int amax_offset = 0,
+                       const int scale_inv_offset = 0);
 
 void cast_to_fp8_noalloc(const at::Tensor &input, const at::Tensor &scale, at::Tensor output,
-                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype);
+                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype,
+                         const int scale_offset = 0, const int amax_offset = 0,
+                         const int scale_inv_offset = 0);
 
 at::Tensor cast_from_fp8(const at::Tensor &input, const at::Tensor &scale_inv,
-                         transformer_engine::DType itype, transformer_engine::DType otype);
+                         transformer_engine::DType itype, transformer_engine::DType otype,
+                         const int scale_inv_offset = 0);
 
 /***************************************************************************************************
  * Softmax
@@ -484,5 +495,13 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
+
+/***************************************************************************************************
+ * padding
+ **************************************************************************************************/
+
+void fused_multi_row_padding(at::Tensor input, at::Tensor output,
+                             std::vector<size_t> input_row_list,
+                             std::vector<size_t> padded_input_row_list);
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
