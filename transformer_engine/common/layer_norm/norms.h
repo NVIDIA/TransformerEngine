@@ -422,22 +422,23 @@ class LayerNormForwardPlan {
 template <typename NormPlanType>
 class NormalizationPlanRegistry {
  public:
-  static NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype,
-                                            const size_t batch_size, const size_t hidden_size,
-                                            const bool zero_centered_gamma, const size_t sm_count);
+  static NormalizationPlanRegistry& getInstance() {
+    static NormalizationPlanRegistry instance;
+    return instance;
+  };
 
-  static std::unordered_map<int64_t, std::unique_ptr<NormPlanType>> normalizationPlanMap;
+  NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype,
+                                     const size_t batch_size, const size_t hidden_size,
+                                     const bool zero_centered_gamma, const size_t sm_count);
+
 
  private:
   NormalizationPlanRegistry() {}
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
-};
 
-// explicit instantiation for static member
-template <typename NormPlanType>
-std::unordered_map<int64_t, std::unique_ptr<NormPlanType>>
-    NormalizationPlanRegistry<NormPlanType>::normalizationPlanMap;
+  std::unordered_map<int64_t, std::unique_ptr<NormPlanType>> normalizationPlanMap;
+};
 
 }  // namespace transformer_engine
 

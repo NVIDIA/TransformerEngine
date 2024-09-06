@@ -671,14 +671,12 @@ LayerNormForwardPlan::LayerNormForwardPlan(DType wtype, DType itype, DType otype
   static_assert(CUDNN_FRONTEND_VERSION >= 10601,
                 "CUDNN_FRONTEND_VERSION should be at least 1.6.1!");
 
-  NVTE_CHECK_CUDNN(cudnnCreate(&_handle));
-
   namespace fe = cudnn_frontend;
 
   // TODO: Move this outside of this class for Adaptive LayerNorm
   _scalar_dptr = std::make_unique<char[]>(typeToSize(wtype));
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_offset.get())) = (cpp_dtype)1.0f;);
+      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
 
   _graph.set_io_data_type(te2cudnnDtype(itype))
       .set_intermediate_data_type(te2cudnnDtype(ctype))
@@ -811,20 +809,14 @@ NormPlanType* NormalizationPlanRegistry<NormPlanType>::getNormalizationPlan(
     const bool zero_centered_gamma, const size_t sm_count) {
   const DType ctype = DType::kFloat32;
   auto key = get_key(wtype, itype, otype, ctype, hidden_size);
-  printf("A \n");
 
   auto it = normalizationPlanMap.find(key);
-  printf("B \n");
   if (it != normalizationPlanMap.end()) {
-    printf("C \n");
     return it->second.get();
   }
-  printf("D \n");
   auto plan = std::make_unique<NormPlanType>(wtype, itype, otype, ctype, batch_size, hidden_size,
                                              zero_centered_gamma, sm_count);
-  printf("E \n");
   normalizationPlanMap.insert({key, std::move(plan)});
-  printf("F \n");
   return normalizationPlanMap[key].get();
 }
 
