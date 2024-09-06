@@ -664,4 +664,170 @@ template void
 norms_launcher<NVTE_NORM_TYPE::RMS_BWD_CUDNN, NormBwdCudnn<NVTE_NORM_TYPE::RMS_BWD_CUDNN>>(
     NormBwdCudnn<NVTE_NORM_TYPE::RMS_BWD_CUDNN>&, Tensor*, Tensor*, Tensor*, Tensor*);
 
+LayerNormForwardPlan::LayerNormForwardPlan(DType wtype, DType itype, DType otype, DType ctype,
+                                           const size_t batch_size, const size_t hidden_size,
+                                           const bool zero_centered_gamma, const size_t sm_count)
+    : _fp8_out(is_fp8_dtype(otype)), _zero_centered(zero_centered_gamma) {
+  static_assert(CUDNN_FRONTEND_VERSION >= 10601,
+                "CUDNN_FRONTEND_VERSION should be at least 1.6.1!");
+
+  NVTE_CHECK_CUDNN(cudnnCreate(&_handle));
+
+  namespace fe = cudnn_frontend;
+
+  // TODO: Move this outside of this class for Adaptive LayerNorm
+  _scalar_dptr = std::make_unique<char[]>(typeToSize(wtype));
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_offset.get())) = (cpp_dtype)1.0f;);
+
+  _graph.set_io_data_type(te2cudnnDtype(itype))
+      .set_intermediate_data_type(te2cudnnDtype(ctype))
+      .set_compute_data_type(te2cudnnDtype(ctype));
+
+  if (cudnnGetVersion() >= 90400) _graph.set_sm_count(sm_count);
+
+  const auto batch_dim = static_cast<int32_t>(batch_size);
+  const auto hidden_dim = static_cast<int32_t>(hidden_size);
+
+  _x = _graph.tensor(fe::graph::Tensor_attributes()
+                         .set_name("X")
+                         .set_dim({batch_dim, hidden_dim, 1, 1})
+                         .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
+  _gamma_zero = _graph.tensor(fe::graph::Tensor_attributes()
+                                  .set_name("gamma_zero")
+                                  .set_dim({1, hidden_dim, 1, 1})
+                                  .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                                  .set_data_type(te2cudnnDtype(wtype)));
+  _beta = _graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name("bias")
+                            .set_dim({1, hidden_dim, 1, 1})
+                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                            .set_data_type(te2cudnnDtype(wtype)));
+  _eps = _graph.tensor(fe::graph::Tensor_attributes()
+                           .set_name("epsilon")
+                           .set_dim({1, 1, 1, 1})
+                           .set_stride({1, 1, 1, 1})
+                           .set_data_type(te2cudnnDtype(ctype))
+                           .set_is_pass_by_value(true));
+  // TODO: check to remove this if
+  if (zero_centered_gamma) {
+    _scalar_offset = _graph.tensor(fe::graph::Tensor_attributes()
+                                       .set_name("one")
+                                       .set_dim({1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(te2cudnnDtype(wtype))
+                                       .set_is_pass_by_value(true));
+    auto centered_options = fe::graph::Pointwise_attributes()
+                                .set_mode(fe::PointwiseMode_t::ADD)
+                                .set_compute_data_type(te2cudnnDtype(ctype));
+    _gamma = _graph.pointwise(_gamma_zero, _scalar_offset, centered_options);
+    _gamma->set_output(false).set_data_type(te2cudnnDtype(wtype));
+  } else
+    _gamma = _gamma_zero;
+
+  auto norm_options = fe::graph::Layernorm_attributes()
+                          .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
+                          .set_epsilon(_eps);
+  auto ret = _graph.layernorm(_x, _gamma, _beta, norm_options);
+  std::tie(_z, _mean, _rsigma) = std::make_tuple(ret[0], ret[1], ret[2]);
+  _mean->set_output(true).set_data_type(te2cudnnDtype(ctype));
+  /* auto norm_options = fe::graph::Rmsnorm_attributes() */
+  /*                         .set_forward_phase(fe::NormFwdPhase_t::TRAINING) */
+  /*                         .set_epsilon(eps_tensor); */
+  /* auto ret = _graph.rmsnorm(x_tensor, gamma_tensor, norm_options); */
+  /* std::tie(z_tensor, inv_var_tensor) = std::make_tuple(ret[0], ret[1]); */
+
+  _rsigma->set_output(true).set_data_type(te2cudnnDtype(ctype));
+
+  const auto ZDtype = _fp8_out ? ctype : otype;
+  _z->set_output(!_fp8_out).set_data_type(te2cudnnDtype(ZDtype));
+
+  fe::graph::Pointwise_attributes z_scale_options;
+  if (_fp8_out) {
+    // create a scale node
+    _z_scale = _graph.tensor(fe::graph::Tensor_attributes()
+                                 .set_name("z_scale")
+                                 .set_dim({1, 1, 1, 1})
+                                 .set_stride({1, 1, 1, 1})
+                                 .set_data_type(te2cudnnDtype(ctype)));
+    z_scale_options = fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::MUL);
+    _z_fp8 = _graph.pointwise(_z, _z_scale, z_scale_options);
+
+    _z_fp8->set_output(true).set_data_type(te2cudnnDtype(otype));
+
+    // create an amax reduction node
+    _amax = _graph.reduction(_z, fe::graph::Reduction_attributes()
+                                     .set_mode(fe::ReductionMode_t::AMAX)
+                                     .set_compute_data_type(te2cudnnDtype(ctype)));
+    _amax->set_output(true).set_data_type(te2cudnnDtype(ctype)).set_dim({1, 1, 1, 1});
+  }
+
+  this->build();
+}
+
+void LayerNormForwardPlan::build() {
+  NVTE_CHECK(_graph.validate().is_good());
+  NVTE_CHECK(_graph.build_operation_graph(_handle).is_good());
+  NVTE_CHECK(_graph.create_execution_plans({cudnn_frontend::HeurMode_t::FALLBACK}).is_good());
+  NVTE_CHECK(_graph.check_support(_handle).is_good());
+  NVTE_CHECK(_graph.build_plans(_handle).is_good());
+}
+
+std::vector<size_t> LayerNormForwardPlan::getWorkspaceShape() const {
+  return {static_cast<size_t>(_graph.get_workspace_size())};
+}
+
+void LayerNormForwardPlan::execute(void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+                                   void* eps_dptr, void* rsigma_dptr, void* z_dptr, void* amax_dptr,
+                                   void* z_scale_dptr, void* z_scale_inv_dptr,
+                                   void* workspace_dptr) {
+  _variant_pack = {
+      {_x, x_dptr},       {_rsigma, rsigma_dptr}, {_eps, eps_dptr},
+      {_mean, mean_dptr}, {_beta, beta_dptr},
+  };
+  if (_zero_centered) {
+    _variant_pack.insert(
+        {{_scalar_offset, reinterpret_cast<void*>(_scalar_dptr.get())}, {_gamma_zero, gamma_dptr}});
+  } else {
+    _variant_pack.insert({{_gamma, gamma_dptr}});
+  }
+  if (_fp8_out)
+    _variant_pack.insert({
+        {_z_scale, z_scale_dptr},
+        {_amax, amax_dptr},
+        {_z_fp8, z_dptr},
+    });
+  else
+    _variant_pack.insert({{_z, z_dptr}});
+
+  NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
+
+  ComputeScaleInv(amax_dptr, z_scale_inv_dptr);
+}
+
+template <typename NormPlanType>
+NormPlanType* NormalizationPlanRegistry<NormPlanType>::getNormalizationPlan(
+    DType wtype, DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
+    const bool zero_centered_gamma, const size_t sm_count) {
+  const DType ctype = DType::kFloat32;
+  auto key = get_key(wtype, itype, otype, ctype, hidden_size);
+  printf("A \n");
+
+  auto it = normalizationPlanMap.find(key);
+  printf("B \n");
+  if (it != normalizationPlanMap.end()) {
+    printf("C \n");
+    return it->second.get();
+  }
+  printf("D \n");
+  auto plan = std::make_unique<NormPlanType>(wtype, itype, otype, ctype, batch_size, hidden_size,
+                                             zero_centered_gamma, sm_count);
+  printf("E \n");
+  normalizationPlanMap.insert({key, std::move(plan)});
+  printf("F \n");
+  return normalizationPlanMap[key].get();
+}
+
+template class NormalizationPlanRegistry<LayerNormForwardPlan>;
+
 }  // namespace transformer_engine

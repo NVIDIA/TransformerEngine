@@ -15,12 +15,15 @@
 #include <functional>
 #include <map>
 #include <stdexcept>
+#include <typeindex>
 #include <unordered_map>
 #include <vector>
 
 #include "../common.h"
 
 namespace transformer_engine {
+
+namespace fe = cudnn_frontend;
 
 template <typename Params>
 struct LaunchParams {
@@ -387,6 +390,54 @@ void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier = nullptr
                     Tensor* dgamma_part = nullptr, Tensor* dbeta_part = nullptr);
 
 void ComputeScaleInv(Tensor* z);
+void ComputeScaleInv(void* scale_inv, void* amax);
+
+// Derived classes for each normalization type
+class LayerNormForwardPlan {
+ public:
+  LayerNormForwardPlan(DType wtype, DType itype, DType otype, DType ctype, const size_t batch_size,
+                       const size_t hidden_size, const bool zero_centered_gamma,
+                       const size_t sm_count);
+
+  void build();
+
+  std::vector<size_t> getWorkspaceShape() const;
+
+  void execute(void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr, void* eps_dptr,
+               void* rsigma_dptr, void* z_dptr, void* amax_dptr, void* z_scale_dptr,
+               void* z_scale_inv_dptr, void* workspace_dptr);
+
+ private:
+  const bool _zero_centered, _fp8_out;
+  std::unique_ptr<char[]> _scalar_dptr;
+
+  std::shared_ptr<fe::graph::Tensor_attributes> _x, _gamma_zero, _scalar_offset, _gamma, _beta,
+      _eps, _mean, _rsigma, _z, _z_scale, _amax, _z_fp8;
+
+  fe::graph::Graph _graph;
+  std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;
+  cudnnHandle_t _handle;
+};
+
+template <typename NormPlanType>
+class NormalizationPlanRegistry {
+ public:
+  static NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype,
+                                            const size_t batch_size, const size_t hidden_size,
+                                            const bool zero_centered_gamma, const size_t sm_count);
+
+  static std::unordered_map<int64_t, std::unique_ptr<NormPlanType>> normalizationPlanMap;
+
+ private:
+  NormalizationPlanRegistry() {}
+  NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
+  NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
+};
+
+// explicit instantiation for static member
+template <typename NormPlanType>
+std::unordered_map<int64_t, std::unique_ptr<NormPlanType>>
+    NormalizationPlanRegistry<NormPlanType>::normalizationPlanMap;
 
 }  // namespace transformer_engine
 

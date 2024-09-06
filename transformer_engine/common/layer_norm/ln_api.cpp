@@ -52,11 +52,32 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   // TODO: add check for GPU ARCH
 
   if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
-    NormFwdCudnn<NVTE_NORM_TYPE::LN_FWD_CUDNN> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma,
-                                                       stream, multiprocessorCount, workspace,
-                                                       zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::LN_FWD_CUDNN>(NormFwd, workspace);
-    if (is_fp8_dtype(z->data.dtype)) ComputeScaleInv(z);
+    printf("HERE 0\n");
+    auto plan = NormalizationPlanRegistry<LayerNormForwardPlan>::getNormalizationPlan(
+        gamma.data.dtype,  // wtype
+        x.data.dtype,      // itype
+        z->data.dtype,     // otype
+        x.data.shape[0],   // batch_size
+        x.data.shape[1],   // hidden_size
+        zero_centered_gamma, multiprocessorCount);
+    printf("HERE 1\n");
+
+    if (workspace->data.dptr == nullptr) {
+      printf("HERE 2\n");
+      workspace->data.shape = plan->getWorkspaceShape();
+      workspace->data.dtype = DType::kByte;
+      printf("HERE 3\n");
+      return;
+    } else {
+      printf("HERE 4\n");
+      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+      printf("HERE 5\n");
+      plan->execute(x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
+                    reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
+                    z->data.dptr, z->amax.dptr, z->scale.dptr, z->scale_inv.dptr,
+                    workspace->data.dptr);
+      printf("HERE 6\n");
+    }
   } else {
     NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma, stream,
                                                  multiprocessorCount, workspace, barrier,
