@@ -73,16 +73,16 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
                                      std::optional<c10d::ProcessGroup *> inter_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
   pgs.insert({"world", world_group});
-  myrank =pgs["world"]->getRank();
-  numranks =pgs["world"]->getSize();
-  c10d::ProcessGroup::BackendType backend =pgs["world"]->getBackendType();
+  myrank = pgs["world"]->getRank();
+  numranks = pgs["world"]->getSize();
+  c10d::ProcessGroup::BackendType backend = pgs["world"]->getBackendType();
   backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
   if (intra_domain_group.has_value()) {
     // Get local rank on node and number of local ranks
     NVTE_CHECK(intra_domain_group.value()->getBackendType() == backend,
                "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
-               "group!",pgs["world"]->getBackendName());
+               "group!", pgs["world"]->getBackendName());
     pgs.insert({"intra", intra_domain_group.value()});
     mylocal = pgs["intra"]->getRank();
     numlocal = pgs["intra"]->getSize();
