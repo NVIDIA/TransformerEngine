@@ -171,11 +171,12 @@ def _make_graphed_callables(
         ]
     else:
         per_callable_module_params = []
-        for i in range(num_microbatches):
-            for c in callables:
-                per_callable_module_params.append(
-                    tuple(c.parameters()) if isinstance(c, torch.nn.Module) else ()
-                )
+        for m_chunk in range(num_model_chunks):
+            for idx in range(num_microbatches):
+                for l_no in range(num_layers):
+                    per_callable_module_params.append(
+                        tuple(callables[m_chunk*num_layers + l_no].parameters()) if isinstance(c, torch.nn.Module) else ()
+                    )
         assert len(per_callable_module_params) == len(flatten_sample_args)
         per_callable_static_input_surfaces = [
             flatten_sample_args[i] + per_callable_module_params[i]
