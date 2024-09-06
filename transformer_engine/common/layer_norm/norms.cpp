@@ -66,6 +66,14 @@ uint64_t get_key(DType wtype, DType itype, DType otype, DType ctype, uint64_t hi
   return launcher_key;
 }
 
+uint64_t get_key(DType wtype, DType itype, DType otype, DType ctype, uint64_t hidden_size,
+                 bool zero_centered_gamma) {
+  uint64_t type_key = get_type_id(wtype) | (get_type_id(itype) << 2) | (get_type_id(otype) << 4) |
+                      (get_type_id(ctype) << 6 | uint32_t(zero_centered_gamma) << 8);
+  uint64_t launcher_key = (type_key << 32) | hidden_size;
+  return launcher_key;
+}
+
 template <NVTE_NORM_TYPE NormEnum>
 FwdFunction& get_fwd_launcher(DType wtype, DType itype, DType otype, DType ctype,
                               const FwdParams& params) {
@@ -698,6 +706,7 @@ LayerNormForwardPlan::LayerNormForwardPlan(DType wtype, DType itype, DType otype
                                        .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
+                                .set_compute_data_type(get_cudnn_fe_dtype(ctype))
                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
     _gamma = _graph.pointwise(_gamma_zero, _scalar_offset, centered_options);
     _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(wtype));
@@ -781,7 +790,7 @@ void LayerNormForwardPlan::execute(void* x_dptr, void* gamma_dptr, void* beta_dp
 
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 
-  if (_fp8_out) ComputeScaleInv(amax_dptr, z_scale_inv_dptr);
+  if (_fp8_out) ComputeScaleInv(z_scale_inv_dptr, scale_inv_dptr);
 }
 
 template <typename NormPlanType>
@@ -789,7 +798,7 @@ NormPlanType* NormalizationPlanRegistry<NormPlanType>::getNormalizationPlan(
     DType wtype, DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
     const bool zero_centered_gamma, const size_t sm_count) {
   const DType ctype = DType::kFloat32;
-  auto key = get_key(wtype, itype, otype, ctype, hidden_size);
+  auto key = get_key(wtype, itype, otype, ctype, hidden_size, zero_centered_gamma);
 
   auto it = normalizationPlanMap.find(key);
   if (it != normalizationPlanMap.end()) {

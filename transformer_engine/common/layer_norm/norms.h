@@ -392,7 +392,7 @@ void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier = nullptr
                     Tensor* dgamma_part = nullptr, Tensor* dbeta_part = nullptr);
 
 void ComputeScaleInv(Tensor* z);
-void ComputeScaleInv(void* scale_inv, void* amax);
+void ComputeScaleInv(void* scale_inv, void* scale);
 
 // Derived classes for each normalization type
 class LayerNormForwardPlan {
@@ -429,10 +429,9 @@ class NormalizationPlanRegistry {
     return instance;
   };
 
-  NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype,
-                                     const size_t batch_size, const size_t hidden_size,
-                                     const bool zero_centered_gamma, const size_t sm_count);
-
+  NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype, const size_t batch_size,
+                                     const size_t hidden_size, const bool zero_centered_gamma,
+                                     const size_t sm_count);
 
  private:
   NormalizationPlanRegistry() {}

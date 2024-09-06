@@ -53,12 +53,12 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
     auto plan = NormalizationPlanRegistry<LayerNormForwardPlan>::getInstance().getNormalizationPlan(
-      gamma.data.dtype,  // wtype
-      x.data.dtype,      // itype
-      z->data.dtype,     // otype
-      x.data.shape[0],   // batch_size
-      x.data.shape[1],   // hidden_size
-      zero_centered_gamma, multiprocessorCount);
+        gamma.data.dtype,  // wtype
+        x.data.dtype,      // itype
+        z->data.dtype,     // otype
+        x.data.shape[0],   // batch_size
+        x.data.shape[1],   // hidden_size
+        zero_centered_gamma, multiprocessorCount);
 
     if (workspace->data.dptr == nullptr) {
       workspace->data.shape = plan->getWorkspaceShape();

@@ -22,10 +22,10 @@ void ComputeScaleInv(Tensor* z) {
   reciprocalKernel<<<1, 1>>>(reinterpret_cast<float*>(z->scale_inv.dptr),
                              reinterpret_cast<float*>(z->amax.dptr));
 }
-void ComputeScaleInv(void* scale_inv, void* amax) {
-  NVTE_CHECK(amax != nullptr, "FP8 output must have amax tensor.");
-  NVTE_CHECK(scale_inv == nullptr, "FP8 output scale_inv should be empty.");
-  reciprocalKernel<<<1, 1>>>(reinterpret_cast<float*>(scale_inv), reinterpret_cast<float*>(amax));
+void ComputeScaleInv(void* scale_inv, void* scale) {
+  NVTE_CHECK(amax != nullptr, "amax should be allocated.");
+  NVTE_CHECK(scale_inv != nullptr, "scale_inv should be allocated.");
+  reciprocalKernel<<<1, 1>>>(reinterpret_cast<float*>(scale_inv), reinterpret_cast<float*>(scale));
 }
 
 }  // namespace transformer_engine
