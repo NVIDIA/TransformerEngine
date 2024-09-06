@@ -854,7 +854,6 @@ class TestBasicOps:
         torch.testing.assert_close(y2_test, y2_ref, rtol=0, atol=0)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
-
     @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
     @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (4, 1, 16)))
     @pytest.mark.parametrize("dtype", _dtypes)

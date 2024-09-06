@@ -160,6 +160,7 @@ class GELU(_ActivationOperation):
     See `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
 
     """
+
     _forward_tex_function: Callable = tex_gelu
     _backward_tex_function: Callable = transformer_engine_torch.dgelu
 
@@ -204,6 +205,7 @@ class GEGLU(_ActivationOperation):
     See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
 
     """
+
     _forward_tex_function: Callable = tex_geglu
     _backward_tex_function: Callable = transformer_engine_torch.dgeglu
 
@@ -229,6 +231,7 @@ class ReGLU(_ActivationOperation):
     See `GLU Variants Improve Transformer<https://arxiv.org/abs/2002.05202>`__.
 
     """
+
     _forward_tex_function: Callable = tex_reglu
     _backward_tex_function: Callable = transformer_engine_torch.dreglu
 
@@ -263,5 +266,6 @@ class SwiGLU(_ActivationOperation):
     and `Gaussian Error Linear Units (GELUs)<https://arxiv.org/abs/1606.08415>`__.
 
     """
+
     _forward_tex_function: Callable = tex_swiglu
     _backward_tex_function: Callable = transformer_engine_torch.dswiglu
