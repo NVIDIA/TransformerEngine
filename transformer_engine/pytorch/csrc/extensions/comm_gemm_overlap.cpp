@@ -69,24 +69,23 @@ CommOverlapHelper::CommOverlapHelper() {
 }  // empty constructor for NVTE_UB_WITH_MPI=1
 
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     std::optional<c10d::ProcessGroup *> intra_node_group_holder,
-                                     std::optional<c10d::ProcessGroup *> inter_node_group_holder) {
+                                     std::optional<c10d::ProcessGroup *> intra_domain_group,
+                                     std::optional<c10d::ProcessGroup *> inter_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
-  myrank = world_group->getRank();
-  numranks = world_group->getSize();
   pgs.insert({"world", world_group});
-  c10d::ProcessGroup::BackendType backend = world_group->getBackendType();
+  myrank =pgs["world"]->getRank();
+  numranks =pgs["world"]->getSize();
+  c10d::ProcessGroup::BackendType backend =pgs["world"]->getBackendType();
   backend_is_nccl = (backend == c10d::ProcessGroup::BackendType::NCCL);
 
-  if (intra_node_group_holder.has_value()) {
+  if (intra_domain_group.has_value()) {
     // Get local rank on node and number of local ranks
-    c10d::ProcessGroup *intra_node_group = inter_node_group_holder.value();
-    NVTE_CHECK(intra_node_group->getBackendType() == backend,
+    NVTE_CHECK(intra_domain_group.value()->getBackendType() == backend,
                "Internal TE error: Intra-node group must be on the same backend (%s) as the world ",
-               "group!", world_group->getBackendName());
-    mylocal = intra_node_group->getRank();
-    numlocal = intra_node_group->getSize();
-    pgs.insert({"intra", intra_node_group});
+               "group!",pgs["world"]->getBackendName());
+    pgs.insert({"intra", intra_domain_group.value()});
+    mylocal = pgs["intra"]->getRank();
+    numlocal = pgs["intra"]->getSize();
 
     if (numlocal == numranks) {
       // Intra-node group is same as the world group so there can only be 1 node
@@ -99,18 +98,18 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
     } else {
       // Intra-node group is different than the world group so there must be multiple nodes
       NVTE_CHECK(
-          inter_node_group_holder.has_value(),
+          inter_domain_group.has_value(),
           "Internal TE error: Inter-node group cannot be `None` when intra-node group is not ",
           "identical to the world_group!");
 
       // Get node ID and number of nodes
-      c10d::ProcessGroup *inter_node_group = intra_node_group_holder.value();
       NVTE_CHECK(
-          inter_node_group->getBackendType() == backend,
+          inter_domain_group.value()->getBackendType() == backend,
           "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
-          "group!", world_group->getBackendName());
-      mynode = inter_node_group->getRank();
-      numnodes = inter_node_group->getSize();
+          "group!", pgs["world"]->getBackendName());
+      pgs.insert({"inter", inter_domain_group.value()});
+      mynode = pgs["inter"]->getRank();
+      numnodes = pgs["inter"]->getSize();
     }
   } else {
     // Intra-node group is not set so we assume there is only 1 node
