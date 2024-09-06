@@ -23,7 +23,7 @@ void ComputeScaleInv(Tensor* z) {
                              reinterpret_cast<float*>(z->amax.dptr));
 }
 void ComputeScaleInv(void* scale_inv, void* scale) {
-  NVTE_CHECK(amax != nullptr, "amax should be allocated.");
+  NVTE_CHECK(scale != nullptr, "amax should be allocated.");
   NVTE_CHECK(scale_inv != nullptr, "scale_inv should be allocated.");
   reciprocalKernel<<<1, 1>>>(reinterpret_cast<float*>(scale_inv), reinterpret_cast<float*>(scale));
 }

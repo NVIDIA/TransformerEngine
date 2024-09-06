@@ -790,7 +790,7 @@ void LayerNormForwardPlan::execute(void* x_dptr, void* gamma_dptr, void* beta_dp
 
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 
-  if (_fp8_out) ComputeScaleInv(z_scale_inv_dptr, scale_inv_dptr);
+  if (_fp8_out) ComputeScaleInv(z_scale_inv_dptr, z_scale_inv_dptr);
 }
 
 template <typename NormPlanType>
