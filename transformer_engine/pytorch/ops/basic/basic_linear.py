@@ -7,6 +7,7 @@
 from __future__ import annotations
 from collections.abc import Callable, Iterable
 import contextlib
+import functools
 import math
 from typing import Any, Optional
 
@@ -74,9 +75,12 @@ class BasicLinear(BasicOperation):
         parallelism, i.e. distributing input or output tensors along
         outer dimension (sequence or batch dim) when not distributing
         along inner dimension (embedding dim)
-    rng_state_tracker_function: callable
+    rng_state_tracker_function: callable, optional
         Function that returns `CudaRNGStatesTracker`, which is used
         for model-parallel weight initialization
+    rng_state_tracker_name: str, optional
+        Key passed to `CudaRNGStatesTracker` to get a specific RNG
+        tracker
     accumulate_into_main_grad: bool, default = `False`
         Whether to directly accumulate weight gradients into the
         weight's `main_grad` attribute instead of relying on PyTorch
@@ -97,6 +101,7 @@ class BasicLinear(BasicOperation):
         tensor_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
+        rng_state_tracker_name: Optional[str] = None,
         accumulate_into_main_grad: bool = False,
     ) -> None:
         super().__init__()
@@ -160,6 +165,7 @@ class BasicLinear(BasicOperation):
         self.register_parameter("weight", weight)
         self._rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]]
         self._rng_state_tracker_function = rng_state_tracker_function
+        self._rng_state_tracker_name: Optional[str] = rng_state_tracker_name
         if not defer_param_init:
             self.reset_parameters()
 
@@ -283,7 +289,14 @@ class BasicLinear(BasicOperation):
         # Initialize values
         init_context = contextlib.nullcontext
         if self._rng_state_tracker_function is not None:
-            init_context = self._rng_state_tracker_function().fork
+            rng_state_tracker = self._rng_state_tracker_function()
+            if self._rng_state_tracker_name is None:
+                init_context = rng_state_tracker.fork
+            else:
+                init_context = functools.partial(
+                    rng_state_tracker.fork,
+                    self._rng_state_tracker_name,
+                )
         with init_context():
             torch.nn.init.kaiming_uniform_(weight, a=math.sqrt(5))
 

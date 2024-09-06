@@ -49,6 +49,8 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
+from ..ops import Sequential
+from ..ops import Linear as LinearOp
 
 __all__ = ["Linear"]
 
@@ -891,6 +893,12 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        # Construct equivalent representation with fusible operations
+        self._ops: Optional[Sequential] = None
+        self._fusible_ops_are_supported: bool = len(self.parameter_split_sizes) == 1
+        if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
+            self._fusible_ops_are_supported = False
+
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -911,6 +919,61 @@ class Linear(TransformerEngineBaseModule):
                         setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
+
+    def _get_fusible_ops(self) -> Sequential:
+
+        # Get module parameters
+        weight = getattr(self, self.weight_names[0])
+        bias = None
+        if self.use_bias:
+            bias = getattr(self, self.bias_names[0])
+
+        # Unsupported cases
+        if len(self.parameter_split_sizes) != 1:
+            raise ValueError(
+                "Fusible ops do not support splitting weight tensor "
+                "into multiple parameters"
+            )
+        if weight.device.type == "meta":
+            raise RuntimeError("Weight tensor has not been initialized")
+        if bias is not None and bias.device.type == "meta":
+            raise RuntimeError("Bias tensor has not been initialized")
+        if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
+            raise NotImplementedError("Fusible ops do not support Userbuffers yet")
+
+        # Return immediately if fusible ops are already ready
+        if (
+            self._ops is not None
+            and self._ops[0].weight is weight
+            and self._ops[0].bias is bias
+        ):
+            return self._ops
+
+        # Global tensor dimensions
+        in_features = self.in_features
+        out_features = self.out_features
+        if self.parallel_mode == "column":
+            self.out_features *= self.tp_size
+        elif self.parallel_mode == "row":
+            self.in_features *= self.tp_size
+
+        # Construct fusible operations
+        linear_op = LinearOp(
+            in_features,
+            out_features,
+            bias=self.use_bias,
+            device="meta",
+            dtype=weight.dtype,
+            tensor_parallel_mode=self.parallel_mode,
+            tensor_parallel_group=self.tp_group,
+            sequence_parallel=self.sequence_parallel,
+            accumulate_into_main_grad=self.fuse_wgrad_accumulation,
+        )
+        linear_op.weight = weight
+        linear_op.bias = bias
+        self._ops = Sequential(linear_op)
+
+        return self._ops
 
     @no_torch_dynamo()
     def forward(
@@ -941,6 +1004,24 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
+        # Implementation with fusible operations
+        from ..cpu_offload import CPUOffloadEnabled
+        if (
+            self._fusible_ops_are_supported
+            and is_first_microbatch is None
+            and not is_first_module_in_mha
+            and not self.fp8_calibration
+            and not CPUOffloadEnabled
+            and self.fsdp_group is None
+        ):
+            ops = self._get_fusible_ops()
+            out = ops(inp)
+            if self.return_bias:
+                bias_tensor = getattr(self, self.bias_names[0])
+                return out, cast_if_needed(bias_tensor, self.activation_dtype)
+            return out
+
+        # Implementation as monolithic operation
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
@@ -1006,8 +1087,6 @@ class Linear(TransformerEngineBaseModule):
                         with_transpose=with_transpose,
                         fsdp_group=self.fsdp_group,
                     )
-
-            from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
