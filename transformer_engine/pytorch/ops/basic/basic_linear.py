@@ -28,7 +28,12 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
 )
-from transformer_engine.pytorch.module.base import get_workspace
+from transformer_engine.pytorch.module.base import (
+    get_workspace,
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+)
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     OperationContext,
@@ -226,6 +231,8 @@ class BasicLinear(BasicOperation):
 
         # Tensor-parallel group size
         if mode is None:
+            group_size = 1
+        elif process_group is None and not torch.distributed.is_initialized():
             group_size = 1
         else:
             group_size = torch.distributed.get_world_size(process_group)
@@ -577,6 +584,7 @@ class BasicLinear(BasicOperation):
                 out=y,
                 bias=b,
                 use_bias=(b is not None),
+                use_split_accumulator=_2X_ACC_FPROP,
             )
             if with_fp8_output:
                 if y._fp8_meta is None:
@@ -960,6 +968,7 @@ class BasicLinear(BasicOperation):
                 kwargs = dict(
                     accumulate=accumulate_into_grad_input,
                     out=dx,
+                    use_split_accumulator=_2X_ACC_DGRAD,
                 )
                 if with_fp8_grad_input:
                     if dx._fp8_meta is None:
@@ -1058,6 +1067,7 @@ class BasicLinear(BasicOperation):
                     grad_weight.dtype,
                     get_workspace(),
                     accumulate=accumulate_into_grad_weight,
+                    use_split_accumulator=_2X_ACC_WGRAD,
                     out=grad_weight,
                 )
             else:
