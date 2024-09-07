@@ -150,22 +150,6 @@ constexpr bool IF_TE_BWD_NORMS() {
   return (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE || NormEnum == NVTE_NORM_TYPE::RMS_BWD_TE);
 };
 
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_CUDNN_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_FWD_CUDNN || NormEnum == NVTE_NORM_TYPE::LN_BWD_CUDNN ||
-          NormEnum == NVTE_NORM_TYPE::RMS_FWD_CUDNN || NormEnum == NVTE_NORM_TYPE::RMS_BWD_CUDNN);
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_CUDNN_FWD_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_FWD_CUDNN || NormEnum == NVTE_NORM_TYPE::RMS_FWD_CUDNN);
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_CUDNN_BWD_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_BWD_CUDNN || NormEnum == NVTE_NORM_TYPE::RMS_BWD_CUDNN);
-};
-
 using FwdFunction = std::function<void(LaunchParams<FwdParams>&, const bool)>;
 using BwdFunction = std::function<void(LaunchParams<BwdParams>&, const bool)>;
 using FunctionKey = uint64_t;
@@ -349,96 +333,68 @@ class NormBwdTe : public NormFwdTe<NormEnum> {
   std::vector<size_t> get_dgamma_shape();
 };
 
-template <NVTE_NORM_TYPE NormEnum>
-class NormFwdCudnn : public NormBase {
- public:
-  NormFwdCudnn();
-
-  NormFwdCudnn(const Tensor& x, const Tensor& gamma, const Tensor& beta, const float epsilon,
-               Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
-               const int multiprocessorCount, Tensor* workspace, const bool zero_centered_gamma);
-
-  void initialize() override;
-
-  void set_workspace_and_barrier(void* workspace_ptr, void* barrier_ptr) override;
-
-  // Launch the kernel.
-  void execute() override;
-
-  std::vector<size_t> get_workspace_shape() override;
-
-  ~NormFwdCudnn() { cudnnDestroy(_handle); }
-
-  cudnn_frontend::graph::Graph _graph;
-  std::unordered_map<std::shared_ptr<cudnn_frontend::graph::Tensor_attributes>, void*>
-      _variant_pack;
-  cudnnHandle_t _handle;
-  void* _workspace;
-
-  float _epsilon;
-  std::unique_ptr<char[]> _scalar_offset;
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-class NormBwdCudnn : public NormFwdCudnn<NormEnum> {
- public:
-  NormBwdCudnn(const Tensor& dz, const Tensor& x, const Tensor& mu, const Tensor& rsigma,
-               const Tensor& gamma, Tensor* dx, Tensor* dgamma, Tensor* dbeta, cudaStream_t stream,
-               const int multiprocessorCount, Tensor* workspace, const bool zero_centered_gamma);
-};
-
 template <NVTE_NORM_TYPE NormEnum, typename NormType>
-void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier = nullptr,
+void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier,
                     Tensor* dgamma_part = nullptr, Tensor* dbeta_part = nullptr);
 
-void ComputeScaleInv(Tensor* z);
-void ComputeScaleInv(void* scale_inv, void* scale);
+// cuDNN norms
+void ComputeScaleInv(void* scale, void* scale_inv);
+
+enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
+enum class NVTE_Norm_Stage { Forward, Backward };
 
 // Derived classes for each normalization type
-class LayerNormForwardPlan {
+class NormalizationPlan {
  public:
-  LayerNormForwardPlan(DType wtype, DType itype, DType otype, DType ctype, const size_t batch_size,
-                       const size_t hidden_size, const bool zero_centered_gamma,
-                       const size_t sm_count);
+  NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                    DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
+                    const bool zero_centered_gamma, const size_t sm_count);
 
   void build();
 
   std::vector<size_t> getWorkspaceShape() const;
 
+  // FWD
   void execute(void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr, void* eps_dptr,
                void* rsigma_dptr, void* z_dptr, void* amax_dptr, void* z_scale_dptr,
                void* z_scale_inv_dptr, void* workspace_dptr);
+  // BWD
+  void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr);
 
  private:
   const bool _zero_centered, _fp8_out;
   std::unique_ptr<char[]> _scalar_dptr;
-
+  // FWD
   std::shared_ptr<fe::graph::Tensor_attributes> _x, _gamma_zero, _scalar_offset, _gamma, _beta,
       _eps, _mean, _rsigma, _z, _z_scale, _amax, _z_fp8;
+  // BWD
+  std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta;
 
   fe::graph::Graph _graph;
   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;
   cudnnHandle_t _handle;
 };
 
-template <typename NormPlanType>
 class NormalizationPlanRegistry {
  public:
+  // TODO thread-safe
   static NormalizationPlanRegistry& getInstance() {
     static NormalizationPlanRegistry instance;
     return instance;
   };
 
-  NormPlanType* getNormalizationPlan(DType wtype, DType itype, DType otype, const size_t batch_size,
-                                     const size_t hidden_size, const bool zero_centered_gamma,
-                                     const size_t sm_count);
+  NormalizationPlan* getNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+                                          DType wtype, DType itype, DType otype,
+                                          const size_t batch_size, const size_t hidden_size,
+                                          const bool zero_centered_gamma, const size_t sm_count);
 
  private:
   NormalizationPlanRegistry() {}
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<NormPlanType>> normalizationPlanMap;
+  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlan>> normalizationPlanMap;
 };
 
 }  // namespace transformer_engine

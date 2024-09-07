@@ -52,7 +52,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   // TODO: add check for GPU ARCH
 
   if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
-    auto plan = NormalizationPlanRegistry<LayerNormForwardPlan>::getInstance().getNormalizationPlan(
+    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+        NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
         gamma.data.dtype,  // wtype
         x.data.dtype,      // itype
         z->data.dtype,     // otype
@@ -119,10 +120,24 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   }
 
   if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
-    NormBwdCudnn<NVTE_NORM_TYPE::LN_BWD_CUDNN> BwdNorm(dz, x, mu, rsigma, gamma, dx, dgamma, dbeta,
-                                                       stream, multiprocessorCount, workspace,
-                                                       zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::LN_BWD_CUDNN>(BwdNorm, workspace);
+    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+        NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Backward,
+        gamma.data.dtype,  // wtype
+        x.data.dtype,      // itype
+        gamma.data.dtype,  // otype
+        x.data.shape[0],   // batch_size
+        x.data.shape[1],   // hidden_size
+        zero_centered_gamma, multiprocessorCount);
+
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = plan->getWorkspaceShape();
+      workspace->data.dtype = DType::kByte;
+      return;
+    } else {
+      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+      plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
+                    dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr);
+    }
   } else {
     NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE> BwdNorm(
         dz, x, mu, rsigma, gamma, dx, dgamma, dbeta, dgamma_part, dbeta_part, stream,

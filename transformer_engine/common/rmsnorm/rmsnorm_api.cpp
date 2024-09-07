@@ -40,10 +40,26 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   Tensor empty;
 
   if (std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN")) {
-    NormFwdCudnn<RMS_FWD_CUDNN> NormFwd(x, gamma, empty, epsilon, z, &empty, rsigma, stream,
-                                        multiprocessorCount, workspace, zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::RMS_FWD_CUDNN>(NormFwd, workspace);
-    if (is_fp8_dtype(z->data.dtype)) ComputeScaleInv(z);
+    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+        NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
+        gamma.data.dtype,  // wtype
+        x.data.dtype,      // itype
+        z->data.dtype,     // otype
+        x.data.shape[0],   // batch_size
+        x.data.shape[1],   // hidden_size
+        zero_centered_gamma, multiprocessorCount);
+
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = plan->getWorkspaceShape();
+      workspace->data.dtype = DType::kByte;
+      return;
+    } else {
+      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+      plan->execute(x.data.dptr, gamma.data.dptr, nullptr, nullptr,
+                    reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
+                    z->data.dptr, z->amax.dptr, z->scale.dptr, z->scale_inv.dptr,
+                    workspace->data.dptr);
+    }
   } else {
     NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE> NormFwd(x, gamma, empty, epsilon, z, &empty, rsigma,
                                                   stream, multiprocessorCount, workspace, barrier,
@@ -86,10 +102,24 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   Tensor empty;
 
   if (std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN")) {
-    NormBwdCudnn<NVTE_NORM_TYPE::RMS_BWD_CUDNN> BwdNorm(dz, x, empty, rsigma, gamma, dx, dgamma,
-                                                        &empty, stream, multiprocessorCount,
-                                                        workspace, zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::RMS_BWD_CUDNN>(BwdNorm, workspace);
+    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+        NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Backward,
+        gamma.data.dtype,  // wtype
+        x.data.dtype,      // itype
+        gamma.data.dtype,  // otype
+        x.data.shape[0],   // batch_size
+        x.data.shape[1],   // hidden_size
+        zero_centered_gamma, multiprocessorCount);
+
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = plan->getWorkspaceShape();
+      workspace->data.dtype = DType::kByte;
+      return;
+    } else {
+      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+      plan->execute(x.data.dptr, gamma.data.dptr, nullptr, rsigma.data.dptr, dx->data.dptr,
+                    dz.data.dptr, nullptr, dgamma->data.dptr, workspace->data.dptr);
+    }
   } else {
     NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE> BwdNorm(dz, x, empty, rsigma, gamma, dx, dgamma, &empty,
                                                   dgamma_part, &empty, stream, multiprocessorCount,
