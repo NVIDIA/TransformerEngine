@@ -25,7 +25,7 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
-        self.model_name = "meta-llama/Llama-2-7b-hf" # Set to Meta Llama 2 by default
+        self.model_name = "meta-llama/Llama-2-7b-hf"  # Set to Meta Llama 2 by default
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
@@ -34,7 +34,7 @@ class HyperParameters:
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
         self.num_training_steps = 10
-        self.weights_dir = "" # <-- This will be set when the model weights are downloaded
+        self.weights_dir = ""  # <-- This will be set when the model weights are downloaded
 
 
 hyperparams = HyperParameters()
@@ -76,29 +76,37 @@ def get_dataloaders(accelerator: Accelerator, hyperparams):
     train_dataloader = DataLoader(dataset, **dataloader_params)
     return train_dataloader
 
+
 def ensure_model_is_downloaded(hyperparams):
-    assert hyperparams.model_name in ["meta-llama/Meta-Llama-3-8B", "meta-llama/Llama-2-7b-hf"], (
-        "Only Meta Llama 2 7B and Meta Llama 3 8B models are supported!"
-    )
+    assert hyperparams.model_name in [
+        "meta-llama/Meta-Llama-3-8B",
+        "meta-llama/Llama-2-7b-hf",
+    ], "Only Meta Llama 2 7B and Meta Llama 3 8B models are supported!"
 
     # Login using Huggingface Hub API
     from huggingface_hub import login
+
     try:
         login(hyperparams.hf_access_token)
     except Exception as e:
         if "Invalid token passed!" in str(e):
-            print("Please pass a valid HF Access Token! More info at https://huggingface.co/docs/hub/en/security-tokens.")
+            print(
+                "Please pass a valid HF Access Token! More info at"
+                " https://huggingface.co/docs/hub/en/security-tokens."
+            )
         else:
             print(f"Exception is {e}")
 
     # Download the model if it doesn't exist
     from huggingface_hub import snapshot_download
-    local_dir = snapshot_download(repo_id = hyperparams.model_name)
+
+    local_dir = snapshot_download(repo_id=hyperparams.model_name)
 
     # Update the hyperparams with the weights directory
     hyperparams.weights_dir = local_dir
 
     print(f"Model downloaded/already cached in : {local_dir}")
+
 
 def init_baseline_model(hyperparams):
     # Download and cache the weights
