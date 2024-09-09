@@ -6939,8 +6939,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                          P2P is async and can be overlapped with attention compute.
                   "all_gather": All-gather to get full sequence of KV before attention.
                                 The all-gather is not async, and cannot be overlapped.
-                  "a2a": Like DeepSpeed Ulysses, scatter attention heads across CP
-                         group,and gather to get full sequence of QKV.
+                  "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
+                         group, and gather to get full sequence of QKV.
     """
 
     def __init__(
@@ -7137,8 +7137,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                              P2P is async and can be overlapped with attention compute.
                       "all_gather": All-gather to get full sequence of KV before attention.
                                     The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across CP
-                             group,and gather to get full sequence of QKV.
+                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
+                             group, and gather to get full sequence of QKV.
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
@@ -8168,8 +8168,8 @@ class MultiheadAttention(torch.nn.Module):
                              P2P is async and can be overlapped with attention compute.
                       "all_gather": All-gather to get full sequence of KV before attention.
                                     The all-gather is not async, and cannot be overlapped.
-                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across CP
-                             group,and gather to get full sequence of QKV.
+                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
+                             group, and gather to get full sequence of QKV.
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
