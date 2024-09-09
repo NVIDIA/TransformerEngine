@@ -165,6 +165,16 @@ void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int 
                      std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
                      bool use_split_accumulator, int math_sm_count);
 
+void te_grouped_gemm_single_output(
+    std::vector<at::Tensor> A, std::vector<at::Tensor> A_scale_inverse, int A_offset,
+    transformer_engine::DType A_type, bool transa, std::vector<at::Tensor> B,
+    at::Tensor B_scale_inverse, int B_offset, transformer_engine::DType B_type, bool transb,
+    std::vector<int64_t> m_splits, at::Tensor D, int D_offset, at::Tensor D_scale,
+    transformer_engine::DType D_type, at::Tensor D_amax, std::vector<at::Tensor> bias,
+    transformer_engine::DType bias_type, std::vector<at::Tensor> pre_gelu_out, bool grad,
+    std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, int math_sm_count);
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/

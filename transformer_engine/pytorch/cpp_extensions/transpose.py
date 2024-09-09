@@ -175,6 +175,7 @@ def fp8_multi_cast_transpose_fused(
     amax_indices: List[int],
     scale_inv_indices: List[int],
     otype: tex.DType,
+    scale_inv: Optional[torch.Tensor] = None,
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     """Cast + Transpose with FP8 output"""
 
@@ -182,7 +183,7 @@ def fp8_multi_cast_transpose_fused(
         input_list,
         fp8_meta_tensor.scale,
         fp8_meta_tensor.amax_history,
-        fp8_meta_tensor.scale_inv,
+        scale_inv if scale_inv is not None else fp8_meta_tensor.scale_inv,
         scale_indices,
         amax_indices,
         scale_inv_indices,

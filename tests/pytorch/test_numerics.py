@@ -1266,12 +1266,15 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
     )
     inp_hidden_states.retain_grad()
 
-    m = config.seq_len // 16
-    dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
-    dist.append(dist[-1])  # Manually add a zero
-    m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
-    m_splits = m_splits * 16
-    assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+    if num_gemms > 1:
+        m = config.seq_len // 16
+        dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
+        dist.append(dist[-1])  # Manually add a zero
+        m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+        m_splits = m_splits * 16
+        assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
+    else:
+        m_splits = torch.tensor([config.seq_len])
 
     with fp8_autocast(enabled=fp8):
         if isinstance(block, GroupedLinear):
@@ -1353,7 +1356,7 @@ def test_grouped_linear_accuracy(
 
 @pytest.mark.parametrize("parallel_mode", ["column", "row"])
 def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
-    """Split the tests to reduce CI time"""
+    """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
         dtype=torch.float32,
         num_gemms=6,
@@ -1362,6 +1365,18 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
         fp8=True,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
+    )
+
+
+def test_grouped_linear_accuracy_single_gemm():
+    """Split the tests to save CI time"""
+    test_grouped_linear_accuracy(
+        dtype=torch.float32,
+        num_gemms=1,
+        bs=2,
+        model=list(model_configs.keys())[0],
+        fp8=True,
+        fp8_model_params=True,
     )
 
 
@@ -2034,7 +2049,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
 
     fp8_grouped_gemm(
         A_fp8,
-        scale_inv,
+        [scale_inv],
         0,  # A_offset
         tex.DType.kFloat8E4M3,
         B_fp8,
