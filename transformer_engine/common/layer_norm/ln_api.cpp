@@ -66,9 +66,8 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       return;
     } else {
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-      plan->execute(x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
+      plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
                     reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
-                    z->data.dptr, z->amax.dptr, z->scale.dptr, z->scale_inv.dptr,
                     workspace->data.dptr);
     }
   } else {

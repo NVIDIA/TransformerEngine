@@ -384,26 +384,11 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                          .set_dim({batch_dim, hidden_dim, 1, 1})
                          .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
 
-  _dz = _graph.tensor(fe::graph::Tensor_attributes()
-                          .set_name("dz")
-                          .set_dim({batch_dim, hidden_dim, 1, 1})
-                          .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
   _gamma_zero = _graph.tensor(fe::graph::Tensor_attributes()
                                   .set_name("gamma_zero")
                                   .set_dim({1, hidden_dim, 1, 1})
                                   .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
                                   .set_data_type(get_cudnn_fe_dtype(wtype)));
-  _beta = _graph.tensor(fe::graph::Tensor_attributes()
-                            .set_name("bias")
-                            .set_dim({1, hidden_dim, 1, 1})
-                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
-                            .set_data_type(get_cudnn_fe_dtype(wtype)));
-  _eps = _graph.tensor(fe::graph::Tensor_attributes()
-                           .set_name("epsilon")
-                           .set_dim({1, 1, 1, 1})
-                           .set_stride({1, 1, 1, 1})
-                           .set_data_type(get_cudnn_fe_dtype(ctype))
-                           .set_is_pass_by_value(true));
   if (zero_centered_gamma) {
     _scalar_offset = _graph.tensor(fe::graph::Tensor_attributes()
                                        .set_name("one")
@@ -423,7 +408,18 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
 
   // Create graph computation nodes
   if (NormStage == NVTE_Norm_Stage::Forward) {
+    _eps = _graph.tensor(fe::graph::Tensor_attributes()
+                         .set_name("epsilon")
+                         .set_dim({1, 1, 1, 1})
+                         .set_stride({1, 1, 1, 1})
+                         .set_data_type(get_cudnn_fe_dtype(ctype))
+                         .set_is_pass_by_value(true));
     if (NormType == NVTE_Norm_Type::LayerNorm) {
+      _beta = _graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name("bias")
+                            .set_dim({1, hidden_dim, 1, 1})
+                            .set_stride({hidden_dim, 1, hidden_dim, hidden_dim})
+                            .set_data_type(get_cudnn_fe_dtype(wtype)));
       auto norm_options = fe::graph::Layernorm_attributes()
                               .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
                               .set_epsilon(_eps);
@@ -463,6 +459,10 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
       _amax->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype)).set_dim({1, 1, 1, 1});
     }
   } else {
+    _dz = _graph.tensor(fe::graph::Tensor_attributes()
+                        .set_name("dz")
+                        .set_dim({batch_dim, hidden_dim, 1, 1})
+                        .set_stride({hidden_dim, 1, hidden_dim, hidden_dim}));
     _rsigma = _graph.tensor(fe::graph::Tensor_attributes()
                                 .set_name("inv_var")
                                 .set_dim({batch_dim, 1, 1, 1})
@@ -509,9 +509,9 @@ std::vector<size_t> NormalizationPlan::getWorkspaceShape() const {
   return {static_cast<size_t>(_graph.get_workspace_size())};
 }
 
-void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
-                                void* eps_dptr, void* rsigma_dptr, void* z_dptr, void* amax_dptr,
-                                void* z_scale_dptr, void* z_scale_inv_dptr, void* workspace_dptr) {
+void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
+                                void* mean_dptr, void* eps_dptr, void* rsigma_dptr,
+                                void* workspace_dptr) {
   // Binding data pointers to graph tensors
   _variant_pack = {{_x, x_dptr}, {_rsigma, rsigma_dptr}, {_eps, eps_dptr}};
 
@@ -525,13 +525,14 @@ void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* beta_dptr,
     _variant_pack.insert({{_gamma, gamma_dptr}});
 
   if (_fp8_out)
-    _variant_pack.insert({{_z_scale, z_scale_dptr}, {_amax, amax_dptr}, {_z_fp8, z_dptr}});
+    _variant_pack.insert(
+        {{_z_scale, z->scale.dptr}, {_amax, z->amax.dptr}, {_z_fp8, z->data.dptr}});
   else
-    _variant_pack.insert({{_z, z_dptr}});
+    _variant_pack.insert({{_z, z->data.dptr}});
 
   // Execute the computation
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
-  if (_fp8_out) ComputeScaleInv(z_scale_dptr, z_scale_inv_dptr);
+  if (_fp8_out) update_tensor_scale_inv(z, 0);
 }
 
 void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,

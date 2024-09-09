@@ -355,9 +355,8 @@ class NormalizationPlan {
   std::vector<size_t> getWorkspaceShape() const;
 
   // FWD
-  void execute(void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr, void* eps_dptr,
-               void* rsigma_dptr, void* z_dptr, void* amax_dptr, void* z_scale_dptr,
-               void* z_scale_inv_dptr, void* workspace_dptr);
+  void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr);
   // BWD
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
                void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr);

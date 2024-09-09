@@ -55,9 +55,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       return;
     } else {
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-      plan->execute(x.data.dptr, gamma.data.dptr, nullptr, nullptr,
+      plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr, nullptr,
                     reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
-                    z->data.dptr, z->amax.dptr, z->scale.dptr, z->scale_inv.dptr,
                     workspace->data.dptr);
     }
   } else {

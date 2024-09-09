@@ -65,7 +65,6 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      layer_norm/norms.cpp
-     layer_norm/helpers.cu
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
      layer_norm/ln_fwd_cuda_kernel.cu
