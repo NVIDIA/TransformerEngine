@@ -94,7 +94,7 @@ def convert_tensor(
     if is_float8_tensor(tensor):
         data = tensor._data
         if not devices_match(device, tensor.device):
-            data = data.to(device=device, )
+            data = data.to(device=device)
         if memory_format != torch.preserve_format and not data.is_contiguous(
             memory_format=memory_format
         ):
@@ -118,8 +118,6 @@ def convert_tensor(
         # https://github.com/pytorch/pytorch/issues/132020).
         tensor = tensor.contiguous(memory_format=memory_format)
     return tensor
-
-    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
 
 
 def reshape(
@@ -168,3 +166,14 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
+
+def maybe_autocast_dtype(
+    *,
+    device_type: str = "cuda",
+    default_dtype: Optional[torch.dtype] = None,
+) -> torch.dtype:
+    """Get autocast dtype if enabled"""
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return canonicalize_dtype(default_dtype)
