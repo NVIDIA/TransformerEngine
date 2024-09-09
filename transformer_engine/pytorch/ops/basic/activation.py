@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 import abc
-from collections.abc import Callable
 from typing import Optional
 
 import torch
