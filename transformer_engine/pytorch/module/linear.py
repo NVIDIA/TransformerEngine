@@ -910,13 +910,11 @@ class Linear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
-    def _get_fusible_ops(self) -> Sequential:
-
-        # Get module parameters
-        weight = getattr(self, self.weight_names[0])
-        bias = None
-        if self.use_bias:
-            bias = getattr(self, self.bias_names[0])
+    def _get_fusible_ops(
+        self,
+        weight: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor],
+    ) -> Sequential:
 
         # Unsupported cases
         if len(self.parameter_split_sizes) != 1:
@@ -931,11 +929,19 @@ class Linear(TransformerEngineBaseModule):
         if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
             raise NotImplementedError("Fusible ops do not support Userbuffers yet")
 
+        def data_ptr(tensor: Optional[torch.Tensor]) -> int:
+            """Get raw data pointer from tensor"""
+            if tensor is None:
+                return 0
+            if isinstance(tensor, Float8Tensor):
+                return tensor._data.data_ptr()
+            return tensor.data_ptr()
+
         # Return immediately if fusible ops are already ready
         if (
             self._ops is not None
-            and self._ops[0].weight is weight
-            and self._ops[0].bias is bias
+            and data_ptr(self._ops[0].weight) == data_ptr(weight)
+            and data_ptr(self._ops[0].bias) == data_ptr(bias)
         ):
             return self._ops
 
@@ -994,26 +1000,69 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        # Implementation with fusible operations
-        from ..cpu_offload import CPUOffloadEnabled
-        if (
-            self._fusible_ops_are_supported
-            and is_first_microbatch is None
-            and not self.fp8_calibration
-            and not CPUOffloadEnabled
-            and self.fsdp_group is None
-        ):
-            ops = self._get_fusible_ops()
-            out = ops(inp)
-            if self.return_bias:
-                bias_tensor = getattr(self, self.bias_names[0])
-                return out, cast_if_needed(bias_tensor, self.activation_dtype)
-            return out
-
         # Implementation as monolithic operation
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
+
+        # Implementation with fusible operations
+        from ..cpu_offload import CPUOffloadEnabled
+        if (
+            self._fusible_ops_are_supported
+            and not self.fp8_calibration
+            and not CPUOffloadEnabled
+            and self.fsdp_group is None
+        ):
+
+            # Parameters
+            weight = getattr(self, self.weight_names[0])
+            bias = None
+            if self.use_bias:
+                bias = getattr(self, self.bias_names[0])
+
+            # Cast weights to FP8 if needed
+            if self.fp8:
+                with_transpose = torch.is_grad_enabled()
+                if (
+                    not with_transpose
+                    and is_fp8_activation_recompute_enabled()
+                    and not in_fp8_activation_recompute_phase()
+                ):
+                    with_transpose = True
+                if isinstance(weight, Float8Tensor):
+                    # Fill transpose cache in FP8 tensor if needed
+                    update_transpose_cache = with_transpose
+                    if update_transpose_cache:
+                        update_transpose_cache = (
+                            is_first_microbatch or skip_fp8_weight_update is not None
+                        )
+                    if update_transpose_cache:
+                        weight.transpose_2d(
+                            fill_cache=True,
+                            noop_flag=skip_fp8_weight_update,
+                        )
+                else:
+                    # FP8 cast to workspace buffer
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
+                    weight = self.get_fp8_workspace(
+                        tensor=weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        cache_name=(None if is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        with_transpose=with_transpose,
+                        fsdp_group=self.fsdp_group,
+                    )
+
+            # Apply fusible operations
+            ops = self._get_fusible_ops(weight, bias)
+            out = ops(inp)
+
+            if self.return_bias:
+                bias_tensor = getattr(self, self.bias_names[0])
+                return out, cast_if_needed(bias_tensor, self.activation_dtype)
+            return out
 
         with self.prepare_forward(
             inp,
