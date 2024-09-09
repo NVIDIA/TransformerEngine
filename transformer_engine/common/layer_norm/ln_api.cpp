@@ -50,7 +50,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   // TODO: add check for GPU ARCH
 
-  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") == "1") {
+  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
     auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
         gamma.data.dtype,  // wtype
@@ -118,7 +118,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
     CheckOutputTensor(*dbeta, "dbeta");
   }
 
-  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") == "1") {
+  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
     auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Backward,
         gamma.data.dtype,  // wtype

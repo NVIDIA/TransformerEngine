@@ -42,7 +42,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") != "1") {
+  if (!std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
     auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
     auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
     auto dbeta_part_data = allocateSpace(dbeta_part.shape(), dbeta_part.dtype());
@@ -127,7 +127,7 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
-  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") != "1") {
+  if (!std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
     auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
     barrier =
         makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
@@ -221,7 +221,7 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  if (std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN") != "1") {
+  if (!std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN")) {
     auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
     auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
     barrier =
@@ -297,7 +297,7 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  if (std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN") != "1") {
+  if (!std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN")) {
     auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
     barrier =
         makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
