@@ -40,16 +40,19 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 
   // Alloc space for Tensors.
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
-  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
-  auto dbeta_part_data = allocateSpace(dbeta_part.shape(), dbeta_part.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
-  dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
-                                            dgamma_part.dtype());
-  dbeta_part = makeTransformerEngineTensor(dbeta_part_data.data_ptr(), dbeta_part.shape(),
-                                           dbeta_part.dtype());
+  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") != "1") {
+    auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
+    auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
+    auto dbeta_part_data = allocateSpace(dbeta_part.shape(), dbeta_part.dtype());
+    barrier =
+        makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+    dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
+                                              dgamma_part.dtype());
+    dbeta_part = makeTransformerEngineTensor(dbeta_part_data.data_ptr(), dbeta_part.shape(),
+                                             dbeta_part.dtype());
+  }
 
   // Actual call to bwd kernel.
   bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
@@ -121,10 +124,14 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
 
   // Allocate workspaces
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+
+  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") != "1") {
+    auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
+    barrier =
+        makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+  }
 
   // Launch kernel
   func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
@@ -212,13 +219,16 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 
   // Alloc space for Tensors.
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
-  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
-  dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
-                                            dgamma_part.dtype());
+  if (std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN") != "1") {
+    auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
+    auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
+    barrier =
+        makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+    dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
+                                              dgamma_part.dtype());
+  }
 
   // Actual call to bwd kernel.
   bwd_fun(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
@@ -285,10 +295,13 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
 
   // Allocate workspaces
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+  if (std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN") != "1") {
+    auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
+    barrier =
+        makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
+  }
 
   // Launch kernel
   func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),

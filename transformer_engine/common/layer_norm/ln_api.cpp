@@ -23,7 +23,6 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
                    const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
                    const bool zero_centered_gamma) {
-  using namespace transformer_engine;
 
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
@@ -51,7 +50,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   // TODO: add check for GPU ARCH
 
-  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
+  if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") == "1") {
     auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
         gamma.data.dtype,  // wtype
@@ -119,7 +118,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
     CheckOutputTensor(*dbeta, "dbeta");
   }
 
-  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
+  if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") == "1") {
     auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Backward,
         gamma.data.dtype,  // wtype
