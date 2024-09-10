@@ -1137,8 +1137,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         # Unsupported cases
         if len(self.parameter_split_sizes) != 1:
             raise ValueError(
-                "Fusible ops do not support splitting weight tensor "
-                "into multiple parameters"
+                "Fusible ops do not support splitting weight tensor into multiple parameters"
             )
         if norm_weight.device.type != "cuda":
             raise RuntimeError(f"Invalid device for norm weight tensor ({norm_weight.device})")
@@ -1272,6 +1271,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # Implementation with fusible operations
         from ..cpu_offload import CPUOffloadEnabled
+
         if (
             self._fusible_ops_are_supported
             and not self.fp8_calibration

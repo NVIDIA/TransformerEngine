@@ -918,8 +918,7 @@ class Linear(TransformerEngineBaseModule):
         # Unsupported cases
         if len(self.parameter_split_sizes) != 1:
             raise ValueError(
-                "Fusible ops do not support splitting weight tensor "
-                "into multiple parameters"
+                "Fusible ops do not support splitting weight tensor into multiple parameters"
             )
         if weight.device.type != "cuda":
             raise RuntimeError(f"Invalid device for weight tensor ({weight.device})")
@@ -1021,6 +1020,7 @@ class Linear(TransformerEngineBaseModule):
 
         # Implementation with fusible operations
         from ..cpu_offload import CPUOffloadEnabled
+
         if (
             self._fusible_ops_are_supported
             and not self.fp8_calibration

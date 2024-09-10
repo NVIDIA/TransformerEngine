@@ -188,8 +188,7 @@ class Linear(FusedOperation):
         if bias_op_idx is None:
             if value is not None:
                 raise ValueError(
-                    "Attempted to set bias tensor in linear operation, "
-                    "but bias is disabled"
+                    "Attempted to set bias tensor in linear operation, but bias is disabled"
                 )
             return
 
