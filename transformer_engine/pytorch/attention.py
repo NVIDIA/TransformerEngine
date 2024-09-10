@@ -5027,24 +5027,38 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_args_thd.append(max_seqlen_q)
                     fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if _use_flash_attn_3:
+                    fa_optional_forward_kwargs_fp8 = {}
                     if fp8:
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                         activation_dtype = query_layer.dtype
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                        def convert_to_torch_float8(tensor, dtype):
+                            out = torch.Tensor().to(device=tensor.device, dtype=dtype)
+                            out.set_(
+                                tensor._data.untyped_storage(),
+                                tensor._data.storage_offset(),
+                                tensor._data.shape,
+                                tensor._data.stride()
+                            )
+                            return out
                         if fp8_meta["recipe"].fp8_mha:
                             assert all(
                                 isinstance(x, Float8Tensor)
                                 for x in [query_layer, key_layer, value_layer]
                             ), "q/k/v must be Float8Tensors for FP8 MHA."
                             fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
-                            query_layer, key_layer, value_layer = (
-                                x.to(activation_dtype).to(torch_dtype)
-                                for x in [query_layer, key_layer, value_layer]
-                            )
                         else:
                             query_layer, key_layer, value_layer = (
-                                x.to(torch_dtype) for x in [query_layer, key_layer, value_layer]
+                                Float8Tensor.to_float8(x, fp8_dtype=fp8_dtype_forward)
+                                for x in [query_layer, key_layer, value_layer]
                             )
+                        fa_optional_forward_kwargs_fp8["descale_q"] = query_layer._scale_inv
+                        fa_optional_forward_kwargs_fp8["descale_k"] = key_layer._scale_inv
+                        fa_optional_forward_kwargs_fp8["descale_v"] = value_layer._scale_inv
+                        query_layer, key_layer, value_layer = (
+                            convert_to_torch_float8(x, torch_dtype)
+                            for x in [query_layer, key_layer, value_layer]
+                        )
                     output, _ = func(
                         query_layer,
                         key_layer,
@@ -5053,6 +5067,7 @@ class FlashAttention(torch.nn.Module):
                         softmax_scale=self.softmax_scale,
                         causal="causal" in attn_mask_type,
                         deterministic=self.deterministic,
+                        **fa_optional_forward_kwargs_fp8,
                     )
                     if fp8 and fp8_meta["recipe"].fp8_mha:
                         output = cast_to_fp8(
