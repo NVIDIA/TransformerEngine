@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 from collections.abc import Iterable
 import dataclasses
+import pickle
 from typing import Any, Optional
 
 import torch
@@ -506,6 +507,161 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             *extra_inputs,
             basic_op_kwargs=[kwargs],
         )
+
+    def get_extra_state(self) -> Optional[torch.Tensor]:
+        """Serialize extra state
+
+        Contains metadata for FP8 casting.
+
+        """
+
+        # This implementation is working around a few issues:
+        #
+        # (1) PyTorch's "extra state" infrastructure might be able to
+        #     support any picklable type, but they make no guarantees.
+        #     It seems that ONNX export experiences issues with
+        #     non-tensor extra state.
+        # (2) PyTorch's checkpointing infrastructure does not remap
+        #     devices for "extra state" like it does for "state dict".
+        #     Thus, we want to avoid putting extra state on the GPU
+        #     since it may be loaded on the wrong device.
+        # (3) The extra state consists of many small tensors. If we
+        #     want to copy them all to CPU, then we need to avoid the
+        #     overhead of many GPU-CPU memory transfers.
+        #
+        # See: https://github.com/NVIDIA/TransformerEngine/pull/351
+        # See: https://github.com/NVIDIA/TransformerEngine/pull/363
+
+        # Return immediately if op has no FP8 state
+        has_fp8_state = any(
+            self.num_fp8_scales(mode) > 0 for mode in ("input", "param", "grad_output")
+        )
+        if not has_fp8_state:
+            return None
+
+        def to_cpu(src: torch.Tensor) -> torch.Tensor:
+            """Helper function to make CPU copy of tensor
+
+            Memory transfer is asynchronous w.r.t. host, so GPU should
+            be synchronized before using result.
+
+            """
+            dst = torch.empty_like(src, device="cpu")
+            dst.copy_(src, non_blocking=True)
+            return dst
+
+        # Store FP8 state
+        state = {}
+        for mode in ("input", "param", "grad_output"):
+
+            # Get state for a given FP8 tensor
+            if self.num_fp8_scales(mode) == 0:
+                state[mode] = None
+                continue
+            fp8_meta = self.get_fp8_meta(mode)
+            if fp8_meta is None:
+                continue
+            state[mode] = {}
+
+            # Store tensors
+            if "scaling_fwd" in fp8_meta:
+                state[mode]["scale_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale)
+                state[mode]["scale_inv_fwd"] = to_cpu(fp8_meta["scaling_fwd"].scale_inv)
+                state[mode]["amax_history_fwd"] = to_cpu(fp8_meta["scaling_fwd"].amax_history)
+            if "scaling_bwd" in fp8_meta:
+                state[mode]["scale_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale)
+                state[mode]["scale_inv_bwd"] = to_cpu(fp8_meta["scaling_bwd"].scale_inv)
+                state[mode]["amax_history_bwd"] = to_cpu(fp8_meta["scaling_bwd"].amax_history)
+
+            # Store other picklable items
+            extra = {}
+            for key, val in fp8_meta.items():
+                if key == "buffer_index_and_autocast_key":
+                    continue
+                if not isinstance(val, (bool, int, float, str, tuple, list)):
+                    continue
+                extra[key] = val
+            state[mode]["extra_fp8_variables"] = extra
+
+        # Serialize state into byte tensor
+        torch.cuda.synchronize()
+        state_serialized = bytearray(pickle.dumps(state))
+        state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
+        return state_serialized
+
+    def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
+        """Load extra state"""
+        if state is None:
+            return
+
+        # Deserialize state from byte tensor
+        state = pickle.loads(state.detach().numpy(force=True).tobytes())
+        if state is None:
+            return
+
+        def copy_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
+            """Helper function to copy tensor from CPU
+
+            Memory transfer is asynchronous w.r.t. host, so GPU should
+            be synchronized before using result.
+
+            """
+            if src.size() != dst.size():
+                dst.data = torch.empty(src.size(), dtype=dst.dtype, device=dst.device)
+            dst.copy_(src, non_blocking=True)
+
+        # Load FP8 state
+        for mode in ("input", "param", "grad_output"):
+
+            # Get state for a given FP8 tensor
+            if mode not in state:
+                continue
+            if self.num_fp8_scales(mode) == 0:
+                continue
+            fp8_meta = self.get_fp8_meta(mode)
+            if fp8_meta is None:
+                continue
+
+            # Load extra state
+            fp8_meta.update(state[mode]["extra_fp8_variables"])
+            if "amax_history_fwd" in state[mode]:
+                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_fwd"].size(0)
+            elif "amax_history_bwd" in state[mode]:
+                fp8_meta["recipe"].amax_history_len = state[mode]["amax_history_bwd"].size(0)
+            if "global_fp8_buffer_pos_fwd_recompute" in fp8_meta:
+                del fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
+
+            # Load tensors
+            fp8_meta = self.get_fp8_meta(mode)
+            if "scaling_fwd" in fp8_meta:
+                fp8_meta_fwd = fp8_meta["scaling_fwd"]
+                copy_tensor(state[mode]["scale_fwd"], fp8_meta_fwd.scale)
+                copy_tensor(state[mode]["scale_inv_fwd"], fp8_meta_fwd.scale_inv)
+                copy_tensor(state[mode]["amax_history_fwd"], fp8_meta_fwd.amax_history)
+            if "scaling_bwd" in fp8_meta:
+                fp8_meta_bwd = fp8_meta["scaling_bwd"]
+                copy_tensor(state[mode]["scale_bwd"], fp8_meta_bwd.scale)
+                copy_tensor(state[mode]["scale_inv_bwd"], fp8_meta_bwd.scale_inv)
+                copy_tensor(state[mode]["amax_history_bwd"], fp8_meta_bwd.amax_history)
+
+        # Finish CPU-GPU memory transfers
+        torch.cuda.synchronize()
+
+    def _load_from_state_dict(self, *args, **kwargs) -> None:
+        """Load state"""
+
+        # In the base PyTorch module class, the extra state is loaded
+        # _after_ the parameters. However, copying values into FP8
+        # parameters requires an FP8 cast, which uses a scaling factor
+        # from the operation's FP8 metadata. The FP8 metadata is
+        # included in the operation's extra state, so we need to
+        # manually load the extra state before loading parameters.
+
+        state_dict, prefix = args[0], args[1]
+        extra_state_key = prefix + torch.nn.modules.module._EXTRA_STATE_KEY_SUFFIX
+        if extra_state_key in state_dict:
+            self.set_extra_state(state_dict[extra_state_key])
+        super()._load_from_state_dict(*args, **kwargs)
 
 
 class FusedOperation(FusibleOperation):
