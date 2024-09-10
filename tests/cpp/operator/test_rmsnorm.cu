@@ -212,17 +212,18 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma)
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
-  // {2048, 12288},
-  {4096, 4096},
-  {4096, 8192},
-  {8192, 4096},
-  {8192, 8192},
-  // {256, 65536},
-  // {128, 6144},
-  // {64, 2304},
-  // {229, 541},   // Primes 50, 100
-  // {71, 3571},   // Primes 20, 500
-  // {29, 17389} // Primes 10, 2000
+  // {4096, 4096},
+  // {4096, 8192},
+  // {8192, 4096},
+  // {8192, 8192},
+  {2048, 12288},
+  {768, 1024},
+  {256, 65536},
+  {128, 6144},
+  {64, 2304},
+  {229, 541},   // Primes 50, 100
+  {71, 3571},   // Primes 20, 500
+  {29, 17389} // Primes 10, 2000
 };
 }  // namespace
 
@@ -247,14 +248,14 @@ TEST_P(RMSNormTestSuite, TestRMSNorm) {
 
 INSTANTIATE_TEST_SUITE_P(OperatorTest, RMSNormTestSuite,
                          ::testing::Combine(
-                         // ::testing::Values(DType::kFloat32, DType::kBFloat16,
-                         //                   DType::kFloat16),
-                         // ::testing::Values(DType::kFloat32, DType::kBFloat16,
-                         //                   DType::kFloat16, DType::kFloat8E4M3),
-                         ::testing::Values(DType::kBFloat16),
-                         ::testing::Values(DType::kFloat8E4M3),
+                         ::testing::Values(DType::kFloat32, DType::kBFloat16,
+                                           DType::kFloat16),
+                         ::testing::Values(DType::kFloat32, DType::kBFloat16,
+                                           DType::kFloat16, DType::kFloat8E4M3),
+                         // ::testing::Values(DType::kBFloat16),
+                         // ::testing::Values(DType::kFloat8E4M3),
                                             ::testing::ValuesIn(test_cases),
-                                            ::testing::Values(true)),
+                                            ::testing::Values(false, true)),
                          [](const testing::TestParamInfo<RMSNormTestSuite::ParamType> &info) {
                            std::string name =
                              test::typeName(std::get<0>(info.param)) + "X" +
