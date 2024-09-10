@@ -1027,25 +1027,12 @@ class Linear(TransformerEngineBaseModule):
 
             # Cast weights to FP8 if needed
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 if isinstance(weight, Float8Tensor):
-                    # Fill transpose cache in FP8 tensor if needed
-                    update_transpose_cache = with_transpose
-                    if update_transpose_cache:
-                        update_transpose_cache = (
-                            is_first_microbatch or skip_fp8_weight_update is not None
-                        )
-                    if update_transpose_cache:
-                        weight.transpose_2d(
-                            fill_cache=True,
-                            noop_flag=skip_fp8_weight_update,
-                        )
+                    # Make sure transpose cache is valid, if present
+                    # Note: Transpose cache may have been invalidated
+                    # externally, e.g. by optimizer.
+                    if weight._transpose is not None:
+                        weight.transpose_2d(fill_cache=True, noop_flag=skip_fp8_weight_update)
                 else:
                     # FP8 cast to workspace buffer
                     update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -1056,7 +1043,6 @@ class Linear(TransformerEngineBaseModule):
                         cache_name=(None if is_first_microbatch is None else "weight"),
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                         fsdp_group=self.fsdp_group,
                     )
 
