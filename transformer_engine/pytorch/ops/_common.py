@@ -9,54 +9,12 @@ from typing import Any, Iterable, Optional
 
 import torch
 
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-
-
-def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
-    """Canonicalize PyTorch device
-
-    If `None`, then returns the default CUDA device.
-
-    """
-    if device is None:
-        # Use default CUDA device
-        device = torch.get_default_device()
-        if device.type != "cuda":
-            device = torch.device("cuda", torch.cuda.current_device())
-    elif not isinstance(device, torch.device):
-        device = torch.device(device)
-    if device.type == "cuda" and device.index is None:
-        device = torch.device("cuda", torch.cuda.current_device())
-    return device
-
-
-def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
-    """Canonicalize PyTorch datatype
-
-    If `None`, then returns the default PyTorch datatype.
-
-    """
-    if dtype is None:
-        # Use default dtype
-        dtype = torch.get_default_dtype()
-    return dtype
-
-
-def devices_match(device1: torch.device, device2: torch.device) -> bool:
-    """Whether two devices are the same"""
-    device1 = torch.device(device1)
-    device2 = torch.device(device2)
-    if device1.type != device2.type:
-        return False
-    if device1.type == "cuda":
-        index1 = device1.index
-        index2 = device2.index
-        if index1 is None:
-            index1 = torch.cuda.current_device()
-        if index2 is None:
-            index2 = torch.cuda.current_device()
-        return index1 == index2
-    return device1 == device2
+from ..tensor import Float8Tensor
+from ..utils import (
+    canonicalize_device,  # pylint: disable=unused-import
+    canonicalize_dtype,  # pylint: disable=unused-import
+    devices_match,  # pylint: disable=unused-import
+)
 
 
 def is_float8_tensor(tensor: Any) -> bool:
@@ -92,7 +50,15 @@ def convert_tensor(
 
     # Convert FP8 tensor
     if is_float8_tensor(tensor):
-        data = tensor._data.to(device=device, memory_format=memory_format)
+        data = tensor._data
+        if not devices_match(device, data.device):
+            data = data.to(device=device)
+        if memory_format != torch.preserve_format and not data.is_contiguous(
+            memory_format=memory_format
+        ):
+            # Note: torch.Tensor.to ignores memory_format kwarg (see
+            # https://github.com/pytorch/pytorch/issues/132020).
+            data = data.contiguous(memory_format=memory_format)
         return Float8Tensor.make_like(
             tensor,
             data=data,
@@ -101,7 +67,15 @@ def convert_tensor(
         )
 
     # Convert standard PyTorch tensor
-    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+    if not devices_match(device, tensor.device) or dtype != tensor.dtype:
+        tensor = tensor.to(device=device, dtype=dtype)
+    if memory_format != torch.preserve_format and not tensor.is_contiguous(
+        memory_format=memory_format
+    ):
+        # Note: torch.Tensor.to ignores memory_format kwarg (see
+        # https://github.com/pytorch/pytorch/issues/132020).
+        tensor = tensor.contiguous(memory_format=memory_format)
+    return tensor
 
 
 def reshape(
@@ -150,3 +124,14 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
+
+def maybe_autocast_dtype(
+    *,
+    device_type: str = "cuda",
+    default_dtype: Optional[torch.dtype] = None,
+) -> torch.dtype:
+    """Get autocast dtype if enabled"""
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return canonicalize_dtype(default_dtype)

@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install pip -y
-          pip install torch
+          pip install torch numpy
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_pytorch_lint/test.sh

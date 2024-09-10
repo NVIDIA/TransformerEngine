@@ -33,8 +33,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -49,6 +47,9 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
+from ..ops import Sequential
+from ..ops import Linear as LinearOp
+from ..tensor import QuantizedTensor
 
 __all__ = ["Linear"]
 
@@ -881,6 +882,12 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+        # Construct equivalent representation with fusible operations
+        self._ops: Optional[Sequential] = None
+        self._fusible_ops_are_supported: bool = len(self.parameter_split_sizes) == 1
+        if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
+            self._fusible_ops_are_supported = False
+
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -901,6 +908,82 @@ class Linear(TransformerEngineBaseModule):
                         setattr(getattr(self, bias), "sequence_parallel", self.sequence_parallel)
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
+
+    def _get_fusible_ops(
+        self,
+        weight: Optional[torch.Tensor],
+        bias: Optional[torch.Tensor],
+    ) -> Sequential:
+
+        # Unsupported cases
+        if len(self.parameter_split_sizes) != 1:
+            raise ValueError(
+                "Fusible ops do not support splitting weight tensor into multiple parameters"
+            )
+        if weight.device.type != "cuda":
+            raise RuntimeError(f"Invalid device for weight tensor ({weight.device})")
+        if self.use_bias and bias.device.type != "cuda":
+            raise RuntimeError("Invalid device for bias tensor ({bias.device})")
+        if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
+            raise NotImplementedError("Fusible ops do not support Userbuffers yet")
+
+        def data_ptr(tensor: Optional[torch.Tensor]) -> int:
+            """Get raw data pointer from tensor"""
+            if tensor is None:
+                return 0
+            if isinstance(tensor, Float8Tensor):
+                return tensor._data.data_ptr()
+            return tensor.data_ptr()
+
+        # Make fusible ops if needed
+        if (
+            self._ops is None
+            or data_ptr(self._ops[0].weight) != data_ptr(weight)
+            or data_ptr(self._ops[0].bias) != data_ptr(bias)
+        ):
+
+            # Global tensor dimensions
+            in_features = self.in_features
+            out_features = self.out_features
+            if self.parallel_mode == "column":
+                out_features *= self.tp_size
+            elif self.parallel_mode == "row":
+                in_features *= self.tp_size
+
+            def make_parameter(tensor: torch.Tensor) -> torch.nn.Parameter:
+                """Convert tensor to parameter, if needed"""
+                if isinstance(tensor, torch.nn.Parameter):
+                    return tensor
+                return torch.nn.Parameter(tensor)
+
+            # Construct fusible operations
+            linear_op = LinearOp(
+                in_features,
+                out_features,
+                bias=self.use_bias,
+                device="meta",
+                dtype=weight.dtype,
+                tensor_parallel_mode=self.parallel_mode,
+                tensor_parallel_group=self.tp_group,
+                sequence_parallel=self.sequence_parallel,
+                accumulate_into_main_grad=self.fuse_wgrad_accumulation,
+            )
+            linear_op.weight = make_parameter(weight)
+            if self.use_bias:
+                linear_op.bias = make_parameter(bias)
+            self._ops = Sequential(linear_op)
+
+        # Initialize FP8 metadata
+        if self.fp8:
+            self.init_fp8_metadata(num_gemms=1)
+            linear_op = self._ops[-1]
+            linear_op.basic_ops[linear_op._op_idxs["linear"]]._fp8_metas = dict(
+                input=self.fp8_meta,
+                param=self.fp8_meta,
+                grad_output=self.fp8_meta,
+            )
+
+        return self._ops
 
     @no_torch_dynamo()
     def forward(
@@ -935,22 +1018,68 @@ class Linear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
+        # Implementation with fusible operations
+        from ..cpu_offload import CPUOffloadEnabled
+
+        if (
+            self._fusible_ops_are_supported
+            and not self.fp8_calibration
+            and not CPUOffloadEnabled
+            and self.fsdp_group is None
+        ):
+
+            # Parameters
+            weight = getattr(self, self.weight_names[0])
+            bias = None
+            if self.use_bias:
+                bias = getattr(self, self.bias_names[0])
+
+            # Cast weights to FP8 if needed
+            if self.fp8:
+                if isinstance(weight, Float8Tensor):
+                    # Make sure transpose cache is valid, if present
+                    # Note: Transpose cache may have been invalidated
+                    # externally, e.g. by optimizer.
+                    if weight._transpose is not None:
+                        weight.transpose_2d(fill_cache=True, noop_flag=skip_fp8_weight_update)
+                else:
+                    # FP8 cast to workspace buffer
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
+                    weight = self.get_fp8_workspace(
+                        tensor=weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        cache_name=(None if is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        fsdp_group=self.fsdp_group,
+                    )
+
+            # Apply fusible operations
+            ops = self._get_fusible_ops(weight, bias)
+            out = ops(inp)
+            if self.return_bias:
+                bias_tensor = getattr(self, self.bias_names[0])
+                return out, cast_if_needed(bias_tensor, self.activation_dtype)
+            return out
+
+        # Implementation as monolithic operation
         with self.prepare_forward(
             inp,
             is_first_microbatch,
-            allow_non_contiguous=isinstance(inp, Float8Tensor),
+            allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, Float8Tensor) for w in unfused_weights):
+            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
                         raise RuntimeError(
-                            "Splitting Float8Tensor into multiple params is not supported"
+                            "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    unfused_weights = [w.from_float8() for w in unfused_weights]
+                    unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = _noop_cat(
@@ -962,21 +1091,11 @@ class Linear(TransformerEngineBaseModule):
             # Initialize FP8 weights if needed
             weight_fp8 = None
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 if isinstance(weight_tensor, Float8Tensor):
-                    # Fill transpose cache in FP8 tensor if needed
-                    update_transpose_cache = with_transpose
-                    if update_transpose_cache:
-                        update_transpose_cache = (
-                            is_first_microbatch or skip_fp8_weight_update is not None
-                        )
-                    if update_transpose_cache:
+                    # Make sure transpose cache is valid, if present
+                    # Note: Transpose cache may have been invalidated
+                    # externally, e.g. by optimizer.
+                    if weight_tensor._transpose is not None:
                         weight_tensor.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -991,11 +1110,8 @@ class Linear(TransformerEngineBaseModule):
                         cache_name=(None if is_first_microbatch is None else "weight"),
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                         fsdp_group=self.fsdp_group,
                     )
-
-            from ..cpu_offload import CPUOffloadEnabled
 
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply

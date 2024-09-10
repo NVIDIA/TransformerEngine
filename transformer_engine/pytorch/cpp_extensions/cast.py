@@ -8,7 +8,7 @@ from typing import Optional, Union
 import torch
 
 import transformer_engine_torch as tex
-from ._common import canonicalize_fp8_scales, empty_tensor
+from ._common import canonicalize_fp8_scales
 
 __all__ = ["cast_to_fp8", "cast_from_fp8"]
 
@@ -81,8 +81,7 @@ def cast_from_fp8(
 
     # Construct empty tensors if needed
     if scale_inv is None:
-        scale_inv = empty_tensor()
-        scale_inv_offset = 0
+        raise ValueError("Did not provide either `scale_inv` or `fp8_meta_tensor`")
 
     # Launch FP8 cast kernel
     return torch.ops.tex_ts.cast_from_fp8_ts(

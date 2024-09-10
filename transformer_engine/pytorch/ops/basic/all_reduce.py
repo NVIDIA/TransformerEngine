@@ -9,11 +9,8 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
-from .._common import is_float8_tensor
+from ...tensor import QuantizedTensor
+from ..op import BasicOperation, OperationContext
 
 
 class AllReduce(BasicOperation):
@@ -54,8 +51,8 @@ class AllReduce(BasicOperation):
 
         # Perform all-reduce
         x = input_
-        if is_float8_tensor(x):
-            x = x.from_float8()
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize()
         x = x.contiguous()
         torch.distributed.all_reduce(x, group=self.process_group)
         return x
