@@ -36,8 +36,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -54,6 +52,7 @@ from ..ops import (
     MakeExtraOutput as MakeExtraOutputOp,
     RMSNorm as RMSNormOp,
 )
+from ..tensor import QuantizedTensor
 
 __all__ = ["LayerNormLinear"]
 
@@ -1343,14 +1342,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, Float8Tensor) for w in unfused_weights):
+            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
                         raise RuntimeError(
-                            "Splitting Float8Tensor into multiple params is not supported"
+                            "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    unfused_weights = [w.from_float8() for w in unfused_weights]
+                    unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = _noop_cat(
@@ -1362,32 +1361,18 @@ class LayerNormLinear(TransformerEngineBaseModule):
             # Initialize FP8 weights if needed
             weight_fp8 = None
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 if isinstance(weight_tensor, Float8Tensor):
-                    # Fill transpose cache in FP8 tensor if needed
-                    update_transpose_cache = with_transpose
-                    if update_transpose_cache:
-                        update_transpose_cache = (
-                            is_first_microbatch or skip_fp8_weight_update is not None
-                        )
-                    if update_transpose_cache:
+                    # Make sure transpose cache is valid, if present
+                    # Note: Transpose cache may have been invalidated
+                    # externally, e.g. by optimizer.
+                    if weight_tensor._transpose is not None:
                         weight_tensor.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
                         )
                 else:
                     # FP8 cast to workspace buffer
-                    update_workspace = (
-                        is_first_microbatch is None
-                        or is_first_microbatch
-                        or skip_fp8_weight_update is not None
-                    )
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
                     weight_fp8 = self.get_fp8_workspace(
                         tensor=weight_tensor,
                         fp8_meta_forward=True,
@@ -1395,7 +1380,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         cache_name=(None if is_first_microbatch is None else "weight"),
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                     )
 
             from ..cpu_offload import CPUOffloadEnabled

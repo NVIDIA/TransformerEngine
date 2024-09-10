@@ -28,8 +28,6 @@ from ..utils import (
 from ..distributed import (
     set_tensor_model_parallel_attributes,
     get_distributed_world_size,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
 )
 from ..cpp_extensions import (
     cast_to_fp8,
@@ -743,22 +741,12 @@ class GroupedLinear(TransformerEngineBaseModule):
 
             weight_tensors_fp8 = [None] * self.num_gemms
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 for i in range(self.num_gemms):
                     if isinstance(weight_tensors[i], Float8Tensor):
-                        # Fill transpose cache in FP8 tensor if needed
-                        update_transpose_cache = with_transpose
-                        if update_transpose_cache:
-                            update_transpose_cache = (
-                                is_first_microbatch or skip_fp8_weight_update is not None
-                            )
-                        if update_transpose_cache:
+                        # Make sure transpose cache is valid, if present
+                        # Note: Transpose cache may have been invalidated
+                        # externally, e.g. by optimizer.
+                        if weight_tensors[i]._transpose is not None:
                             weight_tensors[i].transpose_2d(
                                 fill_cache=True,
                                 noop_flag=skip_fp8_weight_update,
@@ -773,7 +761,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                             cache_name=(None if is_first_microbatch is None else f"weight{i}"),
                             update_workspace=update_workspace,
                             skip_update_flag=skip_fp8_weight_update,
-                            with_transpose=with_transpose,
                         )
 
             from ..cpu_offload import CPUOffloadEnabled
