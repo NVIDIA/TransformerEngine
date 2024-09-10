@@ -5032,15 +5032,17 @@ class FlashAttention(torch.nn.Module):
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                         activation_dtype = query_layer.dtype
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
+
                         def convert_to_torch_float8(tensor, dtype):
                             out = torch.Tensor().to(device=tensor.device, dtype=dtype)
                             out.set_(
                                 tensor._data.untyped_storage(),
                                 tensor._data.storage_offset(),
                                 tensor._data.shape,
-                                tensor._data.stride()
+                                tensor._data.stride(),
                             )
                             return out
+
                         if fp8_meta["recipe"].fp8_mha:
                             assert all(
                                 isinstance(x, Float8Tensor)
