@@ -138,15 +138,28 @@ def initialize_ub(
         )
 
         if ifname is not None:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                hostname = socket.inet_ntoa(
-                    fcntl.ioctl(
-                        s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
-                    )[20:24]
+            # Make sure the ifname found in the environment is a valid network interface
+            if ifname in [ name for _, name in socket.if_nameindex() ]:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    hostname = socket.inet_ntoa(
+                        fcntl.ioctl(
+                            s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
+                        )[20:24]
+                    )
+                except OSError as err:
+                    raise OSError(f"Invalid network interface: {ifname}") from err
+                finally:
+                    s.close()
+            else:
+                ifname_warning = (
+                    "'%s' is not a valid network interface! `te.initialize_ub()` will attempt to "
+                    + "detect ranks on the same node by matching 'socket.gethostname()', which is "
+                    + "known to fail on virtual clusters like Kubernetes. If Userbuffers "
+                    + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
+                    + "your environment to the correct network interface."
                 )
-            except OSError as err:
-                raise OSError(f"Invalid network interface: {ifname}") from err
+                warnings.warn(ifname_warning, UserWarning)
 
         hostnames = [None for _ in range(world_size)]
         torch.distributed.all_gather_object(hostnames, hostname, world_group)
