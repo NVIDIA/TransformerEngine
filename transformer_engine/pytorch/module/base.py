@@ -139,7 +139,7 @@ def initialize_ub(
 
         if ifname is not None:
             # Make sure the ifname found in the environment is a valid network interface
-            if ifname in [ name for _, name in socket.if_nameindex() ]:
+            if ifname in [name for _, name in socket.if_nameindex()]:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 try:
                     hostname = socket.inet_ntoa(
