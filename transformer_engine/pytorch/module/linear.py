@@ -922,10 +922,10 @@ class Linear(TransformerEngineBaseModule):
                 "Fusible ops do not support splitting weight tensor "
                 "into multiple parameters"
             )
-        if weight.device.type == "meta":
-            raise RuntimeError("Weight tensor has not been initialized")
-        if bias is not None and bias.device.type == "meta":
-            raise RuntimeError("Bias tensor has not been initialized")
+        if weight.device.type != "cuda":
+            raise RuntimeError(f"Invalid device for weight tensor ({weight.device})")
+        if self.use_bias and bias.device.type != "cuda":
+            raise RuntimeError("Invalid device for bias tensor ({bias.device})")
         if self.ub_overlap_rs or self.ub_overlap_ag or self.ub_name is not None:
             raise NotImplementedError("Fusible ops do not support Userbuffers yet")
 
@@ -949,9 +949,15 @@ class Linear(TransformerEngineBaseModule):
         in_features = self.in_features
         out_features = self.out_features
         if self.parallel_mode == "column":
-            self.out_features *= self.tp_size
+            out_features *= self.tp_size
         elif self.parallel_mode == "row":
-            self.in_features *= self.tp_size
+            in_features *= self.tp_size
+
+        def make_parameter(tensor: torch.Tensor) -> torch.nn.Parameter:
+            """Convert tensor to parameter, if needed"""
+            if isinstance(tensor, torch.nn.Parameter):
+                return tensor
+            return torch.nn.Parameter(tensor)
 
         # Construct fusible operations
         linear_op = LinearOp(
@@ -965,8 +971,9 @@ class Linear(TransformerEngineBaseModule):
             sequence_parallel=self.sequence_parallel,
             accumulate_into_main_grad=self.fuse_wgrad_accumulation,
         )
-        linear_op.weight = weight
-        linear_op.bias = bias
+        linear_op.weight = make_parameter(weight)
+        if self.use_bias:
+            linear_op.bias = make_parameter(bias)
         self._ops = Sequential(linear_op)
 
         return self._ops
@@ -1000,7 +1007,6 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
 
-        # Implementation as monolithic operation
         skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
@@ -1058,12 +1064,12 @@ class Linear(TransformerEngineBaseModule):
             # Apply fusible operations
             ops = self._get_fusible_ops(weight, bias)
             out = ops(inp)
-
             if self.return_bias:
                 bias_tensor = getattr(self, self.bias_names[0])
                 return out, cast_if_needed(bias_tensor, self.activation_dtype)
             return out
 
+        # Implementation as monolithic operation
         with self.prepare_forward(
             inp,
             is_first_microbatch,

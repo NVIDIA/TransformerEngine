@@ -47,6 +47,13 @@ from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
+from ..ops import Sequential
+from ..ops import (
+    LayerNorm as LayerNormOp,
+    Linear as LinearOp,
+    MakeExtraOutput as MakeExtraOutputOp,
+    RMSNorm as RMSNormOp,
+)
 
 __all__ = ["LayerNormLinear"]
 
@@ -1073,6 +1080,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
+        # Construct equivalent representation with fusible operations
+        self._ops: Optional[Sequential] = None
+        self._fusible_ops_are_supported: bool = len(self.parameter_split_sizes) == 1
+        if self.ub_overlap_rs_dgrad or self.ub_overlap_ag or self.ub_name is not None:
+            self._fusible_ops_are_supported = False
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1114,6 +1127,108 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     elif self.parallel_mode == "column":
                         set_tensor_model_parallel_attributes(getattr(self, bias), True, 0, 1)
 
+    def _get_fusible_ops(
+        self,
+        norm_weight: Optional[torch.Tensor],
+        norm_bias: Optional[torch.Tensor],
+        linear_weight: Optional[torch.Tensor],
+        linear_bias: Optional[torch.Tensor],
+    ) -> Sequential:
+
+        # Unsupported cases
+        if len(self.parameter_split_sizes) != 1:
+            raise ValueError(
+                "Fusible ops do not support splitting weight tensor "
+                "into multiple parameters"
+            )
+        if norm_weight.device.type != "cuda":
+            raise RuntimeError(f"Invalid device for norm weight tensor ({norm_weight.device})")
+        if norm_bias is not None and norm_bias.device.type != "cuda":
+            raise RuntimeError("Invalid device for bias tensor ({norm_bias.device})")
+        if linear_weight.device.type != "cuda":
+            raise RuntimeError(f"Invalid device for linear weight tensor ({linear_weight.device})")
+        if linear_bias is not None and linear_bias.device.type != "cuda":
+            raise RuntimeError("Invalid device for bias tensor ({linear_bias.device})")
+        if self.ub_overlap_rs_dgrad or self.ub_overlap_ag or self.ub_name is not None:
+            raise NotImplementedError("Fusible ops do not support Userbuffers yet")
+
+        def data_ptr(tensor: Optional[torch.Tensor]) -> int:
+            """Get raw data pointer from tensor"""
+            if tensor is None:
+                return 0
+            if isinstance(tensor, Float8Tensor):
+                return tensor._data.data_ptr()
+            return tensor.data_ptr()
+
+        # Return immediately if fusible ops are already ready
+        if (
+            self._ops is not None
+            and data_ptr(self._ops[0].weight) == data_ptr(norm_weight)
+            and data_ptr(self._ops[0].bias) == data_ptr(norm_bias)
+            and data_ptr(self._ops[-1].weight) == data_ptr(linear_weight)
+            and data_ptr(self._ops[-1].bias) == data_ptr(linear_bias)
+        ):
+            return self._ops
+
+        # Global tensor dimensions
+        in_features = self.in_features
+        out_features = self.out_features
+        if self.parallel_mode == "column":
+            out_features *= self.tp_size
+        elif self.parallel_mode == "row":
+            in_features *= self.tp_size
+
+        def make_parameter(tensor: torch.Tensor) -> torch.nn.Parameter:
+            """Convert tensor to parameter, if needed"""
+            if isinstance(tensor, torch.nn.Parameter):
+                return tensor
+            return torch.nn.Parameter(tensor)
+
+        # Construct fusible operations
+        norm_op = None
+        if self.normalization == "LayerNorm":
+            norm_op = LayerNormOp(
+                in_features,
+                eps=self.eps,
+                device="meta",
+                dtype=norm_weight.dtype,
+                zero_centered_gamma=self.zero_centered_gamma,
+            )
+            norm_op.weight = make_parameter(norm_weight)
+            norm_op.bias = make_parameter(norm_bias)
+        elif self.normalization == "RMSNorm":
+            norm_op = RMSNormOp(
+                in_features,
+                eps=self.eps,
+                device="meta",
+                dtype=norm_weight.dtype,
+                zero_centered_gamma=self.zero_centered_gamma,
+            )
+            norm_op.weight = make_parameter(norm_weight)
+        linear_op = LinearOp(
+            in_features,
+            out_features,
+            bias=self.use_bias,
+            device="meta",
+            dtype=linear_weight.dtype,
+            tensor_parallel_mode=self.parallel_mode,
+            tensor_parallel_group=self.tp_group,
+            sequence_parallel=self.sequence_parallel,
+            accumulate_into_main_grad=self.fuse_wgrad_accumulation,
+        )
+        linear_op.weight = make_parameter(linear_weight)
+        if self.use_bias:
+            linear_op.bias = make_parameter(linear_bias)
+
+        # Fuse ops
+        ops = [norm_op]
+        if self.return_layernorm_output:
+            ops.append(MakeExtraOutputOp())
+        ops.append(linear_op)
+        self._ops = Sequential(*ops)
+
+        return self._ops
+
     @no_torch_dynamo()
     def forward(
         self,
@@ -1147,6 +1262,83 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
+        # Implementation with fusible operations
+        from ..cpu_offload import CPUOffloadEnabled
+        if (
+            self._fusible_ops_are_supported
+            and not self.fp8_calibration
+            and not CPUOffloadEnabled
+            and self.fsdp_group is None
+        ):
+
+            # Parameters
+            linear_weight = getattr(self, self.weight_names[0])
+            linear_bias = None
+            if self.use_bias:
+                linear_bias = getattr(self, self.bias_names[0])
+
+            # Cast weights to FP8 if needed
+            if self.fp8:
+                with_transpose = torch.is_grad_enabled()
+                if (
+                    not with_transpose
+                    and is_fp8_activation_recompute_enabled()
+                    and not in_fp8_activation_recompute_phase()
+                ):
+                    with_transpose = True
+                if isinstance(linear_weight, Float8Tensor):
+                    # Fill transpose cache in FP8 tensor if needed
+                    update_transpose_cache = with_transpose
+                    if update_transpose_cache:
+                        update_transpose_cache = (
+                            is_first_microbatch or skip_fp8_weight_update is not None
+                        )
+                    if update_transpose_cache:
+                        linear_weight.transpose_2d(
+                            fill_cache=True,
+                            noop_flag=skip_fp8_weight_update,
+                        )
+                else:
+                    # FP8 cast to workspace buffer
+                    update_workspace = is_first_microbatch is None or is_first_microbatch
+                    linear_weight = self.get_fp8_workspace(
+                        tensor=linear_weight,
+                        fp8_meta_forward=True,
+                        fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                        cache_name=(None if is_first_microbatch is None else "weight"),
+                        update_workspace=update_workspace,
+                        skip_update_flag=skip_fp8_weight_update,
+                        with_transpose=with_transpose,
+                        fsdp_group=self.fsdp_group,
+                    )
+
+            # Apply fusible operations
+            ops = self._get_fusible_ops(
+                self.layer_norm_weight,
+                self.layer_norm_bias,
+                linear_weight,
+                linear_bias,
+            )
+            out = ops(inp)
+
+            # Parse outputs
+            ln_out = None
+            bias_out = None
+            if self.return_layernorm_output:
+                out, ln_out = out
+            if self.return_bias:
+                bias_out = getattr(self, self.bias_names[0])
+                bias_out = cast_if_needed(bias_out, self.activation_dtype)
+            if not self.return_bias and not self.return_layernorm_output:
+                return out
+            retvals = [out]
+            if self.return_bias:
+                retvals.append(bias_out)
+            if self.return_layernorm_output:
+                retvals.append(ln_out)
+            return tuple(retvals)
+
+        # Implementation as monolithic operation
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
             # Get concatenated weight and bias tensors
