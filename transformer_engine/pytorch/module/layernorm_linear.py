@@ -1159,72 +1159,81 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 return tensor._data.data_ptr()
             return tensor.data_ptr()
 
-        # Return immediately if fusible ops are already ready
+        # Make fusible ops if needed
         if (
-            self._ops is not None
-            and data_ptr(self._ops[0].weight) == data_ptr(norm_weight)
-            and data_ptr(self._ops[0].bias) == data_ptr(norm_bias)
-            and data_ptr(self._ops[-1].weight) == data_ptr(linear_weight)
-            and data_ptr(self._ops[-1].bias) == data_ptr(linear_bias)
+            self._ops is None
+            or data_ptr(self._ops[0].weight) != data_ptr(norm_weight)
+            or data_ptr(self._ops[0].bias) != data_ptr(norm_bias)
+            or data_ptr(self._ops[-1].weight) != data_ptr(linear_weight)
+            or data_ptr(self._ops[-1].bias) != data_ptr(linear_bias)
         ):
-            return self._ops
 
-        # Global tensor dimensions
-        in_features = self.in_features
-        out_features = self.out_features
-        if self.parallel_mode == "column":
-            out_features *= self.tp_size
-        elif self.parallel_mode == "row":
-            in_features *= self.tp_size
+            # Global tensor dimensions
+            in_features = self.in_features
+            out_features = self.out_features
+            if self.parallel_mode == "column":
+                out_features *= self.tp_size
+            elif self.parallel_mode == "row":
+                in_features *= self.tp_size
 
-        def make_parameter(tensor: torch.Tensor) -> torch.nn.Parameter:
-            """Convert tensor to parameter, if needed"""
-            if isinstance(tensor, torch.nn.Parameter):
-                return tensor
-            return torch.nn.Parameter(tensor)
+            def make_parameter(tensor: torch.Tensor) -> torch.nn.Parameter:
+                """Convert tensor to parameter, if needed"""
+                if isinstance(tensor, torch.nn.Parameter):
+                    return tensor
+                return torch.nn.Parameter(tensor)
 
-        # Construct fusible operations
-        norm_op = None
-        if self.normalization == "LayerNorm":
-            norm_op = LayerNormOp(
+            # Construct fusible operations
+            norm_op = None
+            if self.normalization == "LayerNorm":
+                norm_op = LayerNormOp(
+                    in_features,
+                    eps=self.eps,
+                    device="meta",
+                    dtype=norm_weight.dtype,
+                    zero_centered_gamma=self.zero_centered_gamma,
+                )
+                norm_op.weight = make_parameter(norm_weight)
+                norm_op.bias = make_parameter(norm_bias)
+            elif self.normalization == "RMSNorm":
+                norm_op = RMSNormOp(
+                    in_features,
+                    eps=self.eps,
+                    device="meta",
+                    dtype=norm_weight.dtype,
+                    zero_centered_gamma=self.zero_centered_gamma,
+                )
+                norm_op.weight = make_parameter(norm_weight)
+            linear_op = LinearOp(
                 in_features,
-                eps=self.eps,
+                out_features,
+                bias=self.use_bias,
                 device="meta",
-                dtype=norm_weight.dtype,
-                zero_centered_gamma=self.zero_centered_gamma,
+                dtype=linear_weight.dtype,
+                tensor_parallel_mode=self.parallel_mode,
+                tensor_parallel_group=self.tp_group,
+                sequence_parallel=self.sequence_parallel,
+                accumulate_into_main_grad=self.fuse_wgrad_accumulation,
             )
-            norm_op.weight = make_parameter(norm_weight)
-            norm_op.bias = make_parameter(norm_bias)
-        elif self.normalization == "RMSNorm":
-            norm_op = RMSNormOp(
-                in_features,
-                eps=self.eps,
-                device="meta",
-                dtype=norm_weight.dtype,
-                zero_centered_gamma=self.zero_centered_gamma,
-            )
-            norm_op.weight = make_parameter(norm_weight)
-        linear_op = LinearOp(
-            in_features,
-            out_features,
-            bias=self.use_bias,
-            device="meta",
-            dtype=linear_weight.dtype,
-            tensor_parallel_mode=self.parallel_mode,
-            tensor_parallel_group=self.tp_group,
-            sequence_parallel=self.sequence_parallel,
-            accumulate_into_main_grad=self.fuse_wgrad_accumulation,
-        )
-        linear_op.weight = make_parameter(linear_weight)
-        if self.use_bias:
-            linear_op.bias = make_parameter(linear_bias)
+            linear_op.weight = make_parameter(linear_weight)
+            if self.use_bias:
+                linear_op.bias = make_parameter(linear_bias)
 
-        # Fuse ops
-        ops = [norm_op]
-        if self.return_layernorm_output:
-            ops.append(MakeExtraOutputOp())
-        ops.append(linear_op)
-        self._ops = Sequential(*ops)
+            # Fuse ops
+            ops = [norm_op]
+            if self.return_layernorm_output:
+                ops.append(MakeExtraOutputOp())
+            ops.append(linear_op)
+            self._ops = Sequential(*ops)
+
+        # Initialize FP8 metadata
+        if self.fp8:
+            self.init_fp8_metadata(num_gemms=1)
+            linear_op = self._ops[-1]
+            linear_op.basic_ops[linear_op._op_idxs["linear"]]._fp8_metas = dict(
+                input=self.fp8_meta,
+                param=self.fp8_meta,
+                grad_output=self.fp8_meta,
+            )
 
         return self._ops
 
