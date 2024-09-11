@@ -23,7 +23,6 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
                    const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
                    const bool zero_centered_gamma) {
-
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
   NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
