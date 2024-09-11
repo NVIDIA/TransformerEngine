@@ -12,30 +12,18 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.cpp_extensions import (
+from ...cpp_extensions import (
     layernorm_bwd,
     layernorm_fwd,
     layernorm_fwd_fp8,
     layernorm_fwd_fp8_inf,
     layernorm_fwd_inf,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    get_fp8_te_dtype,
-)
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
-from .._common import (
-    canonicalize_device,
-    canonicalize_dtype,
-    is_float8_tensor,
-    maybe_autocast_dtype,
-    reshape,
-)
-from ...utils import clear_tensor_data
+from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
+from ...tensor import Float8Tensor, QuantizedTensor
+from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
+from ..op import BasicOperation, OperationContext
+from .._common import maybe_autocast_dtype, reshape
 
 
 class LayerNorm(BasicOperation):
@@ -192,12 +180,12 @@ class LayerNorm(BasicOperation):
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         b = reshape(self.bias, (inner_dim,), device=device, dtype=dtype)
-        if is_float8_tensor(x):
-            x = x.from_float8()
-        if is_float8_tensor(w):
-            w = w.from_float8()
-        if is_float8_tensor(b):
-            b = x.from_float8()
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize()
+        if isinstance(w, QuantizedTensor):
+            w = w.dequantize()
+        if isinstance(b, QuantizedTensor):
+            b = b.dequantize()
 
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
@@ -282,10 +270,10 @@ class LayerNorm(BasicOperation):
         dtype = ctx.dtype
         dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
-        if is_float8_tensor(w):
-            w = w.from_float8()
-        if is_float8_tensor(dy):
-            dy = dy.from_float8()
+        if isinstance(w, QuantizedTensor):
+            w = w.dequantize()
+        if isinstance(dy, QuantizedTensor):
+            dy = dy.dequantize()
 
         # Compute layer norm backward pass
         dx, dw, db = layernorm_bwd(
