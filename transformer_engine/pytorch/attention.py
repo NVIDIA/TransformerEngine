@@ -4879,22 +4879,13 @@ class FlashAttention(torch.nn.Module):
                     )
                 else:
                     query_layer, key_layer, value_layer = [
-                        x.transpose(0, 1).contiguous()
-                        for x in (query_layer, key_layer, value_layer)
+                        x.transpose(0, 1) for x in (query_layer, key_layer, value_layer)
                     ]
-            elif qkv_format in ["bshd", "thd"]:
-                query_layer, key_layer, value_layer = [
-                    x.contiguous() for x in (query_layer, key_layer, value_layer)
-                ]
         else:
             if qkv_format == "sbhd":
                 query_layer._data, key_layer._data, value_layer._data = [
-                    x.transpose(0, 1).contiguous()
+                    x.transpose(0, 1)
                     for x in (query_layer._data, key_layer._data, value_layer._data)
-                ]
-            elif qkv_format in ["bshd", "thd"]:
-                query_layer._data, key_layer._data, value_layer._data = [
-                    x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
 
         batch_size = query_layer.shape[0]
@@ -5090,11 +5081,7 @@ class FlashAttention(torch.nn.Module):
                 output.reshape(batch_size * max_seqlen_q // cp_size, -1).transpose_2d()
                 output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
             else:
-                output = (
-                    output.view(batch_size, max_seqlen_q // cp_size, -1)
-                    .transpose(0, 1)
-                    .contiguous()
-                )
+                output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
             output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
@@ -5102,7 +5089,7 @@ class FlashAttention(torch.nn.Module):
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
-        return output
+        return output.contiguous()
 
 
 def _combine_tensors(
