@@ -233,9 +233,9 @@ def test_dot_product_attention(
     """Test DotProductAttention module"""
 
     # Get configs
-    tols = dict(atol=5e-3, rtol=5e-3)
+    tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
-        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        tols = dict(atol=1.5e-2, rtol=1.5e-2)
     config = model_configs[model]
     is_mla = config.head_dim_qk != config.head_dim_v
     if qkv_layout is None:
@@ -1035,7 +1035,7 @@ def test_transformer_layer(
 
     # Get configs
     config = model_configs[model]
-    tols = dict(atol=5e-1, rtol=5e-2)
+    tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
     # Test backend availability

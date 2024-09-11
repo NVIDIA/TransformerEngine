@@ -88,10 +88,7 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
     test = ref.to(device=test_device, dtype=test_dtype)
     if test_is_fp8:
-        test = Float8Tensor.to_float8(test)
-        test._transpose = test._data.reshape(-1, test.size(-1)).transpose(0, 1)
-        test._transpose = test._transpose.contiguous()
-        test._transpose_invalid = False
+        test = Float8Tensor.to_float8(test, with_transpose_cache=True)
     elif test.data_ptr() == ref.data_ptr():
         test = test.clone()
     ref.copy_(test)
