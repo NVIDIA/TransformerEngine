@@ -399,7 +399,6 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                                        .set_is_pass_by_value(true));
     auto centered_options = fe::graph::Pointwise_attributes()
                                 .set_mode(fe::PointwiseMode_t::ADD)
-                                .set_compute_data_type(get_cudnn_fe_dtype(ctype))
                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
     _gamma = _graph.pointwise(_gamma_zero, _scalar_offset, centered_options);
     _gamma->set_output(false).set_data_type(get_cudnn_fe_dtype(wtype));
@@ -423,14 +422,16 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                                 .set_data_type(get_cudnn_fe_dtype(wtype)));
       auto norm_options = fe::graph::Layernorm_attributes()
                               .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
-                              .set_epsilon(_eps);
+                              .set_epsilon(_eps)
+                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       auto ret = _graph.layernorm(_x, _gamma, _beta, norm_options);
       std::tie(_z, _mean, _rsigma) = std::make_tuple(ret[0], ret[1], ret[2]);
       _mean->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
     } else if (NormType == NVTE_Norm_Type::RMSNorm) {
       auto norm_options = fe::graph::Rmsnorm_attributes()
                               .set_forward_phase(fe::NormFwdPhase_t::TRAINING)
-                              .set_epsilon(_eps);
+                              .set_epsilon(_eps)
+                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       auto ret = _graph.rmsnorm(_x, _gamma, norm_options);
       std::tie(_z, _rsigma) = std::make_tuple(ret[0], ret[1]);
     }
@@ -447,7 +448,9 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                                    .set_dim({1, 1, 1, 1})
                                    .set_stride({1, 1, 1, 1})
                                    .set_data_type(get_cudnn_fe_dtype(ctype)));
-      auto z_scale_options = fe::graph::Pointwise_attributes().set_mode(fe::PointwiseMode_t::MUL);
+      auto z_scale_options = fe::graph::Pointwise_attributes()
+                                 .set_mode(fe::PointwiseMode_t::MUL)
+                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       _z_fp8 = _graph.pointwise(_z, _z_scale, z_scale_options);
 
       _z_fp8->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
@@ -474,14 +477,16 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                               .set_stride({1, 1, 1, 1})
                               .set_data_type(get_cudnn_fe_dtype(ctype)));
     if (NormType == NVTE_Norm_Type::LayerNorm) {
-      auto norm_options =
-          fe::graph::Layernorm_backward_attributes().set_saved_mean_and_inv_variance(_mean,
-                                                                                     _rsigma);
+      auto norm_options = fe::graph::Layernorm_backward_attributes()
+                              .set_saved_mean_and_inv_variance(_mean, _rsigma)
+                              .set_compute_data_type(get_cudnn_fe_dtype(ctype));
       auto ret = _graph.layernorm_backward(_dz, _x, _gamma, norm_options);
       std::tie(_dx, _dgamma, _dbeta) = std::make_tuple(ret[0], ret[1], ret[2]);
       _dbeta->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
     } else {
-      auto norm_options = fe::graph::Rmsnorm_backward_attributes().has_dbias(false);
+      auto norm_options =
+          fe::graph::Rmsnorm_backward_attributes().has_dbias(false).set_compute_data_type(
+              get_cudnn_fe_dtype(ctype));
       auto ret = _graph.rmsnorm_backward(_dz, _x, _gamma, _rsigma, norm_options);
       std::tie(_dx, _dgamma, _dbeta) = std::make_tuple(ret[0], ret[1], ret[2]);
       if (_dbeta != nullptr) NVTE_ERROR("cuDNN rmsnorm dbias incorrectly returned.");
