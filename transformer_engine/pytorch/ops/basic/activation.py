@@ -19,11 +19,10 @@ from ...cpp_extensions import (
     relu as tex_relu,
     swiglu as tex_swiglu,
 )
-from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...utils import clear_tensor_data
+from ...tensor import Float8Tensor, QuantizedTensor
+from ...utils import clear_tensor_data, devices_match
 from ..op import BasicOperation, OperationContext
-from .._common import devices_match, is_float8_tensor
 
 
 class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
@@ -73,8 +72,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Check input tensor
         x = input_
-        if is_float8_tensor(x):
-            x = x.from_float8()
+        if isinstance(x, QuantizedTensor):
+            x = x.dequantize()
         if x.device.type != "cuda":
             x = x.cuda()
         if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
@@ -139,8 +138,8 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Check grad output tensor
         dy = grad_output
-        if is_float8_tensor(dy):
-            dy = dy.from_float8()
+        if isinstance(dy, QuantizedTensor):
+            dy = dy.dequantize()
         if not devices_match(dy.device, x.device) or dy.dtype != x.dtype:
             dy = dy.to(device=x.device, dtype=x.dtype)
         if not dy.is_contiguous():

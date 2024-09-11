@@ -9,15 +9,9 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    get_fp8_te_dtype,
-)
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
+from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
+from ...tensor import Float8Tensor
+from ..op import BasicOperation, OperationContext
 from .._common import is_float8_tensor
 
 
@@ -31,7 +25,7 @@ class CastFloat8(BasicOperation):
     ----------
     forward: bool, default = `True`
         Perform FP8 cast in forward pass
-    backward: bool, default = `True`
+    backward: bool, default = `False`
         Perform FP8 cast in backward pass
 
     """
@@ -39,7 +33,7 @@ class CastFloat8(BasicOperation):
     def __init__(
         self,
         forward: bool = True,
-        backward: bool = True,
+        backward: bool = False,
     ) -> None:
         super().__init__()
         self._cast_forward = forward
