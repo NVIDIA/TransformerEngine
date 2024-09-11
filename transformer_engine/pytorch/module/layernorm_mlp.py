@@ -13,6 +13,7 @@ from torch.nn import init
 
 from .base import (
     get_workspace,
+    _ub_communicators,
     get_ub,
     TransformerEngineBaseModule,
     _2X_ACC_FPROP,
@@ -569,8 +570,8 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                fc1_weight = Parameter(fc1_weight.requires_grad)
-                fc2_weight = Parameter(fc2_weight.requires_grad)
+                fc1_weight = Parameter(fc1_weight, fc1_weight.requires_grad)
+                fc2_weight = Parameter(fc2_weight, fc2_weight.requires_grad)
 
                 fc1_weight.main_grad = fc1_weight_main_grad
                 fc2_weight.main_grad = fc2_weight_main_grad
@@ -1297,7 +1298,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.gemm_gelu_fusion = (
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
-            and not get_ub("fc1_fprop").is_atomic_gemm()
+            and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
         )
 
         if tp_group is None:

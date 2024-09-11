@@ -872,8 +872,9 @@ class TestLayerNormMLP:
 @pytest.mark.parametrize("attn_type", ["self", "cross"])
 @pytest.mark.parametrize("mask_type", ["causal", "padding"])
 @pytest.mark.parametrize("math_dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("deterministic", [True, False])
 def test_dot_product_attention(
-    bs, hidden_size, num_heads, q_seqlen, kv_seqlen, attn_type, mask_type, math_dtype
+    bs, hidden_size, num_heads, q_seqlen, kv_seqlen, attn_type, mask_type, math_dtype, deterministic
 ):
     """
     Test DotProductAttention Layer
@@ -927,6 +928,10 @@ def test_dot_product_attention(
         attn_mask[i, 0, 0 : q_actual_seqlen[i], 0 : kv_actual_seqlen[i]] = False
 
     head_size = hidden_size // num_heads
+
+    if deterministic:
+        os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+
     layer_te = te.DotProductAttention(
         num_heads,
         head_size,
@@ -981,6 +986,15 @@ def test_dot_product_attention(
     assert_allclose(q_grad, valid_q_grad_ref, rtol=rtol, atol=atol)
     assert_allclose(k_grad, valid_k_grad_ref, rtol=rtol, atol=atol)
     assert_allclose(v_grad, valid_v_grad_ref, rtol=rtol, atol=atol)
+    if deterministic:
+        out2, q_grad2, k_grad2, v_grad2 = calc_attn_output_and_grad(
+            layer_te, attn_q_input, attn_k_input, attn_v_input, attn_mask, grad_out
+        )
+        assert_allclose(out, out2, rtol=1e-12, atol=1e-12)
+        assert_allclose(q_grad, q_grad2, rtol=1e-12, atol=1e-12)
+        assert_allclose(k_grad, k_grad2, rtol=1e-12, atol=1e-12)
+        assert_allclose(v_grad, v_grad2, rtol=1e-12, atol=1e-12)
+        os.environ.pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO", None)
 
 
 @pytest.mark.parametrize("bs", [1, 2])

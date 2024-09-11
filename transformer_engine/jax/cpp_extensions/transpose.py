@@ -6,10 +6,12 @@ from functools import partial, reduce
 from typing import Tuple, Sequence, Union, Callable
 import operator
 
+import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
@@ -24,8 +26,11 @@ from .misc import (
     get_padded_spec,
     multidim_transpose,
     normalize_axis_boundary,
+    is_ffi_enabled,
 )
 from .activation import ActivationEnum
+from .activation import _jax_act_lu
+from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 
 
@@ -36,6 +41,27 @@ __all__ = [
     "dact_lu_dbias_cast_transpose",
     "dgated_act_lu_cast_transpose",
 ]
+
+
+def _jax_transpose(inputs, static_axis_boundary, transpose_axis_boundary):
+    """
+    JAX native transpose implementation
+    """
+    axes = multidim_transpose(range(inputs.ndim), static_axis_boundary, transpose_axis_boundary)
+    return jnp.transpose(inputs, axes=axes)
+
+
+def _jax_cast_transpose(
+    inputs, scale, amax, out_dtype, static_axis_boundary, transpose_axis_boundary
+):
+    """
+    JAX native cast_transpose implementation
+    """
+    casted_output, updated_amax = _jax_cast_fp8(inputs, scale, amax, out_dtype=out_dtype)
+    casted_transposed_output = _jax_transpose(
+        casted_output, static_axis_boundary, transpose_axis_boundary
+    )
+    return casted_output, casted_transposed_output, updated_amax
 
 
 class TransposePrimitive(BasePrimitive):
@@ -176,6 +202,8 @@ def transpose(
     """
     transpose wrapper
     """
+    if not TransposePrimitive.enabled():
+        return _jax_transpose(x, static_axis_boundary, transpose_axis_boundary)
     return TransposePrimitive.outer_primitive.bind(
         x,
         static_axis_boundary=static_axis_boundary,
@@ -236,45 +264,49 @@ class CastTransposePrimitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        if static_axis_boundary >= 0:
-            for i in range(static_axis_boundary + 1):
-                assert ir_x_shape[i] == 1
-        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-        ir_amax_type = ir.RankedTensorType(amax.type)
-        ir_amax_dtype = ir_amax_type.element_type
-        ir_amax_shape = ir_amax_type.shape
-        ir_scale_shape = ir_amax_shape
-        ir_scale_inv_shape = ir_amax_shape
+        if is_ffi_enabled():
+            name = "te_cast_transpose_ffi"
+            out = ffi.ffi_lowering(name, operand_output_aliases={1: 2})(
+                ctx, x, amax, scale, scale_inv, transpose_axis=transpose_axis_boundary
+            )
+        else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            if static_axis_boundary >= 0:
+                for i in range(static_axis_boundary + 1):
+                    assert ir_x_shape[i] == 1
+            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+            ir_amax_type = ir.RankedTensorType(amax.type)
+            ir_amax_dtype = ir_amax_type.element_type
+            ir_amax_shape = ir_amax_type.shape
+            ir_scale_shape = ir_amax_shape
+            ir_scale_inv_shape = ir_amax_shape
 
-        transposed_x_shape = multidim_transpose(
-            ir_x_shape, static_axis_boundary, transpose_axis_boundary
-        )
+            transposed_x_shape = multidim_transpose(
+                ir_x_shape, static_axis_boundary, transpose_axis_boundary
+            )
 
-        out_types = [
-            ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
-            ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
-            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-        ]
-        operands = [x, amax, scale, scale_inv]
-        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [
+                ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
+                ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype),
+                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ]
+            operands = [x, amax, scale, scale_inv]
+            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        contracted_x_shape = (
-            reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
-            reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),
-        )
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            contracted_x_shape,
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(out_dtype),
-        )
-
-        out = custom_caller(
-            CastTransposePrimitive.name, args, opaque, False, operand_output_aliases={1: 2}
-        )
-
+            contracted_x_shape = (
+                reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
+                reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),
+            )
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                contracted_x_shape,
+                jax_dtype_to_te_dtype(x_aval.dtype),
+                jax_dtype_to_te_dtype(out_dtype),
+            )
+            out = custom_caller(
+                CastTransposePrimitive.name, args, opaque, False, operand_output_aliases={1: 2}
+            )
         return out
 
     @staticmethod
@@ -381,6 +413,15 @@ def cast_transpose(
     cast transpose wrapper
     Return two tensors, FP8(inputs) and FP8(inputs.T), which are scaled by `scale`
     """
+    if not CastTransposePrimitive.enabled():
+        return _jax_cast_transpose(
+            x,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary,
+        )
     return CastTransposePrimitive.outer_primitive.bind(
         x,
         amax,
@@ -630,6 +671,28 @@ def dbias_cast_transpose(
     """
     if static_axis_boundary < 0:
         static_axis_boundary = -1  # means no static axes
+
+    if not DBiasCastTransposePrimitive.enabled():
+        casted_dz, cast_transposed_dz, updated_amax = _jax_cast_transpose(
+            dz,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary,
+        )
+        dbias = jnp.sum(
+            dz,
+            axis=tuple(
+                range(
+                    transpose_axis_boundary
+                    if transpose_axis_boundary > 0
+                    else transpose_axis_boundary + dz.ndim
+                )
+            ),
+            keepdims=False,
+        )
+        return casted_dz, cast_transposed_dz, dbias, updated_amax
 
     return DBiasCastTransposePrimitive.outer_primitive.bind(
         dz,
@@ -947,6 +1010,31 @@ def dact_lu_dbias_cast_transpose(
     if static_axis_boundary < 0:
         static_axis_boundary = -1  # means no static axes
 
+    if not DActLuDBiasCastTransposePrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), x)
+        (dx,) = vjp_func(dz)
+        casted_dx, cast_transposed_dx, updated_amax = _jax_cast_transpose(
+            dx,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=transpose_axis_boundary,
+        )
+        dbias = jnp.squeeze(
+            jnp.sum(
+                dx,
+                axis=tuple(
+                    range(
+                        transpose_axis_boundary
+                        if transpose_axis_boundary > 0
+                        else transpose_axis_boundary + dx.ndim
+                    )
+                ),
+            )
+        )
+        return casted_dx, cast_transposed_dx, dbias, updated_amax
+
     act_type_id = ActivationEnum[activation_type]
     return DActLuDBiasCastTransposePrimitive.outer_primitive.bind(
         dz,
@@ -1161,6 +1249,17 @@ def dgated_act_lu_cast_transpose(
     Return FP8(dgated_act_lu(inputs))
     """
     act_type_id = ActivationEnum[activation_type]
+    if not DgatedActLuCastTransposePrimitive.enabled():
+        _, vjp_func = jax.vjp(partial(_jax_act_lu, activation_type=activation_type), x)
+        (dx,) = vjp_func(dz)
+        return _jax_cast_transpose(
+            dx,
+            scale,
+            amax,
+            out_dtype=out_dtype,
+            static_axis_boundary=static_axis_boundary,
+            transpose_axis_boundary=-2,
+        )
     return DgatedActLuCastTransposePrimitive.outer_primitive.bind(
         dz,
         x,

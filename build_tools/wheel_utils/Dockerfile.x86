@@ -33,4 +33,4 @@ ENV CUDA_PATH=/usr/local/cuda
 ENV CUDADIR=/usr/local/cuda
 ENV NVTE_RELEASE_BUILD=1
 
-CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true"]
+CMD ["/bin/bash", "/TransformerEngine/build_tools/wheel_utils/build_wheels.sh", "manylinux_2_28_x86_64", "true", "true", "true", "true", "true"]

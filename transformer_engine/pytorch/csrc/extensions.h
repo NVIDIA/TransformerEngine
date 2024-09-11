@@ -14,11 +14,14 @@
  * Attention
  **************************************************************************************************/
 
-NVTE_Fused_Attn_Backend get_fused_attn_backend(
-    const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    float p_dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim, int64_t window_size_left, int64_t window_size_right);
+NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
+                                               const transformer_engine::DType kv_dtype,
+                                               NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                                               NVTE_Mask_Type attn_mask_type, float p_dropout,
+                                               size_t num_attn_heads, size_t num_gqa_groups,
+                                               size_t max_seqlen_q, size_t max_seqlen_kv,
+                                               size_t head_dim_qk, size_t head_dim_v,
+                                               int64_t window_size_left, int64_t window_size_right);
 
 std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
     size_t max_seqlen, bool is_training, float attn_scale, float p_dropout, bool set_zero,
@@ -176,6 +179,11 @@ void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
                                 std::vector<at::Tensor> amax_output_list,
                                 std::vector<at::Tensor> scale_inv_output_list,
                                 transformer_engine::DType otype);
+
+std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_transpose_alloc(
+    std::vector<at::Tensor> input_list, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
+    std::vector<int> scale_indices, std::vector<int> amax_indices,
+    std::vector<int> scale_inv_indices, transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);
 
@@ -415,11 +423,18 @@ std::tuple<at::Tensor, at::Tensor> multi_tensor_unscale_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     at::Tensor inv_scale, at::optional<bool> per_tensor_python);
 
+using transformer_engine::DType;
 void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay);
+
+void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
+                                std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,
+                                const float beta1, const float beta2, const float epsilon,
+                                const int step, const int mode, const int bias_correction,
+                                const float weight_decay, DType fp8_dtype);
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
                                        std::vector<std::vector<at::Tensor>> tensor_lists,

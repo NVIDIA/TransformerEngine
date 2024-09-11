@@ -22,7 +22,7 @@ extern "C" {
 /*! \enum NVTE_QKV_Layout
  *  \brief Memory layouts of QKV tensors.
  *   `S`, `B`, `H`, `D`, and `T` stand for sequence length, batch size, number of heads,
- *   head size, and the total number of sequences in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
+ *   head size, and the total number of tokens in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
  *   `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
  *   or padded to the same length, and `THD`-based layouts are used when sequences have
  *   different lengths in a batch.
@@ -147,15 +147,16 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout);
  *  \param[in]     num_gqa_groups    The number of heads in K, V.
  *  \param[in]     max_seqlen_q      The sequence length of Q.
  *  \param[in]     max_seqlen_kv     The sequence length of K, V.
- *  \param[in]     head_dim          The head dimension of Q, K, V.
+ *  \param[in]     head_dim_qk       The head dimension of Q, K.
+ *  \param[in]     head_dim_v        The head dimension of V.
  *  \param[in]     window_size_left  Sliding window size (the left half).
  *  \param[in]     window_size_right Sliding window size (the right half).
  */
 NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, float dropout, size_t num_attn_heads, size_t num_gqa_groups,
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim, int64_t window_size_left,
-    int64_t window_size_right);
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v,
+    int64_t window_size_left, int64_t window_size_right);
 
 /*! \brief Compute dot product attention with packed QKV input.
  *
