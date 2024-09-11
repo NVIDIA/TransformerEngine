@@ -33,8 +33,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -49,6 +47,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
+from ..tensor import QuantizedTensor
 
 __all__ = ["Linear"]
 
@@ -82,12 +81,10 @@ class _Linear(torch.autograd.Function):
         ub_overlap_rs: bool,
         ub_overlap_ag: bool,
         ub_name: str,
-        is_first_module_in_mha: bool,
+        fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
         is_input_fp8 = isinstance(inp, Float8Tensor)
-        if is_input_fp8:
-            fp8_meta["scaling_fwd"].scale_inv[tex.FP8FwdTensors.GEMM1_INPUT] = inp._scale_inv[0]
 
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
@@ -110,14 +107,6 @@ class _Linear(torch.autograd.Function):
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if isinstance(inputmat, Float8Tensor):
                 inputmat_scale_inv = inputmat._scale_inv
-                if (
-                    not fp8_meta["recipe"].override_linear_precision.wgrad
-                    and is_grad_enabled
-                    and weight.requires_grad
-                    and not sequence_parallel
-                ):
-                    # FP8 input for forward, FP8 input transpose for backward wgrad
-                    inputmat_t = inputmat.transpose_2d()
             else:
                 inputmat_scale_inv = torch.empty([1], dtype=torch.float32, device=inputmat.device)
                 if (
@@ -171,7 +160,7 @@ class _Linear(torch.autograd.Function):
 
             assert isinstance(weight_fp8, Float8Tensor)
 
-            if is_first_module_in_mha:
+            if fp8_output:
                 proj_out_index, meta_tensor, proj_out_tetype, proj_out_pttype = (
                     tex.FP8FwdTensors.GEMM1_OUTPUT,
                     fp8_meta["scaling_fwd"],
@@ -240,7 +229,7 @@ class _Linear(torch.autograd.Function):
                 fp8_meta_tensor=meta_tensor,
                 D_dtype=proj_out_tetype,
             )
-            if is_first_module_in_mha:
+            if fp8_output:
                 out = Float8Tensor(
                     data=out,
                     fp8_meta=fp8_meta,
@@ -639,7 +628,7 @@ class _Linear(torch.autograd.Function):
             None,  # ub_overlap_rs
             None,  # ub_overlap_ag
             None,  # ub_name
-            None,  # is_first_module_in_mha
+            None,  # fp8_output
             None,  # fsdp_group
         )
 
@@ -917,7 +906,7 @@ class Linear(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-        is_first_module_in_mha: Optional[bool] = False,
+        fp8_output: Optional[bool] = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -948,21 +937,19 @@ class Linear(TransformerEngineBaseModule):
         with self.prepare_forward(
             inp,
             is_first_microbatch,
-            allow_non_contiguous=isinstance(inp, Float8Tensor),
+            allow_non_contiguous=isinstance(inp, QuantizedTensor),
         ) as inp:
-
-            is_first_module_in_mha = is_first_module_in_mha and self.fp8_meta["recipe"].fp8_mha
 
             # Get concatenated weight and bias tensors
             unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, Float8Tensor) for w in unfused_weights):
+            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
                         raise RuntimeError(
-                            "Splitting Float8Tensor into multiple params is not supported"
+                            "Splitting QuantizedTensor into multiple params is not supported"
                         )
                 else:
-                    unfused_weights = [w.from_float8() for w in unfused_weights]
+                    unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = _noop_cat(
@@ -974,21 +961,11 @@ class Linear(TransformerEngineBaseModule):
             # Initialize FP8 weights if needed
             weight_fp8 = None
             if self.fp8:
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    not with_transpose
-                    and is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
                 if isinstance(weight_tensor, Float8Tensor):
-                    # Fill transpose cache in FP8 tensor if needed
-                    update_transpose_cache = with_transpose
-                    if update_transpose_cache:
-                        update_transpose_cache = (
-                            is_first_microbatch or skip_fp8_weight_update is not None
-                        )
-                    if update_transpose_cache:
+                    # Make sure transpose cache is valid, if present
+                    # Note: Transpose cache may have been invalidated
+                    # externally, e.g. by optimizer.
+                    if weight_tensor._transpose is not None:
                         weight_tensor.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1003,7 +980,6 @@ class Linear(TransformerEngineBaseModule):
                         cache_name=(None if is_first_microbatch is None else "weight"),
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                         fsdp_group=self.fsdp_group,
                     )
 
@@ -1037,7 +1013,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_overlap_rs,
                 self.ub_overlap_ag,
                 self.ub_name,
-                is_first_module_in_mha,
+                fp8_output,
                 self.fsdp_group,
             )
             out = linear_fn(*args)

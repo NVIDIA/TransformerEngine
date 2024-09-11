@@ -13,6 +13,7 @@ add_executable(test_operator
                test_layernorm.cu
                test_rmsnorm.cu
                test_multi_cast_transpose.cu
+               test_multi_padding.cu
                test_causal_softmax.cu
                ../test_common.cu)
 
