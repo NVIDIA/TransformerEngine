@@ -4881,11 +4881,19 @@ class FlashAttention(torch.nn.Module):
                     query_layer, key_layer, value_layer = [
                         x.transpose(0, 1) for x in (query_layer, key_layer, value_layer)
                     ]
+            if context_parallel:
+                query_layer, key_layer, value_layer = [
+                    x.contiguous() for x in (query_layer, key_layer, value_layer)
+                ]
         else:
             if qkv_format == "sbhd":
                 query_layer._data, key_layer._data, value_layer._data = [
                     x.transpose(0, 1)
                     for x in (query_layer._data, key_layer._data, value_layer._data)
+                ]
+            if context_parallel:
+                query_layer._data, key_layer._data, value_layer._data = [
+                    x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
 
         batch_size = query_layer.shape[0]
