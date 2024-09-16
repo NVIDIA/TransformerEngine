@@ -28,7 +28,7 @@ class HyperParameters:
 
         # Set to Meta Llama 2 by default.
         self.model_name = "meta-llama/Llama-2-7b-hf"
-        
+
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
@@ -37,8 +37,8 @@ class HyperParameters:
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
         self.num_training_steps = 10
-        
-        # This is either provided by the user or it will be set when the 
+
+        # This is either provided by the user or it will be set when the
         # model weights are downloaded.
         self.weights_cache_dir = ""
 
@@ -106,8 +106,12 @@ def ensure_model_is_downloaded(hyperparams):
     # Download the model if it doesn't exist
     from huggingface_hub import snapshot_download
 
-    supplied_cache_dir = hyperparams.weights_cache_dir if hyperparams.weights_cache_dir != "" else None
-    hyperparams.weights_cache_dir = snapshot_download(repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir)
+    supplied_cache_dir = (
+        hyperparams.weights_cache_dir if hyperparams.weights_cache_dir != "" else None
+    )
+    hyperparams.weights_cache_dir = snapshot_download(
+        repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir
+    )
 
     print(f"Model cache directory : {hyperparams.weights_cache_dir}")
 
