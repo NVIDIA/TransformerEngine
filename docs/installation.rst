@@ -28,6 +28,17 @@ Transformer Engine library is preinstalled in the PyTorch container in versions 
 on `NVIDIA GPU Cloud <https://ngc.nvidia.com>`_.
 
 
+pip - from PyPI
+-----------------------
+
+Transformer Engine can be directly installed from `our PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+
+.. code-block:: bash
+
+    pip install transformer_engine[pytorch]
+
+To obtain the necessary python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch,paddle]). Transformer Engine ships wheels for the core library as well as the paddle extensions. Source distributions are shipped for the JAX and PyTorch extensions.
+
 pip - from GitHub
 -----------------------
 
