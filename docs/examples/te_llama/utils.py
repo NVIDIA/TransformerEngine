@@ -25,7 +25,10 @@ from accelerate.utils.dataclasses import FP8RecipeKwargs
 class HyperParameters:
     def __init__(self):
         self.mixed_precision = "bf16"
-        self.model_name = "meta-llama/Llama-2-7b-hf"  # Set to Meta Llama 2 by default
+
+        # Set to Meta Llama 2 by default.
+        self.model_name = "meta-llama/Llama-2-7b-hf"
+        
         self.dataset_name = "timdettmers/openassistant-guanaco"
         self.dataset_text_field = "text"
         self.learning_rate = 1.41e-5
@@ -34,7 +37,10 @@ class HyperParameters:
         self.gradient_accumulation_steps = 1
         self.num_warmup_steps = 5
         self.num_training_steps = 10
-        self.weights_dir = ""  # <-- This will be set when the model weights are downloaded
+        
+        # This is either provided by the user or it will be set when the 
+        # model weights are downloaded.
+        self.weights_cache_dir = ""
 
 
 hyperparams = HyperParameters()
@@ -100,12 +106,10 @@ def ensure_model_is_downloaded(hyperparams):
     # Download the model if it doesn't exist
     from huggingface_hub import snapshot_download
 
-    local_dir = snapshot_download(repo_id=hyperparams.model_name)
+    supplied_cache_dir = hyperparams.weights_cache_dir if hyperparams.weights_cache_dir != "" else None
+    hyperparams.weights_cache_dir = snapshot_download(repo_id=hyperparams.model_name, cache_dir=supplied_cache_dir)
 
-    # Update the hyperparams with the weights directory
-    hyperparams.weights_dir = local_dir
-
-    print(f"Model downloaded/already cached in : {local_dir}")
+    print(f"Model cache directory : {hyperparams.weights_cache_dir}")
 
 
 def init_baseline_model(hyperparams):
@@ -113,11 +117,11 @@ def init_baseline_model(hyperparams):
     ensure_model_is_downloaded(hyperparams)
 
     # Init the model
-    config = AutoConfig.from_pretrained(hyperparams.weights_dir)
+    config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
     # make sure to use flash_attention to do iso comparison with TELlamaModel
     config._attn_implementation = "flash_attention_2"
     model = AutoModelForCausalLM.from_pretrained(
-        hyperparams.weights_dir,
+        hyperparams.weights_cache_dir,
         config=config,
         torch_dtype=torch.bfloat16,
     )
@@ -135,10 +139,10 @@ def init_te_llama_model(hyperparams):
     # Init the model
     from te_llama import TELlamaForCausalLM
 
-    config = AutoConfig.from_pretrained(hyperparams.weights_dir)
+    config = AutoConfig.from_pretrained(hyperparams.weights_cache_dir)
     config._attn_implementation = "flash_attention_2"
     model = TELlamaForCausalLM.from_pretrained_local(
-        hyperparams.weights_dir,
+        hyperparams.weights_cache_dir,
         config=config,
         torch_dtype=torch.bfloat16,
     )
