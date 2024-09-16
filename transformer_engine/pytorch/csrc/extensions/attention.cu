@@ -95,9 +95,11 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   auto qkv_sizes = QKV.sizes().vec();
   std::vector<size_t> qkv_shape{qkv_sizes.begin(), qkv_sizes.end()};
   std::vector<size_t> q_shape;
-  for (auto i : qkv_shape) {
-    if (i != 3) {
-      q_shape.push_back(i);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  int loc_3 = (layout_group == NVTE_3HD) ? qkv_sizes.size() - 3 : qkv_sizes.size() - 2;
+  for (auto it = qkv_shape.begin(); it != qkv_shape.end(); ++it) {
+    if (it - qkv_shape.begin() != loc_3) {
+      q_shape.push_back(*it);
     }
   }
   std::vector<int64_t> o_shape{q_shape.begin(), q_shape.end()};
@@ -252,9 +254,11 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   auto qkv_sizes = QKV.sizes().vec();
   std::vector<size_t> qkv_shape{qkv_sizes.begin(), qkv_sizes.end()};
   std::vector<size_t> q_shape;
-  for (auto i : qkv_shape) {
-    if (i != 3) {
-      q_shape.push_back(i);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  int loc_3 = (layout_group == NVTE_3HD) ? qkv_sizes.size() - 3 : qkv_sizes.size() - 2;
+  for (auto it = qkv_shape.begin(); it != qkv_shape.end(); ++it) {
+    if (it - qkv_shape.begin() != loc_3) {
+      q_shape.push_back(*it);
     }
   }
   auto h = q_shape[q_shape.size() - 2];
