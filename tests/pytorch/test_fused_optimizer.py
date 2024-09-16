@@ -3,9 +3,9 @@
 # See LICENSE for license information.
 
 from itertools import product
-import unittest
 import copy
 
+import pytest
 import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
@@ -19,13 +19,11 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
-class TestFusedOptimizer(unittest.TestCase):
-    def setUp(self, iters=7):
+class TestFusedOptimizer:
+
+    def setup_method(self, *, iters: int = 7) -> None:
         self.iters = iters
         torch.manual_seed(9876)
-
-    def tearDown(self):
-        pass
 
     def gen_param_optim(self, tensors, options, tst_options=None):
 
@@ -88,8 +86,8 @@ class TestFusedOptimizer(unittest.TestCase):
 
 class TestFusedAdam(TestFusedOptimizer):
 
-    def setUp(self):
-        super().setUp()
+    def setup_method(self) -> None:
+        super().setup_method()
         self.options = {
             "lr": 5e-4,
             "betas": (0.9, 0.999),
@@ -111,7 +109,7 @@ class TestFusedAdam(TestFusedOptimizer):
     def test_bfloat16(self):
         self.gen_single_type_test(param_type=torch.bfloat16, skip_assert=True)
 
-    @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
+    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
         for current_dev, tensor_dev in product(devices, devices):
@@ -176,7 +174,7 @@ class TestFusedAdam(TestFusedOptimizer):
 
             torch.testing.assert_close(ref_param, tst_param)
 
-    @unittest.skipIf(not is_bf16_compatible(), "bf16 if not supported")
+    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
     def test_bf16_model_weight_cast(self):
         dtype = torch.bfloat16
         model = MultiheadAttention(
@@ -214,7 +212,7 @@ class TestFusedAdam(TestFusedOptimizer):
                 ref_params, model_params_to_fp32, rtol=1e-3, atol=1e-3, equal_nan=True
             )
 
-    @unittest.skipIf(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
         with fp8_model_init(enabled=True):
@@ -255,8 +253,9 @@ class TestFusedAdam(TestFusedOptimizer):
 
 
 class TestFusedSGD(TestFusedOptimizer):
-    def __init__(self, *args, **kwargs):
-        super(TestFusedSGD, self).__init__(*args, **kwargs)
+
+    def setup_method(self) -> None:
+        super().setup_method()
         self.options = {"lr": 0.25, "momentum": 0.125}
         self.ref_optim = torch.optim.SGD
         self.fused_optim = te.optimizers.FusedSGD
@@ -267,7 +266,7 @@ class TestFusedSGD(TestFusedOptimizer):
     def test_half(self):
         self.gen_single_type_test(param_type=torch.float16)
 
-    @unittest.skipIf(torch.cuda.device_count() < 2, "more than 1 GPU required")
+    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="more than 1 GPU required")
     def test_multi_device(self):
         devices = ("cuda:0", "cuda:1")
         for current_dev, tensor_dev in product(devices, devices):
@@ -308,9 +307,9 @@ class Model(torch.nn.Module):
         return y
 
 
-class AdamTest(unittest.TestCase):
-    def setUp(self, seed=0):
-        super().setUp()
+class AdamTest:
+
+    def setup_method(self, *, seed: int = 0) -> None:
         torch.manual_seed(seed)
 
         self.model = Model().cuda()
@@ -321,7 +320,7 @@ class AdamTest(unittest.TestCase):
         params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = torch.optim.Adam(params, lr=self.lr)
 
-    def testGradScaler(self):
+    def test_grad_scaler(self):
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=False)
         scaler = torch.cuda.amp.GradScaler(enabled=True)
@@ -372,7 +371,7 @@ class AdamTest(unittest.TestCase):
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    def testGradScalerCapturable(self):
+    def test_grad_scaler_capturable(self):
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=True)
         scaler = torch.cuda.amp.GradScaler(enabled=True)
@@ -423,7 +422,7 @@ class AdamTest(unittest.TestCase):
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    def testGradScalerCapturableMaster(self):
+    def test_grad_scaler_capturable_master(self):
         # Cast conv layers to FP16
         for m in self.model_.modules():
             if m.__class__ in [torch.nn.Conv2d]:
@@ -485,7 +484,7 @@ class AdamTest(unittest.TestCase):
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    def testNative(self):
+    def test_native(self):
         params_ = [p for p in self.model_.parameters() if p.requires_grad]
         optimizer_ = te.optimizers.FusedAdam(params_, lr=self.lr, capturable=False)
 
@@ -531,7 +530,7 @@ class AdamTest(unittest.TestCase):
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
     @largeTensorTest("60GB", "cuda")
-    def testLargeTensor(self):
+    def test_large_tensor(self):
         t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)
