@@ -4892,6 +4892,10 @@ class FlashAttention(torch.nn.Module):
                     x.transpose(0, 1).contiguous()
                     for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
+                query_layer, key_layer, value_layer = [
+                    Float8Tensor.make_like(x, data=x._data)
+                    for x in (query_layer, key_layer, value_layer)
+                ]
             elif qkv_format in ["bshd", "thd"]:
                 query_layer._data, key_layer._data, value_layer._data = [
                     x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
@@ -5104,8 +5108,12 @@ class FlashAttention(torch.nn.Module):
         if qkv_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
             if fp8 and fp8_meta["recipe"].fp8_mha:
-                output.reshape(batch_size * max_seqlen_q // cp_size, -1).transpose_2d()
-                output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
+                output = Float8Tensor.make_like(
+                    output,
+                    data=output._data.reshape(
+                        batch_size, max_seqlen_q // cp_size, -1
+                    ).transpose(0,1).contiguous()
+                    )
             else:
                 output = (
                     output.view(batch_size, max_seqlen_q // cp_size, -1)
