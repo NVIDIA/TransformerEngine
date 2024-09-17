@@ -43,6 +43,8 @@ class AttnMaskType(Enum):
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
     PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
+    CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK
+    PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
 
 class QKVLayout(Enum):
@@ -97,11 +99,21 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
             return AttnMaskType.PADDING_MASK
         case "causal":
             return AttnMaskType.CAUSAL_MASK
+        case "causal_bottom_right" | "bottom_right_causal":
+            return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
         case "padding_causal" | "causal_padding":
             return AttnMaskType.PADDING_CAUSAL_MASK
+        case (
+            "padding_causal_bottom_right"
+            | "causal_padding_bottom_right"
+            | "bottom_right_causal_padding"
+            | "bottom_right_padding_causal"
+        ):
+            return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
     raise ValueError(
-        f"Unsupported {attn_mask_type=}, supported attn_mask_type="
-        "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
+        f"Unsupported {attn_mask_type=}, supported attn_mask_type={{'no_mask', 'padding', 'causal',"
+        " 'padding_causal', 'causal_padding', 'causal_bottom_right',"
+        " 'padding_causal_bottom_right'}"
     )
 
 
@@ -155,6 +167,75 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
+def _reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat, inverse: bool):
+    match tensor_format:
+        case QKVFormat.SBHD:
+            seq_dim = 0
+        case QKVFormat.BSHD:
+            seq_dim = 1
+        case _:
+            raise ValueError(f"{tensor_format=} is not supported for causal load balancing.")
+
+    if cp_size == 1:
+        return tensor
+
+    if cp_size % 2 != 0:
+        raise ValueError(f"{cp_size=} must be a multiple of 2.")
+
+    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
+    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
+        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+
+    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D]
+    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
+    ori_tensor_shape = tensor.shape
+    tensor = tensor.reshape(
+        (
+            *ori_tensor_shape[:seq_dim],
+            2 * cp_size,
+            ori_tensor_shape[seq_dim] // (2 * cp_size),
+            *ori_tensor_shape[seq_dim + 1 :],
+        )
+    )
+
+    parts = []
+    if not inverse:
+        for cp_rank in range(cp_size):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+    else:
+        for cp_rank in range(cp_size // 2):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            base = 4 * cp_rank
+            index = jnp.array([base, base + 2])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+        for cp_rank in range(cp_size // 2):
+            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
+            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
+            base = 2 * cp_size - 1 - 4 * cp_rank
+            index = jnp.array([base, base - 2])
+            parts.append(jnp.take(tensor, index, axis=seq_dim))
+
+    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
+    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
+    combined = jnp.stack(parts, axis=seq_dim)
+
+    return combined.reshape(ori_tensor_shape)
+
+
+def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+    """Reorders a tensor for load balancing the compute of causal attention."""
+    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, False)
+
+
+def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+    """Inverse operation of `reorder_causal_load_balancing`."""
+    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, True)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -166,6 +247,8 @@ def fused_attn(
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -192,6 +275,9 @@ def fused_attn(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
+        context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+        context_parallel_axis (str): The name of the context parallel axis.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -213,7 +299,11 @@ def fused_attn(
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
-    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+    if attn_mask_type in [
+        AttnMaskType.NO_MASK,
+        AttnMaskType.CAUSAL_MASK,
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+    ]:
         batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
         q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
         kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
@@ -242,6 +332,8 @@ def fused_attn(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=1,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
 
     return output
@@ -262,6 +354,8 @@ def fused_attn_thd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int = 1,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
 ):
     """
     (Experimental) Perform THD (packed) cuDNN fused attention.
@@ -300,6 +394,9 @@ def fused_attn_thd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
+        context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+        context_parallel_axis (str): The name of the context parallel axis.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -354,12 +451,14 @@ def fused_attn_thd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
 
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -375,6 +474,8 @@ def _fused_attn(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    context_parallel_causal_load_balanced: bool,
+    context_parallel_axis: str,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -391,6 +492,8 @@ def _fused_attn(
         dropout_probability,
         is_training,
         max_segments_per_seq,
+        context_parallel_causal_load_balanced,
+        context_parallel_axis,
     )
     return output
 
@@ -410,6 +513,8 @@ def _fused_attn_fwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -426,6 +531,8 @@ def _fused_attn_fwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
     output = checkpoint_name(output, "context")
     softmax_aux = checkpoint_name(softmax_aux, "context")
@@ -451,6 +558,8 @@ def _fused_attn_bwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
     ctx,
     dz,
 ):
@@ -483,6 +592,8 @@ def _fused_attn_bwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
