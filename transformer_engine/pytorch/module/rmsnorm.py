@@ -21,7 +21,12 @@ class RMSNorm(_RMSNormOp):
     `Root Mean Square Layer Normalization <https://arxiv.org/abs/1910.07467>`__
 
     .. math::
-        y = \frac{x}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * \gamma
+        y = \frac{x}{\text{RMS}_\varepsilon(x)} * \gamma
+
+    where
+
+    .. math::
+        \text{RMS}_\varepsilon(x) = \sqrt{\frac{1}{n}\sum_{i=0}^n x_i^2 + \varepsilon}
 
     :math:`\gamma` is a learnable affine transform parameter that
     matches the inner-most dimensions of the input tensor.
@@ -81,20 +86,20 @@ class RMSNorm(_RMSNormOp):
     def reset_rms_norm_parameters(self) -> None:
         """Deprecated"""
         warnings.warn(
-            "This method will be deprecated in an upcoming release. "
-            "Update your code to use LayerNorm.reset_parameters() instead.",
+            "This method is deprecated and will be removed in an upcoming release. "
+            "Update your code to use RMSNorm.reset_parameters() instead.",
             DeprecationWarning,
             stacklevel=2,
         )
         self.reset_parameters()
 
     def reset_parameters(self, defer_init: Optional[bool] = None) -> None:
-        """Init LayerNorm parameters"""
+        """Init RMSNorm parameters"""
 
         # Check whether to defer init (deprecated)
         if defer_init is not None:
             warnings.warn(
-                'reset_parameters kwarg is deprecated. Set device to "meta" instead.',
+                'defer_init argument to reset_parameters function is deprecated. Set device to "meta" instead.',
                 DeprecationWarning,
                 stacklevel=2,
             )
