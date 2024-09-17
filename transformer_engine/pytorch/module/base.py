@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -392,6 +392,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
+        self.activation_dtype: Optional[torch.dtype] = None
+
+        # Fast variant of __setattr__
+        # Note: torch.nn.Module has custom __setattr__ that handles
+        # modules, parameters, and buffers. This is unnecessary
+        # overhead when setting plain attrs.
+        self._fast_setattr: Callable[Tuple[str, Any], None]
+        self._fast_setattr = super(torch.nn.Module, self).__setattr__
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -575,11 +583,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self._fast_setattr("activation_dtype", torch.get_autocast_gpu_dtype())
             return
 
         # All checks after this have already been performed once, thus skip
-        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
+        if self.activation_dtype == inp.dtype:
             return
 
         dtype = inp.dtype
@@ -589,7 +597,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     "Data types for parameters must match when outside of autocasted region. "
                     f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
                 )
-        self.activation_dtype = dtype
+        self._fast_setattr("activation_dtype", dtype)
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
         """
@@ -618,9 +626,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     # assume FP8 execution.
     def init_fp8_metadata(self, num_gemms: int = 1) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
-        self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
-        self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
-        self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
+        self._fast_setattr("fp8_parameters", FP8GlobalStateManager.with_fp8_parameters())
+        self._fast_setattr("fp8", FP8GlobalStateManager.is_fp8_enabled())
+        self._fast_setattr("fp8_calibration", FP8GlobalStateManager.is_fp8_calibration())
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
         if self.fp8_parameters and not self.fp8_initialized:
@@ -646,10 +654,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors()
-            self.fp8_initialized = True
+            self._fast_setattr("fp8_initialized", True)
         else:
             # If fp8 isn't enabled, turn off and return.
-            self.fp8_initialized = False
+            self._fast_setattr("fp8_initialized", False)
             return
 
     @contextmanager
@@ -694,10 +702,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
-            if not allow_non_contiguous:
-                yield inp.contiguous()
-            else:
-                yield inp
+            if not allow_non_contiguous and not inp.is_contiguous():
+                inp = inp.contiguous()
+            yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
