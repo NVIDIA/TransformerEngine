@@ -5110,10 +5110,10 @@ class FlashAttention(torch.nn.Module):
             if fp8 and fp8_meta["recipe"].fp8_mha:
                 output = Float8Tensor.make_like(
                     output,
-                    data=output._data.reshape(
-                        batch_size, max_seqlen_q // cp_size, -1
-                    ).transpose(0,1).contiguous()
-                    )
+                    data=output._data.reshape(batch_size, max_seqlen_q // cp_size, -1)
+                    .transpose(0, 1)
+                    .contiguous(),
+                )
             else:
                 output = (
                     output.view(batch_size, max_seqlen_q // cp_size, -1)
