@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
@@ -125,6 +126,7 @@ def set_tensor_model_parallel_attributes(
     setattr(tensor, "partition_stride", stride)
 
 
+@lru_cache
 def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
     """Return world size for the distributed group."""
     if not torch.distributed.is_initialized():
@@ -132,6 +134,7 @@ def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
     return torch.distributed.get_world_size(group=group)
 
 
+@lru_cache
 def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
     """Return my rank for the distributed group."""
     assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
