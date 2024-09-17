@@ -95,7 +95,8 @@ class LayerNorm(_LayerNormOp):
         # Check whether to defer init (deprecated)
         if defer_init is not None:
             warnings.warn(
-                'defer_init argument to reset_parameters function is deprecated. Set device to "meta" instead.',
+                "defer_init argument to reset_parameters function is deprecated. Set device to"
+                ' "meta" instead.',
                 DeprecationWarning,
                 stacklevel=2,
             )
