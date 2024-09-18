@@ -48,6 +48,7 @@ from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 from ..tensor import QuantizedTensor
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["Linear"]
 
@@ -983,8 +984,6 @@ class Linear(TransformerEngineBaseModule):
                         fsdp_group=self.fsdp_group,
                     )
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
                 args = []
@@ -1002,7 +1001,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

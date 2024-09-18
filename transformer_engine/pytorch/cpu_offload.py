@@ -16,6 +16,11 @@ __all__ = ["get_cpu_offload_context"]
 CPUOffloadEnabled = False
 
 
+def is_cpu_offload_enabled() -> bool:
+    """Check if CPU offloading is currently enabled."""
+    return CPUOffloadEnabled
+
+
 class CpuOffloadSavedTensorHook:
     """Contex-manager that executes a pair of pack/unpack hooks for saved tensors.
 

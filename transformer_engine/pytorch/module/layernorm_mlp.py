@@ -54,6 +54,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["LayerNormMLP"]
 
@@ -1524,8 +1525,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.bias_gelu_nvfusion = False
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
@@ -1550,7 +1549,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,

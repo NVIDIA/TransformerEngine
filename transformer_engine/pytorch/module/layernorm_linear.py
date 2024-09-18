@@ -46,6 +46,7 @@ from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 from ..tensor import QuantizedTensor
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["LayerNormLinear"]
 
@@ -1190,8 +1191,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         skip_update_flag=skip_fp8_weight_update,
                     )
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
                 args = []
@@ -1212,7 +1211,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
