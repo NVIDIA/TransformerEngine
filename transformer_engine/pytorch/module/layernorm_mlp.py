@@ -1471,8 +1471,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
 
             # Get weight tensors
-            fc1_weight = self.fc1_weight
-            fc2_weight = self.fc2_weight
+            fc1_weight = self._fast_get_param("fc1_weight")
+            fc1_bias = self._fast_get_param("fc1_bias")
+            fc2_weight = self._fast_get_param("fc2_weight")
+            fc2_bias = self._fast_get_param("fc2_bias")
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.from_float8()
@@ -1533,15 +1535,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
+                self._fast_get_param("layer_norm_weight"),
+                self._fast_get_param("layer_norm_bias"),
                 fc1_weight,
                 fc1_weight_fp8,
-                self.fc1_bias,
+                fc1_bias,
                 self.use_bias,
                 fc2_weight,
                 fc2_weight_fp8,
-                self.fc2_bias,
+                fc2_bias,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
@@ -1579,12 +1581,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             out, ln_out = out
 
         if self.gemm_bias_unfused_add:
-            out = out + cast_if_needed(self.fc2_bias, self.activation_dtype)
+            out = out + cast_if_needed(fc2_bias, self.activation_dtype)
 
         if self.return_bias:
             if self.return_layernorm_output:
-                return out, cast_if_needed(self.fc2_bias, self.activation_dtype), ln_out
-            return out, cast_if_needed(self.fc2_bias, self.activation_dtype)
+                return out, cast_if_needed(fc2_bias, self.activation_dtype), ln_out
+            return out, cast_if_needed(fc2_bias, self.activation_dtype)
         if self.return_layernorm_output:
             return out, ln_out
         return out

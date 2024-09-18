@@ -1150,7 +1150,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [getattr(self, name) for name in self.weight_names]
+            unfused_weights = [self._fast_get_param(name) for name in self.weight_names]
             if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
@@ -1162,10 +1162,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
                 bias_tensor = _noop_cat(
-                    [getattr(self, name) for name in self.bias_names],
+                    [self._fast_get_param(name) for name in self.bias_names]
                 )
             else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+                bias_tensor = self._fast_get_param(self.bias_names[0])  # Unused
 
             # Initialize FP8 weights if needed
             weight_fp8 = None
@@ -1199,8 +1199,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
+                self._fast_get_param("layer_norm_weight"),
+                self._fast_get_param("layer_norm_bias"),
                 weight_tensor,
                 weight_fp8,
                 bias_tensor,

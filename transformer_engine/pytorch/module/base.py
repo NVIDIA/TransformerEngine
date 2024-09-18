@@ -415,6 +415,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._fast_setattr: Callable[Tuple[str, Any], None]
         self._fast_setattr = super(torch.nn.Module, self).__setattr__
 
+        # Fast getter for parameters
+        # Note: torch.nn.Module does not store parameters like normal
+        # attrs, but rather in a dict. When attempting to access, the
+        # module will raise an AttributeError in __getattribute__ and
+        # call a custom __getattr__. This is unnecessary overhead if
+        # we know we are accessing a parameter.
+        self._fast_get_param: Callable[str, torch.nn.Parameter]
+        self._fast_get_param = self.__dict__["_parameters"].get
+
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
 
