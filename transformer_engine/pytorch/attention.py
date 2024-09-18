@@ -4828,6 +4828,10 @@ class FlashAttention(torch.nn.Module):
         self.attention_type = attention_type
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
+        self.logger = logging.getLogger("FlashAttention")
+        self.logger.setLevel(_log_level)
+        if not self.logger.hasHandlers():
+            self.logger.addHandler(_stream_handler)
 
     def forward(
         self,
@@ -5067,16 +5071,32 @@ class FlashAttention(torch.nn.Module):
                             convert_to_torch_float8(x, torch_dtype)
                             for x in [query_layer, key_layer, value_layer]
                         )
-                    output, _ = func(
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        *fa_optional_forward_args_thd,
-                        softmax_scale=self.softmax_scale,
-                        causal="causal" in attn_mask_type,
-                        deterministic=self.deterministic,
-                        **fa_optional_forward_kwargs_fp8,
-                    )
+                    try:
+                        output, _ = func(
+                            query_layer,
+                            key_layer,
+                            value_layer,
+                            *fa_optional_forward_args_thd,
+                            softmax_scale=self.softmax_scale,
+                            causal="causal" in attn_mask_type,
+                            deterministic=self.deterministic,
+                            **fa_optional_forward_kwargs_fp8,
+                        )
+                    except TypeError:
+                        self.logger.debug(
+                            "Running with default q, k, v descales, i.e. 1s. To enable custom "
+                            "descales, please install flashattn-hopper (FA3) with this PR: "
+                            "https://github.com/Dao-AILab/flash-attention/pull/1210."
+                        )
+                        output, _ = func(
+                            query_layer,
+                            key_layer,
+                            value_layer,
+                            *fa_optional_forward_args_thd,
+                            softmax_scale=self.softmax_scale,
+                            causal="causal" in attn_mask_type,
+                            deterministic=self.deterministic,
+                        )
                     if fp8 and fp8_meta["recipe"].fp8_mha:
                         output = cast_to_fp8(
                             output,
