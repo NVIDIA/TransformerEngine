@@ -97,7 +97,7 @@ std::vector<at::Tensor> fused_attn_fwd_qkvpacked(
   std::vector<size_t> q_shape;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   int loc_3 = 0;
-  switch(layout_group) {
+  switch (layout_group) {
     case NVTE_3HD:
       loc_3 = qkv_sizes.size() - 3;
       break;
@@ -266,7 +266,7 @@ std::vector<at::Tensor> fused_attn_bwd_qkvpacked(
   std::vector<size_t> q_shape;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   int loc_3 = 0;
-  switch(layout_group) {
+  switch (layout_group) {
     case NVTE_3HD:
       loc_3 = qkv_sizes.size() - 3;
       break;
