@@ -153,7 +153,8 @@ def initialize_ub(
                     s.close()
             else:
                 ifname_warning = (
-                    f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will attempt to "
+                    f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will"
+                    " attempt to "
                     + "detect ranks on the same node by matching 'socket.gethostname()', which is "
                     + "known to fail on virtual clusters like Kubernetes. If Userbuffers "
                     + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
