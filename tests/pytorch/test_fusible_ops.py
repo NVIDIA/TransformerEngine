@@ -549,7 +549,7 @@ class TestBasicOps:
         dx_ref = dy_ref
 
         # Implementation with fusible operation
-        op = te_ops.CastFloat8(forward=cast_forward, backward=cast_backward)
+        op = te_ops.Quantize(forward=cast_forward, backward=cast_backward)
         recipe = transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
@@ -647,9 +647,9 @@ class TestBasicOps:
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
         forward = te_ops.Sequential(
-            te_ops.CastFloat8(forward=fp8_input, backward=fp8_grad_input),
+            te_ops.Quantize(forward=fp8_input, backward=fp8_grad_input),
             op,
-            te_ops.CastFloat8(forward=fp8_output, backward=fp8_grad_output),
+            te_ops.Quantize(forward=fp8_output, backward=fp8_grad_output),
         )
         recipe = transformer_engine.common.recipe.DelayedScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
@@ -927,7 +927,7 @@ class TestBasicOps:
             del b_test
         forward = te_ops.Sequential(
             op,
-            te_ops.CastFloat8(forward=fp8_output, backward=False),
+            te_ops.Quantize(forward=fp8_output, backward=False),
         )
         with te.fp8_autocast(enabled=fp8_output):
             y_test = forward(x_test)
@@ -1094,7 +1094,7 @@ class TestBasicOps:
             del w_test
         forward = te_ops.Sequential(
             op,
-            te_ops.CastFloat8(forward=fp8_output, backward=False),
+            te_ops.Quantize(forward=fp8_output, backward=False),
         )
         with te.fp8_autocast(enabled=fp8_output):
             y_test = forward(x_test)

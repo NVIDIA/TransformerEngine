@@ -59,6 +59,9 @@ class RMSNorm(BasicOperation):
     sm_margin: int, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
+        For more fine-grained control, provide a dict with the SM
+        margin at each compute stage ("forward", "backward",
+        "inference").
 
     """
 
@@ -109,11 +112,21 @@ class RMSNorm(BasicOperation):
             self.reset_parameters()
 
         # Number of SMs to exclude when launching CUDA kernels
-        self._sm_margins: dict[str, int] = dict(
-            fwd=int(os.getenv("NVTE_FWD_LAYERNORM_SM_MARGIN", str(sm_margin))),
-            bwd=int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", str(sm_margin))),
-            inf=int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", str(sm_margin))),
-        )
+        self._sm_margins: dict[str, int]
+        if isinstance(sm_margin, dict):
+            getenv = lambda name : int(os.getenv(name, "0"))
+            self._sm_margins = dict(
+                forward=sm_margin.get("forward", getenv("NVTE_FWD_LAYERNORM_SM_MARGIN")),
+                backward=sm_margin.get("backward", getenv("NVTE_BWD_LAYERNORM_SM_MARGIN")),
+                inference=sm_margin.get("inference", getenv("NVTE_INF_LAYERNORM_SM_MARGIN")),
+            )
+        else:
+            getenv = lambda name : int(os.getenv(name, str(sm_margin)))
+            self._sm_margins = dict(
+                forward=getenv("NVTE_FWD_LAYERNORM_SM_MARGIN"),
+                backward=getenv("NVTE_BWD_LAYERNORM_SM_MARGIN"),
+                inference=getenv("NVTE_INF_LAYERNORM_SM_MARGIN"),
+            )
 
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
@@ -183,7 +196,7 @@ class RMSNorm(BasicOperation):
         # Compute RMSNorm
         y = None
         rstdevs = None
-        sm_margin = self._sm_margins["fwd" if requires_grad else "inf"]
+        sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
         if with_fp8_output:
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
             fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
@@ -258,7 +271,7 @@ class RMSNorm(BasicOperation):
             x,
             rstdevs,
             w,
-            self._sm_margins["bwd"],
+            self._sm_margins["backward"],
             self.zero_centered_gamma,
         )
 

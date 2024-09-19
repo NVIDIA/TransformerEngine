@@ -44,9 +44,18 @@ class LayerNorm(_LayerNormOp):
             .. math::
                 y = \frac{x - \mathrm{E}[x]}{\sqrt{\mathrm{Var}[x] + \varepsilon}} * (1 + \gamma) + \beta
 
-    sm_margin: int, default = 0
+    sm_margin: int or dict, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
+        For more fine-grained control, provide a dict with the SM
+        margin at each compute stage ("forward", "backward",
+        "inference").
+
+    Legacy
+    ------
+    sequence_parallel: bool
+        Set a bool attr named `sequence_parallel` in the parameters.
+        This is custom logic for Megatron-LM integration.
 
     """
 
@@ -54,7 +63,7 @@ class LayerNorm(_LayerNormOp):
         self,
         normalized_shape: Union[Iterable[int], int],
         eps: float = 1e-5,
-        sequence_parallel: Optional[bool] = None,  # deprecated
+        sequence_parallel: Optional[bool] = None,  # legacy
         params_dtype: Optional[torch.dtype] = None,  # deprecated
         zero_centered_gamma: bool = False,
         **kwargs,
@@ -76,7 +85,7 @@ class LayerNorm(_LayerNormOp):
             **kwargs,
         )
 
-        # Flag for sequence parallelism (deprecated)
+        # Flag for sequence parallelism (custom Megatron-LM integration)
         self.sequence_parallel: Optional[bool] = sequence_parallel
 
     def reset_layer_norm_parameters(self) -> None:
@@ -106,7 +115,7 @@ class LayerNorm(_LayerNormOp):
         # Reset parameters
         super().reset_parameters()
 
-        # Set flag for sequence parallelism (deprecated)
+        # Set flag for sequence parallelism (custom Megatron-LM integration)
         if getattr(self, "sequence_parallel", None) is not None:
             self.weight.sequence_parallel = self.sequence_parallel
             self.bias.sequence_parallel = self.sequence_parallel
@@ -115,34 +124,34 @@ class LayerNorm(_LayerNormOp):
     def fwd_ln_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("fwd_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["fwd"]
+        return self._sm_margins["forward"]
 
     @fwd_ln_sm_margin.setter
     def fwd_ln_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("fwd_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["fwd"] = val
+        self._sm_margins["forward"] = val
 
     @property
     def bwd_ln_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("bwd_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["bwd"]
+        return self._sm_margins["backward"]
 
     @bwd_ln_sm_margin.setter
     def bwd_ln_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("bwd_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["bwd"] = val
+        self._sm_margins["backward"] = val
 
     @property
     def inf_ln_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("inf_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["inf"]
+        return self._sm_margins["inference"]
 
     @inf_ln_sm_margin.setter
     def inf_ln_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("inf_ln_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["inf"] = val
+        self._sm_margins["inference"] = val

@@ -51,6 +51,15 @@ class RMSNorm(_RMSNormOp):
     sm_margin: int, default = 0
         Number of SMs to exclude when launching CUDA kernels. This
         helps overlap with other kernels, e.g. communication kernels.
+        For more fine-grained control, provide a dict with the SM
+        margin at each compute stage ("forward", "backward",
+        "inference").
+
+    Legacy
+    ------
+    sequence_parallel: bool
+        Set a bool attr named `sequence_parallel` in the parameters.
+        This is custom logic for Megatron-LM integration.
 
     """
 
@@ -58,7 +67,7 @@ class RMSNorm(_RMSNormOp):
         self,
         normalized_shape: Union[Iterable[int], int],
         eps: float = 1e-5,
-        sequence_parallel: Optional[bool] = None,  # deprecated
+        sequence_parallel: Optional[bool] = None,  # legacy
         params_dtype: Optional[torch.dtype] = None,  # deprecated
         zero_centered_gamma: bool = False,
         **kwargs,
@@ -80,7 +89,7 @@ class RMSNorm(_RMSNormOp):
             **kwargs,
         )
 
-        # Flag for sequence parallelism (deprecated)
+        # Flag for sequence parallelism (custom Megatron-LM integration)
         self.sequence_parallel: Optional[bool] = sequence_parallel
 
     def reset_rms_norm_parameters(self) -> None:
@@ -110,7 +119,7 @@ class RMSNorm(_RMSNormOp):
         # Reset parameters
         super().reset_parameters()
 
-        # Set flag for sequence parallelism (deprecated)
+        # Flag for sequence parallelism (custom Megatron-LM integration)
         if getattr(self, "sequence_parallel", None) is not None:
             self.weight.sequence_parallel = self.sequence_parallel
 
@@ -118,34 +127,34 @@ class RMSNorm(_RMSNormOp):
     def fwd_rmsnorm_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("fwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["fwd"]
+        return self._sm_margins["forward"]
 
     @fwd_rmsnorm_sm_margin.setter
     def fwd_rmsnorm_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("fwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["fwd"] = val
+        self._sm_margins["forward"] = val
 
     @property
     def bwd_rmsnorm_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("bwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["bwd"]
+        return self._sm_margins["backward"]
 
     @bwd_rmsnorm_sm_margin.setter
     def bwd_rmsnorm_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("bwd_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["bwd"] = val
+        self._sm_margins["backward"] = val
 
     @property
     def inf_rmsnorm_sm_margin(self) -> int:
         """Shim for backward compatibility"""
         warnings.warn("inf_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        return self._sm_margins["inf"]
+        return self._sm_margins["inference"]
 
     @inf_rmsnorm_sm_margin.setter
     def inf_rmsnorm_sm_margin(self, val: int) -> None:
         """Shim for backward compatibility"""
         warnings.warn("inf_rmsnorm_sm_margin attr is deprecated", DeprecationWarning, stacklevel=2)
-        self._sm_margins["inf"] = val
+        self._sm_margins["inference"] = val
