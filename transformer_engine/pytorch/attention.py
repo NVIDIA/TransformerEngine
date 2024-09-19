@@ -115,13 +115,12 @@ try:
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
 except PackageNotFoundError:
     if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
-        logger = logging.getLogger()
-        logger.setLevel(_log_level)
-        if not logger.hasHandlers():
-            logger.addHandler(_stream_handler)
-        logger.debug(
-            "To use flash-attn v3, please follow these steps to install the flashattn-hopper"
-            " package: \n"
+        fa3_logger = logging.getLogger()
+        fa3_logger.setLevel(_log_level)
+        if not fa3_logger.hasHandlers():
+            fa3_logger.addHandler(_stream_handler)
+        fa3_logger.debug(
+            "To use flash-attn v3, please follow these steps to install the flashattn-hopper package: \n"
             """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
             """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
             """(3) mkdir -p $python_path/flashattn_hopper \n"""
