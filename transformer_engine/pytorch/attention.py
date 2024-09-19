@@ -120,7 +120,8 @@ except PackageNotFoundError:
         if not fa3_logger.hasHandlers():
             fa3_logger.addHandler(_stream_handler)
         fa3_logger.debug(
-            "To use flash-attn v3, please follow these steps to install the flashattn-hopper package: \n"
+            "To use flash-attn v3, please follow these steps to install the flashattn-hopper"
+            " package: \n"
             """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
             """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
             """(3) mkdir -p $python_path/flashattn_hopper \n"""
