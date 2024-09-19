@@ -4072,6 +4072,7 @@ class RotaryPositionEmbedding(torch.nn.Module):
         rotary_percent: float = 1.0,
         seq_len_interpolation_factor: Optional[int] = None,
         pretrained_max_position_embeddings: Optional[int] = None,
+        rotary_base: float = 10000.0,
     ):
         """
         Parameters
@@ -4090,8 +4091,9 @@ class RotaryPositionEmbedding(torch.nn.Module):
         if rotary_percent < 1.0:
             dim = int(dim * rotary_percent)
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
+        self.rotary_base = rotary_base
         inv_freq = 1.0 / (
-            10000
+            self.rotary_base
             ** (
                 torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
                 / dim
@@ -4905,20 +4907,19 @@ class FlashAttention(torch.nn.Module):
                     )
                 else:
                     query_layer, key_layer, value_layer = [
-                        x.transpose(0, 1).contiguous()
-                        for x in (query_layer, key_layer, value_layer)
+                        x.transpose(0, 1) for x in (query_layer, key_layer, value_layer)
                     ]
-            elif qkv_format in ["bshd", "thd"]:
+            if context_parallel:
                 query_layer, key_layer, value_layer = [
                     x.contiguous() for x in (query_layer, key_layer, value_layer)
                 ]
         else:
             if qkv_format == "sbhd":
                 query_layer._data, key_layer._data, value_layer._data = [
-                    x.transpose(0, 1).contiguous()
+                    x.transpose(0, 1)
                     for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
-            elif qkv_format in ["bshd", "thd"]:
+            if context_parallel:
                 query_layer._data, key_layer._data, value_layer._data = [
                     x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
@@ -5116,11 +5117,7 @@ class FlashAttention(torch.nn.Module):
                 output.reshape(batch_size * max_seqlen_q // cp_size, -1).transpose_2d()
                 output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
             else:
-                output = (
-                    output.view(batch_size, max_seqlen_q // cp_size, -1)
-                    .transpose(0, 1)
-                    .contiguous()
-                )
+                output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
         elif qkv_format == "bshd":
             # (bs)hd -> bs(hd)
             output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
@@ -5128,7 +5125,7 @@ class FlashAttention(torch.nn.Module):
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
-        return output
+        return output.contiguous()
 
 
 def _combine_tensors(
