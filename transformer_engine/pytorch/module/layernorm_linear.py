@@ -1162,9 +1162,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
-                bias_tensor = _noop_cat(
-                    [self._fast_get_param(name) for name in self.bias_names]
-                )
+                bias_tensor = _noop_cat([self._fast_get_param(name) for name in self.bias_names])
             else:
                 bias_tensor = self._fast_get_param(self.bias_names[0])  # Unused
 
