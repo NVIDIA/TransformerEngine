@@ -95,8 +95,9 @@ class _LayerNormLinear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        out_features, in_features = weight.shape
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -340,7 +341,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
@@ -370,7 +371,7 @@ class _LayerNormLinear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        out = out.view(-1, *inp_shape[1:-1], out_features)
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:

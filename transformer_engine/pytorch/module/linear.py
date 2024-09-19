@@ -88,8 +88,9 @@ class _Linear(torch.autograd.Function):
         is_input_fp8 = isinstance(inp, Float8Tensor)
 
         # Make sure input dimensions are compatible
-        in_features = weight.shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        out_features, in_features = weight.shape
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view(-1, in_features)
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -181,7 +182,7 @@ class _Linear(torch.autograd.Function):
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
-                dim_size[1] = weight_fp8.size(0)
+                dim_size[1] = out_features
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
                     if ub_obj_projout.is_atomic_gemm():
@@ -201,7 +202,7 @@ class _Linear(torch.autograd.Function):
                     ub_obj_projout.set_ubuf_scale_inv(meta_tensor.scale_inv[proj_out_index])
             else:
                 dim_size = list(inputmat_total.size())
-                dim_size[1] = weight_fp8.size(0)
+                dim_size[1] = out_features
                 out = torch.empty(dim_size, dtype=proj_out_pttype, device=inputmat_total.device)
 
             _ = fp8_gemm(
@@ -261,7 +262,7 @@ class _Linear(torch.autograd.Function):
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // get_distributed_world_size(tp_group)
-                dim_size[1] = weight.size(0)
+                dim_size[1] = out_features
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
                     ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
@@ -269,7 +270,7 @@ class _Linear(torch.autograd.Function):
                     ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
             else:
                 dim_size = list(inputmat_total.size())
-                dim_size[1] = weight.size(0)
+                dim_size[1] = out_features
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
             _ = gemm(
@@ -335,7 +336,7 @@ class _Linear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_overlap_ag = ub_overlap_ag
@@ -359,7 +360,7 @@ class _Linear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.view(-1, *inp_shape[1:-1], out_features)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:

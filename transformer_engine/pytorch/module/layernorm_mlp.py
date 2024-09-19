@@ -125,7 +125,8 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -488,7 +489,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.use_fc2_bias = use_fc2_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
@@ -520,11 +521,11 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out, _ = allreduce(fc2_out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        fc2_out = fc2_out.view(-1, *inp.shape[1:-1], fc2_out.shape[-1])
+        fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
-                shape = list(inp.shape)
+                shape = list(inp_shape)
                 shape[0] *= tp_size
                 return fc2_out, ln_out_return.view(shape)
             return fc2_out, ln_out_return.view_as(inp)
