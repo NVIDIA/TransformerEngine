@@ -85,6 +85,16 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
+# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
+_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
+# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
+_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
+_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
+_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
+_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -105,8 +115,12 @@ try:
     _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
 except PackageNotFoundError:
     if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
-        warnings.warn(
-            "To use flash-attn v3, please use the following commands to install: \n"
+        logger = logging.getLogger()
+        logger.setLevel(_log_level)
+        if not logger.hasHandlers():
+            logger.addHandler(_stream_handler)
+        logger.debug(
+            "To use flash-attn v3, please follow these steps to install the flashattn-hopper package: \n"
             """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
             """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
             """(3) mkdir -p $python_path/flashattn_hopper \n"""
@@ -131,18 +145,6 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-
-
-# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
-_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
-_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
-_stream_handler = logging.StreamHandler()
-_stream_handler.setFormatter(_formatter)
 
 _attention_backends = {
     "attention_params": None,
