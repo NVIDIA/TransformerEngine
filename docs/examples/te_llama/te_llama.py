@@ -102,8 +102,11 @@ class TELlamaForCausalLM:
         Custom method adapted from `from_pretrained` method in HuggingFace
         Transformers repo: https://github.com/huggingface/transformers/blob/f497f564bb76697edab09184a252fc1b1a326d1e/src/transformers/modeling_utils.py#L2579
         """
-        vanilla_model = cls(config).to(kwargs["torch_dtype"])
-        is_local = os.path.isdir(pretrained_model_name_or_path)
+        # Before loading the model, set the default dtype for torch
+        torch.set_default_dtype(kwargs["torch_dtype"])
+
+        # Load the vanilla model weights
+        vanilla_model = cls(config)
         subfolder = ""
         variant = None
         if os.path.isfile(
@@ -133,7 +136,7 @@ class TELlamaForCausalLM:
         else:
             raise AssertionError("Only sharded PyTorch ckpt format supported at the moment")
 
-        resolved_archive_file, sharded_metadata = get_checkpoint_shard_files(
+        resolved_archive_file, _ = get_checkpoint_shard_files(
             pretrained_model_name_or_path,
             archive_file,
         )
