@@ -538,7 +538,7 @@ void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void*
   // Execute the computation
   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
-  update_tensor_scale_inv(z, 0);
+  if (_fp8_out) update_tensor_scale_inv(z, stream);
 }
 
 void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
