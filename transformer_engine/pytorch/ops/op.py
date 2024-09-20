@@ -245,8 +245,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         # Update FP8 recipe
         if fp8_recipe is None:
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_recipe is None:
-            fp8_recipe = get_default_fp8_recipe()
         fp8_meta["recipe"] = fp8_recipe
 
         # Update FP8 communication group

@@ -535,7 +535,11 @@ def restore_fp8_tensors(
                     m._load_fp8_metas(module_tensors)
             elif isinstance(m, Sequential):
                 restore_fp8_tensors(m, module_tensors)
-    assert len(fp8_tensors) == 0, "TE internal error."
+    if len(fp8_tensors) != 0:
+        raise RuntimeError(
+            f"Got FP8 state for {len(fp8_tensors)} more modules than expected. "
+            "There is probably a discrepancy with `save_fp8_tensors`."
+        )
 
 
 def make_graphed_callables(
