@@ -12,9 +12,8 @@ from typing import Optional
 
 import torch
 
+from transformer_engine_torch import layernorm_bwd, layernorm_fwd
 from ...cpp_extensions import (
-    layernorm_bwd,
-    layernorm_fwd,
     layernorm_fwd_fp8,
     layernorm_fwd_fp8_inf,
     layernorm_fwd_inf,

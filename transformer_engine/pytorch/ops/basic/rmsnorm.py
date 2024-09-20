@@ -12,9 +12,8 @@ from typing import Optional
 
 import torch
 
+from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
 from ...cpp_extensions import (
-    rmsnorm_bwd,
-    rmsnorm_fwd,
     rmsnorm_fwd_fp8,
     rmsnorm_fwd_fp8_inf,
     rmsnorm_fwd_inf,
