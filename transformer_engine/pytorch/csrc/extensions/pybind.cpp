@@ -10,6 +10,12 @@
 #include "../extensions.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  // Permutation functions
+  m.def("moe_permute_fwd", moe_permute_fwd);
+  m.def("moe_permute_bwd", moe_permute_bwd);
+  m.def("moe_unpermute_fwd", moe_unpermute_fwd);
+  m.def("moe_unpermute_bwd", moe_unpermute_bwd);
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
@@ -87,10 +93,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_multi_cast_transpose_alloc", &fused_multi_cast_transpose_alloc,
         "Fused Multi-tensor Cast + Transpose with allocating output tensors",
         py::call_guard<py::gil_scoped_release>());
-  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8", py::call_guard<py::gil_scoped_release>());
+  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8", py::call_guard<py::gil_scoped_release>(),
+        py::arg("input"), py::arg("scale"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
+        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
   m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8", py::call_guard<py::gil_scoped_release>());
+        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("scale"),
+        py::arg("output"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
+        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
+  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8", py::call_guard<py::gil_scoped_release>(),
+        py::arg("input"), py::arg("scale_inv"), py::arg("itype"), py::arg("otype"),
+        py::arg("scale_inv_offset") = 0);
   m.def("te_gemm", &te_gemm, "CublasLt GEMM");  /// TODO Think
   m.def("te_grouped_gemm", &te_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
@@ -140,7 +152,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
-
+  m.def("fused_multi_row_padding", &fused_multi_row_padding, "Fused Multi-tensor padding",
+        py::call_guard<py::gil_scoped_release>());
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
         py::call_guard<py::gil_scoped_release>());
@@ -189,6 +202,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "performed for L2 norm computation, and tensors are not updated)",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_adam_fp8", &multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam_capturable", &multi_tensor_adam_capturable_cuda,

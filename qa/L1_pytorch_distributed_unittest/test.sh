@@ -4,6 +4,10 @@
 
 set -e
 
+# pkg_resources is deprecated in setuptools 70+ and the packaging submodule
+# has been removed from it. This is a temporary fix until upstream MLM fix.
+pip install setuptools==69.5.1
+
 : ${TE_PATH:=/opt/transformerengine}
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
 
