@@ -19,6 +19,7 @@ from .fp8 import (
 )
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
+from .ops.op import BasicOperation
 
 __all__ = ["make_graphed_callables"]
 
@@ -486,13 +487,11 @@ def _make_graphed_callables(
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
     fp8_recipe: DelayedScaling,
-) -> Any:
+) -> List[Any]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
-    from .ops import Sequential, FusibleOperation  # Avoid circular import
-
     fp8_tensors = []
     for module in modules:
         for m in module.modules():
@@ -501,40 +500,25 @@ def save_fp8_tensors(
                 if m.primary_weights_in_fp8:
                     m.adjust_amax_history_length(fp8_recipe.amax_history_len)
                 module_tensors = m.get_fp8_meta_tensors()
-            elif isinstance(m, FusibleOperation):
-                if m.is_fused_op:
-                    module_tensors = save_fp8_tensors(m.basic_ops, fp8_recipe)
-                else:
-                    m.pre_forward(
-                        fp8_enabled=True,
-                        fp8_recipe=fp8_recipe,
-                    )
-                    module_tensors = m._save_fp8_metas()
-            elif isinstance(m, Sequential):
-                module_tensors = save_fp8_tensors(m, fp8_recipe)
+            elif isinstance(m, BasicOperation):
+                m.pre_forward(fp8_enabled=True, fp8_recipe=fp8_recipe)
+                module_tensors = m._save_fp8_metas()
             fp8_tensors.append(module_tensors)
     return fp8_tensors
 
 
 def restore_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_tensors: Any,
+    fp8_tensors: List[Any],
 ) -> None:
     """Restore FP8 tensors."""
-    from .ops import Sequential, FusibleOperation  # Avoid circular import
-
     for module in modules:
         for m in module.modules():
             module_tensors = fp8_tensors.pop(0)
             if isinstance(m, TransformerEngineBaseModule):
                 m.reset_fp8_meta_tensors(module_tensors)
-            elif isinstance(m, FusibleOperation):
-                if m.is_fused_op:
-                    restore_fp8_tensors(m.basic_ops, module_tensors)
-                else:
-                    m._load_fp8_metas(module_tensors)
-            elif isinstance(m, Sequential):
-                restore_fp8_tensors(m, module_tensors)
+            elif isinstance(m, BasicOperation):
+                m._load_fp8_metas(module_tensors)
     if len(fp8_tensors) != 0:
         raise RuntimeError(
             f"Got FP8 state for {len(fp8_tensors)} more modules than expected. "
