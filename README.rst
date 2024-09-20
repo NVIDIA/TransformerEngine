@@ -149,8 +149,8 @@ Installation
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
 * Linux x86_64
-* CUDA 11.8+ for Hopper and CUDA 12.1+ for Ada
-* NVIDIA Driver supporting CUDA 11.8 or later
+* CUDA 12.0+ for Hopper and CUDA 12.1+ for Ada
+* NVIDIA Driver supporting CUDA 12.0 or later
 * cuDNN 8.1 or later
 * For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
 
@@ -174,7 +174,15 @@ To install the latest stable version of Transformer Engine,
 
     pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch,paddle).
+
+Alternatively, the package can be directly installed from `Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+
+.. code-block:: bash
+
+    pip install transformer_engine[pytorch]
+
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch,paddle]). Transformer Engine ships wheels for the core library as well as the PaddlePaddle extensions. Source distributions are shipped for the JAX and PyTorch extensions.
 
 From source
 ^^^^^^^^^^^
@@ -182,7 +190,7 @@ From source
 
 Compiling with FlashAttention-2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance. 
+Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance.
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 

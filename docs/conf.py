@@ -47,7 +47,10 @@ if not git_sha:
 
 git_sha = git_sha[:7] if len(git_sha) > 7 else git_sha
 
-version = str(te_version + "-" + git_sha)
+if "dev" in te_version:
+    version = str(te_version + "-" + git_sha)
+else:
+    version = str(te_version)
 release = te_version
 
 # hack: version is used for html creation, so put the version picker
@@ -109,6 +112,8 @@ napoleon_custom_sections = [
     ("Parallelism parameters", "params_style"),
     ("Optimization parameters", "params_style"),
     ("Values", "params_style"),
+    ("Graphing parameters", "params_style"),
+    ("FP8-related parameters", "params_style"),
 ]
 
 breathe_projects = {"TransformerEngine": os.path.abspath("doxygen/xml/")}

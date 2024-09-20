@@ -359,6 +359,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
           kernel is not available on the system, a warning will be issued, and the module will
           automatically fall back to the unfused backend.
 
+    .. note::
+        The DotProductAttention default setting enables non-deterministic kernels for reduced
+        workspace requirements and faster computation. Users can disable the non-deterministic
+        kernels via the :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO` environment variable:
+
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` to allow only deterministic kernels.
+        * :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=1` to allow non-deterministic kernels (default).
+
     Parameters
     ----------
     head_dim: int
@@ -1531,19 +1539,20 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         Indicate the min and max time-scales of rotary position embedding,
         only used when :attr:`enable_rotary_pos_emb=True`
     rotary_pos_emb_group_method: str, default = 'consecutive'
-        Indicate the method to coupled the coordinates. It should be one of
-        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`
-        , d is the hidden dimension. 'consecutive' pairs index :math:`i` with :math:`i + 1`.
+        Indicate the method to couple the coordinates. It should be one of
+        ['consecutive', 'alternate']. 'alternate' is to pair index :math:`i` with :math:`i + d/2`,
+        where :math:`d` is the hidden dimension. 'consecutive' pairs index :math:`i` with
+        :math:`i + 1`.
     low_rank_adaptation_scope: str, default = 'none'
         Indicate the scope to apply low rank adaptation. It should be one of
         ['none', 'all', 'qkv_proj', 'output_proj', 'mlp', 'exclude_qkv_proj',
-         'exclude_output_proj', 'exclude_mlp']
+        'exclude_output_proj', 'exclude_mlp']
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
     low_rank_adaptation_alpha: float, default = None
         The alpha for computing the scaling factor of LoRA output.
-        :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
+        :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
 

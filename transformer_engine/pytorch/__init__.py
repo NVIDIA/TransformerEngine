@@ -6,25 +6,54 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import logging
 import importlib
+import importlib.util
 import sys
 import torch
+from importlib.metadata import version
 
-from transformer_engine.common import get_te_path
+from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
 
 def _load_library():
     """Load shared library with Transformer Engine C extensions"""
+    module_name = "transformer_engine_torch"
+
+    if is_package_installed(module_name):
+        assert is_package_installed("transformer_engine"), "Could not find `transformer-engine`."
+        assert is_package_installed(
+            "transformer_engine_cu12"
+        ), "Could not find `transformer-engine-cu12`."
+        assert (
+            version(module_name)
+            == version("transformer-engine")
+            == version("transformer-engine-cu12")
+        ), (
+            "TransformerEngine package version mismatch. Found"
+            f" {module_name} v{version(module_name)}, transformer-engine"
+            f" v{version('transformer-engine')}, and transformer-engine-cu12"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
+            " transformer-engine[pytorch]==VERSION'"
+        )
+
+    if is_package_installed("transformer-engine-cu12"):
+        if not is_package_installed(module_name):
+            logging.info(
+                "Could not find package %s. Install transformer-engine using 'pip"
+                " install transformer-engine[pytorch]==VERSION'",
+                module_name,
+            )
+
     extension = _get_sys_extension()
     try:
         so_dir = get_te_path() / "transformer_engine"
-        so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
         so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"transformer_engine_torch.*.{extension}"))
+        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
-    module_name = "transformer_engine_torch"
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
@@ -38,12 +67,14 @@ from transformer_engine.pytorch.module import LayerNormMLP
 from transformer_engine.pytorch.module import LayerNorm
 from transformer_engine.pytorch.module import RMSNorm
 from transformer_engine.pytorch.module import GroupedLinear
+from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.transformer import TransformerLayer
+from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.pytorch.graph import make_graphed_callables

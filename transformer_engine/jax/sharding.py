@@ -20,6 +20,7 @@ _PXLA_THREAD_RESOURCES = pxla.thread_resources
 BATCH_AXES = "nvte_batch"
 SEQLEN_AXES = "nvte_seqlen"
 SEQLEN_TP_AXES = "nvte_seqlen_tp"
+SEQLEN_CP_AXES = "nvte_seqlen_cp"
 HEAD_AXES = "nvte_head"
 HIDDEN_AXES = "nvte_hidden"
 HIDDEN_TP_AXES = "nvte_hidden_tp"
@@ -30,8 +31,7 @@ W_TP_AXES = "nvte_w_tp"
 W_JOINED_AXES = "nvte_w_joined"
 
 
-def _get_mesh_info(resource: str):
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
@@ -66,6 +66,7 @@ def get_sharding_map_logic_axis_to_mesh_axis():
         BATCH_AXES: batch_dim_rule,
         SEQLEN_AXES: None,
         SEQLEN_TP_AXES: gsr.tp_resource,
+        SEQLEN_CP_AXES: gsr.cp_resource,
         HEAD_AXES: gsr.tp_resource,
         HIDDEN_AXES: None,
         HIDDEN_TP_AXES: gsr.tp_resource,
@@ -132,13 +133,15 @@ def get_padded_spec(spec, ndim):
     return spec + (None,) * (ndim - len(spec))
 
 
-def lax_paral_op(x: jnp.array, ops: Callable, mesh_resource: str):
+def lax_paral_op(
+    x: jnp.array, ops: Callable, mesh_resource: str, mesh: jax.sharding.Mesh, **kwargs
+):
     """
     A wrapper function to invoke lax.p* operations, like psum.
     """
     if mesh_resource is not None:
-        _, resource = _get_mesh_info(mesh_resource)
-        return ops(x, resource)
+        _, resource = _get_mesh_info(mesh_resource, mesh)
+        return ops(x, resource, **kwargs)
     return x
 
 
@@ -147,6 +150,33 @@ def num_of_devices():
     Get total number of detected devices
     """
     return len(jax.devices())
+
+
+def get_mesh_axis_size(axis, mesh=None):
+    """
+    Get the axis size of the given mesh.
+    If the mesh is None, it would be replaced
+    by the global mesh.
+    """
+    if mesh is None:
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    if axis is None:
+        return 1
+
+    assert axis in mesh.shape, f"{axis} is not a axis of the given mesh {mesh.shape}"
+    return mesh.shape[axis]
+
+
+def get_mesh_axis_rank(axis: str, mesh=None):
+    """
+    Gets the local axis rank of the `axis` of the array.
+    If the mesh is None the rank is 0.
+    """
+    if mesh is None:
+        return 0
+    _, axis_name = _get_mesh_info(axis, mesh)
+    return jax.lax.axis_index(axis_name)
 
 
 @dataclass
@@ -169,12 +199,16 @@ class MeshResource:
     pp_resource : str, default = None
         The axis name in Mesh used to split model layers. along.
         If it is None, then pipeline parallelism is disabled.
+    cp_resource : str, default = None
+        The axis name in Mesh used to split sequence (context) dimensions along
+        in the attention. If it is None, then context parallelism is disabled.
     """
 
     dp_resource: str = None
     tp_resource: str = None
     fsdp_resource: str = None
     pp_resource: str = None
+    cp_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = MeshResource()
@@ -201,22 +235,22 @@ def global_mesh_resource() -> MeshResource:
     return _GLOBAL_MESH_RESOURCE
 
 
-def all_reduce_sum_along_dp_fsdp(x: jnp.array):
+def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
     """
     All-Reduce (Sum) along DP and FSDP mesh axes.
     """
-    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource)
-    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource)
+    x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
+    return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
-def all_reduce_max_along_all_axes_except_PP(x: jnp.array):
+def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
     """
     All-Reduce (Max) along all mesh axes.
     """
     all_axes = get_all_mesh_axes()
     for axis in all_axes:
         if axis != global_mesh_resource().pp_resource:
-            x = lax_paral_op(x, jax.lax.pmax, axis)
+            x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
 
 

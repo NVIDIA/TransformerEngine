@@ -1,4 +1,11 @@
 {% extends "!layout.html" %}
+
+  {% block extrahead %}
+
+  <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js"></script>
+
+  {% endblock %}
+
   {% block sidebartitle %} {{ super() }}
 
   <style>
@@ -70,7 +77,7 @@
     color: #8c0;
   }
 
-  html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.glossary):not(.simple)>dt {
+  html.writer-html5 .rst-content dl[class]:not(.option-list):not(.field-list):not(.footnote):not(.citation):not(.glossary):not(.simple)>dt {
     background: rgba(118, 185, 0, 0.1);
     color: rgba(59,93,0,1);
     border-top: solid 3px rgba(59,93,0,1);
@@ -83,8 +90,10 @@
   }
   </style>
 
-  {%- if nvidia_analytics_id %}
-  <script type="text/javascript">_satellite.pageBottom();</script>
-  {%- endif %}
+  {% endblock %}
+
+  {% block footer %}
+
+  <script type="text/javascript">if (typeof _satellite !== “undefined”){ _satellite.pageBottom();}</script>
 
   {% endblock %}

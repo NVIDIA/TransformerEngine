@@ -1,0 +1,4 @@
+{
+	global: *nvte*; *transformer_engine*;
+	local: *;
+};

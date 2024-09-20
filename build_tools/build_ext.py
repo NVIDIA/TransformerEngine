@@ -10,6 +10,7 @@ import subprocess
 import sys
 import sysconfig
 import copy
+import time
 
 from pathlib import Path
 from subprocess import CalledProcessError
@@ -69,8 +70,8 @@ class CMakeExtension(setuptools.Extension):
         configure_command.append(f"-Dpybind11_DIR={pybind11_dir}")
 
         # CMake build and install commands
-        build_command = [_cmake_bin, "--build", build_dir]
-        install_command = [_cmake_bin, "--install", build_dir]
+        build_command = [_cmake_bin, "--build", build_dir, "--verbose"]
+        install_command = [_cmake_bin, "--install", build_dir, "--verbose"]
 
         # Check whether parallel build is restricted
         max_jobs = get_max_jobs_for_parallel_build()
@@ -81,12 +82,16 @@ class CMakeExtension(setuptools.Extension):
             build_command.append(str(max_jobs))
 
         # Run CMake commands
+        start_time = time.perf_counter()
         for command in [configure_command, build_command, install_command]:
             print(f"Running command {' '.join(command)}")
             try:
                 subprocess.run(command, cwd=build_dir, check=True)
             except (CalledProcessError, OSError) as e:
                 raise RuntimeError(f"Error when running CMake: {e}")
+
+        total_time = time.perf_counter() - start_time
+        print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
 def get_build_ext(extension_cls: Type[setuptools.Extension]):
@@ -101,8 +106,12 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 if isinstance(ext, CMakeExtension):
                     print(f"Building CMake extension {ext.name}")
                     # Set up incremental builds for CMake extensions
-                    setup_dir = Path(__file__).resolve().parent.parent
-                    build_dir = setup_dir / "build" / "cmake"
+                    build_dir = os.getenv("NVTE_CMAKE_BUILD_DIR")
+                    if build_dir:
+                        build_dir = Path(build_dir).resolve()
+                    else:
+                        root_dir = Path(__file__).resolve().parent.parent
+                        build_dir = root_dir / "build" / "cmake"
 
                     # Ensure the directory exists
                     build_dir.mkdir(parents=True, exist_ok=True)

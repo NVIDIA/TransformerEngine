@@ -68,10 +68,12 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Iterable[Iterable[torch.Tensor]]]:
         """Forward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -83,24 +85,27 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         Parameters
         ----------
         basic_op_ctxs: list of OperationContext
-            Contexts for corresponding basic operations
+            Contexts for basic operations
         input_: torch.Tensor
             Input tensor
+        basic_op_extra_inputs: list of torch.Tensor
+            Extra tensor inputs to basic operations
         basic_op_prev_ops: list of BasicOperation
-            Basic operations that preceed each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            first)
+            Basic operations that preceed this operation's basic
+            operations
         basic_op_next_ops: list of BasicOperation
-            Basic operations that follow each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            last)
+            Basic operations that follow this operation's basic
+            operations
         basic_op_kwargs: list of dict
-            Keyword arguments to forward functions of corresponding
-            basic operations
+            Keyword arguments to forward functions of basic
+            operations.
 
         Returns
         -------
-        torch.Tensor: Output tensor.
+        torch.Tensor:
+            Output tensor.
+        Iterable of torch.Tensor:
+            Extra tensor outputs from basic operations.
 
         """
         raise NotImplementedError(
@@ -111,7 +116,13 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
+        *,
+        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+    ) -> tuple[
+        torch.Tensor,
+        Iterable[Iterable[Optional[torch.Tensor]]],
+        Iterable[Iterable[Optional[torch.Tensor]]],
+    ]:
         """Backward pass
 
         This op is either a basic op or the fusion of basic ops, so
@@ -123,24 +134,21 @@ class FusibleOperation(torch.nn.Module, metaclass=abc.ABCMeta):
         Parameters
         ----------
         basic_op_ctxs: list of OperationContext
-            Contexts for corresponding basic operations.
+            Contexts for basic operations
         grad_output: torch.Tensor
-            Loss gradient w.r.t. operation output.
-        basic_op_prev_ops: list of BasicOperation
-            Basic operations that preceed each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            first)
-        basic_op_next_ops: list of BasicOperation
-            Basic operations that follow each of the corresponding
-            basic operations (or `None` if corresponding basic op is
-            last)
+            Loss gradient w.r.t. operation output
+        basic_op_grad_extra_outputs: list of tuple of torch.Tensor
+            Loss gradients w.r.t. extra tensor outputs from basic
+            operations.
 
         Returns
         -------
         torch.Tensor:
             Loss gradient w.r.t. operation input
         Iterable of iterable of torch.Tensor:
-            Loss gradients w.r.t. parameters for corresponding basic
+            Loss gradients w.r.t. parameters for basic operations
+        Iterable of iterable of torch.Tensor:
+            Loss gradients w.r.t. extra tensor inputs to basic
             operations
 
         """
@@ -156,6 +164,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     and backward passes are performed by a fused operation.
 
     """
+
+    # Number of extra tensor inputs
+    num_extra_inputs: int = 0
+    # Number of extra tensor outputs
+    num_extra_outputs: int = 0
 
     def __init__(self) -> None:
         super().__init__()
@@ -298,6 +311,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         ctx: OperationContext,
         input_: torch.Tensor,
+        *,
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
         **kwargs: Any,
@@ -310,6 +324,10 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             Context to coordinate between forward and backward passes
         input_: torch.Tensor
             Input tensor
+        prev_op: BasicOperation, optional
+            Basic operation that preceeds this operation
+        next_op: BasicOperation, optional
+            Basic operation that follows this operation
 
         Returns
         -------
@@ -346,35 +364,63 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         self,
         basic_op_ctxs: list[OperationContext],
         input_: torch.Tensor,
+        *,
+        basic_op_extra_inputs: list[tuple[torch.Tensor, ...]],
         basic_op_prev_ops: list[Optional[BasicOperation]],
         basic_op_next_ops: list[Optional[BasicOperation]],
         basic_op_kwargs: list[dict[str, Any]],
-    ) -> torch.Tensor:
-        return self.op_forward(
+    ) -> tuple[torch.Tensor, list[tuple[()]]]:
+        if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
+            raise RuntimeError(
+                "{self.__class__.__name__} operation has "
+                f"{self.num_extra_inputs} extra tensor inputs "
+                f"and {self.num_extra_outputs} extra tensor outputs. "
+                "It should override `fuser_forward` instead of `op_forward`."
+            )
+        output = self.op_forward(
             basic_op_ctxs[0],
             input_,
-            basic_op_prev_ops[0],
-            basic_op_next_ops[0],
+            prev_op=basic_op_prev_ops[0],
+            next_op=basic_op_next_ops[0],
             **basic_op_kwargs[0],
         )
+        return output, [()]
 
     def fuser_backward(
         self,
         basic_op_ctxs: list[OperationContext],
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, Iterable[Iterable[Optional[torch.Tensor]]]]:
+        *,
+        basic_op_grad_extra_outputs: list[tuple[torch.Tensor, ...]],
+    ) -> tuple[
+        torch.Tensor,
+        list[Iterable[Optional[torch.Tensor]]],
+        list[tuple[()]],
+    ]:
+        if self.num_extra_inputs > 0 or self.num_extra_outputs > 0:
+            raise RuntimeError(
+                "{self.__class__.__name__} operation has "
+                f"{self.num_extra_inputs} extra tensor inputs "
+                f"and {self.num_extra_outputs} extra tensor outputs. "
+                "It should override `fuser_backward` instead of `op_backward`."
+            )
         grad_input, grad_params = self.op_backward(basic_op_ctxs[0], grad_output)
-        return grad_input, [grad_params]
+        return grad_input, [grad_params], [()]
 
     def forward(
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
+        *extra_inputs: torch.Tensor,
         **kwargs: Any,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         """Apply operation"""
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(input, [kwargs])
+        return OperationFuser([self], fuse_ops=False)(
+            input,
+            *extra_inputs,
+            basic_op_kwargs=[kwargs],
+        )
 
     def get_extra_state(self) -> Optional[torch.Tensor]:
         """Serialize extra state
@@ -573,6 +619,7 @@ class FusedOperation(FusibleOperation):
     def forward(
         self,
         input: torch.Tensor,  # pylint: disable=redefined-builtin
+        *extra_inputs: torch.Tensor,
         basic_op_kwargs: Optional[list[dict[str, Any]]] = None,
     ) -> torch.Tensor:
         """Apply operation"""
@@ -580,4 +627,8 @@ class FusedOperation(FusibleOperation):
             basic_op_kwargs = [{} for _ in range(len(self.basic_ops))]
         from .fuser import OperationFuser
 
-        return OperationFuser([self], fuse_ops=False)(input, basic_op_kwargs)
+        return OperationFuser([self], fuse_ops=False)(
+            input,
+            *extra_inputs,
+            basic_op_kwargs=basic_op_kwargs,
+        )

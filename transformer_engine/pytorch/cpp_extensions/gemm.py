@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Python interface for GEMM extensions"""
+import functools
 from typing import Optional, Tuple, Union, List
 import torch
 import transformer_engine_torch as tex
@@ -10,7 +11,18 @@ from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
 
-__all__ = ["gemm", "fp8_gemm", "grouped_gemm", "fp8_grouped_gemm"]
+__all__ = [
+    "gemm",
+    "fp8_gemm",
+    "grouped_gemm",
+    "fp8_grouped_gemm",
+]
+
+
+@functools.lru_cache(maxsize=None)
+def _empty_tensor() -> torch.Tensor:
+    """Get tensor with no entries and no data"""
+    return torch.Tensor()
 
 
 def fp8_gemm(
@@ -39,7 +51,7 @@ def fp8_gemm(
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
 
-    empty_tensor = torch.Tensor()
+    empty_tensor = _empty_tensor()
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_index is not None
     assert_dim_for_fp8_exec(A)
@@ -195,7 +207,7 @@ def gemm(
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    empty_tensor = torch.Tensor()
+    empty_tensor = _empty_tensor()
     fp8_index = -1  # dummy index
 
     if out is None:
@@ -306,15 +318,15 @@ def grouped_gemm(
     layout: str = "TN",
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
-) -> Tuple[Union[List[torch.Tensor], None], ...]:
+) -> Tuple[List[torch.Tensor], ...]:
     """Non FP8 Grouped GEMM."""
 
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     num_gemms = len(A)
-    empty_tensor = torch.Tensor()
-    empty_tensors = [torch.Tensor()] * num_gemms
+    empty_tensor = _empty_tensor()
+    empty_tensors = [empty_tensor] * num_gemms
 
     if gelu and not grad:
         gelu_input = [
@@ -373,7 +385,7 @@ def grouped_gemm(
 
 def fp8_grouped_gemm(
     A: List[torch.Tensor],
-    A_scale_inv: torch.Tensor,
+    A_scale_inv: List[torch.Tensor],
     A_fp8_tensor_offset: int,
     A_dtype: tex.DType,
     B: List[torch.Tensor],
@@ -383,6 +395,7 @@ def fp8_grouped_gemm(
     out: List[torch.Tensor],
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
+    m_splits: Optional[List[int]] = None,
     out_offset: Optional[int] = None,
     fp8_meta_tensor: tex.FP8TensorMeta = None,
     gelu: bool = False,
@@ -391,18 +404,27 @@ def fp8_grouped_gemm(
     use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
-) -> Tuple[Union[List[torch.Tensor], None], ...]:
+) -> Tuple[List[torch.Tensor], ...]:
     """
     TN layout Grouped GEMM with fp8 inputs.
-    This method assumes the scale/scale_inv/amax of A/B/out is contiguous in the meta tensor.
-    scale: [ ...A_scale... | ...B_scale... | ...out_scale...]
-    scale_inv: [ ...A_scale_inv... | ...B_scale_inv... | ...out_scale_inv...]
-    amax: [ ...A_amax... | ...B_amax... | ...out_amax...]
+    Input requirements:
+        1. If len(A_scale_inv) == num_gemms, len(out) must be 1, and m_splits is not None.
+           This is used for the calculation of output (fwd) and dgrad (bwd).
+        2. if len(A_scale_inv) == 1, len(out) must be num_gemms. This is used for the
+           calculation of wgrad.
     """
-
     num_gemms = len(A)
-    empty_tensor = torch.Tensor()
-    empty_tensors = [torch.Tensor()] * num_gemms
+    if num_gemms > 1 and len(A_scale_inv) == num_gemms:
+        assert len(out) == 1 and m_splits is not None
+    elif num_gemms > 1 and len(A_scale_inv) == 1:
+        assert len(out) == num_gemms
+    elif num_gemms == 1:
+        assert len(A_scale_inv) == 1 and len(out) == 1
+    else:
+        raise ValueError("Invalid input combinations of A_scale_inv and out.")
+
+    empty_tensor = _empty_tensor()
+    empty_tensors = [empty_tensor] * num_gemms
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         assert fp8_meta_tensor is not None and out_offset is not None
     for a, b in zip(A, B):
@@ -413,41 +435,71 @@ def fp8_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias[0].dtype
-    if gelu:
-        gelu_input = [
-            torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
-            for o in out
-        ]
-    else:
-        gelu_input = empty_tensors
     bias_dtype = TE_DType[bias_dtype]
-
+    gelu_input = empty_tensors
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
-    torch.ops.tex_ts.te_grouped_gemm_ts(
-        A,
-        A_scale_inv,
-        A_fp8_tensor_offset,
-        A_dtype,
-        True,  # transa
-        B,
-        B_scale_inv,
-        B_fp8_tensor_offset,
-        B_dtype,
-        False,  # transb
-        out,
-        0 if out_offset is None else out_offset,
-        empty_tensor if out_offset is None else fp8_meta_tensor.scale,
-        out_dtype,
-        empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
-        bias if use_bias else empty_tensors,
-        bias_dtype,
-        gelu_input,  # this is pre_gelu_out
-        False,  # grad
-        workspaces,
-        workspaces[0].shape[0],
-        accumulate,
-        use_split_accumulator,
-    )
+    if len(A_scale_inv) == 1:
+        if gelu:
+            gelu_input = [
+                torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
+                for o in out
+            ]
+
+        torch.ops.tex_ts.te_grouped_gemm_ts(
+            A,
+            A_scale_inv[0],
+            A_fp8_tensor_offset,
+            A_dtype,
+            True,  # transa
+            B,
+            B_scale_inv,
+            B_fp8_tensor_offset,
+            B_dtype,
+            False,  # transb
+            out,
+            0 if out_offset is None else out_offset,
+            empty_tensor if out_offset is None else fp8_meta_tensor.scale,
+            out_dtype,
+            empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
+            bias if use_bias else empty_tensors,
+            bias_dtype,
+            gelu_input,  # this is pre_gelu_out
+            False,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+        )
+    else:
+        if gelu:
+            gelu_input = [torch.empty((m, A[0].size(0)), dtype=bias_dtype) for m in m_splits]
+
+        torch.ops.tex_ts.te_grouped_gemm_single_output_ts(
+            A,
+            A_scale_inv,
+            A_fp8_tensor_offset,
+            A_dtype,
+            True,  # transa
+            B,
+            B_scale_inv,
+            B_fp8_tensor_offset,
+            B_dtype,
+            False,  # transb
+            m_splits,
+            out[0],
+            0 if out_offset is None else out_offset,
+            empty_tensor if out_offset is None else fp8_meta_tensor.scale,
+            out_dtype,
+            empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
+            bias if use_bias else empty_tensors,
+            bias_dtype,
+            gelu_input,  # this is pre_gelu_out
+            False,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+        )
 
     return out, gelu_input
