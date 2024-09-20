@@ -57,7 +57,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
       plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr, nullptr,
                     reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
-                    workspace->data.dptr);
+                    workspace->data.dptr, stream);
     }
   } else {
     NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE> NormFwd(x, gamma, empty, epsilon, z, &empty, rsigma,
@@ -117,7 +117,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     } else {
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
       plan->execute(x.data.dptr, gamma.data.dptr, nullptr, rsigma.data.dptr, dx->data.dptr,
-                    dz.data.dptr, nullptr, dgamma->data.dptr, workspace->data.dptr);
+                    dz.data.dptr, nullptr, dgamma->data.dptr, workspace->data.dptr, stream);
     }
   } else {
     NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE> BwdNorm(dz, x, empty, rsigma, gamma, dx, dgamma, &empty,

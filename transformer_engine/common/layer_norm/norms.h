@@ -356,10 +356,11 @@ class NormalizationPlan {
 
   // FWD
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
-               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr);
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream);
   // BWD
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr);
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+               cudaStream_t stream);
 
  private:
   const bool _zero_centered, _fp8_out;

@@ -516,7 +516,7 @@ std::vector<size_t> NormalizationPlan::getWorkspaceShape() const {
 
 void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
                                 void* mean_dptr, void* eps_dptr, void* rsigma_dptr,
-                                void* workspace_dptr) {
+                                void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
   _variant_pack = {{_x, x_dptr}, {_rsigma, rsigma_dptr}, {_eps, eps_dptr}};
 
@@ -536,13 +536,14 @@ void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void*
     _variant_pack.insert({{_z, z->data.dptr}});
 
   // Execute the computation
+  NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
   update_tensor_scale_inv(z, 0);
 }
 
 void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
                                 void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
-                                void* workspace_dptr) {
+                                void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};
@@ -557,6 +558,7 @@ void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
   if (mean_dptr && dbeta_dptr) _variant_pack.insert({{_mean, mean_dptr}, {_dbeta, dbeta_dptr}});
 
   // Execute the computation
+  NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 }
 

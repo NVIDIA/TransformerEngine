@@ -67,7 +67,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
       plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
                     reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
-                    workspace->data.dptr);
+                    workspace->data.dptr, stream);
     }
   } else {
     NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma, stream,
@@ -133,7 +133,8 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
     } else {
       NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
       plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
-                    dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr);
+                    dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr,
+                    stream);
     }
   } else {
     NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE> BwdNorm(
