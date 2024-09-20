@@ -80,10 +80,10 @@ def setup_pytorch_extension(
             )
         )
 
-        for arch in cuda_architectures:
-            if arch_nb != "70":
-                arch_nb = arch.replace("sm_", "")
-                nvcc_flags.extend(["-gencode", f"arch=compute_{arch_nb},code={arch}"])
+        for arch in cuda_architectures.split(";"):
+            if arch == "70":
+                continue  # Already handled
+            nvcc_flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
 
     # Libraries
     library_dirs = []
