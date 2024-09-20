@@ -1472,6 +1472,47 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
+        if fp8:
+            if use_fused_attention:
+                fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
+                fused_attn_qkv_dtype = fp8_dtype_forward
+                fused_attn_backend = FusedAttnBackend["FP8"]
+                if fp8_meta["recipe"].fp8_mha:
+                    assert (
+                        isinstance(q, Float8Tensor)
+                        and isinstance(k, Float8Tensor)
+                        and isinstance(v, Float8Tensor)
+                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                    fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
+                    q_fp8, k_fp8, v_fp8 = q, k, v
+                    q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
+                else:
+                    q_f16, k_f16, v_f16 = q, k, v
+                    q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
+                    if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        k, v = [
+                            cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
+                            for x in [k_f16, v_f16]
+                        ]
+                fp8_meta_kwargs = {}
+                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_qkv_offset"] = META_QKV
+                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv
+                fp8_meta_kwargs["d_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_s_offset"] = META_S
+                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale
+                fp8_meta_kwargs["q_scale_o_offset"] = META_O_CP
+                amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
+            else:
+                assert False, "FP8 is only supported with Fused Attention!"
+        else:
+            q_f16 = q
+            if use_fused_attention:
+                fp8_meta_kwargs = {}
+                fused_attn_qkv_dtype = TE_DType[q.dtype]
+                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
         assert qkv_format == "thd" or (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
@@ -1528,47 +1569,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         flash_attn_streams = [torch.cuda.current_stream(), cp_stream]
         # synchronize fwd results correction across steps
         fwd_results_correction_done = torch.cuda.Event()
-
-        if fp8:
-            if use_fused_attention:
-                fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-                fused_attn_qkv_dtype = fp8_dtype_forward
-                fused_attn_backend = FusedAttnBackend["FP8"]
-                if fp8_meta["recipe"].fp8_mha:
-                    assert (
-                        isinstance(q, Float8Tensor)
-                        and isinstance(k, Float8Tensor)
-                        and isinstance(v, Float8Tensor)
-                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
-                    fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
-                    q_fp8, k_fp8, v_fp8 = q, k, v
-                    q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
-                else:
-                    q_f16, k_f16, v_f16 = q, k, v
-                    q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
-                    if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
-                        k, v = [
-                            cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
-                            for x in [k_f16, v_f16]
-                        ]
-                fp8_meta_kwargs = {}
-                fp8_meta_kwargs["d_scale_qkv"] = fp8_meta["scaling_fwd"].scale_inv
-                fp8_meta_kwargs["d_scale_qkv_offset"] = META_QKV
-                fp8_meta_kwargs["d_scale_s"] = fp8_meta["scaling_fwd"].scale_inv
-                fp8_meta_kwargs["d_scale_s_offset"] = META_S
-                fp8_meta_kwargs["q_scale_s"] = fp8_meta["scaling_fwd"].scale
-                fp8_meta_kwargs["q_scale_s_offset"] = META_S
-                fp8_meta_kwargs["q_scale_o"] = fp8_meta["scaling_fwd"].scale
-                fp8_meta_kwargs["q_scale_o_offset"] = META_O_CP
-                amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
-            else:
-                assert False, "FP8 is only supported with Fused Attention!"
-        else:
-            q_f16 = q
-            if use_fused_attention:
-                fp8_meta_kwargs = {}
-                fused_attn_qkv_dtype = TE_DType[q.dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         p2p_comm_buffers = [None for _ in range(cp_size)]
         if use_fused_attention and qkv_format in ["bshd", "sbhd"]:
@@ -2174,6 +2174,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_fwd_scales = fp8_meta["scaling_fwd"].scale.clone()
             fp8_fwd_scale_invs = fp8_meta["scaling_fwd"].scale_inv.clone()
         elif fp8 and fp8_meta["recipe"].fp8_mha:
+            q_fp8 = q_fp8.view(q.shape)
             kv_fp8 = Float8Tensor(
                 data=kv,
                 fp8_meta=fp8_meta,
@@ -2185,6 +2186,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_save, kv_save, out_save = q_fp8, kv_fp8, out_f16
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
         else:
+            q_f16 = q_f16.view(q.shape)
             q_save, kv_save, out_save = q_f16, kv, out_f16
             fp8_fwd_scales, fp8_fwd_scale_invs = None, None
 
