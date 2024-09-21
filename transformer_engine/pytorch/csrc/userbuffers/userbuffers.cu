@@ -2277,7 +2277,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 
   void *send_srcptr = reinterpret_cast<char *>(comm->mem_ptr[srchandler]) + send_offset;
   void *send_dstptr =
-      reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
+      reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + recv_offset;
 
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
