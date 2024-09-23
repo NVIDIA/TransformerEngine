@@ -1488,7 +1488,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
                 else:
                     q_f16, k_f16, v_f16 = q, k, v
-                    q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
+                    if cp_size_a2a == 1 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                        q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
                     if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                         k, v = [
                             cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
@@ -1512,6 +1513,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fp8_meta_kwargs = {}
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
+        if cp_size_a2a > 1:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, True)
+            print(f"before A2A rank_{rank*cp_size_a2a+rank_a2a}, {q.shape}, {k.shape}, {v.shape}")
+            q, k, v = flash_attn_a2a_communicate(
+                [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
+            )
+            print(f"after A2A rank_{rank*cp_size_a2a+rank_a2a}, {q.shape}, {k.shape}, {v.shape}")
+            if not fp8 or not fp8_meta["recipe"].fp8_mha:
+                q_f16 = q
+            if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
+            torch.cuda.synchronize()
 
         assert qkv_format == "thd" or (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
@@ -1585,6 +1599,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
+                        print(f"P2P global_rank_{rank*cp_size_a2a+rank_a2a}, rank_{rank}, step_{i}, send_dst_{send_dst}, recv_src_{recv_src}, {p2p_comm_buffers[i].shape}")
                         p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
                         send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
                             rank,
@@ -2174,7 +2189,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_fwd_scales = fp8_meta["scaling_fwd"].scale.clone()
             fp8_fwd_scale_invs = fp8_meta["scaling_fwd"].scale_inv.clone()
         elif fp8 and fp8_meta["recipe"].fp8_mha:
-            q_fp8 = q_fp8.view(q.shape)
+            q_fp8 = Float8Tensor(
+                data=q,
+                fp8_meta=fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=META_QKV,
+                fp8_dtype=fp8_dtype_forward,
+                dtype=q_fp8.dtype,
+            )
             kv_fp8 = Float8Tensor(
                 data=kv,
                 fp8_meta=fp8_meta,
