@@ -4,6 +4,8 @@
 import operator
 import re
 from functools import reduce
+from itertools import product
+import pytest
 
 import jax
 from jax.experimental.pjit import pjit, _UNSPECIFIED
@@ -25,6 +27,28 @@ def generate_configs():
         configs.append(
             [4, (DP_size, TP_size), ("dp", "tp"), MeshResource(dp_resource="dp", tp_resource="tp")]
         )
+
+    return configs
+
+
+def generate_context_parallel_configs():
+    configs = []
+
+    DP_sizes = (1, 2)
+    CP_sizes = (1, 2, 4, 8)
+    TP_sizes = (1, 2)
+    for dp, cp, tp in product(DP_sizes, CP_sizes, TP_sizes):
+        ndev = cp * tp * dp
+        if is_devices_enough(ndev):
+            configs.append(
+                pytest.param(
+                    ndev,
+                    (dp, cp, tp),
+                    ("dp", "cp", "tp"),
+                    MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp"),
+                    id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}",
+                )
+            )
 
     return configs
 
