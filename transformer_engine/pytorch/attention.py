@@ -1523,7 +1523,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 q_f16 = q
             if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
-            torch.cuda.synchronize()
 
         assert qkv_format == "thd" or (
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
