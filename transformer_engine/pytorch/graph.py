@@ -356,12 +356,13 @@ def _make_graphed_callables(
             """Autograd function for graph replay."""
 
             @staticmethod
-            def forward(ctx, skip_fp8_weight_update, *inputs):
+            def forward(ctx, skip_fp8_weight_update, fuse_wgrad_accumulation, *inputs):
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
                 if ctx.is_first_module and skip_fp8_weight_update is not None:
                     FP8GlobalStateManager.set_skip_fp8_weight_update_tensor(skip_fp8_weight_update)
+                ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
 
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
@@ -390,10 +391,16 @@ def _make_graphed_callables(
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+                    
+                # Handle MCore wgrad accumulate fusion if needed
+                if ctx.fuse_wgrad_accumulation:
+                    for param in module_params:
+                        if hasattr(param, "grad_added_to_main_grad"):
+                            param.grad_added_to_main_grad = True
 
                 # Input args that didn't require grad expect a None gradient.
                 assert isinstance(static_grad_inputs, tuple)
-                return (None,) + tuple(
+                return (None, None) + tuple(
                     b.detach() if b is not None else b for b in static_grad_inputs
                 )
 
@@ -407,6 +414,11 @@ def _make_graphed_callables(
                 ), "`is_first_microbatch` boolean kwarg must be provided for FP8 weight caching."
 
                 skip_fp8_weight_update = not user_kwargs["is_first_microbatch"]
+
+            # Handle custom DDP from mcore
+            fuse_wgrad_accumulation = None
+            if 'fuse_wgrad_accumulation' in user_kwargs:
+                fuse_wgrad_accumulation = user_kwargs["fuse_wgrad_accumulation"]
 
             # Check that required kwargs are provided
             for key in kwargs_keys:
@@ -423,7 +435,7 @@ def _make_graphed_callables(
             flatten_user_args, _ = _tree_flatten(user_args)
             flatten_user_kwargs, _ = _tree_flatten([user_kwargs[key] for key in kwargs_keys])
             func_args = tuple(flatten_user_args) + tuple(flatten_user_kwargs) + module_params
-            out = Graphed.apply(skip_fp8_weight_update, *func_args)
+            out = Graphed.apply(skip_fp8_weight_update, fuse_wgrad_accumulation, *func_args)
             return _tree_unflatten(out, output_unflatten_spec)
 
         return functionalized
