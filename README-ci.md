@@ -126,8 +126,6 @@ discussion for more information.
   repository, their GitHub username, and their NVIDIA email. See an
   [example](https://nvbugspro.nvidia.com/bug/4476510) and the
   [documentation for Blossom GitHub support](https://confluence.nvidia.com/display/BLOS/Github+Support+User+Documentation).
-- Request Duo Access. See
-  [these instructions](https://nvidia.service-now.com/esc?id=kb_article&sysparm_article=KB0021726).
 
 ## QA workflow
 
