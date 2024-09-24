@@ -70,21 +70,30 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
+        # Compute dtype
+        dtype: torch.dtype
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = input_.dtype
+        if dtype not in (torch.float32, torch.float16, torch.bfloat16):
+            raise RuntimeError(f"Unsupported dtype ({dtype})")
+
         # Check input tensor
         x = input_
         if isinstance(x, QuantizedTensor):
             x = x.dequantize()
         if x.device.type != "cuda":
             x = x.cuda()
-        if x.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            x = x.float()
+        if x.dtype != dtype:
+            x = x.to(dtype=dtype)
         if not x.is_contiguous():
             x = x.contiguous()
 
         # Check if FP8 is enabled
         with_fp8_output = False
         output_fp8_meta = None
-        output_dtype = TE_DType[x.dtype]
+        output_dtype = TE_DType[dtype]
         output_fp8_scale_inv = None
         if (
             FP8GlobalStateManager.is_fp8_enabled()
@@ -118,7 +127,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
                 fp8_meta_index=0,
                 fp8_dtype=output_dtype,
                 fp8_scale_inv=output_fp8_scale_inv,
-                dtype=x.dtype,
+                dtype=dtype,
             )
 
         # Save state for backward pass
