@@ -966,14 +966,14 @@ class Float8Tensor(QuantizedTensor):
 
         # Just copy FP8 data if other tensor is Float8Tensor
         if isinstance(tensor, Float8Tensor):
-            if (
+            if (  # pylint: disable=too-many-boolean-expressions
                 self.size() != tensor.size()
                 or self.stride() != tensor.stride()
                 or self.storage_offset() != tensor.storage_offset()
                 or self.dtype != tensor.dtype
                 or self.layout != tensor.layout
                 or not devices_match(self.device, new_device)
-            ):  # pylint: disable=too-many-boolean-expressions
+            ):
                 dummy_tensor = torch.Tensor._make_wrapper_subclass(
                     Float8Tensor,
                     tensor.size(),
