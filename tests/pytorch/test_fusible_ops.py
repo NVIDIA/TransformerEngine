@@ -362,8 +362,8 @@ class TestFuser:
         w_test = op.weight.to(dtype=torch.float64, device="cpu")
         torch.testing.assert_close(w_test, w_ref, rtol=0, atol=0)
 
-        # Check forward and backward pass output
-        x = torch.empty(
+        # Check forward and backward pass
+        x = torch.zeros(
             (size, size),
             dtype=init_dtype,
             device=device,
@@ -372,7 +372,63 @@ class TestFuser:
         y = op(x)
         y.backward(torch.zeros_like(y))
         assert y.dtype == final_dtype
-        assert x.dtype == init_dtype
+        assert x.grad.dtype == init_dtype
+        assert op.weight.grad.dtype == final_dtype
+
+    @pytest.mark.parametrize("model_dtype", _dtypes)
+    @pytest.mark.parametrize("autocast_dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_compute", (False, True))
+    def test_pyt_autocast(
+        self,
+        *,
+        size: int = 16,
+        model_dtype: torch.dtype,
+        autocast_dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_weight: bool = False,
+        fp8_compute: bool,
+    ) -> None:
+        """Test with PyTorch autocast"""
+        device = torch.device(device)
+
+        # Skip invalid configurations
+        if fp8_weight or fp8_compute:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Construct operation
+        with te.fp8_model_init(enabled=fp8_weight):
+            op = te_ops.Linear(size, size, bias=False, device=device, dtype=model_dtype)
+
+        # Check forward and backward pass
+        x = torch.zeros(
+            (size, size),
+            dtype=model_dtype,
+            device=device,
+            requires_grad=True,
+        )
+        with te.fp8_autocast(enabled=fp8_compute):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                y = op(x)
+        y.backward(torch.zeros_like(y))
+        assert y.dtype == autocast_dtype
+        assert x.grad.dtype == model_dtype
+        assert op.weight.grad.dtype == model_dtype
+
+        # Check forward and backward pass (swapped context order)
+        if fp8_compute:
+            x.grad = None
+            op.weight.grad = None
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                with te.fp8_autocast(enabled=fp8_compute):
+                    y = op(x)
+            y.backward(torch.zeros_like(y))
+            assert y.dtype == autocast_dtype
+            assert x.grad.dtype == model_dtype
+            assert op.weight.grad.dtype == model_dtype
+
 
 class TestBasicOps:
     """Tests for individual operations"""

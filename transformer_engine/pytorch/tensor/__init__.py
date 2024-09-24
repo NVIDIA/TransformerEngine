@@ -29,6 +29,7 @@ def _make_module_cast_func(dtype):
                 data=tensor._data,
                 fp8_attrs=tensor._fp8_attrs,
                 dtype=dtype,
+                requires_grad=tensor.requires_grad,
             )
         if tensor.is_floating_point():
             return getattr(tensor, cast_func_name)()

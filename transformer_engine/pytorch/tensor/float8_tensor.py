@@ -346,6 +346,7 @@ class Float8Tensor(QuantizedTensor):
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         fp8_scale_inv: Optional[torch.Tensor] = None,
         dtype: torch.dtype = torch.float32,
+        requires_grad: bool = False,
         data_transpose: Optional[torch.Tensor] = None,
     ):
 
@@ -367,7 +368,7 @@ class Float8Tensor(QuantizedTensor):
             storage_offset=data.storage_offset(),
             dtype=dtype,
             layout=data.layout,
-            requires_grad=data.requires_grad,
+            requires_grad=requires_grad,
             device=data.device,
         )
         self._data: torch.Tensor = data
