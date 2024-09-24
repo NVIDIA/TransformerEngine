@@ -96,10 +96,8 @@ class LayerNorm(BasicOperation):
             raise ValueError(f"Only CUDA devices are supported (got {device})")
         self.device: torch.device = device
 
-        # Parameter datatype
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
-
         # Initialize parameters if needed
+        dtype = canonicalize_dtype(dtype)
         weight = torch.empty(
             self._shape,
             device="meta",
@@ -144,10 +142,12 @@ class LayerNorm(BasicOperation):
         bias = self.bias
         if weight.device.type != "cuda":
             weight = torch.empty_like(weight, device=self.device)
+        else:
+            weight = weight.to(device=self.device)
         if bias.device.type != "cuda":
             bias = torch.empty_like(bias, device=self.device)
-        weight = weight.to(device=self.device, dtype=self.dtype)
-        bias = bias.to(device=self.device, dtype=self.dtype)
+        else:
+            bias = bias.to(device=self.device)
 
         # Initialize values
         if self.zero_centered_gamma:
@@ -188,7 +188,7 @@ class LayerNorm(BasicOperation):
         # Check input tensors
         inner_dim = math.prod(self._shape)
         device = self.device
-        dtype = maybe_autocast_dtype(default_dtype=self.dtype)
+        dtype = maybe_autocast_dtype(default_dtype=self.weight.dtype)
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         b = reshape(self.bias, (inner_dim,), device=device, dtype=dtype)

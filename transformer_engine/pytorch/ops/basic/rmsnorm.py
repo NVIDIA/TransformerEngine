@@ -95,14 +95,11 @@ class RMSNorm(BasicOperation):
             raise ValueError(f"Only CUDA devices are supported (got {device})")
         self.device: torch.device = device
 
-        # Parameter datatype
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
-
         # Initialize parameters if needed
         weight = torch.empty(
             self._shape,
             device="meta",
-            dtype=dtype,
+            dtype=canonicalize_dtype(dtype),
         )
         weight = torch.nn.Parameter(weight)
         self.weight: torch.nn.Parameter
@@ -134,7 +131,8 @@ class RMSNorm(BasicOperation):
         weight = self.weight
         if weight.device.type != "cuda":
             weight = torch.empty_like(weight, device=self.device)
-        weight = weight.to(device=self.device, dtype=self.dtype)
+        else:
+            weight = weight.to(device=self.device)
 
         # Initialize values
         if self.zero_centered_gamma:
@@ -171,7 +169,7 @@ class RMSNorm(BasicOperation):
         # Check input tensors
         inner_dim = math.prod(self._shape)
         device = self.device
-        dtype = maybe_autocast_dtype(default_dtype=self.dtype)
+        dtype = maybe_autocast_dtype(default_dtype=self.weight.dtype)
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         if isinstance(x, QuantizedTensor):
