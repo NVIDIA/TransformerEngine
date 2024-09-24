@@ -1520,9 +1520,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q, k, v = flash_attn_a2a_communicate(
                 [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
             )
-            if not fp8 or not fp8_meta["recipe"].fp8_mha:
+            if not fp8:
                 q_f16 = q
-            if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            elif not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+                q_f16 = q
                 q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
 
         assert qkv_format == "thd" or (
