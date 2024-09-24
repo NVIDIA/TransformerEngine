@@ -1440,6 +1440,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         if isinstance(cp_group, list):
+            assert qkv_format != "thd", f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
             cp_group_a2a = cp_group[0]
             cp_size_a2a = get_distributed_world_size(cp_group_a2a)
             rank_a2a = get_distributed_rank(cp_group_a2a)
