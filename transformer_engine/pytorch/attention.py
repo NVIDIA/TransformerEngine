@@ -1445,6 +1445,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             rank_a2a = get_distributed_rank(cp_group_a2a)
             cp_group = cp_group[1]
         else:
+            cp_group_a2a = None
             cp_size_a2a = 1
             rank_a2a = 0
 
@@ -2236,8 +2237,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             *rng_states,
             *attn_biases,
         )
+        ctx.cp_group_a2a = cp_group_a2a
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
+        ctx.cp_stream = cp_stream
         ctx.dropout_p = dropout_p
         ctx.total_tokens_kv = total_tokens_kv
         ctx.max_seqlen_q = max_seqlen_q
@@ -2255,10 +2258,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
+        if ctx.cp_group_a2a is not None:
+            cp_size_a2a = get_distributed_world_size(ctx.cp_group_a2a)
+            rank_a2a = get_distributed_rank(ctx.cp_group_a2a)
+        else:
+            cp_size_a2a = 1
+            rank_a2a = 0
+
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
-        send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size]
-        recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size]
+        send_dst = ctx.cp_global_ranks[(rank - 1) % cp_size * cp_size_a2a + rank_a2a]
+        recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
         (q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded) = ctx.saved_tensors[:6]
@@ -2271,6 +2281,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         causal = "causal" in ctx.attn_mask_type
         padding = "padding" in ctx.attn_mask_type
         if ctx.qkv_format in ["bshd", "sbhd"]:
+            seq_dim = ctx.qkv_format.index("s")
             qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format[:-2] + "2" + ctx.qkv_format[-2:]
         else:
             qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
@@ -2353,6 +2364,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_dqkv_dtype = TE_DType[dout.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
+        if cp_size_a2a > 1:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, True)
+            out, dout = flash_attn_a2a_communicate(
+                [out, dout], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, True
+            )
 
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
@@ -2949,6 +2966,21 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 cast_to_fp8(x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward)
                 for x in [dq, dkv]
             ]
+        dk, dv = dkv[0], dkv[1]
+
+        if cp_size_a2a > 1:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, False)
+            dq, dk, dv = flash_attn_a2a_communicate(
+                [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, False
+            )
+            if ctx.qkv_format == "bshd":
+                batch_size = dout.shape[0]
+                dq, dk, dv = [x.view(batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
+            elif ctx.qkv_format == "sbhd":
+                batch_size = dout.shape[2]
+                dq, dk, dv = [x.view(-1, batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
+
+        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
             dq, dk, dv = [
                 Float8Tensor(
                     data=x,
@@ -2958,10 +2990,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     fp8_dtype=fp8_dtype_backward,
                     dtype=dout_dtype,
                 )
-                for x in [dq, dkv[0], dkv[1]]
+                for x in [dq, dk, dv]
             ]
-        else:
-            dk, dv = dkv[0], dkv[1]
 
         if attn_dbias is not None:
             # [b, np, sq, 2*cp, sk//(2*cp)] -> [b, np, sq, sk]
