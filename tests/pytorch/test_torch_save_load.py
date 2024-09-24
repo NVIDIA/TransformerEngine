@@ -326,10 +326,11 @@ def test_sequential_model(
     # Construct model to save to checkpoint
     with te.fp8_model_init(enabled=save_fp8_model):
         model = te_ops.Sequential(
-            te_ops.BasicLinear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
+            te_ops.Linear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
         )
     with torch.no_grad():
         torch.rand(model[0].weight.size(), out=model[0].weight)
+        torch.rand(model[0].bias.size(), out=model[0].bias)
 
     # Synthetic data
     xs_ref = [
@@ -377,7 +378,7 @@ def test_sequential_model(
             ("param", "scaling_fwd"),
             ("grad_output", "scaling_bwd"),
         ):
-            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_model = model[0].basic_ops[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
             m_ref = fp8_meta_ref[fp8_meta_type]
             m_ref["amax"] = m_model.amax_history.detach().clone()
             m_ref["scale"] = m_model.scale.detach().clone()
@@ -401,13 +402,13 @@ def test_sequential_model(
     with torch.no_grad():
         for param in model.parameters():
             param.zero_()
-    model[0]._fp8_metas = None
+    model[0].basic_ops[0]._fp8_metas = None
     del model
 
     # Construct new model to load from checkpoint
     with te.fp8_model_init(enabled=load_fp8_model):
         model = te_ops.Sequential(
-            te_ops.BasicLinear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
+            te_ops.Linear(in_shape[-1], in_shape[-1], device=device, dtype=dtype),
         )
 
     # Tolerances for numerical checks
@@ -439,7 +440,7 @@ def test_sequential_model(
             ("param", "scaling_fwd"),
             ("grad_output", "scaling_bwd"),
         ):
-            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_model = model[0].basic_ops[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
             m_ref = fp8_meta_ref[fp8_meta_type]
             with pytest.raises(AssertionError):
                 torch.testing.assert_close(m_model.amax_history, m_ref["amax"], **exact_tols)
@@ -459,7 +460,7 @@ def test_sequential_model(
             ("param", "scaling_fwd"),
             ("grad_output", "scaling_bwd"),
         ):
-            m_model = model[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
+            m_model = model[0].basic_ops[0].get_fp8_meta(fp8_meta_type)[fp8_meta_key]
             m_ref = fp8_meta_ref[fp8_meta_type]
             torch.testing.assert_close(m_model.amax_history, m_ref["amax"], **exact_tols)
             torch.testing.assert_close(m_model.scale, m_ref["scale"], **exact_tols)
