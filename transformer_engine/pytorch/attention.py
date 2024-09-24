@@ -2237,6 +2237,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             *rng_states,
             *attn_biases,
         )
+        ctx.batch_size = batch_size
         ctx.cp_group_a2a = cp_group_a2a
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
@@ -2316,6 +2317,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # [b, np, sq] -> [b, np, sq, 1]
             softmax_lse.unsqueeze_(-1)
 
+        dout_dtype = dout.dtype
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -2326,7 +2328,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
                 dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
-                dout_dtype = dout.dtype
                 if ctx.fp8_meta["recipe"].fp8_mha:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
@@ -2350,7 +2351,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
             if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
-                q, kv, dout = [x.from_float8(x.dtype) for x in [q, kv, dout]]
+                q, kv = [x.from_float8(x.dtype) for x in [q, kv]]
+                if cp_size_a2a == 1:
+                    dout = dout.from_float8(dout_dtype)
+                else:
+                    dout_fp8_dtype = dout._fp8_dtype
+                    dout_scale_inv = dout._scale_inv
+                    dout = dout._data
             dq = torch.empty_like(q)
             if ctx.qkv_format == "thd" and causal:
                 dq[cu_seqlens_q_padded[-1] :].fill_(0)
@@ -2362,7 +2369,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fp8_meta_kwargs = {}
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
-                fused_attn_dqkv_dtype = TE_DType[dout.dtype]
+                fused_attn_dqkv_dtype = TE_DType[dout_dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if cp_size_a2a > 1:
@@ -2370,6 +2377,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             out, dout = flash_attn_a2a_communicate(
                 [out, dout], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, True
             )
+            if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+                dout = cast_from_fp8(
+                    dout, None, None, dout_fp8_dtype, TE_DType[dout_dtype], scale_inv=dout_scale_inv
+                )
 
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
@@ -2974,11 +2985,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, False
             )
             if ctx.qkv_format == "bshd":
-                batch_size = dout.shape[0]
-                dq, dk, dv = [x.view(batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
+                dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
             elif ctx.qkv_format == "sbhd":
-                batch_size = dout.shape[2]
-                dq, dk, dv = [x.view(-1, batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
+                dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
         if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
             dq, dk, dv = [
