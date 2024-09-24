@@ -16,8 +16,7 @@ def _make_module_cast_func(dtype):
     """Make module cast function that can handle QuantizedTensor"""
     cast_func_name = {
         torch.float32: "float",
-        torch.float16:
-        "half",
+        torch.float16: "half",
         torch.bfloat16: "bfloat16",
     }[dtype]
 
@@ -40,6 +39,7 @@ def _make_module_cast_func(dtype):
         return self._apply(tensor_cast_func)
 
     return module_cast_func
+
 
 # Monkey-patch module cast functions to handle QuantizedTensor
 torch.nn.Module.float = _make_module_cast_func(torch.float32)

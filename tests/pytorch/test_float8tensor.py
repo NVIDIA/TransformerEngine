@@ -369,7 +369,7 @@ class TestFloat8Tensor:
         assert x.device == y.device
 
         # Copy from plain tensor
-        x0 = torch.zeros((3,2), dtype=torch.float16, device=x.device)
+        x0 = torch.zeros((3, 2), dtype=torch.float16, device=x.device)
         x.data = x0
         assert isinstance(x, Float8Tensor)
         assert x0.size() == x.size() == x._data.size()
@@ -382,7 +382,7 @@ class TestFloat8Tensor:
         assert x.device == y.device
 
         # Copy from Float8Tensor
-        x0 = Float8Tensor.to_float8(torch.zeros((4,3,1), dtype=torch.float32))
+        x0 = Float8Tensor.to_float8(torch.zeros((4, 3, 1), dtype=torch.float32))
         x.data = x0
         assert isinstance(x, Float8Tensor)
         assert x0.size() == x.size() == x._data.size()
