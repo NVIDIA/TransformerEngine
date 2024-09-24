@@ -391,7 +391,7 @@ def _make_graphed_callables(
                 # Update FP8 scale factors if needed
                 if ctx.is_first_module:
                     FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
-                    
+
                 # Handle MCore wgrad accumulate fusion if needed
                 if ctx.fuse_wgrad_accumulation:
                     for param in module_params:
@@ -417,7 +417,7 @@ def _make_graphed_callables(
 
             # Handle custom DDP from mcore
             fuse_wgrad_accumulation = None
-            if 'fuse_wgrad_accumulation' in user_kwargs:
+            if "fuse_wgrad_accumulation" in user_kwargs:
                 fuse_wgrad_accumulation = user_kwargs["fuse_wgrad_accumulation"]
 
             # Check that required kwargs are provided
