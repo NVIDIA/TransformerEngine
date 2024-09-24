@@ -973,7 +973,7 @@ class Float8Tensor(QuantizedTensor):
                 or self.dtype != tensor.dtype
                 or self.layout != tensor.layout
                 or not devices_match(self.device, new_device)
-            ):
+            ):  # pylint: disable=too-many-boolean-expressions
                 dummy_tensor = torch.Tensor._make_wrapper_subclass(
                     Float8Tensor,
                     tensor.size(),
