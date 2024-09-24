@@ -1516,11 +1516,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, True)
-            print(f"before A2A rank_{rank*cp_size_a2a+rank_a2a}, {q.shape}, {k.shape}, {v.shape}")
             q, k, v = flash_attn_a2a_communicate(
                 [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, True
             )
-            print(f"after A2A rank_{rank*cp_size_a2a+rank_a2a}, {q.shape}, {k.shape}, {v.shape}")
             if not fp8 or not fp8_meta["recipe"].fp8_mha:
                 q_f16 = q
             if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
@@ -1599,7 +1597,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         req.wait()
 
                     if i < (cp_size - 1):
-                        print(f"P2P global_rank_{rank*cp_size_a2a+rank_a2a}, rank_{rank}, step_{i}, send_dst_{send_dst}, recv_src_{recv_src}, {p2p_comm_buffers[i].shape}")
                         p2p_comm_buffers[i + 1] = torch.empty_like(p2p_comm_buffers[i])
                         send_recv_reqs[i % 2] = flash_attn_p2p_communicate(
                             rank,
@@ -2155,12 +2152,26 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     )
 
         kv = p2p_comm_buffers[-1]
-        if use_fused_attention:
-            if qkv_format == "bshd":
-                out = out.view(out.shape[0], -1, *out.shape[-2:])
-            elif qkv_format == "sbhd":
-                out = out.view(-1, *out.shape[-3:])
-        else:
+        if qkv_format == "bshd":
+            out = out.view(out.shape[0], -1, *out.shape[-2:])
+            batch_size = out.shape[0]
+        elif qkv_format == "sbhd":
+            out = out.view(-1, *out.shape[-3:])
+            batch_size = out.shape[1]
+
+        if cp_size_a2a > 1:
+            chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, False)
+            out = flash_attn_a2a_communicate(
+                out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False
+            )
+            if use_fused_attention:
+                if qkv_format == "bshd":
+                    # [b*s, np, hn] -> [b, s, np, hn]
+                    out = out.view(batch_size, -1, *out.shape[-2:])
+                elif qkv_format == "sbhd":
+                    # [s*b, np, hn] -> [s, b, np, hn]
+                    out = out.view(-1, batch_size, *out.shape[-2:])
+        elif not use_fused_attention:
             out = out.view(-1, *out.shape[-2:])
 
         if fp8 and use_fused_attention:
