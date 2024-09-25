@@ -2156,10 +2156,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         kv = p2p_comm_buffers[-1]
         if qkv_format == "bshd":
             out = out.view(out.shape[0], -1, *out.shape[-2:])
-            batch_size = out.shape[0]
+            ctx.batch_size = out.shape[0]
         elif qkv_format == "sbhd":
             out = out.view(-1, *out.shape[-3:])
-            batch_size = out.shape[1]
+            ctx.batch_size = out.shape[1]
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, False)
@@ -2169,10 +2169,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 if qkv_format == "bshd":
                     # [b*s, np, hn] -> [b, s, np, hn]
-                    out = out.view(batch_size, -1, *out.shape[-2:])
+                    out = out.view(ctx.batch_size, -1, *out.shape[-2:])
                 elif qkv_format == "sbhd":
                     # [s*b, np, hn] -> [s, b, np, hn]
-                    out = out.view(-1, batch_size, *out.shape[-2:])
+                    out = out.view(-1, ctx.batch_size, *out.shape[-2:])
         elif not use_fused_attention:
             out = out.view(-1, *out.shape[-2:])
 
@@ -2239,7 +2239,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             *rng_states,
             *attn_biases,
         )
-        ctx.batch_size = batch_size
         ctx.cp_group_a2a = cp_group_a2a
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
