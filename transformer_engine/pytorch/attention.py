@@ -4057,7 +4057,7 @@ def attn_forward_func_with_cp(
             cp_group = cp_group[0]
             cp_comm_type = "a2a"
     else:
-        assert isinstance(cp_group, dist_group_type), "Unsupported process group for non-hierarchical CP implementation!"
+        assert isinstance(cp_group, dist_group_type), f"Unsupported process group for CP communication type {cp_comm_type}!"
 
     assert qkv_format in [
         "bshd",
