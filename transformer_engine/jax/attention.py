@@ -119,11 +119,13 @@ def check_set_window_size(
         ):
             window_size = (orig_window_size[0], 0)
             warnings.warn(
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type.name
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="
+                + attn_mask_type.name
             )
         elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
             assert False, (
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type.name
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="
+                + attn_mask_type.name
             )
     elif attn_mask_type in non_causal_mask_types:
         if orig_window_size is None:
@@ -131,15 +133,18 @@ def check_set_window_size(
         elif orig_window_size == (-1, 0):
             window_size = (-1, -1)
             warnings.warn(
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type.name
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="
+                + attn_mask_type.name
             )
         elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
             assert False, (
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type.name
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="
+                + attn_mask_type.name
             )
     else:
         assert False, "Invalid attn_mask_type: " + attn_mask_type.name
     return window_size
+
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
     """Convert string attn_mask_type to AttnMaskType
@@ -184,8 +189,8 @@ def is_fused_attn_kernel_available(
     q_max_seqlen,
     kv_max_seqlen,
     head_dim,
-    window_size_left = -1,
-    window_size_right = -1,
+    window_size_left=-1,
+    window_size_right=-1,
 ):
     """
     To check whether the fused attention kernel is supported

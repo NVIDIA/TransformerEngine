@@ -127,7 +127,7 @@ class FusedAttnHelper:
             self.kv_max_seqlen,
             self.head_dim,
             self.window_size_left,
-            self.window_size_right
+            self.window_size_right,
         )
 
     @staticmethod
@@ -272,7 +272,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             kv_max_seqlen,
             head_dim,
             config.window_size_left,
-            config.window_size_right
+            config.window_size_right,
         ).get_fused_attn_backend()
 
         if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
@@ -320,7 +320,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.is_training,
             config.max_segments_per_seq,
             config.window_size_left,
-            config.window_size_right
+            config.window_size_right,
         )
         wkspace_aval = q_aval.update(
             shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -401,7 +401,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
             config.window_size_left,
-            config.window_size_right
+            config.window_size_right,
         )
 
         out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -630,7 +630,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             deterministic,
             config.max_segments_per_seq,
             config.window_size_left,
-            config.window_size_right
+            config.window_size_right,
         )
 
         dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
@@ -731,7 +731,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
             config.window_size_left,
-            config.window_size_right
+            config.window_size_right,
         )
 
         out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
@@ -1261,7 +1261,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
                     output,
                     doutput,
                     q_seqlen,
-                    kv_seqlen
+                    kv_seqlen,
                 )
                 for idx in range(cp_size)
             ]

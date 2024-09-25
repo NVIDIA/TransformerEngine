@@ -149,7 +149,7 @@ def make_mask(
     # The only difference is that for window size part [w, 0], cuDNN uses a mask that each
     # row has at most w elements that are NOT masked out, while get_swa_mask() generates
     # a mask that each row has at most w+1 elements that are not masked out. To compare
-    # cuDNN results with Python reference implementation with mask, we adjust the 
+    # cuDNN results with Python reference implementation with mask, we adjust the
     # arguments for the jnp.triu function by adding 1
     if window_size_left >= 0:
         max_seqlen_q = inv_mask.shape[-2]
@@ -341,7 +341,7 @@ class FusedAttnRunner:
             self.max_seqlen_kv,
             self.head_dim,
             self.window_size_left,
-            self.window_size_right
+            self.window_size_right,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("Unsupported inputs combination or device compute capability.")
@@ -776,7 +776,9 @@ class TestFusedAttn:
             window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
             window_size_left, window_size_right = window_size
             if s_q > s_kv:
-                pytest.skip("seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN")
+                pytest.skip(
+                    "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
+                )
         runner = FusedAttnRunner(
             b,
             s_q,
@@ -810,7 +812,7 @@ class TestFusedAttn:
         dtype,
         qkv_layout,
         bias_shape,
-        swa
+        swa,
     ):
         """
         Test backward with parameterized configs
@@ -822,7 +824,9 @@ class TestFusedAttn:
             window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
             window_size_left, window_size_right = window_size
             if s_q > s_kv:
-                pytest.skip("seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN")
+                pytest.skip(
+                    "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
+                )
         runner = FusedAttnRunner(
             b,
             s_q,
