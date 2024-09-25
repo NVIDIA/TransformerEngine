@@ -51,7 +51,7 @@ def get_bash_arguments(num_gpus, **kwargs):
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", ["a2a", "p2p"]])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     config = model_configs_flash_attn[model]
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
@@ -72,12 +72,11 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus=4 if isinstance(cp_comm_type, list) else 2,
+            num_gpus=4 if cp_comm_type == "a2a+p2p" else 2,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
             kernel_backend="FlashAttention",
-            cp_size=[2, 2] if isinstance(cp_comm_type, list) else 2,
             cp_comm_type=cp_comm_type,
         ),
         check=True,
@@ -108,7 +107,7 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("dtype", ["bf16", "fp16", "fp8"])
 @pytest.mark.parametrize("model", model_configs_fused_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
-@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", ["a2a", "p2p"]])
+@pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+!")
@@ -150,12 +149,11 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus=4 if isinstance(cp_comm_type, list) else 2,
+            num_gpus=4 if cp_comm_type == "a2a+p2p" else 2,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
             kernel_backend="FusedAttention",
-            cp_size=[2, 2] if isinstance(cp_comm_type, list) else 2,
             cp_comm_type=cp_comm_type,
         ),
         check=True,
