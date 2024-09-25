@@ -357,12 +357,8 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Compute the forward pass.
         detached_inputs = detach_variable(inputs)
-        with (
-            torch.enable_grad(),
-            ctx.recompute_ctx,
-            ctx.torch_gpu_amp_ctx,
-            ctx.torch_cpu_amp_ctx,
-            activation_recompute_forward(activation_recompute=True, recompute_phase=True),
+        with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
+            activation_recompute=True, recompute_phase=True
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
@@ -683,13 +679,9 @@ def checkpoint(
     torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx = _get_active_autocast_contexts()
 
     def recompute_fn(*args, **kwargs):
-        with (
-            torch.autograd.enable_grad(),
-            te_recompute_ctx,
-            user_recompute_ctx,
-            torch_gpu_amp_forward_ctx,
-            torch_cpu_amp_forward_ctx,
-        ):
+        with torch.autograd.enable_grad(), (
+            te_recompute_ctx
+        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx:
             function(*args, **kwargs)
 
     # Initialize a new checkpoint frame for each new forward pass.
