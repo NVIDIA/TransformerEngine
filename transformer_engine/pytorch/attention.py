@@ -1407,6 +1407,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     Attention implementation with context parallelism. Exchange KV between CP ranks
     with P2P in ring topology. Split attention compute into multiple steps, and overlap
     current-step compute with next-step communication.
+
+    This implementation also supports hierarchical CP, which parallelizes attention
+    heads in low-level CP grpups and parallizes seqeunce dimension in high-levle CP
+    groups. Refer details in `LongVILA <https://arxiv.org/abs/2408.10188>`_ and
+    `USP <https://arxiv.org/abs/2405.07719>`_.
     """
 
     @staticmethod
@@ -2167,15 +2172,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             out = flash_attn_a2a_communicate(
                 out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False
             )
-            if use_fused_attention:
-                if qkv_format == "bshd":
-                    # [b*s, np, hn] -> [b, s, np, hn]
-                    out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-                elif qkv_format == "sbhd":
-                    # [s*b, np, hn] -> [s, b, np, hn]
-                    out = out.view(-1, ctx.batch_size, *out.shape[-2:])
-        elif not use_fused_attention:
-            out = out.view(-1, *out.shape[-2:])
+            if qkv_format == "bshd":
+                # [b*s, np, hn] -> [b, s, np, hn]
+                out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+            elif qkv_format == "sbhd":
+                # [s*b, np, hn] -> [s, b, np, hn]
+                out = out.view(-1, ctx.batch_size, *out.shape[-2:])
 
         if fp8 and use_fused_attention:
             amax_cp_fwd = amax_per_step.amax(dim=1)
@@ -3255,13 +3257,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         torch.cuda.current_stream().wait_stream(cp_stream)
 
-        if use_fused_attention:
-            if qkv_format == "bshd":
-                out = out.view(out.shape[0], -1, *out.shape[-2:])
-            elif qkv_format == "sbhd":
-                out = out.view(-1, *out.shape[-3:])
-        else:
-            out = out.view(-1, *out.shape[-2:])
+        if qkv_format == "bshd":
+            out = out.view(out.shape[0], -1, *out.shape[-2:])
+        elif qkv_format == "sbhd":
+            out = out.view(-1, *out.shape[-3:])
 
         ctx.save_for_backward(
             q,
@@ -3744,13 +3743,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, False
         )
 
-        if use_fused_attention:
-            if qkv_format == "bshd":
-                # [b*s, np, hn] -> [b, s, np, hn]
-                out = out.view(batch_size, -1, *out.shape[-2:])
-            elif qkv_format == "sbhd":
-                # [s*b, np, hn] -> [s, b, np, hn]
-                out = out.view(-1, batch_size, *out.shape[-2:])
+        if qkv_format == "bshd":
+            # [b*s, np, hn] -> [b, s, np, hn]
+            out = out.view(batch_size, -1, *out.shape[-2:])
+        elif qkv_format == "sbhd":
+            # [s*b, np, hn] -> [s, b, np, hn]
+            out = out.view(-1, batch_size, *out.shape[-2:])
 
         if fp8:
             if fp8_meta["recipe"].fp8_mha:
@@ -3889,10 +3887,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_dqkv_dtype = TE_DType[dout.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
-
-        if not ctx.use_fused_attention:
-            out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-        dout = dout.view(*out.shape)
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, out.device, True)
         out, dout = flash_attn_a2a_communicate(
@@ -4053,15 +4047,15 @@ def attn_forward_func_with_cp(
     Attention implementation with context parallelism.
     """
 
-    if isinstance(cp_comm_type, list):
-        assert isinstance(cp_group, list), "Hierarchical CP implementation needs multi-level of CP groups!"
-        assert len(cp_comm_type) == 2 and len(cp_group) == 2, "Current implementation only supports two-level of CP groups!"
+    if cp_comm_type == "a2a+p2p":
+        assert isinstance(cp_group, list), "Hierarchical CP implementation needs multi-level CP groups!"
+        assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
-            cp_comm_type = cp_comm_type[1]
+            cp_comm_type = "p2p"
         elif get_distributed_world_size(cp_group[1]) == 1:
             cp_group = cp_group[0]
-            cp_comm_type = cp_comm_type[0]
+            cp_comm_type = "a2a"
     else:
         assert isinstance(cp_group, dist_group_type), "Unsupported process group for non-hierarchical CP implementation!"
 
@@ -4119,7 +4113,7 @@ def attn_forward_func_with_cp(
         use_fused_attention,
     ]
 
-    if cp_comm_type in ["p2p", ["a2a", "p2p"]]:
+    if "p2p" in cp_comm_type:
         args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
@@ -4942,7 +4936,7 @@ class FlashAttention(torch.nn.Module):
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
-        cp_comm_type: Union[str, List[str]] = "p2p",
+        cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
@@ -6756,7 +6750,7 @@ class FusedAttention(torch.nn.Module):
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
-        cp_comm_type: Union[str, List[str]] = "p2p",
+        cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
@@ -7035,18 +7029,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                compute and communication overlapping. To address the wave quantization
                issue of each split step, we add an additional CUDA stream so that we
                can overlap two flash attention kernels.
-    cp_comm_type : Union[str, List[str]], default = `p2p`
+    cp_comm_type : str, default = `p2p`
                   inter-gpu communication type for context parallelism.
-                  Can be "p2p" or "all_gather" or "a2a" or ["a2a", "p2p"].
+                  Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
                   "p2p": Exchange KV chunks with P2P communications in ring topology.
                          P2P is async and can be overlapped with attention compute.
                   "all_gather": All-gather to get full sequence of KV before attention.
                                 The all-gather is not async, and cannot be overlapped.
                   "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
                          group, and gather to get full sequence of QKV.
-                  ["a2a", "p2p"]: hierarchical CP implementation. First applying a2a
-                  to QKV across each CP sub-group (e.g., via NVLink), then exchanging
-                  KV with p2p between sub-groups (e.g., via IBLink).
+                  "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
+                  across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                  p2p between sub-groups (e.g., via IBLink).
     """
 
     def __init__(
@@ -7067,7 +7061,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
         cp_stream: torch.cuda.Stream = None,
-        cp_comm_type: Union[str, List[str]] = "p2p",
+        cp_comm_type: str = "p2p",
         softmax_scale: Optional[float] = None,
     ) -> None:
         super().__init__()
@@ -7222,7 +7216,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         cp_group: Union[dist_group_type, List[dist_group_type], None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
-        cp_comm_type: Union[str, List[str]] = "p2p",
+        cp_comm_type: str = "p2p",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -7236,18 +7230,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : Union[str, List[str]], default = `p2p`
+        cp_comm_type : str, default = `p2p`
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a" or ["a2a", "p2p"].
+                      Can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
                       "p2p": Exchange KV chunks with P2P communications in ring topology.
                              P2P is async and can be overlapped with attention compute.
                       "all_gather": All-gather to get full sequence of KV before attention.
                                     The all-gather is not async, and cannot be overlapped.
                       "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
                              group, and gather to get full sequence of QKV.
-                      ["a2a", "p2p"]: hierarchical CP implementation. First applying a2a
-                      to QKV across each CP sub-group (e.g., via NVLink), then exchanging
-                      KV with p2p between sub-groups (e.g., via IBLink).
+                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
+                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                      p2p between sub-groups (e.g., via IBLink).
         """
         self.cp_group = cp_group
         self.cp_global_ranks = cp_global_ranks
@@ -8261,7 +8255,7 @@ class MultiheadAttention(torch.nn.Module):
         cp_group: Union[dist_group_type, List[dist_group_type], None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
-        cp_comm_type: Union[str, List[str]] = "p2p",
+        cp_comm_type: str = "p2p",
     ) -> None:
         """
         Set the context parallel attributes for the given
@@ -8275,18 +8269,18 @@ class MultiheadAttention(torch.nn.Module):
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : Union[str, List[str]], default = `p2p`
+        cp_comm_type : str, default = `p2p`
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather" or "a2a", ["a2a", "p2p"].
+                      Can be "p2p" or "all_gather" or "a2a", "a2a+p2p".
                       "p2p": Exchange KV chunks with P2P communications in ring topology.
                              P2P is async and can be overlapped with attention compute.
                       "all_gather": All-gather to get full sequence of KV before attention.
                                     The all-gather is not async, and cannot be overlapped.
                       "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
                              group, and gather to get full sequence of QKV.
-                      ["a2a", "p2p"]: hierarchical CP implementation. First applying a2a
-                      to QKV across each CP sub-group (e.g., via NVLink), then exchanging
-                      KV with p2p between sub-groups (e.g., via IBLink).
+                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
+                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                      p2p between sub-groups (e.g., via IBLink).
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
