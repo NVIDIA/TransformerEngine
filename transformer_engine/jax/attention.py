@@ -6,6 +6,7 @@
 from enum import Enum
 from functools import partial
 from typing import Optional, Tuple
+import warnings
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
@@ -86,6 +87,60 @@ def get_qkv_format(qkv_layout):
     return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
 
 
+# Following check_set_window_size() in transformer_engine/pytorch/attention.py
+def check_set_window_size(
+    attn_mask_type: AttnMaskType,
+    window_size: Tuple[int, int] = None,
+):
+    """Check if sliding window size is compliant with attention mask type.
+    If not, set it to the appropriate size.
+
+         attn_mask_type                              |   window_size
+    -------------------------------------------------------------------------
+    NO_MASK, PADDING_MASK                            | (-1, -1) or (>=0, >=0)
+    CAUSAL_MASK                                      | (-1,  0) or (>=0, 0)
+    PADDING_CAUSAL_MASK                              | (-1,  0) or (>=0, 0)
+    CAUSAL_BOTTOM_RIGHT_MASK                         | (-1,  0) or (>=0, 0)
+    PADDING_CAUSAL_BOTTOM_RIGHT_MASK                 | (-1,  0) or (>=0, 0)
+    """
+    orig_window_size = window_size
+    non_causal_mask_types = {AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK}
+    causal_mask_types = {
+        AttnMaskType.CAUSAL_MASK,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+    }
+    if attn_mask_type in causal_mask_types:
+        if orig_window_size is None:
+            window_size = (-1, 0)
+        elif orig_window_size == (-1, -1) or (
+            orig_window_size[0] >= 0 and orig_window_size[1] != 0
+        ):
+            window_size = (orig_window_size[0], 0)
+            warnings.warn(
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type.name
+            )
+        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
+            assert False, (
+                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type.name
+            )
+    elif attn_mask_type in non_causal_mask_types:
+        if orig_window_size is None:
+            window_size = (-1, -1)
+        elif orig_window_size == (-1, 0):
+            window_size = (-1, -1)
+            warnings.warn(
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type.name
+            )
+        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
+            assert False, (
+                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type.name
+            )
+    else:
+        assert False, "Invalid attn_mask_type: " + attn_mask_type.name
+    return window_size
+
 def canonicalize_attn_mask_type(attn_mask_type: str):
     """Convert string attn_mask_type to AttnMaskType
     TE-JAX currently fall back to the padding version kernels for the libraries integration.
@@ -129,6 +184,8 @@ def is_fused_attn_kernel_available(
     q_max_seqlen,
     kv_max_seqlen,
     head_dim,
+    window_size_left = -1,
+    window_size_right = -1,
 ):
     """
     To check whether the fused attention kernel is supported
@@ -145,6 +202,8 @@ def is_fused_attn_kernel_available(
         q_max_seqlen,
         kv_max_seqlen,
         head_dim,
+        window_size_left,
+        window_size_right,
     ).is_fused_attn_kernel_available()
 
 
@@ -247,6 +306,8 @@ def fused_attn(
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -275,6 +336,8 @@ def fused_attn(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
+        window_size_left (int): Sliding window size (the left half).
+        window_size_right (int): Sliding window size (the right half).
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -332,6 +395,8 @@ def fused_attn(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=1,
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -354,6 +419,8 @@ def fused_attn_thd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int = 1,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -451,6 +518,8 @@ def fused_attn_thd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -458,7 +527,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -474,6 +543,8 @@ def _fused_attn(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    window_size_left: int,
+    window_size_right: int,
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
 ):
@@ -492,6 +563,8 @@ def _fused_attn(
         dropout_probability,
         is_training,
         max_segments_per_seq,
+        window_size_left,
+        window_size_right,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
     )
@@ -513,6 +586,8 @@ def _fused_attn_fwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    window_size_left,
+    window_size_right,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
 ):
@@ -531,6 +606,8 @@ def _fused_attn_fwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -558,6 +635,8 @@ def _fused_attn_bwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    window_size_left,
+    window_size_right,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     ctx,
@@ -592,6 +671,8 @@ def _fused_attn_bwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size_left=window_size_left,
+        window_size_right=window_size_right,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
