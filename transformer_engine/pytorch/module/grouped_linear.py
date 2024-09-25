@@ -754,7 +754,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self._fast_get_param(f"weight{i}") for i in range(self.num_gemms)
             ]
             bias_tensors = [
-                self._fast_get_param(f"bias{i}") for i in range(self.num_gemms)
+                getattr(self, f"bias{i}") for i in range(self.num_gemms)
             ]
             if not self.fp8:
                 weight_tensors = [
