@@ -4113,7 +4113,7 @@ def attn_forward_func_with_cp(
         use_fused_attention,
     ]
 
-    if "p2p" in cp_comm_type:
+    if cp_comm_type in ["p2p", "a2a+p2p"]:
         args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
