@@ -750,16 +750,11 @@ class GroupedLinear(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=self.num_gemms) as inp:
 
-            weight_tensors = [
-                self._fast_get_param(f"weight{i}") for i in range(self.num_gemms)
-            ]
-            bias_tensors = [
-                getattr(self, f"bias{i}") for i in range(self.num_gemms)
-            ]
+            weight_tensors = [self._fast_get_param(f"weight{i}") for i in range(self.num_gemms)]
+            bias_tensors = [getattr(self, f"bias{i}") for i in range(self.num_gemms)]
             if not self.fp8:
                 weight_tensors = [
-                    w.dequantize() if isinstance(w, QuantizedTensor) else w
-                    for w in weight_tensors
+                    w.dequantize() if isinstance(w, QuantizedTensor) else w for w in weight_tensors
                 ]
 
             weight_tensors_fp8 = [None] * self.num_gemms
