@@ -17,7 +17,7 @@ dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
 def run_dpa_with_cp(
-    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
+    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_size=2, cp_comm_type="p2p"
 ):
     """Test DotProductAttention module with context parallelism"""
 
@@ -59,6 +59,19 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    if isinstance(cp_size, list):
+        assert len(cp_size) == 2
+        assert len(cp_size) == len(cp_comm_type)
+        assert cp_size[0] * cp_size[1] == world_size
+        cp_comm_sub_ranks = [range(i*cp_size[0], (i+1)*cp_size[0]) for i in range(cp_size[1])]
+        cp_comm_sub_ranks += [range(i, world_size, cp_size[0]) for i in range(cp_size[0])]
+        cp_comm_sub_groups = []
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                cp_comm_sub_groups.append(sub_group)
+    else:
+        assert cp_size == world_size
 
     if dtype == "fp8":
         fp8_recipe = DelayedScaling(fp8_dpa=True)
@@ -167,13 +180,6 @@ def run_dpa_with_cp(
     else:
         bias = None
 
-    # make sure all GPU ranks have same inputs
-    for x in [q, k, v, dout] + ([] if bias is None else [bias]):
-        dist.broadcast(x, 0, group=cp_comm_group)
-    if qkv_format == "thd":
-        for x in [cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded]:
-            dist.broadcast(x, 0, group=cp_comm_group)
-
     # run core_attn without CP
     for x in [q, k, v]:
         x.requires_grad = True
@@ -239,7 +245,7 @@ def run_dpa_with_cp(
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
-        cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+        cp_comm_sub_groups if isinstance(cp_size, list) else cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
     )
 
     if dtype == "fp8":
