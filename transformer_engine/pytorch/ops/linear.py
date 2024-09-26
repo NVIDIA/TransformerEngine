@@ -137,6 +137,11 @@ class Linear(FusedOperation):
 
     @property
     def weight(self) -> torch.nn.Parameter:
+        """Weight tensor
+
+        Parameter is owned by `BasicLinear` operation.
+
+        """
         return self.basic_ops[0].weight
 
     @weight.setter
@@ -145,6 +150,11 @@ class Linear(FusedOperation):
 
     @property
     def bias(self) -> Optional[torch.nn.Parameter]:
+        """Bias tensor
+
+        Parameter is owned by `Bias` operation.
+
+        """
         if self._has_bias:
             return self.basic_ops[1].bias
         return None
