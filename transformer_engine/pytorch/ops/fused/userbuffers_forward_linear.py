@@ -32,7 +32,6 @@ from .._common import (
 )
 
 
-
 class UserbuffersForwardLinear(FusedOperation):
     """Linear forward implementation using Userbuffers
 
