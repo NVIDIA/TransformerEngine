@@ -528,11 +528,11 @@ class GroupedLinear(TransformerEngineBaseModule):
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
     get_rng_state_tracker : Callable, default = `None`
-                 used to get the random number generator state tracker for initilizeing weights.
+                 used to get the random number generator state tracker for initializing weights.
     rng_tracker_name : str, default = `None`
                  the param passed to get_rng_state_tracker to get the specific rng tracker.
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
 
