@@ -667,7 +667,7 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight_requires_grad=weight_requires_grad,
             bias_requires_grad=(bias_op is not None),
             device=linear_op.device,
-            dtype=linear_op.dtype,
+            dtype=linear_op.dtype,  # TODO: Use linear_op_ctx.dtype when PR #1202 lands
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,

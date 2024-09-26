@@ -471,6 +471,11 @@ class UserbuffersForwardLinear(FusedOperation):
             if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
                 grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
 
+        # Get autocast dtype if needed
+        dtype = None
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+
         # Userbuffers options
         if linear_op._userbuffers_options is None:
             raise RuntimeError("Linear op is missing dict for Userbuffers options")
@@ -481,7 +486,7 @@ class UserbuffersForwardLinear(FusedOperation):
             weight=linear_op.weight,
             bias=bias,
             device=linear_op.device,
-            dtype=linear_op.dtype,
+            dtype=dtype,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -500,6 +505,7 @@ class UserbuffersForwardLinear(FusedOperation):
         linear_op_ctx.weight_fp8_meta = weight_fp8_meta
         linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
         linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        linear_op_ctx.dtype = dtype
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
