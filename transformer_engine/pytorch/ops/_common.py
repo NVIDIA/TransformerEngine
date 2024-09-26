@@ -9,6 +9,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
+from transformer_engine_torch import FP8TensorMeta
+from ..fp8 import FP8GlobalStateManager
 from ..tensor import Float8Tensor
 from ..utils import (
     canonicalize_device,  # pylint: disable=unused-import
@@ -117,7 +119,7 @@ def reshape(
 
 
 def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, int]:
-    """Get FP8TensorMeta object and index corrsponding to Float8Tensor
+    """Get FP8TensorMeta object and index corresponding to Float8Tensor
 
     Constructs FP8TensorMeta if needed.
 
