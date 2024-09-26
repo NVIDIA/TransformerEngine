@@ -512,7 +512,7 @@ class TestBasicOps:
             bias_op.bias.copy_(b_test)
             del b_test
         forward = te_ops.Sequential(
-            te_ops.CastFloat8(forward=False, backward=fp8_grad_input),
+            te_ops.Quantize(forward=False, backward=fp8_grad_input),
             bias_op,
         )
         with te.fp8_autocast(enabled=fp8_grad_input, fp8_recipe=fp8_recipe):

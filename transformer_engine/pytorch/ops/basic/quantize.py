@@ -2,27 +2,20 @@
 #
 # See LICENSE for license information.
 
-"""Fusible operation for identity."""
+"""Fusible operation for quantization."""
 
 from __future__ import annotations
 from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    get_fp8_te_dtype,
-)
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
-from .._common import is_float8_tensor
+from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
+from ...tensor import Float8Tensor, QuantizedTensor
+from ..op import BasicOperation, OperationContext
 
 
-class CastFloat8(BasicOperation):
-    """Cast tensor to FP8
+class Quantize(BasicOperation):
+    """Quantize tensor data
 
     Uses FP8 recipe from `fp8_autocast` context. When called outside
     of an `fp8_autocast` context, this is an identity operation.
@@ -30,9 +23,9 @@ class CastFloat8(BasicOperation):
     Parameters
     ----------
     forward: bool, default = `True`
-        Perform FP8 cast in forward pass
+        Perform quantization in forward pass
     backward: bool, default = `False`
-        Perform FP8 cast in backward pass
+        Perform quantization in backward pass
 
     """
 
@@ -42,13 +35,13 @@ class CastFloat8(BasicOperation):
         backward: bool = False,
     ) -> None:
         super().__init__()
-        self._cast_forward = forward
-        self._cast_backward = backward
+        self._quantize_forward = forward
+        self._quantize_backward = backward
 
     def num_fp8_scales(self, mode: str) -> int:
-        if mode == "input" and self._cast_forward:
+        if mode == "input" and self._quantize_forward:
             return 1
-        if mode == "grad_output" and self._cast_backward:
+        if mode == "grad_output" and self._quantize_backward:
             return 1
         return 0
 
@@ -62,12 +55,12 @@ class CastFloat8(BasicOperation):
 
         # Check if FP8 is enabled
         fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
-        cast_forward = fp8_enabled and self._cast_forward
-        cast_backward = fp8_enabled and self._cast_backward
+        quantize_forward = fp8_enabled and self._quantize_forward
+        quantize_backward = fp8_enabled and self._quantize_backward
 
-        # Cast to FP8 if needed
+        # Quantize if needed
         out = input_
-        if cast_forward and not is_float8_tensor(out):
+        if quantize_forward and not isinstance(out, QuantizedTensor):
             fp8_meta = self.get_fp8_meta("input")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             out = Float8Tensor.to_float8(
@@ -78,7 +71,7 @@ class CastFloat8(BasicOperation):
                 fp8_dtype=fp8_dtype,
             )
 
-        ctx.cast_backward = cast_backward
+        ctx.quantize_backward = quantize_backward
         return out
 
     def op_backward(
@@ -87,7 +80,7 @@ class CastFloat8(BasicOperation):
         grad_output: torch.Tensor,
     ) -> tuple[torch.Tensor, tuple[()]]:
         grad_input = grad_output
-        if ctx.cast_backward and not is_float8_tensor(grad_input):
+        if ctx.quantize_backward and not isinstance(grad_input, QuantizedTensor):
             fp8_meta = self.get_fp8_meta("grad_output")
             fp8_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
             grad_input = Float8Tensor.to_float8(
