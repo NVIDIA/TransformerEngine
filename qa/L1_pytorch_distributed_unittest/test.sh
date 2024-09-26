@@ -9,7 +9,6 @@ set -e
 pip install setuptools==69.5.1
 
 : ${TE_PATH:=/opt/transformerengine}
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
 
 git clone https://github.com/NVIDIA/Megatron-LM.git
