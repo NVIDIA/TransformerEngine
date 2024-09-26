@@ -923,7 +923,7 @@ class TestBasicOps:
         )[activation]
         forward = te_ops.Sequential(
             make_op(),
-            te_ops.CastFloat8(forward=fp8_output, backward=False),
+            te_ops.Quantize(forward=fp8_output, backward=False),
         )
         with te.fp8_autocast(enabled=fp8_output):
             y_test = forward(x_test)
