@@ -772,6 +772,7 @@ class TestFusedAttn:
         window_size_left = -1
         window_size_right = -1
         if swa:
+            random.seed(42)
             # Use a small window size to avoid long running time
             window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
             window_size_left, window_size_right = window_size
@@ -820,6 +821,7 @@ class TestFusedAttn:
         window_size_left = -1
         window_size_right = -1
         if swa:
+            random.seed(42)
             # Use a small window size to avoid long running time
             window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
             window_size_left, window_size_right = window_size
