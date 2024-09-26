@@ -68,13 +68,13 @@ def canonicalize_fp8_scales(
     # Force offsets to be the same if needed
     if not allow_multiple_offsets and not scale_offset == amax_offset == scale_inv_offset:
         if scale_offset != 0:
-            scale = scale[scale_offset]
+            scale = scale[scale_offset:]
             scale_offset = 0
         if amax_offset != 0:
-            amax = amax[0][amax_offset]
+            amax = amax[:, amax_offset:]
             amax_offset = 0
         if scale_inv_offset != 0:
-            scale_inv = scale_inv[scale_inv_offset]
+            scale_inv = scale_inv[scale_inv_offset:]
             scale_inv_offset = 0
 
     # Pack tensors and offsets into dicts
