@@ -21,12 +21,10 @@ from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import get_ub, get_workspace
-from ...utils import clear_tensor_data
+from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import FusedOperation, FusibleOperation, OperationContext
 from .._common import (
-    canonicalize_device,
-    canonicalize_dtype,
     convert_tensor,
     get_fp8_meta_from_fp8_tensor,
     is_float8_tensor,
@@ -312,53 +310,45 @@ class UserbuffersBackwardLinear(FusedOperation):
                 grad_output_fp8_meta["recipe"],
                 fprop_tensor=False,
             )
-            if with_ub_all_gather_dy:
-                data = ub_comm_dy.get_ubuf_output(0)
-            else:
-                data = torch.empty_like(dy_local, dtype=torch.uint8)
-            dy_fp8 = Float8Tensor(
-                data=data,
-                fp8_meta=grad_output_fp8_meta,
-                fp8_meta_forward=False,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
-            )
             if bias_requires_grad and db is None:
                 # Fused cast-transpose-bgrad
-                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-                    forward=dy_fp8._fp8_meta_forward,
-                )
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+                fp8_scale_inv = torch.empty([1], dtype=torch.float32, device=device)
                 db, data, data_transpose = fp8_cast_transpose_bgrad_fused(
                     dy_local,
-                    dy_fp8._fp8_meta[fp8_meta_key],
-                    dy_fp8._fp8_meta_index,
-                    dy_fp8._fp8_dtype,
-                    scale_inv=dy_fp8._scale_inv,
+                    grad_output_fp8_meta[fp8_meta_key],
+                    0,
+                    fp8_dtype,
+                    scale_inv=fp8_scale_inv,
                 )
                 if with_ub_all_gather_dy:
-                    dy_fp8._data.copy_(data)
-                    db_async = torch.distributed.all_reduce(
-                        db,
-                        group=tensor_parallel_group,
-                        async_op=True,
-                    )
-                else:
-                    dy_fp8._data = data
-                    dy_fp8._transpose = data_transpose
-                    dy_fp8._transpose_invalid = False
-            elif not with_ub_all_gather_dy:
-                dy_fp8.cast_transpose_(dy_local)
+                    data = ub_comm_dy.get_ubuf_output(0).copy_(data)
+                dy_local = Float8Tensor(
+                    data=data,
+                    fp8_meta=grad_output_fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    fp8_scale_inv=fp8_scale_inv,
+                    dtype=dtype,
+                    data_transpose=data_transpose,
+                )
             else:
-                dy_fp8.copy_(dy_local)
-            dy_local = dy_fp8
+                dy_local = Float8Tensor.to_float8(
+                    dy_local,
+                    fp8_meta=grad_output_fp8_meta,
+                    fp8_meta_forward=False,
+                    fp8_meta_index=0,
+                    fp8_dtype=fp8_dtype,
+                    data=(ub_comm_dy.get_ubuf_output(0) if with_ub_all_gather_dy else None),
+                    with_transpose_cache=(not with_ub_all_gather_dy),
+                )
         elif not with_fp8_compute and is_float8_tensor(dy_local):
             if with_ub_all_gather_dy:
                 ub_local_buffer = ub_comm_dy.get_ubuf_output(0)
                 dy_local = ub_local_buffer.copy_(dy_local)
             else:
-                dy_local = dy_local.from_float8()
+                dy_local = dy_local.dequantize()
 
         if bias_requires_grad and db is None and with_fp8_compute and with_ub_all_gather_dy:
             # We don't have a fused grad bias impl that takes FP8
@@ -386,30 +376,21 @@ class UserbuffersBackwardLinear(FusedOperation):
                     input_fp8_meta["recipe"],
                     fprop_tensor=True,
                 )
-                if with_ub_all_gather_x:
-                    data = ub_comm_x.get_ubuf_output(0)
-                else:
-                    data = torch.empty_like(x_local, dtype=torch.uint8)
-                x_fp8 = Float8Tensor(
-                    data=data,
+                x_local = Float8Tensor.to_float8(
+                    x_local,
                     fp8_meta=input_fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
-                    fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                    dtype=dtype,
+                    data=(ub_comm_x.get_ubuf_output(0) if with_ub_all_gather_x else None),
+                    with_transpose_cache=(not with_ub_all_gather_x),
                 )
-                if with_ub_all_gather_x:
-                    x_fp8.copy_(x_local)
-                else:
-                    x_fp8.cast_transpose_(x_local)
-                x_local = x_fp8
             elif not with_fp8_compute and is_float8_tensor(x_local):
                 if with_ub_all_gather_x:
                     ub_local_buffer = ub_comm_x.get_ubuf_output(0)
                     x_local = ub_local_buffer.copy_(x_local)
                 else:
-                    x_local = x_local.from_float8()
+                    x_local = x_local.dequantize()
 
         # Check weight tensor
         w = convert_tensor(
@@ -423,19 +404,16 @@ class UserbuffersBackwardLinear(FusedOperation):
                 weight_fp8_meta["recipe"],
                 fprop_tensor=True,
             )
-            w_fp8 = Float8Tensor(
-                data=torch.empty_like(w, dtype=torch.uint8),
+            w = Float8Tensor.to_float8(
+                w,
                 fp8_meta=weight_fp8_meta,
                 fp8_meta_forward=True,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
+                with_transpose_cache=True,
             )
-            w_fp8.cast_transpose_(w)
-            w = w_fp8
         elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.from_float8()
+            w = w.dequantize()
 
         # Initialize buffers for UB all-gather if needed
         dy = dy_local

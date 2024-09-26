@@ -16,6 +16,7 @@ from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import get_ub, get_workspace
+from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
     BasicOperation,
@@ -24,13 +25,12 @@ from ..op import (
     OperationContext,
 )
 from .._common import (
-    canonicalize_device,
-    canonicalize_dtype,
     convert_tensor,
     get_fp8_meta_from_fp8_tensor,
     is_float8_tensor,
     reshape,
 )
+
 
 
 class UserbuffersForwardLinear(FusedOperation):
@@ -247,32 +247,23 @@ class UserbuffersForwardLinear(FusedOperation):
                 input_fp8_meta["recipe"],
                 fprop_tensor=True,
             )
-            if with_ub_all_gather:
-                data = ub_local_buffer
-            else:
-                data = torch.empty_like(x_local, dtype=torch.uint8)
-            x_fp8 = Float8Tensor(
-                data=data,
+            with_transpose_cache = weight.requires_grad
+            if tensor_parallel_mode == "column" and sequence_parallel:
+                with_transpose_cache = False
+            x_local = Float8Tensor.to_float8(
+                x_local,
                 fp8_meta=input_fp8_meta,
                 fp8_meta_forward=True,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
+                data=(ub_local_buffer if with_ub_all_gather else None),
+                with_transpose_cache=with_transpose_cache,
             )
-            with_cast_transpose = weight.requires_grad
-            if tensor_parallel_mode == "column" and sequence_parallel:
-                with_cast_transpose = False
-            if with_cast_transpose:
-                x_fp8.cast_transpose_(x_local)
-            else:
-                x_fp8.copy_(x_local)
-            x_local = x_fp8
         elif not with_fp8_compute and is_float8_tensor(x_local):
             if with_ub_all_gather:
                 x_local = ub_local_buffer.copy_(x_local)
             else:
-                x_local = x_local.from_float8()
+                x_local = x_local.dequantize()
 
         # Initialize buffers for UB all-gather if needed
         x = x_local
@@ -309,7 +300,7 @@ class UserbuffersForwardLinear(FusedOperation):
                 fp8_dtype=fp8_dtype,
             )
         elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.from_float8()
+            w = w.dequantize()
 
         # Check bias tensor
         b = None
