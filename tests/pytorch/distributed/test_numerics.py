@@ -41,7 +41,7 @@ def _run_test(layer, fp8):
     ]
 
     if fp8:
-        test_cmd += ["--fp8=true"]
+        test_cmd += ["--fp8"]
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
     if (
