@@ -2172,12 +2172,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             out = flash_attn_a2a_communicate(
                 out, chunk_ids_for_a2a, seq_dim, cp_size_a2a, cp_group_a2a, cp_stream, False
             )
-            if qkv_format == "bshd":
-                # [b*s, np, hn] -> [b, s, np, hn]
-                out = out.view(ctx.batch_size, -1, *out.shape[-2:])
-            elif qkv_format == "sbhd":
-                # [s*b, np, hn] -> [s, b, np, hn]
-                out = out.view(-1, ctx.batch_size, *out.shape[-2:])
+            if use_fused_attention:
+                if qkv_format == "bshd":
+                    # [b*s, np, hn] -> [b, s, np, hn]
+                    out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+                elif qkv_format == "sbhd":
+                    # [s*b, np, hn] -> [s, b, np, hn]
+                    out = out.view(-1, ctx.batch_size, *out.shape[-2:])
+        elif not use_fused_attention:
+            out = out.view(-1, *out.shape[-2:])
 
         if fp8 and use_fused_attention:
             amax_cp_fwd = amax_per_step.amax(dim=1)
@@ -2377,6 +2380,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
 
         if cp_size_a2a > 1:
+            if not ctx.use_fused_attention:
+                out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+                dout = dout.view(*out.shape)
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, True)
             out, dout = flash_attn_a2a_communicate(
                 [out, dout], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, True
@@ -3257,10 +3263,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         torch.cuda.current_stream().wait_stream(cp_stream)
 
-        if qkv_format == "bshd":
-            out = out.view(out.shape[0], -1, *out.shape[-2:])
-        elif qkv_format == "sbhd":
-            out = out.view(-1, *out.shape[-3:])
+        if use_fused_attention:
+            if qkv_format == "bshd":
+                out = out.view(out.shape[0], -1, *out.shape[-2:])
+            elif qkv_format == "sbhd":
+                out = out.view(-1, *out.shape[-3:])
+        else:
+            out = out.view(-1, *out.shape[-2:])
 
         ctx.save_for_backward(
             q,
@@ -3743,12 +3752,13 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             out, chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, False
         )
 
-        if qkv_format == "bshd":
-            # [b*s, np, hn] -> [b, s, np, hn]
-            out = out.view(batch_size, -1, *out.shape[-2:])
-        elif qkv_format == "sbhd":
-            # [s*b, np, hn] -> [s, b, np, hn]
-            out = out.view(-1, batch_size, *out.shape[-2:])
+        if use_fused_attention:
+            if qkv_format == "bshd":
+                # [b*s, np, hn] -> [b, s, np, hn]
+                out = out.view(batch_size, -1, *out.shape[-2:])
+            elif qkv_format == "sbhd":
+                # [s*b, np, hn] -> [s, b, np, hn]
+                out = out.view(-1, batch_size, *out.shape[-2:])
 
         if fp8:
             if fp8_meta["recipe"].fp8_mha:
@@ -3887,6 +3897,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = TE_DType[q.dtype]
                 fused_attn_dqkv_dtype = TE_DType[dout.dtype]
                 fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+
+        if not ctx.use_fused_attention:
+            out = out.view(ctx.batch_size, -1, *out.shape[-2:])
+        dout = dout.view(*out.shape)
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size, out.device, True)
         out, dout = flash_attn_a2a_communicate(
