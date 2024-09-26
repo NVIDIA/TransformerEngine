@@ -23,7 +23,6 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 """
 
 
-
 if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")
 
@@ -33,12 +32,10 @@ TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(torch.cuda.device_count(), 4)
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
+
 def _run_test(layer, fp8):
     test_path = TEST_ROOT / "run_numerics.py"
-    test_cmd = LAUNCH_CMD + [
-        str(test_path),
-        f"--layer-type={layer}"
-    ]
+    test_cmd = LAUNCH_CMD + [str(test_path), f"--layer-type={layer}"]
 
     if fp8:
         test_cmd += ["--fp8"]
@@ -54,11 +51,13 @@ def _run_test(layer, fp8):
 
 all_boolean = [True, False]
 
+
 @pytest.mark.parametrize("fp8", all_boolean)
 def test_linear(fp8):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     _run_test("linear", fp8)
+
 
 @pytest.mark.parametrize("fp8", all_boolean)
 def test_layernorm(fp8):
@@ -66,17 +65,20 @@ def test_layernorm(fp8):
         pytest.skip(reason_for_no_fp8)
     _run_test("layernorm", fp8)
 
+
 @pytest.mark.parametrize("fp8", all_boolean)
 def test_layernorm_linear(fp8):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     _run_test("layernorm_linear", fp8)
 
+
 @pytest.mark.parametrize("fp8", all_boolean)
 def test_layernorm_mlp(fp8):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     _run_test("layernorm_mlp", fp8)
+
 
 @pytest.mark.parametrize("fp8", all_boolean)
 def test_transformer_layer(fp8):
