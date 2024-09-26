@@ -42,8 +42,6 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
-    is_fp8_activation_recompute_enabled,
-    in_fp8_activation_recompute_phase,
     use_reentrant_activation_recompute,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
@@ -1485,19 +1483,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight_fp8 = None
             if self.fp8:
                 update_workspace = is_first_microbatch is None or is_first_microbatch
-                with_transpose = torch.is_grad_enabled()
-                if (
-                    is_fp8_activation_recompute_enabled()
-                    and not in_fp8_activation_recompute_phase()
-                ):
-                    with_transpose = True
-                update_transpose_cache = with_transpose
-                if update_transpose_cache:
-                    update_transpose_cache = (
-                        is_first_microbatch or skip_fp8_weight_update is not None
-                    )
                 if isinstance(fc1_weight, Float8Tensor):
-                    if update_transpose_cache:
+                    if fc1_weight._transpose is not None:
                         fc1_weight.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1513,10 +1500,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         cache_name=cache_name,
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                     )
                 if isinstance(fc2_weight, Float8Tensor):
-                    if update_transpose_cache:
+                    if fc2_weight._transpose is not None:
                         fc2_weight.transpose_2d(
                             fill_cache=True,
                             noop_flag=skip_fp8_weight_update,
@@ -1532,7 +1518,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                         cache_name=cache_name,
                         update_workspace=update_workspace,
                         skip_update_flag=skip_fp8_weight_update,
-                        with_transpose=with_transpose,
                     )
 
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
