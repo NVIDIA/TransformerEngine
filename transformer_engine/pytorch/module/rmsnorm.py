@@ -186,7 +186,19 @@ class RMSNorm(torch.nn.Module):
         """RMSNorm FWD"""
 
         # Set the activation type for AMP.
-        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+        # Note: This will soon be deprecated with
+        # https://github.com/NVIDIA/TransformerEngine/pull/1033
+        if torch.is_autocast_enabled():
+            self.activation_dtype = torch.get_autocast_gpu_dtype()
+        elif self.activation_dtype != inp.dtype:
+            dtype = inp.dtype
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
+            self.activation_dtype = dtype
 
         if torch.is_grad_enabled():
             fwd_fn = _RMSNorm.apply

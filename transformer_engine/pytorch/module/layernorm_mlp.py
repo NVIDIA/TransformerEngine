@@ -435,7 +435,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight.weight_offloading = True
                 fc1_weight.weight_offloading = True
                 fc2_weight.weight_offloading = True
-                fc1_bias.weight_offloading = True
+                if fc1_bias is not None:
+                    fc1_bias.weight_offloading = True
 
                 inputmat.activation_offloading = True
                 if normalization == "LayerNorm":
