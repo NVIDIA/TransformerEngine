@@ -145,6 +145,7 @@ def check_set_window_size(
         assert False, "Invalid attn_mask_type: " + attn_mask_type.name
     return window_size
 
+
 # Following get_swa_mask() in transformer_engine/pytorch/attention.py
 def get_swa_mask(
     window_size: Tuple[int, int],
@@ -198,6 +199,7 @@ def get_swa_mask(
             swa_mask = jnp.triu(swa_mask, k=max_seqlen_kv - max_seqlen_q - left)
             swa_mask = jnp.tril(swa_mask, k=max_seqlen_kv - max_seqlen_q + right)
     return swa_mask
+
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
     """Convert string attn_mask_type to AttnMaskType

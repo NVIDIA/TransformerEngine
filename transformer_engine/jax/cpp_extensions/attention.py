@@ -223,6 +223,7 @@ def generate_cu_seqlen(actual_seqlen):
 def _fix_window_size_left(window_size_left: int) -> int:
     return window_size_left + 1
 
+
 class FusedAttnFwdPrimitive(BasePrimitive):
     """
     Fused Attention Forward Primitive
