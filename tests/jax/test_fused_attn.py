@@ -29,6 +29,7 @@ from transformer_engine.jax.attention import (
     fused_attn_thd,
     get_qkv_format,
     check_set_window_size,
+    get_swa_mask,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.transformer_engine_jax import (
@@ -145,26 +146,11 @@ def make_mask(
         )
         inv_mask = combine_masks(inv_pad_mask, inv_mask)
 
-    # The following part follows get_swa_mask() in transformer_engine/pytorch/attention.py
-    # The only difference is that for window size part [w, 0], cuDNN uses a mask that each
-    # row has at most w elements that are NOT masked out, while get_swa_mask() generates
-    # a mask that each row has at most w+1 elements that are not masked out. To compare
-    # cuDNN results with Python reference implementation with mask, we adjust the
-    # arguments for the jnp.triu function by adding 1
     if window_size_left >= 0:
+        window_size = (window_size_left, window_size_right)
         max_seqlen_q = inv_mask.shape[-2]
         max_seqlen_kv = inv_mask.shape[-1]
-        swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv))
-        if is_causal_mask(attn_mask_type):
-            left = window_size_left if window_size_left != -1 else max_seqlen_q
-            right = window_size_right if window_size_right != -1 else max_seqlen_q
-            swa_mask = jnp.triu(swa_mask, k=-left + 1)
-            swa_mask = jnp.tril(swa_mask, k=right)
-        else:
-            left = window_size_left if window_size_left != -1 else max_seqlen_kv
-            right = window_size_right if window_size_right != -1 else max_seqlen_kv
-            swa_mask = jnp.triu(swa_mask, k=max_seqlen_kv - max_seqlen_q - left + 1)
-            swa_mask = jnp.tril(swa_mask, k=max_seqlen_kv - max_seqlen_q + right)
+        swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
         swa_mask_bcast = jnp.broadcast_to(swa_mask, inv_mask.shape)
         inv_mask = jnp.where(inv_mask != 0, swa_mask_bcast, inv_mask)
 

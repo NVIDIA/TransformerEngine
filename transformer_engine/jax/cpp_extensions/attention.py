@@ -216,6 +216,13 @@ def generate_cu_seqlen(actual_seqlen):
     return cu_seqlen
 
 
+# Note: the definition of sliding window mask in cuDNN is slightly different from the paper and
+# the Python get_swa_window() function. We need to +1 for window_size_left to get the desired
+# results. FusedAttn{Fwd, Bwd}Primitive classes are the entering points to C++ backends, so we
+# make the change here. This function needs to be removed if the cuDNN API is fixed.
+def _fix_window_size_left(window_size_left: int) -> int:
+    return window_size_left + 1
+
 class FusedAttnFwdPrimitive(BasePrimitive):
     """
     Fused Attention Forward Primitive
@@ -271,7 +278,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             q_max_seqlen,
             kv_max_seqlen,
             head_dim,
-            config.window_size_left,
+            _fix_window_size_left(config.window_size_left),
             config.window_size_right,
         ).get_fused_attn_backend()
 
@@ -319,7 +326,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(q_aval.dtype),
             config.is_training,
             config.max_segments_per_seq,
-            config.window_size_left,
+            _fix_window_size_left(config.window_size_left),
             config.window_size_right,
         )
         wkspace_aval = q_aval.update(
@@ -400,7 +407,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
-            config.window_size_left,
+            _fix_window_size_left(config.window_size_left),
             config.window_size_right,
         )
 
@@ -629,7 +636,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             config.is_training,
             deterministic,
             config.max_segments_per_seq,
-            config.window_size_left,
+            _fix_window_size_left(config.window_size_left),
             config.window_size_right,
         )
 
@@ -730,7 +737,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             jax_dtype_to_te_dtype(wkspace_aval.dtype),
             config.is_training,
             not FusedAttnHelper.is_non_deterministic_allowed(),
-            config.window_size_left,
+            _fix_window_size_left(config.window_size_left),
             config.window_size_right,
         )
 

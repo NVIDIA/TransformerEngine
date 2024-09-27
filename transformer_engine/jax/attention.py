@@ -145,6 +145,59 @@ def check_set_window_size(
         assert False, "Invalid attn_mask_type: " + attn_mask_type.name
     return window_size
 
+# Following get_swa_mask() in transformer_engine/pytorch/attention.py
+def get_swa_mask(
+    window_size: Tuple[int, int],
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
+):
+    """
+    Convert sliding window `window_size` to an equivalent "`arbitrary`" mask.
+    For "`causal`" mask type, the sliding window diagonal is aligned to the top left corner,
+    and for other mask types, the bottom right corner.
+
+    Parameters
+    ----------
+    window_size: Tuple[int, int]
+        Sliding window size for local attention, where query at position i attends to keys
+        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+        `attn_mask_type`.
+    max_seqlen_q: int
+        Maximum sequence length for queries.
+    max_seqlen_kv: int
+        Maximum sequence length for keys and values.
+    attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
+        Attention mask type, {AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK,
+        AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK,
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK}
+
+    Returns
+    ----------
+    swa_mask: jax.numpy.tensor
+        Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
+        that will get attention, value 0 are the masked out positions.
+    """
+    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv))
+    causal_mask_types = {
+        AttnMaskType.CAUSAL_MASK,
+        AttnMaskType.PADDING_CAUSAL_MASK,
+    }
+    if window_size[0] >= 0:
+        if attn_mask_type in causal_mask_types:
+            left = window_size[0] if window_size[0] != -1 else max_seqlen_q
+            right = window_size[1] if window_size[1] != -1 else max_seqlen_q
+            swa_mask = jnp.triu(swa_mask, k=-left)
+            swa_mask = jnp.tril(swa_mask, k=right)
+        else:
+            left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
+            right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
+            swa_mask = jnp.triu(swa_mask, k=max_seqlen_kv - max_seqlen_q - left)
+            swa_mask = jnp.tril(swa_mask, k=max_seqlen_kv - max_seqlen_q + right)
+    return swa_mask
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
     """Convert string attn_mask_type to AttnMaskType
