@@ -61,7 +61,7 @@ def run_dpa_with_cp(
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
     if cp_comm_type == "a2a+p2p":
         assert world_size % 2 == 0
-        cp_comm_sub_ranks = [range(i*2, (i+1)*2) for i in range(world_size//2)]
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
         cp_comm_sub_groups = []
         for sub_ranks in cp_comm_sub_ranks:
@@ -241,7 +241,10 @@ def run_dpa_with_cp(
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
-        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
+        cp_comm_ranks,
+        torch.cuda.Stream(),
+        cp_comm_type,
     )
 
     if dtype == "fp8":

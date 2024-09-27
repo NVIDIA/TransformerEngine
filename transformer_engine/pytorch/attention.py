@@ -1445,8 +1445,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             softmax_scale = q.shape[-1] ** (-0.5)
 
         if isinstance(cp_group, list):
-            assert qkv_format != "thd", f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
-            assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported with hierarchical CP implementation yet!"
+            assert (
+                qkv_format != "thd"
+            ), f"{qkv_format} format is not supported with hierarchical CP implementation yet!"
+            assert attn_bias_type == "no_bias", (
+                f"{attn_bias_type} bias type is not supported with hierarchical CP implementation"
+                " yet!"
+            )
             cp_group_a2a = cp_group[0]
             cp_size_a2a = get_distributed_world_size(cp_group_a2a)
             rank_a2a = get_distributed_rank(cp_group_a2a)
@@ -2385,7 +2390,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dout = dout.view(*out.shape)
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, True)
             out, dout = flash_attn_a2a_communicate(
-                [out, dout], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, True
+                [out, dout],
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                ctx.cp_group_a2a,
+                ctx.cp_stream,
+                True,
             )
             if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
                 dout = cast_from_fp8(
@@ -2992,7 +3003,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, q.device, False)
             dq, dk, dv = flash_attn_a2a_communicate(
-                [dq, dk, dv], chunk_ids_for_a2a, seq_dim, cp_size_a2a, ctx.cp_group_a2a, ctx.cp_stream, False
+                [dq, dk, dv],
+                chunk_ids_for_a2a,
+                seq_dim,
+                cp_size_a2a,
+                ctx.cp_group_a2a,
+                ctx.cp_stream,
+                False,
             )
             if ctx.qkv_format == "bshd":
                 dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
@@ -4062,7 +4079,9 @@ def attn_forward_func_with_cp(
     """
 
     if cp_comm_type == "a2a+p2p":
-        assert isinstance(cp_group, list), "Hierarchical CP implementation needs multi-level CP groups!"
+        assert isinstance(
+            cp_group, list
+        ), "Hierarchical CP implementation needs multi-level CP groups!"
         assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
         if get_distributed_world_size(cp_group[0]) == 1:
             cp_group = cp_group[1]
@@ -4071,7 +4090,9 @@ def attn_forward_func_with_cp(
             cp_group = cp_group[0]
             cp_comm_type = "a2a"
     else:
-        assert isinstance(cp_group, dist_group_type), f"Unsupported process group for CP communication type {cp_comm_type}!"
+        assert isinstance(
+            cp_group, dist_group_type
+        ), f"Unsupported process group for CP communication type {cp_comm_type}!"
 
     assert qkv_format in [
         "bshd",

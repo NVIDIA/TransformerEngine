@@ -37,7 +37,7 @@ model_configs_flash_attn = {
 
 
 def get_bash_arguments(num_gpus, **kwargs):
-    args = ["python", "-m", "torch.distributed.launch", "--nproc-per-node="+str(num_gpus)]
+    args = ["python", "-m", "torch.distributed.launch", "--nproc-per-node=" + str(num_gpus)]
     te_path = os.getenv("TE_PATH", "/opt/transformerengine")
     script_path = os.path.join(te_path, "tests/pytorch/fused_attn/run_fused_attn_with_cp.py")
     args.append(script_path)
