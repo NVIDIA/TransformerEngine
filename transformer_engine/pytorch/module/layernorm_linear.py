@@ -816,7 +816,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                             y = \frac{x - \mathrm{E}[x]}{ \sqrt{\mathrm{Var}[x] + \varepsilon}} *
                             (1 + \gamma) + \beta
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
 
@@ -832,7 +832,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    parallel_mode : {None, 'Column', 'Row'}, default = `None`
+    parallel_mode : {None, 'column', 'row'}, default = `None`
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
                    When set to `None`, no communication is performed.
