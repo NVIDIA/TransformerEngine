@@ -97,11 +97,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
         output_fp8_meta = None
         output_dtype = TE_DType[dtype]
         output_fp8_scale_inv = None
-        if (
-            fp8_enabled
-            and next_op is not None
-            and next_op.num_fp8_scales("input") > 0
-        ):
+        if fp8_enabled and next_op is not None and next_op.num_fp8_scales("input") > 0:
             with_fp8_output = True
             fp8_meta = next_op.get_fp8_meta("input")
             fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)

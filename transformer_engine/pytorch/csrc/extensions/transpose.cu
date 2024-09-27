@@ -196,17 +196,11 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
   return {grad_bias, dgelu, dgelu_transpose};
 }
 
-void fused_dswiglu_cast_transpose(at::Tensor grad_output,
-                                  at::Tensor input,
-                                  at::Tensor grad_input,
-                                  at::Tensor grad_input_transpose,
-                                  at::Tensor scale,
-                                  at::Tensor amax,
-                                  at::Tensor scale_inv,
-                                  transformer_engine::DType otype,
-                                  int scale_offset,
-                                  int amax_offset,
-                                  int scale_inv_offset) {
+void fused_dswiglu_cast_transpose(at::Tensor grad_output, at::Tensor input, at::Tensor grad_input,
+                                  at::Tensor grad_input_transpose, at::Tensor scale,
+                                  at::Tensor amax, at::Tensor scale_inv,
+                                  transformer_engine::DType otype, int scale_offset,
+                                  int amax_offset, int scale_inv_offset) {
   using namespace transformer_engine;
 
   // Tensor dimensions
@@ -217,33 +211,28 @@ void fused_dswiglu_cast_transpose(at::Tensor grad_output,
   const auto N = static_cast<size_t>(grad_output.size(-1));
 
   // Check tensor dims
-  NVTE_CHECK(grad_output.dim() == 2,
-             "Expected grad output tensor to have 2 dims, but found ", grad_output.dim());
-  NVTE_CHECK(input.dim() == 2,
-             "Expected input tensor to have 2 dims, but found ", input.dim());
-  NVTE_CHECK(outer_dim(input) == M,
-             "Expected input tensor to have outer dimension of ",
-             M, ", but found ", outer_dim(input));
-  NVTE_CHECK(input.size(-1) == 2*N,
-             "Expected input tensor to have inner dimension of ",
-             2*N, ", but found ", input.size(-1));
-  NVTE_CHECK(grad_input.dim() == 2,
-             "Expected grad input tensor to have 2 dims, but found ", grad_input.dim());
-  NVTE_CHECK(outer_dim(grad_input) == M,
-             "Expected grad input tensor to have outer dimension of ",
+  NVTE_CHECK(grad_output.dim() == 2, "Expected grad output tensor to have 2 dims, but found ",
+             grad_output.dim());
+  NVTE_CHECK(input.dim() == 2, "Expected input tensor to have 2 dims, but found ", input.dim());
+  NVTE_CHECK(outer_dim(input) == M, "Expected input tensor to have outer dimension of ", M,
+             ", but found ", outer_dim(input));
+  NVTE_CHECK(input.size(-1) == 2 * N, "Expected input tensor to have inner dimension of ", 2 * N,
+             ", but found ", input.size(-1));
+  NVTE_CHECK(grad_input.dim() == 2, "Expected grad input tensor to have 2 dims, but found ",
+             grad_input.dim());
+  NVTE_CHECK(outer_dim(grad_input) == M, "Expected grad input tensor to have outer dimension of ",
              M, ", but found ", outer_dim(grad_input));
-  NVTE_CHECK(grad_input.size(-1) == 2*N,
-             "Expected grad input tensor to have inner dimension of ",
-             2*N, ", but found ", grad_input.size(-1));
+  NVTE_CHECK(grad_input.size(-1) == 2 * N, "Expected grad input tensor to have inner dimension of ",
+             2 * N, ", but found ", grad_input.size(-1));
   NVTE_CHECK(grad_input_transpose.dim() == 2,
              "Expected grad input transpose tensor to have 2 dims, but found ",
              grad_input_transpose.dim());
-  NVTE_CHECK(grad_input_transpose.size(0) == 2*N,
-             "Expected grad input tensor to have outer dimension of ",
-             2*N, ", but found ", grad_input_transpose.size(0));
+  NVTE_CHECK(grad_input_transpose.size(0) == 2 * N,
+             "Expected grad input tensor to have outer dimension of ", 2 * N, ", but found ",
+             grad_input_transpose.size(0));
   NVTE_CHECK(grad_input_transpose.size(1) == M,
-             "Expected grad input tensor to have outer dimension of ",
-             M, ", but found ", grad_input_transpose.size(1));
+             "Expected grad input tensor to have outer dimension of ", M, ", but found ",
+             grad_input_transpose.size(1));
 
   // Check tensor format
   NVTE_CHECK(grad_output.is_contiguous(), "Expected grad output tensor to be contiguous");
@@ -266,10 +255,10 @@ void fused_dswiglu_cast_transpose(at::Tensor grad_output,
   // Construct Transformer Engine tensors
   auto dy_cu = makeTransformerEngineTensor(grad_output);
   auto x_cu = makeTransformerEngineTensor(input);
-  auto dx_cu = makeTransformerEngineTensor(grad_input.data_ptr(), {M, 2*N}, otype, amax_dptr,
+  auto dx_cu = makeTransformerEngineTensor(grad_input.data_ptr(), {M, 2 * N}, otype, amax_dptr,
                                            scale_dptr, scale_inv_dptr);
-  auto dx_t_cu = makeTransformerEngineTensor(grad_input_transpose.data_ptr(), {2*N, M},
-                                             otype, amax_dptr, scale_dptr, scale_inv_dptr);
+  auto dx_t_cu = makeTransformerEngineTensor(grad_input_transpose.data_ptr(), {2 * N, M}, otype,
+                                             amax_dptr, scale_dptr, scale_inv_dptr);
 
   // Launch kernel
   nvte_dswiglu_cast_transpose(dy_cu.data(), x_cu.data(), dx_cu.data(), dx_t_cu.data(),
