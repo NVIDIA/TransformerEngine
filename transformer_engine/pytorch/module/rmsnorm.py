@@ -120,7 +120,7 @@ class RMSNorm(torch.nn.Module):
                          .. math::
                             y = \frac{x}{RMS_\varepsilon(x)} * (1 + \gamma)
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
     """
