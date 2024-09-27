@@ -4718,20 +4718,20 @@ def get_qkv_layout(
             x.storage_offset() == (offset + i * last_dim_size) for i, x in enumerate([k, v])
         )
 
-        check_hd_offsets_qkv = all(
-            x.storage_offset() == sum(all_dims_size[:i]) for i, x in enumerate([q, k, v])
-        ) if check_ptrs_qkv else all(
-            x.storage_offset() == 0 for i, x in enumerate([q, k, v])
+        check_hd_offsets_qkv = (
+            all(x.storage_offset() == sum(all_dims_size[:i]) for i, x in enumerate([q, k, v]))
+            if check_ptrs_qkv
+            else all(x.storage_offset() == 0 for i, x in enumerate([q, k, v]))
         )
-        check_hd_offsets_qk = all(
-            x.storage_offset() == sum(all_dims_size[:i]) for i, x in enumerate([q, k])
-        ) if not check_ptrs_qkv and check_ptrs_qk else all(
-            x.storage_offset() == 0 for i, x in enumerate([q, k])
+        check_hd_offsets_qk = (
+            all(x.storage_offset() == sum(all_dims_size[:i]) for i, x in enumerate([q, k]))
+            if not check_ptrs_qkv and check_ptrs_qk
+            else all(x.storage_offset() == 0 for i, x in enumerate([q, k]))
         )
-        check_hd_offsets_kv = all(
-            x.storage_offset() == sum(all_dims_size[1:i+1]) for i, x in enumerate([k, v])
-        ) if not check_ptrs_qkv and check_ptrs_kv else all(
-            x.storage_offset() == 0 for i, x in enumerate([k, v])
+        check_hd_offsets_kv = (
+            all(x.storage_offset() == sum(all_dims_size[1 : i + 1]) for i, x in enumerate([k, v]))
+            if not check_ptrs_qkv and check_ptrs_kv
+            else all(x.storage_offset() == 0 for i, x in enumerate([k, v]))
         )
 
         if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_3hd_offsets:
@@ -4754,7 +4754,11 @@ def get_qkv_layout(
             # q and kv may be disjoint or consecutive in memory
             # when consecutive, they may share the same data_ptr()
             qkv_layout = qkv_format + "_" + qkv_format[:-1] + "2" + qkv_format[-1:]
-        elif check_strides_kv and check_shapes_kv and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk):
+        elif (
+            check_strides_kv
+            and check_shapes_kv
+            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
+        ):
             # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
             # three chunks of memory (q, k and v) which can be disjoint or consecutive
             # when consecutive, they may share the same data_ptr()
