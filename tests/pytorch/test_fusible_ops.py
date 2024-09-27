@@ -940,6 +940,77 @@ class TestBasicOps:
         torch.testing.assert_close(y_test, y_ref, **tols)
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_output", (False, True))
+    @pytest.mark.parametrize("fp8_grad_input", (False, True))
+    def test_swiglu(
+        self,
+        *,
+        out_shape: Iterable[int] = (16, 16),
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_output: bool,
+        fp8_grad_input: bool,
+    ):
+
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        in_shape[-1] *= 2
+
+        # Skip invalid configurations
+        fp8 = fp8_output or fp8_grad_input
+        if fp8:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # FP8 recipe
+        fp8_recipe = None
+        if fp8_grad_input:
+            fp8_recipe = transformer_engine.common.recipe.DelayedScaling(
+                fp8_format=transformer_engine.common.recipe.Format.E4M3,
+            )
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x1, x2 = x_ref.chunk(2, dim=-1)
+        y_ref = torch.nn.functional.silu(x1) * x2
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=fp8_grad_input),
+            te_ops.SwiGLU(),
+            te_ops.Quantize(forward=fp8_output, backward=False),
+        )
+        with te.fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
+            y_test = forward(x_test)
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if fp8:
+            tols = dtype_tols(tex.DType.kFloat8E4M3)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
 
 class TestFusedOps:
     """Tests for fused operations"""

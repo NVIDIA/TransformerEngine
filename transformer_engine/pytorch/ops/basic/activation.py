@@ -18,6 +18,7 @@ from ...cpp_extensions import (
     reglu as tex_reglu,
     relu as tex_relu,
     swiglu as tex_swiglu,
+    fp8_dswiglu_cast_transpose_fused,
 )
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...tensor import Float8Tensor, QuantizedTensor
@@ -91,12 +92,13 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
             x = x.contiguous()
 
         # Check if FP8 is enabled
+        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         with_fp8_output = False
         output_fp8_meta = None
         output_dtype = TE_DType[dtype]
         output_fp8_scale_inv = None
         if (
-            FP8GlobalStateManager.is_fp8_enabled()
+            fp8_enabled
             and next_op is not None
             and next_op.num_fp8_scales("input") > 0
         ):
@@ -132,6 +134,7 @@ class _ActivationOperation(BasicOperation, metaclass=abc.ABCMeta):
 
         # Save state for backward pass
         ctx.save_for_backward(x)
+        ctx.fp8_enabled = fp8_enabled
         ctx.prev_op = prev_op
 
         return y
@@ -304,3 +307,88 @@ class SwiGLU(_ActivationOperation):
 
     def _activation_backward_impl(self, *args, **kwargs) -> torch.Tensor:
         return transformer_engine_torch.dswiglu(*args, **kwargs)
+
+    def op_backward(
+        self,
+        ctx: OperationContext,
+        grad_output: torch.Tensor,
+    ) -> tuple[torch.Tensor, tuple[()]]:
+
+        # Saved tensors from forward pass
+        (x,) = ctx.saved_tensors
+
+        # Tensor attributes
+        dtype = x.dtype
+        device = x.device
+
+        # Check grad output tensor
+        dy = grad_output
+        if isinstance(dy, QuantizedTensor):
+            dy = dy.dequantize()
+        if not devices_match(dy.device, device) or dy.dtype != dtype:
+            dy = dy.to(device=device, dtype=dtype)
+        if not dy.is_contiguous():
+            dy = dy.contiguous()
+
+        # Check if FP8 is enabled
+        with_fp8_grad_input = False
+        grad_input_fp8_meta = None
+        grad_input_dtype = TE_DType[dtype]
+        grad_input_fp8_scale_inv = None
+        if (
+            ctx.fp8_enabled
+            and ctx.prev_op is not None
+            and ctx.prev_op.num_fp8_scales("grad_output") > 0
+        ):
+            with_fp8_grad_input = True
+            fp8_meta = ctx.prev_op.get_fp8_meta("grad_output")
+            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
+            grad_input_fp8_meta = fp8_meta[fp8_meta_key]
+            grad_input_dtype = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=False)
+            grad_input_fp8_scale_inv = torch.empty([1], dtype=torch.float32, device=device)
+
+        # Launch kernel
+        if with_fp8_grad_input:
+            # Fused with FP8 cast-transpose
+            input_dims = x.size()
+            flat_input_dims = [x.numel() // input_dims[-1], input_dims[-1]]
+            flat_output_dims = [flat_input_dims[0], flat_input_dims[1] // 2]
+            dx = torch.empty(input_dims, dtype=torch.uint8, device=device)
+            dx_t = torch.empty(
+                (flat_input_dims[1], flat_input_dims[0]),
+                dtype=torch.uint8,
+                device=device,
+            )
+            fp8_dswiglu_cast_transpose_fused(
+                dy.reshape(flat_output_dims),
+                x.reshape(flat_input_dims),
+                grad_input=dx.reshape(flat_input_dims),
+                grad_input_transpose=dx_t,
+                otype=grad_input_dtype,
+                fp8_meta=grad_input_fp8_meta,
+                fp8_meta_index=0,
+                scale_inv=grad_input_fp8_scale_inv,
+            )
+            dx = Float8Tensor(
+                data=dx,
+                fp8_meta=grad_input_fp8_meta,
+                fp8_meta_forward=True,
+                fp8_meta_index=0,
+                fp8_dtype=grad_input_dtype,
+                fp8_scale_inv=grad_input_fp8_scale_inv,
+                dtype=dtype,
+            )
+            dx._transpose = dx_t
+            dx._transpose_invalid = False
+        else:
+            # Standard impl
+            dx = self._activation_backward_impl(dy, x, TE_DType[dtype])
+            if dx.size() != x.size():
+                dx = dx.reshape(x.size())
+
+        # Note: This fails if op is preceeded by an identity op like Quantize(forward=False)
+        # # Clear input tensor if possible
+        # if ctx.prev_op is not None:
+        #     clear_tensor_data(x)
+
+        return dx, ()

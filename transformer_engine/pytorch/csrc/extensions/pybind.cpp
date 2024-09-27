@@ -88,6 +88,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("grad_output"), py::arg("gelu_input"), py::arg("scale"), py::arg("amax"),
         py::arg("scale_inv"), py::arg("otype"), py::arg("scale_offset") = 0,
         py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
+  m.def("fused_dswiglu_cast_transpose", &fused_dswiglu_cast_transpose,
+        "Fused SwiGLU backward + FP8 cast + FP8 transpose",
+        py::call_guard<py::gil_scoped_release>(),
+        py::arg("grad_output"), py::arg("input"),
+        py::arg("grad_input"), py::arg("grad_input_transpose"),
+        py::arg("scale"), py::arg("amax"), py::arg("scale_inv"),
+        py::arg("otype"), py::arg("scale_offset") = 0,
+        py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
   m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
         "Fused Multi-tensor Cast + Transpose", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_cast_transpose_alloc", &fused_multi_cast_transpose_alloc,
