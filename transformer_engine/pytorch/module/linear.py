@@ -650,7 +650,7 @@ class Linear(TransformerEngineBaseModule):
                  used for initializing weights in the following way: `init_method(weight)`.
                  When set to `None`, defaults to `torch.nn.init.normal_(mean=0.0, std=0.023)`.
     get_rng_state_tracker : Callable, default = `None`
-                 used to get the random number generator state tracker for initilizeing weights.
+                 used to get the random number generator state tracker for initializing weights.
     rng_tracker_name : str, default = `None`
                  the param passed to get_rng_state_tracker to get the specific rng tracker.
     parameters_split : Optional[Union[Tuple[str, ...], Dict[str, int]]], default = None
@@ -662,7 +662,7 @@ class Linear(TransformerEngineBaseModule):
                       names that end in `_weight` or `_bias`, so trailing underscores are
                       stripped from any provided names.
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
 
@@ -678,7 +678,7 @@ class Linear(TransformerEngineBaseModule):
              `set_tensor_parallel_group(tp_group)` method on the initialized module before the
              forward pass to supply the tensor parallel group needed for tensor and sequence
              parallel collectives.
-    parallel_mode : {None, 'Column', 'Row'}, default = `None`
+    parallel_mode : {None, 'column', 'row'}, default = `None`
                    used to decide whether this Linear layer is Column Parallel Linear or Row
                    Parallel Linear as described `here <https://arxiv.org/pdf/1909.08053.pdf>`_.
                    When set to `None`, no communication is performed.
