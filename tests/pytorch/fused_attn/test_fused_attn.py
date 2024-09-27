@@ -249,7 +249,7 @@ def test_dot_product_attention(
     # Test backend availability
     window_size = (-1, -1)
     if swa:
-        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+        window_size = [min(config.max_seqlen_q, config.max_seqlen_kv)] * 2
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
