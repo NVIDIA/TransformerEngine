@@ -11,7 +11,6 @@ import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
 
-from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed

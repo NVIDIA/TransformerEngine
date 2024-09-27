@@ -12,7 +12,6 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 
 import transformer_engine_torch as tex
-from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
 )
