@@ -1402,6 +1402,108 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
+@torch.compile
+def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
+    """
+    Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
+    To make sure tokens are ordered correctly for compute, we need to reorder sequence chunks
+    before or after CP communications (e.g., all-gather, all-to-all). This function is to compute
+    sequence chunk ids for reordering.
+    """
+    chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device=device)
+    if to_contiguous:
+        for rank in range(cp_size):
+            chunk_ids[rank] = 2 * rank
+            chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
+    else:
+        for rank in range(cp_size):
+            chunk_ids[2 * rank] = rank
+            chunk_ids[2 * rank + 1] = 2 * cp_size - rank - 1
+    return chunk_ids
+
+
+@torch.compile
+def reorder_seq_chunks_for_a2a(x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn):
+    """Reorder sequence chunk for A2A communication."""
+    if before_attn:
+        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+        x = x.movedim(0, seq_dim).contiguous()
+        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 2) :])
+        # reorder the sequence chunks
+        x = torch.index_select(x, dim=seq_dim, index=chunk_ids_for_a2a)
+    else:
+        # [b, cp*2, s//2, np//cp, hn] -> [cp*2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+        x = x.movedim(seq_dim, 0).contiguous()
+        # reorder the sequence chunks
+        x = torch.index_select(x, dim=0, index=chunk_ids_for_a2a)
+        # [cp*2, b, s//2, np//cp, hn] -> [cp, 2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, 2, s//2, b, np//cp, hn]
+        x = x.view(cp_size, 2, *x.shape[1:])
+    return x
+
+
+def flash_attn_a2a_communicate(
+    a2a_inputs: Union[torch.Tensor, List[torch.Tensor]],
+    chunk_ids_for_a2a: torch.Tensor,
+    seq_dim: int,
+    cp_size: int,
+    cp_group: dist_group_type,
+    cp_stream: torch.cuda.Stream,
+    before_attn: bool,
+) -> Union[torch.Tensor, List[torch.Tensor]]:
+    """A2A communication for context parallelism."""
+    a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
+    a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
+    if before_attn:
+        for i in range(len(a2a_inputs) + 2):
+            if 0 < i < len(a2a_inputs) + 1:
+                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
+                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
+                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
+                )
+            if i > 1:
+                with torch.cuda.stream(cp_stream):
+                    a2a_reqs[i - 2].wait()
+                    x = a2a_outputs[i - 2]
+                    # reorder the sequence chunks
+                    x = reorder_seq_chunks_for_a2a(
+                        x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
+                    )
+                    # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
+                    a2a_outputs[i - 2] = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
+            if i < len(a2a_inputs):
+                x = a2a_inputs[i]
+                # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
+                x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
+                # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
+                a2a_inputs[i] = x.movedim(-3, 0).contiguous()
+    else:
+        for i in range(len(a2a_inputs) + 2):
+            if 0 < i < len(a2a_inputs) + 1:
+                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
+                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
+                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
+                )
+            if i < len(a2a_inputs):
+                x = a2a_inputs[i]
+                # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+                x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
+                # reorder the sequence chunks
+                a2a_inputs[i] = reorder_seq_chunks_for_a2a(
+                    x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
+                )
+            if i > 1:
+                with torch.cuda.stream(cp_stream):
+                    a2a_reqs[i - 2].wait()
+                    x = a2a_outputs[i - 2]
+                    # [cp, 2, b, s//2, np//cp, hn] -> [b, 2, s//2, cp, np//cp, hn] or [cp, 2, s//2, b, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
+                    x = x.movedim(0, -3).movedim(0, seq_dim).contiguous()
+                    # [b, 2, s//2, cp, np//cp, hn] -> [b*s, np, hn] or [2, s//2, b, cp, np//cp, hn] -> [s*b, np, hn]
+                    a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
+    torch.cuda.current_stream().wait_stream(cp_stream)
+    return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
+
+
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Exchange KV between CP ranks
@@ -3060,26 +3162,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         )
 
 
-@torch.compile
-def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
-    """
-    Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
-    To make sure tokens are ordered correctly for compute, we need to reorder sequence chunks
-    before or after CP communications (e.g., all-gather, all-to-all). This function is to compute
-    sequence chunk ids for reordering.
-    """
-    chunk_ids = torch.empty(2 * cp_size, dtype=torch.int32, device=device)
-    if to_contiguous:
-        for rank in range(cp_size):
-            chunk_ids[rank] = 2 * rank
-            chunk_ids[rank + cp_size] = 2 * cp_size - 2 * rank - 1
-    else:
-        for rank in range(cp_size):
-            chunk_ids[2 * rank] = rank
-            chunk_ids[2 * rank + 1] = 2 * cp_size - rank - 1
-    return chunk_ids
-
-
 def get_kv_seq_info_after_all_gather(
     local_chunk_id, cp_size, max_seqlen_q, max_seqlen_kv, window_size, causal
 ):
@@ -3503,88 +3585,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
         )
-
-
-@torch.compile
-def reorder_seq_chunks_for_a2a(x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn):
-    """Reorder sequence chunk for A2A communication."""
-    if before_attn:
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        x = x.movedim(0, seq_dim).contiguous()
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 2) :])
-        # reorder the sequence chunks
-        x = torch.index_select(x, dim=seq_dim, index=chunk_ids_for_a2a)
-    else:
-        # [b, cp*2, s//2, np//cp, hn] -> [cp*2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        x = x.movedim(seq_dim, 0).contiguous()
-        # reorder the sequence chunks
-        x = torch.index_select(x, dim=0, index=chunk_ids_for_a2a)
-        # [cp*2, b, s//2, np//cp, hn] -> [cp, 2, b, s//2, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp, 2, s//2, b, np//cp, hn]
-        x = x.view(cp_size, 2, *x.shape[1:])
-    return x
-
-
-def flash_attn_a2a_communicate(
-    a2a_inputs: Union[torch.Tensor, List[torch.Tensor]],
-    chunk_ids_for_a2a: torch.Tensor,
-    seq_dim: int,
-    cp_size: int,
-    cp_group: dist_group_type,
-    cp_stream: torch.cuda.Stream,
-    before_attn: bool,
-) -> Union[torch.Tensor, List[torch.Tensor]]:
-    """A2A communication for context parallelism."""
-    a2a_inputs = [a2a_inputs] if not isinstance(a2a_inputs, list) else a2a_inputs
-    a2a_outputs, a2a_reqs = [None] * len(a2a_inputs), [None] * len(a2a_inputs)
-    if before_attn:
-        for i in range(len(a2a_inputs) + 2):
-            if 0 < i < len(a2a_inputs) + 1:
-                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
-                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
-                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
-                )
-            if i > 1:
-                with torch.cuda.stream(cp_stream):
-                    a2a_reqs[i - 2].wait()
-                    x = a2a_outputs[i - 2]
-                    # reorder the sequence chunks
-                    x = reorder_seq_chunks_for_a2a(
-                        x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
-                    )
-                    # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn] or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
-                    a2a_outputs[i - 2] = x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
-            if i < len(a2a_inputs):
-                x = a2a_inputs[i]
-                # [b, s, np, hn] -> [b, s, cp, np//cp, hn] or [s, b, np, hn] -> [s, b, cp, np//cp, hn]
-                x = x.view(*x.shape[:-2], cp_size, x.shape[-2] // cp_size, x.shape[-1])
-                # [b, s, cp, np//cp, hn] -> [cp, b, s, np//cp, hn] or [s, b, cp, np//cp, hn] -> [cp, s, b, np//cp, hn]
-                a2a_inputs[i] = x.movedim(-3, 0).contiguous()
-    else:
-        for i in range(len(a2a_inputs) + 2):
-            if 0 < i < len(a2a_inputs) + 1:
-                a2a_outputs[i - 1] = torch.empty_like(a2a_inputs[i - 1])
-                a2a_reqs[i - 1] = torch.distributed.all_to_all_single(
-                    a2a_outputs[i - 1], a2a_inputs[i - 1], group=cp_group, async_op=True
-                )
-            if i < len(a2a_inputs):
-                x = a2a_inputs[i]
-                # [b, cp*s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn] or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-                x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
-                # reorder the sequence chunks
-                a2a_inputs[i] = reorder_seq_chunks_for_a2a(
-                    x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
-                )
-            if i > 1:
-                with torch.cuda.stream(cp_stream):
-                    a2a_reqs[i - 2].wait()
-                    x = a2a_outputs[i - 2]
-                    # [cp, 2, b, s//2, np//cp, hn] -> [b, 2, s//2, cp, np//cp, hn] or [cp, 2, s//2, b, np//cp, hn] -> [2, s//2, b, cp, np//cp, hn]
-                    x = x.movedim(0, -3).movedim(0, seq_dim).contiguous()
-                    # [b, 2, s//2, cp, np//cp, hn] -> [b*s, np, hn] or [2, s//2, b, cp, np//cp, hn] -> [s*b, np, hn]
-                    a2a_outputs[i - 2] = x.view(-1, x.shape[-3] * x.shape[-2], x.shape[-1])
-    torch.cuda.current_stream().wait_stream(cp_stream)
-    return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
 
 class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
