@@ -1449,7 +1449,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         padding = "padding" in attn_mask_type
 
         if qkv_format in ["bshd", "sbhd"]:
-            seq_dim = qkv_format.index("s")
+            seq_dim = torch.tensor(qkv_format.index("s"), device=torch.cuda.current_device())
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
