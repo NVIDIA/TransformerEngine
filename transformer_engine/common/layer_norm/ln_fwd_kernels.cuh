@@ -11,7 +11,7 @@
 #include <cstdio>
 
 #include "../utils.cuh"
-#include "ln.h"
+#include "norms.h"
 
 namespace transformer_engine {
 namespace layer_norm {
