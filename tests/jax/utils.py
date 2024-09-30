@@ -920,6 +920,7 @@ def apply_swa_mask(
     new_mask = jnp.where(original_mask == 1, swa_mask_bcast, original_mask)
     return new_mask
 
+
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
 
@@ -965,8 +966,12 @@ class EncoderLayer(nn.Module):
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
         # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
         if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size_left > 0:
-            encoder_mask = apply_swa_mask(self.self_attn_mask_type, encoder_mask,
-                                          self.window_size_left, self.window_size_right)
+            encoder_mask = apply_swa_mask(
+                self.self_attn_mask_type,
+                encoder_mask,
+                self.window_size_left,
+                self.window_size_right,
+            )
 
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
@@ -1133,8 +1138,12 @@ class DecoderLayer(nn.Module):
     ):
         # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
         if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size_left > 0:
-            decoder_mask = apply_swa_mask(self.self_attn_mask_type, decoder_mask,
-                                          self.window_size_left, self.window_size_right)
+            decoder_mask = apply_swa_mask(
+                self.self_attn_mask_type,
+                decoder_mask,
+                self.window_size_left,
+                self.window_size_right,
+            )
 
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1

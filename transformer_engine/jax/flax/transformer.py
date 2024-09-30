@@ -207,7 +207,6 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             new_mask = jnp.where(original_mask == 0, swa_mask_bcast, original_mask)
             return new_mask
 
-
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxType"""
             # mask is ignored for no_mask and causal_mask without sliding window

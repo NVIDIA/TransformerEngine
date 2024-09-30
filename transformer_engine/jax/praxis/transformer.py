@@ -382,7 +382,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init,
             window_size_left=self.window_size_left,
-            window_size_right=self.window_size_right
+            window_size_right=self.window_size_right,
         )
 
         self.create_layer("transformerlayer", transformerlayer_cls)
