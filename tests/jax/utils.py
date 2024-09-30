@@ -18,6 +18,7 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
+from transformer_engine.jax.attention import AttnMaskType, get_swa_mask
 from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
@@ -902,6 +903,23 @@ class RelativePositionBiases(nn.Module):
         return values[jnp.newaxis, ...]
 
 
+def apply_swa_mask(
+    attn_mask_type: AttnMaskType,
+    original_mask: Array,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+) -> Array:
+    """Apply the sliding window mask to a given mask"""
+    window_size = (window_size_left, window_size_right)
+    max_seqlen_q = original_mask.shape[-2]
+    max_seqlen_kv = original_mask.shape[-1]
+    swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
+    # In swa_mask and original_mask 0 is masked out
+    swa_mask = swa_mask.astype(original_mask.dtype)
+    swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
+    new_mask = jnp.where(original_mask == 1, swa_mask_bcast, original_mask)
+    return new_mask
+
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
 
@@ -934,7 +952,9 @@ class EncoderLayer(nn.Module):
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
     self_attn_bias_type: Any = None
-    self_attn_mask_type: Any = None
+    self_attn_mask_type: str = "no_mask"
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -943,7 +963,11 @@ class EncoderLayer(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
-        del self.self_attn_mask_type  # dummy, just align to TE's impl
+        # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
+        if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size_left > 0:
+            encoder_mask = apply_swa_mask(self.self_attn_mask_type, encoder_mask,
+                                          self.window_size_left, self.window_size_right)
+
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -1087,7 +1111,9 @@ class DecoderLayer(nn.Module):
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
     self_attn_bias_type: Any = None
-    self_attn_mask_type: Any = None
+    self_attn_mask_type: str = "no_mask"
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1105,7 +1131,11 @@ class DecoderLayer(nn.Module):
         decode=False,
         max_decode_length=None,
     ):
-        del self.self_attn_mask_type  # dummy, just align to TE's impl
+        # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
+        if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size_left > 0:
+            decoder_mask = apply_swa_mask(self.self_attn_mask_type, decoder_mask,
+                                          self.window_size_left, self.window_size_right)
+
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim

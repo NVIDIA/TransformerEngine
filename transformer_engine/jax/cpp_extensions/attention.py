@@ -221,7 +221,7 @@ def generate_cu_seqlen(actual_seqlen):
 # results. FusedAttn{Fwd, Bwd}Primitive classes are the entering points to C++ backends, so we
 # make the change here. This function needs to be removed if the cuDNN API is fixed.
 def _fix_window_size_left(window_size_left: int) -> int:
-    return window_size_left + 1
+    return window_size_left if window_size_left == -1 else window_size_left + 1
 
 
 class FusedAttnFwdPrimitive(BasePrimitive):

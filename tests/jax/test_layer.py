@@ -61,6 +61,8 @@ _KEY_OF_SELF_ATTN_MASK_TYPE = "self_attn_mask_type"
 _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
+_KEY_OF_WINDOW_SIZE_LEFT = "window_size_left"
+_KEY_OF_WINDOW_SIZE_RIGHT = "window_size_right"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -70,6 +72,8 @@ BASE_ATTRS = {
     _KEY_OF_INTERMEDIATE_DROPOUT: 0,
     _KEY_OF_SELF_ATTN_MASK_TYPE: "padding_causal",
     _KEY_OF_LAYERNORM_TYPE: "layernorm",
+    _KEY_OF_WINDOW_SIZE_LEFT: -1,
+    _KEY_OF_WINDOW_SIZE_RIGHT: -1,
 }
 
 ATTRS = [
@@ -192,6 +196,11 @@ ATTRS = [
     },
     {
         _KEY_OF_MLP_ACTIVATIONS: (("relu", "relu")),
+    },
+    {
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_WINDOW_SIZE_LEFT: 64,  # Must < seqlen in DATA_SHAPE
+        _KEY_OF_WINDOW_SIZE_RIGHT: 0,
     },
 ]
 

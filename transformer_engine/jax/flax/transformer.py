@@ -25,7 +25,7 @@ from jax.ad_checkpoint import checkpoint_name
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..attention import AttnBiasType, AttnMaskType, QKVLayout
-from ..attention import is_fused_attn_kernel_available, canonicalize_attn_mask_type
+from ..attention import is_fused_attn_kernel_available, get_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
@@ -118,6 +118,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     float32_logits: bool = False
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     @nn.compact
     def __call__(
@@ -193,13 +195,33 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
 
+        def apply_swa_mask(attn_mask_type: AttnMaskType, original_mask: Array) -> Array:
+            """Apply the sliding window mask to a given mask"""
+            window_size = (self.window_size_left, self.window_size_right)
+            max_seqlen_q = original_mask.shape[-2]
+            max_seqlen_kv = original_mask.shape[-1]
+            swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
+            # In swa_mask 0 is masked out, in original_mask 1 is masked out
+            swa_mask = 1 - swa_mask.astype(original_mask.dtype)
+            swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
+            new_mask = jnp.where(original_mask == 0, swa_mask_bcast, original_mask)
+            return new_mask
+
+
         def convert_to_softmax_type(attn_mask_type, mask):
             """Convert the attn_mask_type to SoftmaxType"""
-            # mask is ignored for no_mask and causal_mask
-            if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+            # mask is ignored for no_mask and causal_mask without sliding window
+            if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
+            if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size_left < 0:
+                mask = None
+            # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+                if self.window_size_left < 0:
+                    return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
+                else:
+                    swa_mask = apply_swa_mask(attn_mask_type, mask)
+                    return SoftmaxType.SCALED_MASKED, swa_mask
             if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
                 if mask is not None:
                     return SoftmaxType.SCALED_MASKED, mask
@@ -244,6 +266,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     @nn.compact
     def __call__(
@@ -289,6 +313,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )
         elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
             """kvpacked format, treat
@@ -311,6 +337,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )
         elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
             if self.transpose_batch_sequence:
@@ -328,6 +356,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 scaling_factor=scale_factor,
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -440,6 +470,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
+    window_size_left: int, default = -1
+        Sliding window size, the left half.
+    window_size_right: int, default = -1
+        Sliding window size, the right half.
 
     Optimization parameters
     -----------------------
@@ -459,6 +493,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     @nn.compact
     def __call__(
@@ -532,6 +568,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             seqlen_q,
             seqlen_kv,
             self.head_dim,
+            self.window_size_left,
+            self.window_size_right,
         )
 
         use_fused_attn = enable_fused_attn and has_fused_attn_kernel
@@ -577,6 +615,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 float32_logits=self.float32_logits,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
         else:
             x = _FusedDotProductAttention(
@@ -587,6 +627,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
 
         return x
@@ -856,6 +898,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         For fused attention backend, the accumulation is always float32 without the perf overhead.
     fuse_qkv: bool, default = None
         Deprecated. Please refer `fuse_qkv_params`
+    window_size_left: int, default = -1
+        Sliding window size (the left half).
+    window_size_right: int, default = -1
+        Sliding window size (the right half).
     """
 
     head_dim: int
@@ -886,6 +932,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -1280,6 +1328,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             qkv_layout=qkv_layout.name,
             scale_factor=scale_factor,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            window_size_left=self.window_size_left,
+            window_size_right=self.window_size_right,
         )(*dpa_args, mask, bias, deterministic=deterministic)
         x = x.reshape((x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
 
@@ -1555,6 +1605,10 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
+    window_size_left: int, default = -1
+        Sliding window size, the left half.
+    window_size_right: int, default = -1
+        Sliding window size, the right half.
 
     Optimization parameters
     -----------------------
@@ -1618,6 +1672,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
+    window_size_left: int = -1
+    window_size_right: int = -1
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
@@ -1771,6 +1827,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             use_bias=self.use_bias,
             bias_init=self.bias_init,
             name=mha_name,
+            window_size_left=self.window_size_left,
+            window_size_right=self.window_size_right,
         )(inputs, inputs, attention_mask, attn_bias, deterministic=deterministic, decode=decode)
 
         def hidden_dropout(x, deterministic):
@@ -1848,6 +1906,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 use_bias=self.use_bias,
                 bias_init=self.bias_init,
                 name="encoder_decoder_attention",
+                window_size_left=self.window_size_left,
+                window_size_right=self.window_size_right,
             )(x, encoded, encoder_decoder_mask, deterministic=deterministic)
 
             y = with_sharding_constraint_by_logical_axes(
