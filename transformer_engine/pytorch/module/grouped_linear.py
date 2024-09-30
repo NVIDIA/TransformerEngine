@@ -44,6 +44,7 @@ from ..export import is_in_onnx_export_mode
 
 __all__ = ["GroupedLinear"]
 
+
 class _GroupedLinear(torch.autograd.Function):
     """GroupedLinear semi-top level module
     Calls custom cuda extensions.
@@ -303,7 +304,12 @@ class _GroupedLinear(torch.autograd.Function):
                         )
                 else:
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        indices = list(range(ctx.offsets["grad_output"], ctx.offsets["grad_output"] + ctx.num_gemms))
+                        indices = list(
+                            range(
+                                ctx.offsets["grad_output"],
+                                ctx.offsets["grad_output"] + ctx.num_gemms,
+                            )
+                        )
                         grad_output_c, grad_output_t = fp8_multi_cast_transpose_fused(
                             grad_output_mats,
                             ctx.fp8_meta["scaling_bwd"],
@@ -572,12 +578,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self._offsets = {
-            "input": 0,
-            "weight": num_gemms,
-            "output": 2 * num_gemms,
-            "grad_output": 0
-        }
+        self._offsets = {"input": 0, "weight": num_gemms, "output": 2 * num_gemms, "grad_output": 0}
 
         if tp_group is None:
             self.tp_size = tp_size
