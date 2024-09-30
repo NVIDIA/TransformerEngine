@@ -4706,9 +4706,7 @@ def get_qkv_layout(
 
         # check tensor offsets for h3d and 3hd layouts
         prod_h_d = q.shape[-1] * q.shape[-2]
-        check_3hd_offsets = all(
-            x.storage_offset() == i * prod_h_d for i, x in enumerate([q, k, v])
-        )
+        check_3hd_offsets = all(x.storage_offset() == i * prod_h_d for i, x in enumerate([q, k, v]))
         check_h3d_offsets = all(
             x.storage_offset() == i * q.shape[-1] for i, x in enumerate([q, k, v])
         )
