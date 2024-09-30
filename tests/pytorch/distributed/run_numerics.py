@@ -45,21 +45,19 @@ def main(argv=None, namespace=None):
     parser.add_argument("--fp8", action="store_true", default=False)
     args = parser.parse_args(argv, namespace)
 
-    test_dict = {
-        "linear": test_linear,
-        "layernorm": test_layernorm,
-        "layernorm_linear": test_layernorm_linear,
-        "layernorm_mlp": test_layernorm_mlp,
-        "transformer_layer": test_transformer_layer,
-    }
+    test_dict = [
+        test_linear, test_layernorm,
+        test_layernorm_linear, 
+        test_layernorm_mlp, test_transformer_layer
+    ]
 
-    assert args.layer_type in test_dict, f"Argument --layer-type must be in {test_dict.keys()}"
 
     FP8 = args.fp8
 
-    output_value = test_dict[args.layer_type]()
+    for test in test_dict:
+        test()
     dist.destroy_process_group()
-    return output_value
+    return 0
 
 
 def run_distributed_test(test_name=None):
@@ -91,7 +89,6 @@ def _gather(tensor, dim=0):
     class HalfGradient(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input):
-            ctx.save_for_backward(input)
             return input  # forward pass (identity)
 
         @staticmethod
@@ -114,14 +111,16 @@ def dist_print(msg, src=None, end="\n", error=False):
     dist.barrier()
 
 
+
 def _check_outputs(output_single_node, output_distributed):
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-    rtol = 0.125 if FP8 else 0.025
-    atol = 0.0625 if FP8 else 0.00125
+    rtol = 0.125 if FP8 else 0.02
+    atol = 0.0625 if FP8 else 0.001
     output_failed, output_info = _compare_tensors(
         "outputs", output_distributed, output_single_node, rtol, atol
     )
-    dist_print(output_info, src=WORLD_RANK, error=output_failed)
+    if output_failed:
+        dist_print(output_info, src=WORLD_RANK, error=output_failed)
     numerics_failed[0] = int(output_failed)
     dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
     if bool(numerics_failed.item()):
@@ -170,8 +169,6 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
     for i, ((name, param_d), param_s) in enumerate(
         zip(model_distributed.named_parameters(), model_single.parameters())
     ):
-        dist_print(i)
-        dist_print(name)
         numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
         grad_failed, grad_info = None, None
         rtol = 0.125 if FP8 else 0.025
@@ -187,7 +184,10 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
                 str(i), param_d.grad, param_s_grad, rtol, atol
             )
 
-        dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
+        if grad_failed:
+            dist_print(i)
+            dist_print(name)
+            dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
         numerics_failed[0] = int(grad_failed)
         dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
         if bool(numerics_failed.item()):

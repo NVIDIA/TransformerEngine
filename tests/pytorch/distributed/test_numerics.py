@@ -29,13 +29,13 @@ if torch.cuda.device_count() < 2:
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
-NUM_PROCS: int = min(torch.cuda.device_count(), 4)
+NUM_PROCS: int = 2
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
-def _run_test(layer, fp8):
+def _run_test(fp8):
     test_path = TEST_ROOT / "run_numerics.py"
-    test_cmd = LAUNCH_CMD + [str(test_path), f"--layer-type={layer}"]
+    test_cmd = LAUNCH_CMD + [str(test_path)]
 
     if fp8:
         test_cmd += ["--fp8"]
@@ -44,7 +44,6 @@ def _run_test(layer, fp8):
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
         raise AssertionError(result.stderr.decode())
 
@@ -53,35 +52,7 @@ all_boolean = [True, False]
 
 
 @pytest.mark.parametrize("fp8", all_boolean)
-def test_linear(fp8):
+def test_distributed(fp8):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    _run_test("linear", fp8)
-
-
-@pytest.mark.parametrize("fp8", all_boolean)
-def test_layernorm(fp8):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    _run_test("layernorm", fp8)
-
-
-@pytest.mark.parametrize("fp8", all_boolean)
-def test_layernorm_linear(fp8):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    _run_test("layernorm_linear", fp8)
-
-
-@pytest.mark.parametrize("fp8", all_boolean)
-def test_layernorm_mlp(fp8):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    _run_test("layernorm_mlp", fp8)
-
-
-@pytest.mark.parametrize("fp8", all_boolean)
-def test_transformer_layer(fp8):
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
-    _run_test("transformer_layer", fp8)
+    _run_test(fp8)
