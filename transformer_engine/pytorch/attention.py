@@ -4770,7 +4770,6 @@ def get_qkv_layout(
             # check_ptrs_qk=True or check_ptrs_kv=True
             qkv_layout = "_".join(list([qkv_format]) * 3)
         else:
-            # return "not_supported" when input layout do not match any of the 15 supported layouts
             qkv_layout = "not_supported"
 
         return qkv_layout
