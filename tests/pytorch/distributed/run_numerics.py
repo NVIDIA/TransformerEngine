@@ -46,11 +46,12 @@ def main(argv=None, namespace=None):
     args = parser.parse_args(argv, namespace)
 
     test_dict = [
-        test_linear, test_layernorm,
-        test_layernorm_linear, 
-        test_layernorm_mlp, test_transformer_layer
+        test_linear,
+        test_layernorm,
+        test_layernorm_linear,
+        test_layernorm_mlp,
+        test_transformer_layer,
     ]
-
 
     FP8 = args.fp8
 
@@ -109,7 +110,6 @@ def dist_print(msg, src=None, end="\n", error=False):
     if WORLD_RANK == (0 if src is None else src):
         stream.write(f"[rank{WORLD_RANK}] {msg}{end}\n")
     dist.barrier()
-
 
 
 def _check_outputs(output_single_node, output_distributed):

@@ -41,10 +41,7 @@ def _run_test(fp8):
         test_cmd += ["--fp8"]
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-    ):
+    if result.returncode != 0 or "NUMERICAL CHECK FAILED" in result.stderr.decode():
         raise AssertionError(result.stderr.decode())
 
 
