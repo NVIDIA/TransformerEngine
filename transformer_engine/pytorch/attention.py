@@ -1521,9 +1521,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     current-step compute with next-step communication.
 
     This implementation also supports hierarchical CP, which parallelizes attention
-    heads in low-level CP grpups and parallizes seqeunce dimension in high-levle CP
-    groups. Refer details in `LongVILA <https://arxiv.org/abs/2408.10188>`_ and
-    `USP <https://arxiv.org/abs/2405.07719>`_.
+    heads in low-level CP groups and parallizes sequence dimension in high-level CP
+    groups. For more details, please refer to `LongVILA <https://arxiv.org/abs/2408.10188>`_
+    and `USP <https://arxiv.org/abs/2405.07719>`_.
     """
 
     @staticmethod
