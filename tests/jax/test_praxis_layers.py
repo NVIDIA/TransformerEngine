@@ -645,41 +645,64 @@ class DotProductAttnAttr:
     NUM_GQA_GROUPS = "num_gqa_groups"
     TRANSPOSE_BS = "transpose_batch_sequence"
     SCALE_FACTOR = "scale_factor"
+    WINDOW_SIZE_LEFT = "window_size_left"
+    WINDOW_SIZE_RIGHT = "window_size_right"
     ATTRS = [
         {
             ATTN_MASK_TYPE: "padding",
             TRANSPOSE_BS: True,
             SCALE_FACTOR: 0.125,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "padding_causal",
             TRANSPOSE_BS: True,
             SCALE_FACTOR: 0.125,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: True,
             SCALE_FACTOR: 0.125,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "padding",
             TRANSPOSE_BS: False,
             SCALE_FACTOR: 0.125,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "padding_causal",
             TRANSPOSE_BS: False,
             SCALE_FACTOR: 2.0,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: False,
             SCALE_FACTOR: 1.0,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             ATTN_MASK_TYPE: "no_mask",
             TRANSPOSE_BS: False,
             SCALE_FACTOR: 1.0,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
+        },
+        {
+            ATTN_MASK_TYPE: "causal",
+            TRANSPOSE_BS: False,
+            SCALE_FACTOR: 1.0,
+            WINDOW_SIZE_LEFT: 64,
+            WINDOW_SIZE_RIGHT: 0,
         },
     ]
 
@@ -707,6 +730,8 @@ class TestDotProductAttn(TestLayer):
         num_gqa_groups = num_attention_heads
         attn_mask_type = attrs[DotProductAttnAttr.ATTN_MASK_TYPE]
         transpose_batch_sequence = attrs[DotProductAttnAttr.TRANSPOSE_BS]
+        window_size_left = attrs[DotProductAttnAttr.WINDOW_SIZE_LEFT]
+        window_size_right = attrs[DotProductAttnAttr.WINDOW_SIZE_RIGHT]
 
         praxis_p = pax_fiddle.Config(
             DotProductAttention,
@@ -717,6 +742,8 @@ class TestDotProductAttn(TestLayer):
             num_gqa_groups=num_gqa_groups,
             attn_mask_type=attn_mask_type,
             transpose_batch_sequence=transpose_batch_sequence,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
         flax_cls = partial(
             flax_DotProductAttention,
@@ -726,6 +753,8 @@ class TestDotProductAttn(TestLayer):
             num_gqa_groups=num_gqa_groups,
             attn_mask_type=attn_mask_type,
             transpose_batch_sequence=transpose_batch_sequence,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
 
         return praxis_p, flax_cls
@@ -750,6 +779,8 @@ class MultiHeadAttnAttr:
     ENABLE_ROPE = "enable_rotary_pos_emb"
     ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
     LORA_SCOPE = "low_rank_adaptation_scope"
+    WINDOW_SIZE_LEFT = "window_size_left"
+    WINDOW_SIZE_RIGHT = "window_size_right"
     ATTRS = [
         {
             USE_BIAS: True,
@@ -759,6 +790,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "padding",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -768,6 +801,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "padding",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -777,6 +812,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "padding",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -786,6 +823,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -795,6 +834,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -804,6 +845,8 @@ class MultiHeadAttnAttr:
             ROPE_GROUP_METHOD: "consecutive",
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -815,6 +858,8 @@ class MultiHeadAttnAttr:
             NUM_GQA_GROUPS: 4,
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -826,6 +871,8 @@ class MultiHeadAttnAttr:
             NUM_GQA_GROUPS: 4,
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -837,6 +884,8 @@ class MultiHeadAttnAttr:
             NUM_GQA_GROUPS: 4,
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -847,6 +896,8 @@ class MultiHeadAttnAttr:
             ATTN_MASK_TYPE: "padding",
             LORA_SCOPE: "all",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -857,6 +908,20 @@ class MultiHeadAttnAttr:
             ATTN_MASK_TYPE: "causal",
             LORA_SCOPE: "all",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
+        },
+        {
+            USE_BIAS: True,
+            LN_TYPE: "layernorm",
+            ZERO_CEN: False,
+            ENABLE_ROPE: False,
+            ROPE_GROUP_METHOD: "consecutive",
+            ATTN_MASK_TYPE: "causal",
+            LORA_SCOPE: "all",
+            TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: 64,
+            WINDOW_SIZE_RIGHT: 0,
         },
     ]
 
@@ -899,6 +964,8 @@ class TestMultiHeadAttn(TestLayer):
         scale_attn_logits = False
         scaled_query_init = True
         float32_logits = False
+        window_size_left = attrs[MultiHeadAttnAttr.WINDOW_SIZE_LEFT]
+        window_size_right = attrs[MultiHeadAttnAttr.WINDOW_SIZE_RIGHT]
 
         praxis_p = pax_fiddle.Config(
             MultiHeadAttention,
@@ -923,6 +990,8 @@ class TestMultiHeadAttn(TestLayer):
             scale_attn_logits=scale_attn_logits,
             scaled_query_init=scaled_query_init,
             float32_logits=float32_logits,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
         flax_cls = partial(
             flax_MultiHeadAttention,
@@ -946,6 +1015,8 @@ class TestMultiHeadAttn(TestLayer):
             scale_attn_logits=scale_attn_logits,
             scaled_query_init=scaled_query_init,
             float32_logits=float32_logits,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
 
         return praxis_p, flax_cls
@@ -983,6 +1054,8 @@ class TransformerLayerAttr:
     ENABLE_ROPE = "enable_rotary_pos_emb"
     ROPE_GROUP_METHOD = "rotary_pos_emb_group_method"
     LORA_SCOPE = "low_rank_adaptation_scope"
+    WINDOW_SIZE_LEFT = "window_size_left"
+    WINDOW_SIZE_RIGHT = "window_size_right"
     ATTRS = [
         {
             USE_BIAS: True,
@@ -993,6 +1066,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1003,6 +1078,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1013,6 +1090,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1023,6 +1102,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1033,6 +1114,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1043,6 +1126,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1053,6 +1138,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1063,6 +1150,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1073,6 +1162,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1083,6 +1174,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1093,6 +1186,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1103,6 +1198,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1113,6 +1210,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1123,6 +1222,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1133,6 +1234,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1143,6 +1246,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1154,6 +1259,8 @@ class TransformerLayerAttr:
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
             LORA_SCOPE: "all",
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1164,6 +1271,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1174,6 +1283,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1184,6 +1295,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: True,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1194,6 +1307,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: False,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1204,6 +1319,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: True,
             ROPE_GROUP_METHOD: "alternate",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1214,6 +1331,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: True,
             ROPE_GROUP_METHOD: "alternate",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1224,6 +1343,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: True,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1234,6 +1355,8 @@ class TransformerLayerAttr:
             ENABLE_ROPE: True,
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
         },
         {
             USE_BIAS: True,
@@ -1245,6 +1368,32 @@ class TransformerLayerAttr:
             ROPE_GROUP_METHOD: "consecutive",
             TRANSPOSE_BS: False,
             LORA_SCOPE: "all",
+            WINDOW_SIZE_LEFT: -1,
+            WINDOW_SIZE_RIGHT: -1,
+        },
+        {
+            USE_BIAS: True,
+            LN_TYPE: "layernorm",
+            ZERO_CEN: False,
+            ACTIVATION: ("relu",),
+            LYR_TYPE: TransformerLayerType.ENCODER,
+            ENABLE_ROPE: False,
+            ROPE_GROUP_METHOD: "consecutive",
+            TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: 64,
+            WINDOW_SIZE_RIGHT: 0,
+        },
+        {
+            USE_BIAS: True,
+            LN_TYPE: "layernorm",
+            ZERO_CEN: False,
+            ACTIVATION: ("relu",),
+            LYR_TYPE: TransformerLayerType.DECODER,
+            ENABLE_ROPE: False,
+            ROPE_GROUP_METHOD: "consecutive",
+            TRANSPOSE_BS: False,
+            WINDOW_SIZE_LEFT: 64,
+            WINDOW_SIZE_RIGHT: 0,
         },
     ]
 
@@ -1289,6 +1438,8 @@ class TestTransformer(TestLayer):
         )
         drop_path = 0.0
         transpose_batch_sequence = attrs[TransformerLayerAttr.TRANSPOSE_BS]
+        window_size_left = attrs[TransformerLayerAttr.WINDOW_SIZE_LEFT]
+        window_size_right = attrs[TransformerLayerAttr.WINDOW_SIZE_RIGHT]
 
         rel_embedding_init = RelativePositionBiases.generate_embedding_init(
             relative_embedding.embedding_init,
@@ -1330,6 +1481,8 @@ class TestTransformer(TestLayer):
             relative_embedding=relative_embedding,
             drop_path=drop_path,
             transpose_batch_sequence=transpose_batch_sequence,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
         flax_cls = partial(
             flax_TransformerLayer,
@@ -1358,6 +1511,8 @@ class TestTransformer(TestLayer):
             low_rank_adaptation_scope=low_rank_adaptation_scope,
             drop_path=drop_path,
             transpose_batch_sequence=transpose_batch_sequence,
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
         )
 
         return praxis_p, flax_cls
