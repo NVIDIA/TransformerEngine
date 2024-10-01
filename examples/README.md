@@ -1,9 +1,7 @@
 # Examples
 
-We provide a variety of examples for deep learning frameworks including [PyTorch](https://github.com/huggingface/transformers/tree/main/examples/pytorch), [JAX](https://jax.readthedocs.io/en/latest/), and [PaddlePaddle](https://github.com/PaddlePaddle/Paddle). 
-Additionally, we offer [Jupyter notebook tutorials](https://github.com/NVIDIA/TransformerEngine/tree/main/docs/examples) and a selection of [third-party examples](). Please be aware that these third-party examples might need specific, older versions of dependencies to function properly.
-
-Please discuss in an [issue](https://github.com/NVIDIA/TransformerEngine/issues) a feature you would like to implement in an example before submitting a PR.
+We provide a variety of examples for deep learning frameworks including [PyTorch](https://github.com/pytorch/pytorch), [JAX](https://github.com/jax-ml/jax), and [PaddlePaddle](https://github.com/PaddlePaddle/Paddle). 
+Additionally, we offer [Jupyter notebook tutorials](https://github.com/NVIDIA/TransformerEngine/tree/main/docs/examples) and a selection of [third-party examples](#third-party). Please be aware that these third-party examples might need specific, older versions of dependencies to function properly.
 
 # PyTorch
 
@@ -30,5 +28,16 @@ Please discuss in an [issue](https://github.com/NVIDIA/TransformerEngine/issues)
 - [Basic MNIST Example](https://github.com/NVIDIA/TransformerEngine/tree/main/examples/pytorch/mnist)
 
 # JAX
-
+- [Basic Transformer Encoder Example](https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/encoder)
+  - Single GPU Training: Demonstrates setting up and training a Transformer model using a single GPU.
+  - Data Parallelism: Scale training across multiple GPUs using data parallelism.
+  - Model Parallelism: Divide a model across multiple GPUs for parallel training.
+  - Multiprocessing with Model Parallelism: Multiprocessing for model parallelism, including multi-node support and hardware affinity setup.
+- [Basic MNIST Example](https://github.com/NVIDIA/TransformerEngine/tree/main/examples/jax/mnist)
+ 
 # PaddlePaddle
+- [Basic MNIST Example](https://github.com/NVIDIA/TransformerEngine/tree/main/examples/paddle/mnist)
+
+# Third party
+- [Hugging Face Accelerate + TE](https://github.com/huggingface/accelerate/tree/main/benchmarks/fp8/transformer_engine)
+  - Scripts for training with Accelerate and TE. Supports single GPU, and multi-GPU via DDP, FSDP, and DeepSpeed ZeRO 1-3.
