@@ -36,8 +36,8 @@ model_configs_flash_attn = {
 }
 
 
-def get_bash_arguments(num_gpus, **kwargs):
-    args = ["python", "-m", "torch.distributed.launch", "--nproc-per-node=" + str(num_gpus)]
+def get_bash_arguments(num_gpus_per_node, **kwargs):
+    args = ["python", "-m", "torch.distributed.launch", "--nproc-per-node=" + str(num_gpus_per_node)]
     te_path = os.getenv("TE_PATH", "/opt/transformerengine")
     script_path = os.path.join(te_path, "tests/pytorch/fused_attn/run_fused_attn_with_cp.py")
     args.append(script_path)
@@ -72,7 +72,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
@@ -151,7 +151,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type):
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
