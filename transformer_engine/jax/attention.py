@@ -244,8 +244,7 @@ def is_fused_attn_kernel_available(
     q_max_seqlen,
     kv_max_seqlen,
     head_dim,
-    window_size_left=-1,
-    window_size_right=-1,
+    window_size: Tuple[int, int] = (-1, -1),
 ):
     """
     To check whether the fused attention kernel is supported
@@ -262,8 +261,7 @@ def is_fused_attn_kernel_available(
         q_max_seqlen,
         kv_max_seqlen,
         head_dim,
-        window_size_left,
-        window_size_right,
+        window_size,
     ).is_fused_attn_kernel_available()
 
 
@@ -366,8 +364,7 @@ def fused_attn(
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size: Tuple[int, int] = (-1, -1),
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -396,8 +393,7 @@ def fused_attn(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
-        window_size_left (int): Sliding window size (the left half).
-        window_size_right (int): Sliding window size (the right half).
+        window_size (Tuple[int, int]): Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -455,8 +451,7 @@ def fused_attn(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=1,
-        window_size_left=window_size_left,
-        window_size_right=window_size_right,
+        window_size=window_size,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -479,8 +474,7 @@ def fused_attn_thd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int = 1,
-    window_size_left: int = -1,
-    window_size_right: int = -1,
+    window_size: Tuple[int, int] = (-1, -1),
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -521,6 +515,8 @@ def fused_attn_thd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
+        window_size (Tuple[int, int]):
+            Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -578,8 +574,7 @@ def fused_attn_thd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size_left=window_size_left,
-        window_size_right=window_size_right,
+        window_size=window_size,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -587,7 +582,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -603,8 +598,7 @@ def _fused_attn(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
-    window_size_left: int,
-    window_size_right: int,
+    window_size: Tuple[int, int],
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
 ):
@@ -623,8 +617,7 @@ def _fused_attn(
         dropout_probability,
         is_training,
         max_segments_per_seq,
-        window_size_left,
-        window_size_right,
+        window_size,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
     )
@@ -646,8 +639,7 @@ def _fused_attn_fwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
-    window_size_left,
-    window_size_right,
+    window_size,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
 ):
@@ -666,8 +658,7 @@ def _fused_attn_fwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size_left=window_size_left,
-        window_size_right=window_size_right,
+        window_size=window_size,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -695,8 +686,7 @@ def _fused_attn_bwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
-    window_size_left,
-    window_size_right,
+    window_size,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     ctx,
@@ -731,8 +721,7 @@ def _fused_attn_bwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size_left=window_size_left,
-        window_size_right=window_size_right,
+        window_size=window_size,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )

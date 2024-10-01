@@ -6,7 +6,7 @@ from enum import Enum
 from dataclasses import dataclass
 from functools import partial
 from math import sqrt
-import random
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -126,8 +126,7 @@ def make_mask(
     segment_pad_q: ArrayLike,
     segment_pad_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
-    window_size_left: int,
-    window_size_right: int,
+    window_size: Tuple[int, int]
 ) -> Array:
     """
     Create attention mask based on mask type. A `True` value in the mask means
@@ -146,12 +145,12 @@ def make_mask(
         )
         inv_mask = combine_masks(inv_pad_mask, inv_mask)
 
-    if window_size_left >= 0:
-        window_size = (window_size_left, window_size_right)
+    if window_size[0] >= 0:
         max_seqlen_q = inv_mask.shape[-2]
         max_seqlen_kv = inv_mask.shape[-1]
         swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
         swa_mask_bcast = jnp.broadcast_to(swa_mask, inv_mask.shape)
+        # In swa_mask and inv_mask 0 is masked out
         inv_mask = jnp.where(inv_mask != 0, swa_mask_bcast, inv_mask)
 
     mask = jnp.logical_not(inv_mask)
@@ -288,8 +287,7 @@ class FusedAttnRunner:
     is_training: bool
     qkv_layout: QKVLayout
     bias_shape: BiasShape
-    window_size_left: int = -1
-    window_size_right: int = -1
+    window_size: Tuple[int, int] = (-1, -1)
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -326,8 +324,7 @@ class FusedAttnRunner:
             self.max_seqlen_q,
             self.max_seqlen_kv,
             self.head_dim,
-            self.window_size_left,
-            self.window_size_right,
+            self.window_size,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("Unsupported inputs combination or device compute capability.")
@@ -474,8 +471,7 @@ class FusedAttnRunner:
             self.segment_pad_q,
             self.segment_pad_kv,
             self.attn_mask_type,
-            self.window_size_left,
-            self.window_size_right,
+            self.window_size,
         )
 
         if get_qkv_format(self.qkv_layout) == QKVFormat.THD:
@@ -520,8 +516,7 @@ class FusedAttnRunner:
             "is_training": self.is_training,
             "qkv_layout": self.qkv_layout,
             "max_segments_per_seq": self._get_max_segments_per_sequence(),
-            "window_size_left": self.window_size_left,
-            "window_size_right": self.window_size_right,
+            "window_size": self.window_size,
         }
 
         # Convert the outputs to float32 for the elementwise comparison
@@ -579,8 +574,7 @@ class FusedAttnRunner:
             "is_training": self.is_training,
             "qkv_layout": self.qkv_layout,
             "max_segments_per_seq": self._get_max_segments_per_sequence(),
-            "window_size_left": self.window_size_left,
-            "window_size_right": self.window_size_right,
+            "window_size": self.window_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
@@ -755,13 +749,9 @@ class TestFusedAttn:
         This test is not intended to run automatically during CI as it is time-consuming
         It is kept for development and debugging
         """
-        window_size_left = -1
-        window_size_right = -1
+        window_size = (-1, -1)
         if swa:
-            random.seed(42)
-            # Use a small window size to avoid long running time
-            window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
-            window_size_left, window_size_right = window_size
+            window_size = (s_kv // 10, 0)
             if s_q > s_kv:
                 pytest.skip(
                     "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
@@ -780,8 +770,7 @@ class TestFusedAttn:
             is_training,
             qkv_layout,
             bias_shape,
-            window_size_left,
-            window_size_right,
+            window_size,
         )
         runner.test_forward()
 
@@ -804,13 +793,9 @@ class TestFusedAttn:
         """
         Test backward with parameterized configs
         """
-        window_size_left = -1
-        window_size_right = -1
+        window_size = (-1, -1)
         if swa:
-            random.seed(42)
-            # Use a small window size to avoid long running time
-            window_size = check_set_window_size(attn_mask_type, (random.randint(0, s_kv // 10), 0))
-            window_size_left, window_size_right = window_size
+            window_size = (s_kv // 10, 0)
             if s_q > s_kv:
                 pytest.skip(
                     "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
@@ -829,7 +814,6 @@ class TestFusedAttn:
             True,
             qkv_layout,
             bias_shape,
-            window_size_left,
-            window_size_right,
+            window_size,
         )
         runner.test_backward()
