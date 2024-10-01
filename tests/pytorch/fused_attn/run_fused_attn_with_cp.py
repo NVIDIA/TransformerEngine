@@ -60,7 +60,9 @@ def run_dpa_with_cp(
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
     if cp_comm_type == "a2a+p2p":
-        assert world_size % 2 == 0, "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
+        assert (
+            world_size % 2 == 0
+        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
         cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
         cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
         cp_comm_sub_groups = []
