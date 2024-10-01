@@ -98,7 +98,9 @@ class _GroupedLinear(torch.autograd.Function):
                 and not sequence_parallel
             ):
                 # FP8 input for forward, FP8 input transpose for backward wgrad
-                indices = list(range(fp8_meta_offsets["input"], fp8_meta_offsets["input"] + num_gemms))
+                indices = list(
+                    range(fp8_meta_offsets["input"], fp8_meta_offsets["input"] + num_gemms)
+                )
                 inputmats, inputmats_t = fp8_multi_cast_transpose_fused(
                     inputmats_no_fp8,
                     fp8_meta["scaling_fwd"],
@@ -178,14 +180,14 @@ class _GroupedLinear(torch.autograd.Function):
                 for i in range(num_gemms):
                     # amax of input
                     amin, amax = inputmats[i].aminmax()
-                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["input"] + i] = torch.max(
-                        -amin, amax
-                    ).float()
+                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["input"] + i] = (
+                        torch.max(-amin, amax).float()
+                    )
                     # amax of weight
                     amin, amax = weights[i].aminmax()
-                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["weight"] + i] = torch.max(
-                        -amin, amax
-                    ).float()
+                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["weight"] + i] = (
+                        torch.max(-amin, amax).float()
+                    )
 
             out = torch.empty(
                 [sum(m_splits), weights[0].size(0)],
