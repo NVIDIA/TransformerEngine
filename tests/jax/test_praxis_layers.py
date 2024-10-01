@@ -693,7 +693,7 @@ class DotProductAttnAttr:
             ATTN_MASK_TYPE: "causal",
             TRANSPOSE_BS: False,
             SCALE_FACTOR: 1.0,
-            WINDOW_SIZE: (64, 0), # Left size must <= S in DATA_SHAPE
+            WINDOW_SIZE: (64, 0),  # Left size must <= S in DATA_SHAPE
         },
     ]
 

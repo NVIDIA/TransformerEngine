@@ -915,7 +915,7 @@ def apply_swa_mask(
         "causal": AttnMaskType.CAUSAL_MASK,
         "padding_causal": AttnMaskType.PADDING_CAUSAL_MASK,
         "causal_bottom_right": AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        "padding_causal_bottom_right": AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
+        "padding_causal_bottom_right": AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
     }
     _attn_mask_type = mask_map.get(attn_mask_type, None)
     assert _attn_mask_type is not None

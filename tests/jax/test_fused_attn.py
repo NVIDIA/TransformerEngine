@@ -126,7 +126,7 @@ def make_mask(
     segment_pad_q: ArrayLike,
     segment_pad_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
-    window_size: Tuple[int, int]
+    window_size: Tuple[int, int],
 ) -> Array:
     """
     Create attention mask based on mask type. A `True` value in the mask means
