@@ -64,7 +64,7 @@ class _GroupedLinear(torch.autograd.Function):
         cpu_offloading: bool,
         sequence_parallel: bool,
         activation_dtype: torch.dtype,
-        offsets: Dict[str, int],
+        fp8_meta_offsets: Dict[str, int],
         is_grad_enabled: bool,
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
@@ -98,7 +98,7 @@ class _GroupedLinear(torch.autograd.Function):
                 and not sequence_parallel
             ):
                 # FP8 input for forward, FP8 input transpose for backward wgrad
-                indices = list(range(offsets["input"], offsets["input"] + num_gemms))
+                indices = list(range(fp8_meta_offsets["input"], fp8_meta_offsets["input"] + num_gemms))
                 inputmats, inputmats_t = fp8_multi_cast_transpose_fused(
                     inputmats_no_fp8,
                     fp8_meta["scaling_fwd"],
@@ -114,7 +114,7 @@ class _GroupedLinear(torch.autograd.Function):
                     cast_to_fp8(
                         inputmats_no_fp8[i],
                         fp8_meta["scaling_fwd"],
-                        offsets["input"] + i,
+                        fp8_meta_offsets["input"] + i,
                         fp8_dtype_forward,
                         scale_inv=inputmat_scale_inv,
                     )
@@ -178,12 +178,12 @@ class _GroupedLinear(torch.autograd.Function):
                 for i in range(num_gemms):
                     # amax of input
                     amin, amax = inputmats[i].aminmax()
-                    fp8_meta["scaling_fwd"].amax_history[0][offsets["input"] + i] = torch.max(
+                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["input"] + i] = torch.max(
                         -amin, amax
                     ).float()
                     # amax of weight
                     amin, amax = weights[i].aminmax()
-                    fp8_meta["scaling_fwd"].amax_history[0][offsets["weight"] + i] = torch.max(
+                    fp8_meta["scaling_fwd"].amax_history[0][fp8_meta_offsets["weight"] + i] = torch.max(
                         -amin, amax
                     ).float()
 
@@ -251,7 +251,7 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.inp_shape = inp.shape
-            ctx.offsets = offsets
+            ctx.fp8_meta_offsets = fp8_meta_offsets
             ctx.requires_dgrad = inp.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, weights[0], biases[0]):
@@ -298,7 +298,7 @@ class _GroupedLinear(torch.autograd.Function):
                             fp8_cast_transpose_bgrad_fused(
                                 grad_output_mats[i],
                                 ctx.fp8_meta["scaling_bwd"],
-                                ctx.offsets["grad_output"] + i,
+                                ctx.fp8_meta_offsets["grad_output"] + i,
                                 fp8_dtype_backward,
                             )
                         )
@@ -306,8 +306,8 @@ class _GroupedLinear(torch.autograd.Function):
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         indices = list(
                             range(
-                                ctx.offsets["grad_output"],
-                                ctx.offsets["grad_output"] + ctx.num_gemms,
+                                ctx.fp8_meta_offsets["grad_output"],
+                                ctx.fp8_meta_offsets["grad_output"] + ctx.num_gemms,
                             )
                         )
                         grad_output_c, grad_output_t = fp8_multi_cast_transpose_fused(
@@ -323,7 +323,7 @@ class _GroupedLinear(torch.autograd.Function):
                             grad_output_c[i] = cast_to_fp8(
                                 grad_output_mats[i],
                                 ctx.fp8_meta["scaling_bwd"],
-                                ctx.offsets["grad_output"] + i,
+                                ctx.fp8_meta_offsets["grad_output"] + i,
                                 fp8_dtype_backward,
                             )
 
@@ -348,7 +348,7 @@ class _GroupedLinear(torch.autograd.Function):
                         weights_fp8[0]._fp8_dtype,
                         grad_output_c,
                         ctx.fp8_meta["scaling_bwd"].scale_inv,
-                        ctx.offsets["grad_output"],
+                        ctx.fp8_meta_offsets["grad_output"],
                         fp8_dtype_backward,
                         [dgrad],
                         ctx.activation_dtype,
@@ -401,7 +401,7 @@ class _GroupedLinear(torch.autograd.Function):
                             fp8_dtype_forward,
                             grad_output_t,
                             ctx.fp8_meta["scaling_bwd"].scale_inv,
-                            ctx.offsets["grad_output"],
+                            ctx.fp8_meta_offsets["grad_output"],
                             fp8_dtype_backward,
                             wgrad_list,
                             ctx.activation_dtype,
@@ -484,7 +484,7 @@ class _GroupedLinear(torch.autograd.Function):
             None,  # cpu_offloading
             None,  # sequence_parallel
             None,  # activation_dtype
-            None,  # offsets
+            None,  # fp8_meta_offsets
             None,  # is_grad_enabled
             None,  # weights_fp8
             *wgrad_list,
