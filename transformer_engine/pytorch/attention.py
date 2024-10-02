@@ -2363,6 +2363,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             *attn_biases,
         )
         ctx.cp_group_a2a = cp_group_a2a
+        ctx.cp_size_a2a = cp_size_a2a
+        ctx.rank_a2a = rank_a2a
         ctx.cp_group = cp_group
         ctx.cp_global_ranks = cp_global_ranks
         ctx.cp_stream = cp_stream
@@ -2383,12 +2385,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        if ctx.cp_group_a2a is not None:
-            cp_size_a2a = get_distributed_world_size(ctx.cp_group_a2a)
-            rank_a2a = get_distributed_rank(ctx.cp_group_a2a)
-        else:
-            cp_size_a2a = 1
-            rank_a2a = 0
+        cp_size_a2a = ctx.cp_size_a2a
+        rank_a2a = ctx.rank_a2a
 
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
