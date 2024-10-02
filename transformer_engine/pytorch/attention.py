@@ -6842,6 +6842,34 @@ class DotProductAttention(TransformerEngineBaseModule):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
+    .. note::
+
+        Transformer Engine starts to support FP8 attention from v1.6. It stores the FP8 metadata
+        under a `._extra_state` key in the checkpoint. As the FP8 support expands from FusedAttention
+        alone to both FusedAttention and FlashAttention, the location of the `._extra_state` key
+        has also changed.
+
+        (1) <= v1.5:    No `._extra_state` key in the checkpoint as no FP8 support is available.
+                        When loading checkpoints created by > v1.5, it emits "unexpected key" errors.
+        (2) v1.6, v1.7: Stores FP8 metadata at `core_attention.fused_attention._extra_state`.
+                        When loading checkpoints created by < v1.6, it does not emit "missing key"
+                        errors and initializes FP8 metadata to default values, i.e. 1s for scaling
+                        factors and 0s for amaxes.
+                        When loading checkpoints created by > v1.7, it emits "unexpected key" errors
+                        as it does not expect the `core_attention._extra_state` key.
+        (3) >= v1.8:    Stores FP8 metadata at `core_attention._extra_state`.
+                        When loading checkpoints created by < v1.6, it does not emit "missing key"
+                        errors and initializes FP8 metadata to default values, i.e. 1s for scaling
+                        factors and 0s for amaxes.
+                        When loading checkpoints created by v1.6 or v1.7, it does not emit "missing
+                        key" or "unexpected key" errors, but does emit a warning that users should
+                        map the v1.6/v1.7 key to the v1.8 key. Without that mapping, it ignores the
+                        v1.6/v1.7 key and initializes FP8 metadata to default values. The mapping
+                        can be done via:
+                        >>> state_dict["self_attention.core_attention._extra_state"] = \
+                            state_dict["self_attention.core_attention.fused_attention._extra_state"]
+                        >>> del state_dict["self_attention.core_attention.fused_attention._extra_state"]
+
     Parameters
     ----------
     num_attention_heads : int
