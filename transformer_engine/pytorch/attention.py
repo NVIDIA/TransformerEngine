@@ -1363,7 +1363,7 @@ def flash_attn_p2p_communicate(
     return send_recv_reqs
 
 
-@jit_fuser
+@torch.compile
 def flash_attn_fwd_out_correction(out, out_per_step, seq_dim, softmax_lse, softmax_lse_per_step):
     """Merge partial outputs of each step in Attention with context parallelism"""
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
@@ -1372,7 +1372,7 @@ def flash_attn_fwd_out_correction(out, out_per_step, seq_dim, softmax_lse, softm
     out.add_(out_corrected)
 
 
-@jit_fuser
+@torch.compile
 def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     """Merge softmax stats of each step in Attention with context parallelism"""
     max_scale = torch.max(softmax_lse, softmax_lse_per_step)
@@ -1381,7 +1381,7 @@ def flash_attn_fwd_softmax_lse_correction(softmax_lse, softmax_lse_per_step):
     softmax_lse.copy_(new_scale)
 
 
-@jit_fuser
+@torch.compile
 def get_cu_seqlens_on_cp_rank(
     cu_seqlens, cu_seqlens_padded_on_cp_rank, cp_size, cp_rank, first_half, second_half
 ):
@@ -1449,7 +1449,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         padding = "padding" in attn_mask_type
 
         if qkv_format in ["bshd", "sbhd"]:
-            seq_dim = torch.tensor(qkv_format.index("s"), device=torch.cuda.current_device())
+            seq_dim = qkv_format.index("s")
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
