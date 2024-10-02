@@ -437,7 +437,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Default case
             super().__setattr__(name, value)
 
-
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
 
