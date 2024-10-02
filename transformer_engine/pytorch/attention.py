@@ -7067,6 +7067,9 @@ class DotProductAttention(TransformerEngineBaseModule):
               tensor parallel process group.
     cp_group : Union[ProcessGroup, List[ProcessGroup]], default = `None`
               context parallel process group.
+              ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
+              List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
+              and cp_group[1] are for a2a and p2p communications respectively.
     cp_global_ranks : list of global rank IDs, default = `None`
                      global rank IDs of GPUs that are in cp_group.
     cp_stream : CUDA stream, default = `None`
@@ -7271,6 +7274,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         ----------
         cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
+                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
+                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
+                  and cp_group[1] are for a2a and p2p communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
@@ -8310,6 +8316,9 @@ class MultiheadAttention(torch.nn.Module):
         ----------
         cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
+                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
+                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
+                  and cp_group[1] are for a2a and p2p communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
