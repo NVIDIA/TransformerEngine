@@ -127,8 +127,8 @@ except PackageNotFoundError:
             fa3_logger.addHandler(_stream_handler)
         fa3_logger.debug(
             "To use flash-attn v3, please follow these steps to install the flashattn-hopper "
-            "package: \n"
-            + _flash_attn_3_installation_steps
+            "package: \n%s",
+            _flash_attn_3_installation_steps
         )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
