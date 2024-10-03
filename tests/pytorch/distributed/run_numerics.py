@@ -45,7 +45,7 @@ def main(argv=None, namespace=None):
         "rank": WORLD_RANK,
         "world_size": WORLD_SIZE,
     }
-    dist_init_kwargs["init_method"] = 'env://'
+    dist_init_kwargs["init_method"] = "env://"
     dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
     assert dist.is_nccl_available()
     torch.cuda.set_device(LOCAL_RANK)
@@ -61,9 +61,11 @@ def main(argv=None, namespace=None):
     args = parser.parse_args(argv, namespace)
 
     test_dict = [
-        test_linear, test_layernorm,
-        test_layernorm_linear, 
-        test_layernorm_mlp, test_transformer_layer
+        test_linear,
+        test_layernorm,
+        test_layernorm_linear,
+        test_layernorm_mlp,
+        test_transformer_layer,
     ]
 
     FP8 = args.fp8
@@ -124,30 +126,25 @@ def dist_print(msg, src=None, end="\n", error=False):
         stream.write(f"[rank{WORLD_RANK}] {msg}{end}\n")
     dist.barrier()
 
+
 def _get_tolerances(dtype):
     if FP8:
-        return {
-            "rtol": 0.125, 
-            "atol": 0.0625
-        }
+        return {"rtol": 0.125, "atol": 0.0625}
 
     if dtype == torch.float16:
-        return {
-            "rtol": 1e-3, 
-            "atol": 1e-5
-        }
+        return {"rtol": 1e-3, "atol": 1e-5}
     if dtype == torch.float32:
-        return {
-            "rtol": 1.3e-6, 
-            "atol": 1e-5
-        }
-     
+        return {"rtol": 1.3e-6, "atol": 1e-5}
+
 
 def _check_outputs(output_single_node, output_distributed):
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-    
+
     output_failed, output_info = _compare_tensors(
-        "outputs", output_distributed, output_single_node, **_get_tolerances(output_single_node.dtype)
+        "outputs",
+        output_distributed,
+        output_single_node,
+        **_get_tolerances(output_single_node.dtype),
     )
     if output_failed:
         dist_print(output_info, src=WORLD_RANK, error=output_failed)
@@ -298,7 +295,9 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
     if parallel_mode == "row":
         # Split input across GPUs for row parallelism
         split_size = HIDDEN_SIZE // WORLD_SIZE
-        input_distributed = input_single_node[:, WORLD_RANK * split_size:(WORLD_RANK + 1) * split_size].clone()
+        input_distributed = input_single_node[
+            :, WORLD_RANK * split_size : (WORLD_RANK + 1) * split_size
+        ].clone()
     elif parallel_mode == "column":
         if sequence_parallel:
             # Duplicate input for sequence parallelism
@@ -542,7 +541,9 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     """
     # Set parameter data type
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = 64 if FP8 else 32 # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = (
+        64 if FP8 else 32
+    )  # larger tensors lead to numerical failures with thight atol and rtol
 
     # Create models
     model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
@@ -632,7 +633,9 @@ def test_layernorm_mlp():
 @run_distributed_test()
 def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = 64 if FP8 else 32 # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = (
+        64 if FP8 else 32
+    )  # larger tensors lead to numerical failures with thight atol and rtol
 
     model_single_node = te.TransformerLayer(
         HIDDEN_SIZE, FFN_HIDDEN_SIZE, NR_HEADS, attention_dropout=0, hidden_dropout=0, **kwargs
@@ -658,7 +661,9 @@ def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
         torch.randn((WORLD_SIZE * SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
     )
     if sequence_parallel:
-        input_distributed = input_single_node[WORLD_RANK * SEQ_LEN:(WORLD_RANK + 1) * SEQ_LEN, :, :]
+        input_distributed = input_single_node[
+            WORLD_RANK * SEQ_LEN : (WORLD_RANK + 1) * SEQ_LEN, :, :
+        ]
     else:
         input_distributed = input_single_node.clone().cuda()
 
@@ -698,7 +703,7 @@ def test_transformer_layer():
         {"apply_residual_connection_post_layernorm": True},
         {"output_layernorm": True},
         {"parallel_attention_mlp": True},
-        #{"layer_type": "decoder"},
+        # {"layer_type": "decoder"},
         {"window_size": (2, 2)},
         {"normalization": "RMSNorm"},
         {"zero_centered_gamma": True},
@@ -717,4 +722,3 @@ def test_transformer_layer():
 
 if __name__ == "__main__":
     sys.exit(main())
-
