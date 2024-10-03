@@ -127,7 +127,8 @@ except PackageNotFoundError:
             fa3_logger.addHandler(_stream_handler)
         fa3_logger.debug(
             "To use flash-attn v3, please follow these steps to install the flashattn-hopper "
-            "package: \n" + _flash_attn_3_installation_steps
+            "package: \n"
+            + _flash_attn_3_installation_steps
         )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
@@ -435,15 +436,8 @@ def get_attention_backend(
                 "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
             )
             use_flash_attention = False
-        if (
-            use_flash_attention
-            and _use_flash_attn_3
-            and fp8
-            and fp8_meta["recipe"].fp8_dpa
-        ):
-            logger.debug(
-                "Disabling FlashAttention 3 for FP8 and qkv_format = thd"
-            )
+        if use_flash_attention and _use_flash_attn_3 and fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling FlashAttention 3 for FP8 and qkv_format = thd")
             _use_flash_attn_3 = False
 
     # Filter: Dropout
@@ -5097,7 +5091,7 @@ class FlashAttention(torch.nn.Module):
                                 + ". Please update your FlashAttention 3 (beta) installation as it "
                                 + "may have added more supported arguments to its API. \n"
                                 + _flash_attn_3_installation_steps,
-                                ) + e.args[1:]
+                            ) + e.args[1:]
                         raise
 
                     if fp8 and fp8_meta["recipe"].fp8_mha:
