@@ -15,6 +15,10 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
 endif()
 
+# Hide non-necessary symbols in shared object.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libtransformer_engine.version")
+
 # Transformer Engine library
 project(transformer_engine LANGUAGES CUDA CXX)
 
@@ -67,6 +71,7 @@ list(APPEND transformer_engine_SOURCES
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
+     util/padding.cu
      util/cuda_driver.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp

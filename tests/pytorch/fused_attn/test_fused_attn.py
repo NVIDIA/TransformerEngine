@@ -22,6 +22,7 @@ from transformer_engine.pytorch.attention import (
     get_attention_backend,
     _flash_attn_2_plus,
     _flash_attn_2_3_plus,
+    _flash_attn_3_plus,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
@@ -135,7 +136,6 @@ def _get_attention_backends(
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     alibi_slopes_shape = None
@@ -233,9 +233,9 @@ def test_dot_product_attention(
     """Test DotProductAttention module"""
 
     # Get configs
-    tols = dict(atol=5e-3, rtol=5e-3)
+    tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
-        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        tols = dict(atol=1.5e-2, rtol=1.5e-2)
     config = model_configs[model]
     is_mla = config.head_dim_qk != config.head_dim_v
     if qkv_layout is None:
@@ -678,7 +678,6 @@ def _run_dot_product_attention(
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create seqlens
@@ -1036,7 +1035,7 @@ def test_transformer_layer(
 
     # Get configs
     config = model_configs[model]
-    tols = dict(atol=5e-1, rtol=5e-2)
+    tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
     # Test backend availability
@@ -1167,7 +1166,6 @@ def _run_transformer_layer(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     # Create input tensor
@@ -1346,20 +1344,22 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
 @pytest.mark.parametrize("qkv_format", qkv_format_fp8_vs_f16)
 @pytest.mark.parametrize("input_layernorm", [True, False])
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
+@pytest.mark.parametrize("RoPE", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
-def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, is_training):
+def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, RoPE, is_training):
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
-    global _attention_backends
-    if not is_training:
+    if _flash_attn_3_plus and not is_training:
+        if RoPE:
+            pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-            dtype, config, True, qkv_format, input_layernorm, is_training
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training
         )
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -1367,19 +1367,19 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     _attention_backends["backend_selection_requires_update"] = True
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
     fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, is_training
+        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training
     )
 
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
     fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, is_training
+        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training
     )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if not is_training:
+    if _flash_attn_3_plus and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1413,7 +1413,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
             )
 
 
-def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_training):
+def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoPE, is_training):
     reset_rng_states()
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
@@ -1432,6 +1432,10 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_
     )
 
     with fp8_model_init(enabled=fp8_mha):
+        rotary_pos_emb = None
+        if RoPE:
+            PE = RotaryPositionEmbedding(dim=config.head_dim_qk)
+            rotary_pos_emb = PE(config.max_seqlen_q).to(device="cuda")
         mha = MultiheadAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_heads,
@@ -1492,6 +1496,7 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, is_
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
             is_first_microbatch=None,
+            rotary_pos_emb=rotary_pos_emb,
         )
         if is_training:
             out.backward(out_grad)
@@ -1527,8 +1532,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    global _attention_backends
-    if not is_training:
+    if _flash_attn_3_plus and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1555,7 +1559,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if not is_training:
+    if _flash_attn_3_plus and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1778,7 +1782,6 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = 0.0001 * torch.randint(
@@ -1833,7 +1836,6 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
-    global _attention_backends
     _attention_backends["backend_selection_requires_update"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")
@@ -1983,12 +1985,18 @@ class _custom_mha_fp8(torch.autograd.Function):
             None,
             None,
             None,
-            fp8_meta["scaling_fwd"].scale_inv[META_QKV],
-            fp8_meta["scaling_fwd"].scale_inv[META_S],
-            fp8_meta["scaling_fwd"].scale[META_S],
-            fp8_meta["scaling_fwd"].scale[META_O],
-            fp8_meta["scaling_fwd"].amax_history[0][META_S],
-            fp8_meta["scaling_fwd"].amax_history[0][META_O],
+            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_qkv
+            META_QKV,  # d_scale_qkv_offset
+            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_s
+            META_S,  # d_scale_s_offset
+            fp8_meta["scaling_fwd"].scale,  # q_scale_s
+            META_S,  # q_scale_s_offset
+            fp8_meta["scaling_fwd"].scale,  # q_scale_o
+            META_O,  # q_scale_o_offset
+            fp8_meta["scaling_fwd"].amax_history,  # amax_s
+            META_S,  # amax_s_offset
+            fp8_meta["scaling_fwd"].amax_history,  # amax_o
+            META_O,  # amax_o_offset
             attn_scale=None,
             dropout=p_dropout,
             fast_zero_fill=fast_zero_fill,

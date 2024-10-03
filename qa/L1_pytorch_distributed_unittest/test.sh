@@ -7,9 +7,9 @@ set -e
 : ${TE_PATH:=/opt/transformerengine}
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
 
+pip install prettytable
 git clone https://github.com/NVIDIA/Megatron-LM.git
 cd Megatron-LM
-git checkout bcce6f54e075e3c3374ea67adefe54f3f2da2b07
-sed -i -e '1504,1505d' megatron/model/transformer.py
+git checkout b3375a0e38c10e2300ef4be031f7dcabab52b448
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_convergence.py
 python $TE_PATH/tests/pytorch/distributed/print_logs.py
