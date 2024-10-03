@@ -110,9 +110,15 @@ _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
 _flash_attn_3_plus = False
 _use_flash_attn_3 = False
+_flash_attn_3_installation_steps = """\
+(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(3) mkdir -p $python_path/flashattn_hopper
+(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
 try:
     _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
-    _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
+    _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.9")
+    _flash_attn_3_0_0_beta = _flash_attn_3_plus and _flash_attn_v3_version < PkgVersion("3.0.0")
 except PackageNotFoundError:
     if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
         fa3_logger = logging.getLogger()
@@ -120,12 +126,8 @@ except PackageNotFoundError:
         if not fa3_logger.hasHandlers():
             fa3_logger.addHandler(_stream_handler)
         fa3_logger.debug(
-            "To use flash-attn v3, please follow these steps to install the flashattn-hopper"
-            " package: \n"
-            """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
-            """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
-            """(3) mkdir -p $python_path/flashattn_hopper \n"""
-            """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
+            "To use flash-attn v3, please follow these steps to install the flashattn-hopper "
+            "package: \n" + _flash_attn_3_installation_steps
         )
 else:
     from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
@@ -433,6 +435,16 @@ def get_attention_backend(
                 "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
             )
             use_flash_attention = False
+        if (
+            use_flash_attention
+            and _use_flash_attn_3
+            and fp8
+            and fp8_meta["recipe"].fp8_dpa
+        ):
+            logger.debug(
+                "Disabling FlashAttention 3 for FP8 and qkv_format = thd"
+            )
+            _use_flash_attn_3 = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention:
@@ -5018,7 +5030,7 @@ class FlashAttention(torch.nn.Module):
                 if _flash_attn_2_4_1_plus:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 fa_optional_forward_args_thd = []
-                if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
+                if (qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type) or fp8:
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
                     if _flash_attn_2_5_7_plus:
@@ -5033,7 +5045,8 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_args_thd.append(max_seqlen_q)
                     fa_optional_forward_args_thd.append(max_seqlen_kv)
                 if _use_flash_attn_3:
-                    fa_optional_forward_kwargs_fp8 = {}
+                    fa_3_optional_forward_kwargs = {}
+                    fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     if fp8:
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                         activation_dtype = query_layer.dtype
@@ -5060,9 +5073,9 @@ class FlashAttention(torch.nn.Module):
                                 Float8Tensor.to_float8(x, fp8_dtype=fp8_dtype_forward)
                                 for x in [query_layer, key_layer, value_layer]
                             )
-                        fa_optional_forward_kwargs_fp8["descale_q"] = query_layer._scale_inv
-                        fa_optional_forward_kwargs_fp8["descale_k"] = key_layer._scale_inv
-                        fa_optional_forward_kwargs_fp8["descale_v"] = value_layer._scale_inv
+                        fa_3_optional_forward_kwargs["descale_q"] = query_layer._scale_inv
+                        fa_3_optional_forward_kwargs["descale_k"] = key_layer._scale_inv
+                        fa_3_optional_forward_kwargs["descale_v"] = value_layer._scale_inv
                         query_layer, key_layer, value_layer = (
                             convert_to_torch_float8(x, torch_dtype)
                             for x in [query_layer, key_layer, value_layer]
@@ -5075,24 +5088,18 @@ class FlashAttention(torch.nn.Module):
                             *fa_optional_forward_args_thd,
                             softmax_scale=self.softmax_scale,
                             causal="causal" in attn_mask_type,
-                            deterministic=self.deterministic,
-                            **fa_optional_forward_kwargs_fp8,
+                            **fa_3_optional_forward_kwargs,
                         )
-                    except TypeError:
-                        self.logger.debug(
-                            "Running with default q, k, v descales, i.e. 1s. To enable custom "
-                            "descales, please install flashattn-hopper (FA3) with this PR: "
-                            "https://github.com/Dao-AILab/flash-attention/pull/1210."
-                        )
-                        output, _ = func(
-                            query_layer,
-                            key_layer,
-                            value_layer,
-                            *fa_optional_forward_args_thd,
-                            softmax_scale=self.softmax_scale,
-                            causal="causal" in attn_mask_type,
-                            deterministic=self.deterministic,
-                        )
+                    except TypeError as e:
+                        if _flash_attn_3_0_0_beta:
+                            e.args = (
+                                e.args[0]
+                                + ". Please update your FlashAttention 3 (beta) installation as it "
+                                + "may have added more supported arguments to its API. \n"
+                                + _flash_attn_3_installation_steps,
+                                ) + e.args[1:]
+                        raise
+
                     if fp8 and fp8_meta["recipe"].fp8_mha:
                         output = cast_to_fp8(
                             output,
