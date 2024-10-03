@@ -312,6 +312,11 @@ class FusedAttnRunner:
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip("QKVPACKED layout requires max_seqlen_q and max_seqlen_kv to be equal.")
 
+        if self.max_seqlen_q > self.max_seqlen_kv and self.window_size[0] > 0:
+            pytest.skip(
+                "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
+            )
+
         self.backend = FusedAttnHelper(
             self.dtype,
             self.dtype,
@@ -752,10 +757,6 @@ class TestFusedAttn:
         window_size = (-1, -1)
         if swa:
             window_size = (s_kv // 10, 0)
-            if s_q > s_kv:
-                pytest.skip(
-                    "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
-                )
         runner = FusedAttnRunner(
             b,
             s_q,
@@ -796,10 +797,6 @@ class TestFusedAttn:
         window_size = (-1, -1)
         if swa:
             window_size = (s_kv // 10, 0)
-            if s_q > s_kv:
-                pytest.skip(
-                    "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
-                )
         runner = FusedAttnRunner(
             b,
             s_q,

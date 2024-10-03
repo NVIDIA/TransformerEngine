@@ -332,10 +332,14 @@ class EncoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["casual", "padding_causal"]:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             mask = causal_mask
         else:
             mask = padded_mask
+            if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
+                pytest.skip(
+                    "cuDNN only supports SWA with causal / padding_causal mask"
+                )
 
         ref_masks = (1 - mask,)
         test_masks = (None, mask)  # The second arg of Transformer is encoded tokens.
@@ -385,10 +389,14 @@ class DecoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["casual", "padding_causal"]:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             self_mask = causal_mask
         else:
             self_mask = padded_mask
+            if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
+                pytest.skip(
+                    "cuDNN only supports SWA with causal / padding_causal mask"
+                )
 
         ref_masks = (1 - self_mask, 1 - padded_mask)
         test_masks = (self_mask, padded_mask)
