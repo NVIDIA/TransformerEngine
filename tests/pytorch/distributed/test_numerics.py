@@ -29,7 +29,7 @@ if torch.cuda.device_count() < 2:
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
-NUM_PROCS: int = 2
+NUM_PROCS: int = min(4, torch.cuda.device_count())
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
@@ -41,7 +41,10 @@ def _run_test(fp8):
         test_cmd += ["--fp8"]
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if result.returncode != 0 or "NUMERICAL CHECK FAILED" in result.stderr.decode():
+    if (
+        result.returncode != 0
+        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
+    ):
         raise AssertionError(result.stderr.decode())
 
 
@@ -53,3 +56,4 @@ def test_distributed(fp8):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     _run_test(fp8)
+
