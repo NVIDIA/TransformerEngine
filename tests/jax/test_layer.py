@@ -337,9 +337,7 @@ class EncoderRunner(BaseRunner):
         else:
             mask = padded_mask
             if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
-                pytest.skip(
-                    "cuDNN only supports SWA with causal / padding_causal mask"
-                )
+                pytest.skip("cuDNN only supports SWA with causal / padding_causal mask")
 
         ref_masks = (1 - mask,)
         test_masks = (None, mask)  # The second arg of Transformer is encoded tokens.
@@ -394,9 +392,7 @@ class DecoderRunner(BaseRunner):
         else:
             self_mask = padded_mask
             if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
-                pytest.skip(
-                    "cuDNN only supports SWA with causal / padding_causal mask"
-                )
+                pytest.skip("cuDNN only supports SWA with causal / padding_causal mask")
 
         ref_masks = (1 - self_mask, 1 - padded_mask)
         test_masks = (self_mask, padded_mask)
