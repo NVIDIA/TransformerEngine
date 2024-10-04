@@ -133,8 +133,11 @@ def _get_tolerances(dtype):
 
     if dtype == torch.float16:
         return {"rtol": 1e-3, "atol": 1e-5}
+    if dtype == torch.bfloat16:
+        return {"rtol": 1.6e-2, "atol": 1e-5}
     if dtype == torch.float32:
         return {"rtol": 1.3e-6, "atol": 1e-5}
+    raise ValueError(f"Unsupported dtype ({dtype})")
 
 
 def _check_outputs(output_single_node, output_distributed):
