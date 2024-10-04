@@ -6,42 +6,69 @@
 Frequently Asked Questions (FAQ)
 ================================
 
-FP8 checkpoint compatibility 
+FP8 checkpoint compatibility
 ----------------------------
 
-Transformer Engine starts to support FP8 attention in 1.6. When checkpointing, it stores the FP8 metadata, including the scaling factors and amax history, under a `._extra_state` key. As our FP8 attention support expands from one backend to multiple backends, the location of the `._extra_state` key has also shifted. We take the `MultiheadAttention` module as an example and show the checkpoint structure in different Transformer Engine versions.
+Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 metadata, i.e. scaling factors and amax histories, under a `._extra_state` key in the checkpoint. As our FP8 attention support expands, the location of the key has also shifted. Here we take the `MultiheadAttention` module as an example and list the checkpointing behaviors with different Transformer Engine versions.
+
+.. code-block:: python
+
+    >>> # Transformer Engine 1.11
+    >>> from transformer_engine.pytorch import MultiheadAttention, fp8_model_init
+    >>> with fp8_model_init(enabled=True):
+    ...     mha = MultiheadAttention(
+    ...         hidden_size=1024,
+    ...         num_attention_heads=16,
+    ...         bias=True,
+    ...         params_dtype=torch.bfloat16,
+    ...         input_layernorm=False,
+    ...         fuse_qkv_params=True,
+    ...         attention_type="self",
+    ...         qkv_weight_interleaved=True,
+    ...     ).to(dtype=torch.bfloat16, device="cuda")
+    ...
+    >>> state_dict = mha.state_dict()
+    >>> print(state_dict.keys())
+    odict_keys(['qkv.weight', 'qkv.bias', 'qkv._extra_state', 'core_attention._extra_state', 'proj.weight', 'proj.bias', 'proj._extra_state'])
+    >>> # core_attention._extra_state is the key for FP8 attention metadata in 1.11
+
 
 .. list-table::
-   :widths: 15 25 50
-   :header-rows: 1
 
-   * - Version
-     - FP8 metadata
-     - Checkpoint compatibility (checkpoint version: loading behavior)
-   * - <= 1.5
-     - None
-     -
-       - <= 1.5: no FP8 metadata loaded (as expected)
-       - > 1.5: "unexpected key" error
-   * - 1.6, 1.7
-     - `core_attention.fused_attention._extra_state`
-     -
-       - <= 1.5: initialize FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
-       - 1.6, 1.7: load FP8 metadata from checkpoint
-       - >= 1.8: "unexpected key" error
-   * - >=1.8, <= 1.11
-     - `core_attention._extra_state`
-     -
-       - <= 1.5: initialize FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
-       - 1.6, 1.7: this checkpoint save/load version pair relies on users to map the 1.6/1.7 key to the 1.8-1.11 key; otherwise, initialize FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes. Mapping in this example can be done by:
-         .. code-block:: python
+   * - **Version: <= 1.5**
 
-             >>> state_dict["core_attention._extra_state"] = \
-                     state_dict["core_attention.fused_attention._extra_state"]
-             >>> del state_dict["core_attention.fused_attention._extra_state"]
-       - >= 1.8: load FP8 metadata from checkpoint
-   * - >=1.12
-     - `core_attention._extra_state`
-     -
-       - <= 1.5: initialize FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
-       - >= 1.6: load FP8 metadata from checkpoint 
+         - Saves no FP8 metadata to checkpoint
+         - Loading checkpoints saved by version:
+
+             :<= 1.5:    No FP8 metadata is loaded (as expected)
+             :>  1.5:    Error: unexpected key
+   * - **Version: 1.6, 1.7**
+
+         - Saves FP8 metadata to `core_attention.fused_attention._extra_state`
+         - Loading checkpoints saved by version:
+
+             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
+             :1.6, 1.7:  Loads FP8 metadata from checkpoint
+             :>= 1.8:    Error: unexpected key
+   * - **Version: >=1.8, <= 1.11**
+
+         - Saves FP8 metadata to `core_attention._extra_state`
+         - Loading checkpoints saved by version:
+
+             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
+             :1.6, 1.7:  Relies on users to map 1.6/1.7 key to 1.8-1.11 key; otherwise, initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes. Mapping in this `MultiheadAttention` example can be done via:
+
+              .. code-block:: python
+
+                  >>> state_dict["core_attention._extra_state"] = \
+                          state_dict["core_attention.fused_attention._extra_state"]
+                  >>> del state_dict["core_attention.fused_attention._extra_state"]
+
+             :>= 1.8:    Loads FP8 metadata from checkpoint
+   * - **Version: >=1.12**
+
+         - Saves FP8 metadata to `core_attention._extra_state`
+         - Loading checkpoints saved by version:
+
+             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
+             :>= 1.6:    Loads FP8 metadata from checkpoint
