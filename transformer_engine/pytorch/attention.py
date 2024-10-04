@@ -128,8 +128,8 @@ else:
 
 if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as flash_attn_varlen_fwd
+    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as flash_attn_varlen_bwd
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
 
@@ -1694,7 +1694,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = _flash_attn_forward(
+                                ) = flash_attn_varlen_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -1808,7 +1808,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = _flash_attn_forward(
+                                ) = flash_attn_varlen_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -1931,7 +1931,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = _flash_attn_forward(
+                                ) = flash_attn_varlen_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -2021,7 +2021,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse_per_step[i],
                                 _,
                                 rng_states[i],
-                            ) = _flash_attn_forward(
+                            ) = flash_attn_varlen_fwd(
                                 q_inputs[i % 2],
                                 kv_inputs[i % 2][0],
                                 kv_inputs[i % 2][1],
@@ -2430,7 +2430,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout_ = dout.view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
                             fa_optional_backward_kwargs["window_size"] = (-1, 0)
-                        _flash_attn_backward(
+                        flash_attn_varlen_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2524,7 +2524,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout_ = dout.view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
                             fa_optional_backward_kwargs["window_size"] = (-1, -1)
-                        _flash_attn_backward(
+                        flash_attn_varlen_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2624,7 +2624,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
                         if _flash_attn_2_3_plus:
                             fa_optional_backward_kwargs["window_size"] = (-1, -1)
-                        _flash_attn_backward(
+                        flash_attn_varlen_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2688,7 +2688,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dout_ = dout.view(-1, *dout.shape[-2:])
                     if _flash_attn_2_3_plus:
                         fa_optional_backward_kwargs["window_size"] = (-1, -1)
-                    _flash_attn_backward(
+                    flash_attn_varlen_bwd(
                         dout_,
                         q_,
                         kv_[0],
@@ -3145,7 +3145,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     else:
                         q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
                         _, _, _, _, out_per_step[i], softmax_lse_per_step[i], _, rng_states[i] = (
-                            _flash_attn_forward(
+                            flash_attn_varlen_fwd(
                                 q_,
                                 k_,
                                 v_,
@@ -3303,7 +3303,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
                         ]
-                        _flash_attn_backward(
+                        flash_attn_varlen_bwd(
                             dout_,
                             q_,
                             k_,
@@ -3637,7 +3637,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 softmax_lse,
                 _,
                 rng_state,
-            ) = _flash_attn_forward(
+            ) = flash_attn_varlen_fwd(
                 q,
                 k,
                 v,
@@ -3853,7 +3853,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             softmax_lse, rng_state = aux_ctx_tensors
             out, dout = [x.view(-1, *x.shape[-2:]) for x in [out, dout]]
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
-            _flash_attn_backward(
+            flash_attn_varlen_bwd(
                 dout,
                 q,
                 k,
