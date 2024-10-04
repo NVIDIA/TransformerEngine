@@ -5012,12 +5012,12 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
                 if _flash_attn_2_4_1_plus:
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
-                if _flash_attn_2_5_7_plus:
-                    fa_optional_forward_kwargs["block_table"] = None
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
+                    if _flash_attn_2_5_7_plus:
+                        fa_optional_forward_kwargs["block_table"] = None
                     func = (
                         flash_attn_varlen_func
                         if not _use_flash_attn_3
