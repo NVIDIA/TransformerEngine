@@ -778,7 +778,12 @@ class Float8Tensor(QuantizedTensor):
                 fill_cache = False
 
         # Need to compute transpose if cache is invalid
-        need_compute = force_compute or (self._transpose is None) or self._transpose_invalid or (noop_flag is not None)
+        need_compute = (
+            force_compute
+            or (self._transpose is None)
+            or self._transpose_invalid
+            or (noop_flag is not None)
+        )
 
         # Return cached transpose if possible
         if not need_compute:
