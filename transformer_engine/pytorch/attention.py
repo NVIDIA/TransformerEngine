@@ -123,6 +123,8 @@ else:
     from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
         _flash_attn_backward as _flash_attn_backward_v3,
     )
+    from flashattn_hopper.flash_attn_interface import _flash_attn_varlen_forward as flash_attn_varlen_fwd_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_varlen_backward as flash_attn_varlen_bwd_v3
 
     _use_flash_attn_3 = True
 
@@ -1499,17 +1501,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
 
         if not use_fused_attention:
-            fa_forward_kwargs = {
-                "dropout_p" : dropout_p,
-                "softmax_scale" : softmax_scale,
-                "return_softmax" : False
-            }
-            if _flash_attn_2_3_plus:
+            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_fwd = flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
-            if _flash_attn_2_4_plus:
-                fa_forward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_5_7_plus:
-                fa_forward_kwargs["block_table"] = None
+            else:
+                flash_attn_fwd = flash_attn_varlen_fwd
+                fa_forward_kwargs["dropout_p"] = dropout_p
+                fa_forward_kwargs["return_softmax"] = False
+                if _flash_attn_2_3_plus:
+                    fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
+                if _flash_attn_2_4_plus:
+                    fa_forward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_5_7_plus:
+                    fa_forward_kwargs["block_table"] = None
 
         # Flash Attn inputs
         q_inputs = [None, None]
@@ -1700,7 +1705,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = flash_attn_varlen_fwd(
+                                ) = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -1800,7 +1805,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     kv_inputs[i % 2] = kv_inputs[i % 2][:, :, 0, ...].contiguous()
                                 # [2, b, sk//2, np, hn] -> [2, b*sk//2, np, hn]
                                 kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-2:])
-                                if _flash_attn_2_3_plus:
+                                if _use_flash_attn_3 or _flash_attn_2_3_plus:
                                     fa_forward_kwargs["window_size"] = (-1, -1)
                                 (
                                     _,
@@ -1811,7 +1816,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = flash_attn_varlen_fwd(
+                                ) = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -1920,7 +1925,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     )
                                 # [2, b, 2, sk//2, np, hn] -> [2, b*sk, np, hn]
                                 kv_inputs[i % 2] = kv_inputs[i % 2].view(2, -1, *k.shape[-2:])
-                                if _flash_attn_2_3_plus:
+                                if _use_flash_attn_3 or _flash_attn_2_3_plus:
                                     fa_forward_kwargs["window_size"] = (-1, -1)
                                 (
                                     _,
@@ -1931,7 +1936,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i],
                                     _,
                                     rng_states[i],
-                                ) = flash_attn_varlen_fwd(
+                                ) = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     kv_inputs[i % 2][0],
                                     kv_inputs[i % 2][1],
@@ -2018,7 +2023,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse_per_step[i],
                                 _,
                                 rng_states[i],
-                            ) = flash_attn_varlen_fwd(
+                            ) = flash_attn_fwd(
                                 q_inputs[i % 2],
                                 kv_inputs[i % 2][0],
                                 kv_inputs[i % 2][1],
@@ -2310,14 +2315,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_recv_reqs = []
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {
-                "dropout_p" : ctx.dropout_p,
-                "softmax_scale" : ctx.softmax_scale,
-            }
-            if _flash_attn_2_4_plus:
-                fa_backward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_4_1_plus:
+            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
+            else:
+                flash_attn_bwd = flash_attn_varlen_bwd
+                fa_backward_kwargs["dropout_p"] = ctx.dropout_p
+                if _flash_attn_2_4_plus:
+                    fa_backward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_4_1_plus:
+                    fa_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(cp_size):
             # wait until KV is received
@@ -2426,9 +2434,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
-                        if _flash_attn_2_3_plus:
+                        if _use_flash_attn_3 or _flash_attn_2_3_plus:
                             fa_backward_kwargs["window_size"] = (-1, 0)
-                        flash_attn_varlen_bwd(
+                        if not _use_flash_attn_3:
+                            fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
+                        flash_attn_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2443,7 +2453,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv,
                             causal=True,
-                            rng_state=rng_states[cp_size - i - 1],
                             **fa_backward_kwargs,
                         )
                 elif i >= (cp_size - rank - 1):
@@ -2518,9 +2527,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         # [b, 2, sq//2, np, hn] -> [b*sq, np, hn]
                         out_ = out.view(-1, *out.shape[-2:])
                         dout_ = dout.view(-1, *dout.shape[-2:])
-                        if _flash_attn_2_3_plus:
+                        if _use_flash_attn_3 or _flash_attn_2_3_plus:
                             fa_backward_kwargs["window_size"] = (-1, -1)
-                        flash_attn_varlen_bwd(
+                        if not _use_flash_attn_3:
+                            fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
+                        flash_attn_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2535,7 +2546,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ctx.max_seqlen_q,
                             ctx.max_seqlen_kv // 2,
                             causal=False,
-                            rng_state=rng_states[cp_size - i - 1],
                             **fa_backward_kwargs,
                         )
                 else:
@@ -2616,9 +2626,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn] -> [b*sq//2, np, hn]
                             out_ = out[:, 1, ...].contiguous().view(-1, *out.shape[-2:])
                             dout_ = dout[:, 1, ...].contiguous().view(-1, *dout.shape[-2:])
-                        if _flash_attn_2_3_plus:
+                        if _use_flash_attn_3 or _flash_attn_2_3_plus:
                             fa_backward_kwargs["window_size"] = (-1, -1)
-                        flash_attn_varlen_bwd(
+                        if not _use_flash_attn_3:
+                            fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
+                        flash_attn_bwd(
                             dout_,
                             q_,
                             kv_[0],
@@ -2633,7 +2645,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             ctx.max_seqlen_q // 2,
                             ctx.max_seqlen_kv,
                             causal=False,
-                            rng_state=rng_states[cp_size - i - 1],
                             **fa_backward_kwargs,
                         )
             else:
@@ -2678,9 +2689,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     # [b, sq, np, hn] -> [b*sq, np, hn]
                     out_ = out.view(-1, *out.shape[-2:])
                     dout_ = dout.view(-1, *dout.shape[-2:])
-                    if _flash_attn_2_3_plus:
+                    if _use_flash_attn_3 or _flash_attn_2_3_plus:
                         fa_backward_kwargs["window_size"] = (-1, -1)
-                    flash_attn_varlen_bwd(
+                    if not _use_flash_attn_3:
+                        fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
+                    flash_attn_bwd(
                         dout_,
                         q_,
                         kv_[0],
@@ -2695,7 +2708,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
                         causal=False,
-                        rng_state=rng_states[cp_size - i - 1],
                         **fa_backward_kwargs,
                     )
 
@@ -3035,15 +3047,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         if not use_fused_attention:
-            fa_forward_kwargs = {
-                "dropout_p" : dropout_p,
-                "softmax_scale" : softmax_scale,
-                "return_softmax" : False
-            }
-            if _flash_attn_2_4_plus:
-                fa_forward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_5_7_plus:
-                fa_forward_kwargs["block_table"] = None
+            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_fwd = flash_attn_varlen_fwd_v3
+            else:
+                flash_attn_fwd = flash_attn_varlen_fwd
+                fa_forward_kwargs["dropout_p"] = dropout_p
+                fa_forward_kwargs["return_softmax"] = False
+                if _flash_attn_2_4_plus:
+                    fa_forward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_5_7_plus:
+                    fa_forward_kwargs["block_table"] = None
 
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
         qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
@@ -3141,7 +3155,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     else:
                         q_, k_, v_ = [x.view(-1, *x.shape[-2:]) for x in [q_, k_, v_]]
                         _, _, _, _, out_per_step[i], softmax_lse_per_step[i], _, rng_states[i] = (
-                            flash_attn_varlen_fwd(
+                            flash_attn_fwd(
                                 q_,
                                 k_,
                                 v_,
@@ -3244,14 +3258,17 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {
-                "dropout_p" : ctx.dropout_p,
-                "softmax_scale" : ctx.softmax_scale,
-            }
-            if _flash_attn_2_4_plus:
-                fa_backward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_4_1_plus:
+            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
+            else:
+                flash_attn_bwd = flash_attn_varlen_bwd
+                fa_backward_kwargs["dropout_p"] = ctx.dropout_p
+                if _flash_attn_2_4_plus:
+                    fa_backward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_4_1_plus:
+                    fa_backward_kwargs["deterministic"] = ctx.deterministic
 
         for i in range(len(local_seq_chunk_ids) + 1):
             if i < len(local_seq_chunk_ids):
@@ -3300,7 +3317,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
                         ]
-                        flash_attn_varlen_bwd(
+                        if not _use_flash_attn_3:
+                            fa_backward_kwargs["rng_state"] = rng_states[i]
+                        flash_attn_bwd(
                             dout_,
                             q_,
                             k_,
@@ -3316,7 +3335,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_kv,
                             causal="causal" in ctx.attn_mask_type,
                             window_size=window_size_per_step[i],
-                            rng_state=rng_states[i],
                             **fa_backward_kwargs,
                         )
                         # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
@@ -3524,17 +3542,20 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         if not use_fused_attention:
-            fa_forward_kwargs = {
-                "dropout_p" : dropout_p,
-                "softmax_scale" : softmax_scale,
-                "return_softmax" : False
-            }
-            if _flash_attn_2_3_plus:
+            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_fwd = flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
-            if _flash_attn_2_4_plus:
-                fa_forward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_5_7_plus:
-                fa_forward_kwargs["block_table"] = None
+            else:
+                flash_attn_fwd = flash_attn_varlen_fwd
+                fa_forward_kwargs["dropout_p"] = dropout_p
+                fa_forward_kwargs["return_softmax"] = False
+                if _flash_attn_2_3_plus:
+                    fa_forward_kwargs["window_size"] = window_size
+                if _flash_attn_2_4_plus:
+                    fa_forward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_5_7_plus:
+                    fa_forward_kwargs["block_table"] = None
 
         assert (
             q.shape[-2] % cp_size == 0 and k.shape[-2] % cp_size == 0
@@ -3638,7 +3659,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 softmax_lse,
                 _,
                 rng_state,
-            ) = flash_attn_varlen_fwd(
+            ) = flash_attn_fwd(
                 q,
                 k,
                 v,
@@ -3814,16 +3835,20 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         )
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {
-                "dropout_p" : ctx.dropout_p,
-                "softmax_scale" : ctx.softmax_scale,
-            }
-            if _flash_attn_2_3_plus:
+            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            if _use_flash_attn_3:
+                flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["window_size"] = ctx.window_size
-            if _flash_attn_2_4_plus:
-                fa_backward_kwargs["alibi_slopes"] = None
-            if _flash_attn_2_4_1_plus:
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
+            else:
+                flash_attn_bwd = flash_attn_varlen_bwd
+                fa_backward_kwargs["dropout_p"] = ctx.dropout_p
+                if _flash_attn_2_3_plus:
+                    fa_backward_kwargs["window_size"] = ctx.window_size
+                if _flash_attn_2_4_plus:
+                    fa_backward_kwargs["alibi_slopes"] = None
+                if _flash_attn_2_4_1_plus:
+                    fa_backward_kwargs["deterministic"] = ctx.deterministic
 
         if ctx.use_fused_attention:
             dq, dk, dv, _ = fused_attn_bwd(
@@ -3855,7 +3880,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             softmax_lse, rng_state = aux_ctx_tensors
             out, dout = [x.view(-1, *x.shape[-2:]) for x in [out, dout]]
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
-            flash_attn_varlen_bwd(
+            if not _use_flash_attn_3:
+                fa_backward_kwargs["rng_state"] = rng_state
+            flash_attn_bwd(
                 dout,
                 q,
                 k,
@@ -3870,7 +3897,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 ctx.max_seqlen_q,
                 ctx.max_seqlen_kv,
                 causal=causal,
-                rng_state=rng_state,
                 **fa_backward_kwargs,
             )
             dq, dk, dv = [x.view(ctx.batch_size, -1, *x.shape[-2:]) for x in [dq, dk, dv]]
