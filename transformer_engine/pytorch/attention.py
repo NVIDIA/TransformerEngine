@@ -3641,8 +3641,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 **fa_forward_kwargs,
             )
             out, softmax_lse = fa_outputs[4], fa_outputs[5]
-            if not _use_flash_attn_3:
-                rng_state = fa_outputs[7]
+            rng_state = fa_outputs[7] if not _use_flash_attn_3 else None
             aux_ctx_tensors = [softmax_lse, rng_state]
             # [b*cp*s, np//cp, hn] -> [b, cp*s, np//cp, hn]
             out = out.view(batch_size, -1, *out.shape[-2:])
