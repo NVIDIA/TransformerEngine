@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
@@ -27,6 +28,27 @@ _IS_GRAPH_CAPTURING = False
 
 _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
+
+
+cudagraph_alloc_cache = {}
+
+def reset_cudagraph_alloc_cache():
+    cudagraph_alloc_cache = {}
+    
+def cached_empty_like(tensor, key):
+    if key not in cudagraph_alloc_cache:
+        cudagraph_alloc_cache[key] = torch.empty_like(tensor)
+    return cudagraph_alloc_cache[key]
+
+def cached_empty(shape, dtype, device, key):
+    if key not in cudagraph_alloc_cache:
+        cudagraph_alloc_cache[key] = torch.empty(
+            shape, 
+            dtype=ctx.activation_dtype, 
+            device=device
+        )
+
+    return cudagraph_alloc_cache[key]
 
 
 def set_capture_start() -> None:
@@ -60,6 +82,7 @@ def _make_graphed_callables(
     allow_unused_input: bool = False,
     fp8_weight_caching: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
+    sample_grad_outputs: Optional[SingleOrTuple[List[Any]]] = None,
     _order: Optional[List[int]] = None,
 ) -> SingleOrTuple[Callable]:
     """
@@ -79,6 +102,12 @@ def _make_graphed_callables(
         else:
             sample_kwargs = {}
 
+    if sample_grad_outputs is None:
+        if isinstance(callables, tuple):
+            sample_grad_outputs = tuple(None for _ in range(len(sample_args)))
+        else:
+            sample_grad_outputs = None
+
     # Canonicalize args as tuples
     just_one_callable = False
     if not isinstance(callables, tuple):
@@ -86,11 +115,14 @@ def _make_graphed_callables(
         callables = (callables,)
         sample_args = (sample_args,)
         sample_kwargs = (sample_kwargs,)
+        sample_grad_outputs = (sample_grad_outputs,)
 
     # Check sizes of args
     if _order is None:
         assert len(sample_args) == len(callables)
         assert len(sample_kwargs) == len(callables)
+        assert len(sample_grad_outputs) == len(callables)
+
     else:
         # Custom logic for interleaved pipeline parallelism
         # Note: This is tightly coupled with the Megatron-core
@@ -120,6 +152,7 @@ def _make_graphed_callables(
             + f"args tuple, but got {len(sample_args)}."
         )
         assert len(sample_kwargs) == len(sample_args)
+        assert len(sample_grad_outputs) == len(sample_args)
 
     if fp8_weight_caching:
         # Initialize flag that controls FP8 weight updates
@@ -220,6 +253,12 @@ def _make_graphed_callables(
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
 
+    import gc; gc.collect()
+    torch.cuda.empty_cache()
+    pyt1 = torch.cuda.memory_allocated() / (1024 ** 2)
+    el1 = (torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]) / (1024 ** 2)
+
+
     if _order is not None:  # pylint: disable=too-many-nested-blocks
         per_callable_static_outputs = [None] * len(flatten_sample_args)
         per_callable_output_unflatten_spec = [None] * len(flatten_sample_args)
@@ -228,6 +267,8 @@ def _make_graphed_callables(
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
         for c_id in _order:
+            reset_cudagraph_alloc_cache()
+
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
@@ -255,11 +296,13 @@ def _make_graphed_callables(
                     )
                     static_input_surface = per_callable_static_input_surfaces[per_callable_bwd_idx]
                     static_outputs = per_callable_static_outputs[per_callable_bwd_idx]
-                    bwd_graph = bwd_graphs[per_callable_bwd_idx]
+                    static_grad_outputs = sample_grad_outputs[per_callable_bwd_idx]
                     # For now, assumes all static_outputs require grad
-                    static_grad_outputs = tuple(
-                        torch.empty_like(o) if o.requires_grad else None for o in static_outputs
-                    )
+                    if static_grad_outputs is None:
+                        static_grad_outputs = tuple(
+                            torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                        )
+                    bwd_graph = bwd_graphs[per_callable_bwd_idx]
                     with torch.cuda.graph(bwd_graph, pool=mempool):
                         grad_inputs = torch.autograd.grad(
                             outputs=tuple(o for o in static_outputs if o.requires_grad),
@@ -290,6 +333,8 @@ def _make_graphed_callables(
         per_callable_output_unflatten_spec = []
         graph_id = 0
         for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):
+            reset_cudagraph_alloc_cache()
+            
             with torch.cuda.graph(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
@@ -302,15 +347,19 @@ def _make_graphed_callables(
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
         per_callable_static_grad_inputs = []
-        for static_input_surface, static_outputs, bwd_graph in zip(
+        for static_input_surface, static_outputs, static_grad_output, bwd_graph in zip(
             reversed(per_callable_static_input_surfaces),
             reversed(per_callable_static_outputs),
+            reversed(sample_grad_outputs),
             reversed(bwd_graphs),
         ):
+            reset_cudagraph_alloc_cache()
             # For now, assumes all static_outputs require grad
-            static_grad_outputs = tuple(
-                torch.empty_like(o) if o.requires_grad else None for o in static_outputs
-            )
+
+            if static_grad_output is None:
+                static_grad_output = tuple(
+                    torch.empty_like(o) if o.requires_grad else None for o in static_outputs
+                )
             with torch.cuda.graph(bwd_graph, pool=mempool):
                 grad_inputs = torch.autograd.grad(
                     outputs=tuple(o for o in static_outputs if o.requires_grad),
@@ -339,6 +388,14 @@ def _make_graphed_callables(
         per_callable_static_grad_outputs = list(reversed(per_callable_static_grad_outputs))
         per_callable_static_grad_inputs = list(reversed(per_callable_static_grad_inputs))
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
+
+    import gc; gc.collect()
+    torch.cuda.empty_cache()
+    pyt2 = torch.cuda.memory_allocated() / (1024 ** 2)
+    el2 = (torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]) / (1024 ** 2)
+
+    print(f"{torch.cuda.current_device()} CG MEM ALLOC {pyt2-pyt1} {el2-el1}")
+
 
     def make_graphed_autograd_function(
         fwd_graph,
@@ -513,6 +570,7 @@ def make_graphed_callables(
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
+    sample_grad_outputs: Optional[SingleOrTuple[List[Any]]] = None,
     fp8_enabled: bool = False,
     fp8_calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
@@ -616,6 +674,7 @@ def make_graphed_callables(
         allow_unused_input=allow_unused_input,
         fp8_weight_caching=fp8_weight_caching,
         sample_kwargs=sample_kwargs,
+        sample_grad_outputs=sample_grad_outputs,
         _order=_order,
     )
 

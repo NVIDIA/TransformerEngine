@@ -65,11 +65,18 @@ class _RMSNorm(torch.autograd.Function):
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
-        dxmat, dgamma = tex.rmsnorm_bwd(
+
+        if is_graph_capturing():
+            dxmat = cached_empty_like(dgrad, key="rmsnorm_dgrad")
+        else:
+            dxmat = torch.empty_like(dgrad)
+
+        dgamma = tex.rmsnorm_bwd(
             d_rmsnorm_out,
             inputmat,
             rsigma,
             rmsnorm_weight,
+            dxmat,
             ctx.bwd_rmsnorm_sm_margin,
             ctx.zero_centered_gamma,
         )

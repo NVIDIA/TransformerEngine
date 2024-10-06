@@ -43,7 +43,7 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
+from ..graph import is_graph_capturing, cached_empty_like, cached_empty
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
@@ -474,8 +474,15 @@ class _LayerNormLinear(torch.autograd.Function):
             elif ctx.ub_overlap_rs_dgrad:
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_dgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
-            else:
-                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+            else:              
+                if is_graph_capturing():
+                    dgrad = cached_empty(
+                        dgrad_size, 
+                        dtype=ctx.activation_dtype, 
+                        device=weight.device,
+                        key='layernormlinear_dgrad')
+                else:  
+                    dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.ub_bulk_dgrad:
                 ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
@@ -676,26 +683,35 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
+            if is_graph_capturing():
+                dgrad_lnout = cached_empty_like(dgrad, key="layernormlinear_dgrad_lnout")
+            else:
+                dgrad_lnout = torch.empty_like(dgrad)
+
             if ctx.normalization == "LayerNorm":
-                dgrad, dgamma, dbeta = tex.layernorm_bwd(
+                dgamma, dbeta = tex.layernorm_bwd(
                     dgrad,
                     inputmat,
                     mu,
                     rsigma,
+                    dgrad_lnout,
                     ln_weight,
                     ctx.bwd_ln_sm_margin,
                     ctx.zero_centered_gamma,
                 )
             elif ctx.normalization == "RMSNorm":
-                dgrad, dgamma = tex.rmsnorm_bwd(
+                dgamma = tex.rmsnorm_bwd(
                     dgrad,
                     inputmat,
                     rsigma,
                     ln_weight,
+                    dgrad_lnout,
                     ctx.bwd_ln_sm_margin,
                     ctx.zero_centered_gamma,
                 )
                 dbeta = None
+            dgrad = dgrad_lnout
+
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
 

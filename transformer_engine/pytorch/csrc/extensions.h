@@ -257,8 +257,8 @@ at::Tensor dsrelu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
-                                      const at::Tensor &gamma, const int sm_margin,
-                                      const bool zero_centered_gamma);
+                                      const at::Tensor &gamma, const at::Tensor &dx,
+                                      const int sm_margin, const bool zero_centered_gamma);
 
 std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,
                                           const at::Tensor &bias, float eps, at::Tensor scale,
@@ -297,8 +297,9 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight,
  * RMSNorm
  **************************************************************************************************/
 
-std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
+at::Tensor rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
+                                    const at::Tensor &dx,
                                     const int sm_margin, const bool zero_centered_gamma);
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,
