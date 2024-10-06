@@ -48,6 +48,7 @@ from test_numerics import reset_rng_states, dtype_tols
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 def custom_amax_to_scale(
     amax: torch.Tensor,
     scale: torch.Tensor,
@@ -1013,7 +1014,9 @@ def test_sanity_attention_extra_state(model, dtype):
     config = model_configs[model]
     outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
     outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
-    outputs_checkpoint_v1_6 = _run_attention_extra_state(dtype, config, mimic_v1_6=True, checkpoint=True)
+    outputs_checkpoint_v1_6 = _run_attention_extra_state(
+        dtype, config, mimic_v1_6=True, checkpoint=True
+    )
 
     # Check that results match
     tols = dtype_tols(dtype)
@@ -1032,9 +1035,10 @@ def test_sanity_attention_extra_state(model, dtype):
             **tols,
         )
 
+
 def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
     steps = 10
-    path = 'checkpoint.pt'
+    path = "checkpoint.pt"
     fp8_enabled = True
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
@@ -1081,7 +1085,9 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
     if checkpoint:
         sd = block.state_dict()
         if mimic_v1_6:
-            sd["self_attention.core_attention.fused_attention._extra_state"] = sd["self_attention.core_attention._extra_state"]
+            sd["self_attention.core_attention.fused_attention._extra_state"] = sd[
+                "self_attention.core_attention._extra_state"
+            ]
             del sd["self_attention.core_attention._extra_state"]
         torch.save(sd, path)
 
@@ -1105,7 +1111,7 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
 
         assert not param_grads, "Oops!"
 
-    for i in range((steps+1) // 2):
+    for i in range((steps + 1) // 2):
         with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
             output = block(hidden_states, None)
             loss = output.sum()

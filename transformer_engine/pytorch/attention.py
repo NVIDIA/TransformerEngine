@@ -7106,12 +7106,12 @@ class DotProductAttention(TransformerEngineBaseModule):
         fused_attn_key = False
         dot_product_attn_key = False
         for k in state_dict.keys():
-            if 'core_attention.fused_attention._extra_state' in k:
+            if "core_attention.fused_attention._extra_state" in k:
                 fused_attn_key = True
-            if 'core_attention._extra_state' in k:
+            if "core_attention._extra_state" in k:
                 dot_product_attn_key = True
         if fused_attn_key and not dot_product_attn_key:
-            prefix = prefix + 'fused_attention.'
+            prefix = prefix + "fused_attention."
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
