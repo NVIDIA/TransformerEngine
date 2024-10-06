@@ -9,6 +9,7 @@ from contextlib import nullcontext
 import torch
 import pytest
 import io
+import os
 
 from transformer_engine.pytorch.fp8 import (
     fp8_autocast,
@@ -42,10 +43,10 @@ from transformer_engine.pytorch.cpp_extensions import (
 )
 from transformer_engine.pytorch.module.base import get_workspace
 from test_onnx_export import create_meta
+from test_numerics import reset_rng_states, dtype_tols
 
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-
 
 def custom_amax_to_scale(
     amax: torch.Tensor,
@@ -1010,14 +1011,41 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_sanity_attention_extra_state(model, dtype):
     config = model_configs[model]
+    outputs = _run_attention_extra_state(dtype, config, checkpoint=False)
+    outputs_checkpoint = _run_attention_extra_state(dtype, config, checkpoint=True)
+    outputs_checkpoint_v1_6 = _run_attention_extra_state(dtype, config, mimic_v1_6=True, checkpoint=True)
+
+    # Check that results match
+    tols = dtype_tols(dtype)
+    if dtype in (torch.float16, torch.bfloat16):
+        tols.update(dict(rtol=2e-2, atol=2e-3))
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            **tols,
+        )
+    for i, (ref, test) in enumerate(zip(outputs, outputs_checkpoint_v1_6)):
+        torch.testing.assert_close(
+            test,
+            ref,
+            **tols,
+        )
+
+def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False):
+    steps = 10
+    path = 'checkpoint.pt'
+    fp8_enabled = True
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
-        fp8_dpa=True,
+        fp8_dpa=fp8_enabled,
         fp8_mha=False,
     )
+
+    reset_rng_states()
     hidden_states = torch.randn(
         (config.seq_len, config.batch_size, config.hidden_size),
         dtype=dtype,
@@ -1025,63 +1053,72 @@ def test_sanity_attention_extra_state(model, dtype):
         requires_grad=True,
     )
 
-    with fp8_model_init(enabled=True):
-        block = TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            fuse_qkv_params=True,
-            params_dtype=dtype,
-            device="cuda",
-        )
-    with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-        output = block(hidden_states, is_first_microbatch=True)
-        loss = output.sum()
-        loss.backward()
+    def get_model(dtype, config):
+        sigma = 0.023
+        init_method = init_method_normal(sigma)
+        output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    # call state_dict()
-    sd = block.state_dict()
+        with fp8_model_init(enabled=fp8_enabled):
+            block = TransformerLayer(
+                config.hidden_size,
+                4 * config.hidden_size,
+                config.num_attention_heads,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                fuse_qkv_params=True,
+                params_dtype=dtype,
+                device="cuda",
+            )
+        return block
 
-    # check core_attention._extra_state
-    attn_extra_state = sd["self_attention.core_attention._extra_state"]
-    attn_extra_state.seek(0)
-    attn_extra_state = torch.load(attn_extra_state, map_location="cuda")
+    block = get_model(dtype, config)
+    for i in range(steps // 2):
+        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+            output = block(hidden_states, None)
+            loss = output.sum()
+            loss.backward()
 
-    # add random core_attention.fused_attention._extra_state
-    # it should not be loaded or cause any 'unexpected key' errors
-    random_state = {"a": 1, "b": 2}
-    fused_attn_extra_state = io.BytesIO()
-    torch.save(random_state, fused_attn_extra_state)
-    sd["self_attention.core_attention.fused_attention._extra_state"] = fused_attn_extra_state
+    if checkpoint:
+        sd = block.state_dict()
+        if mimic_v1_6:
+            sd["self_attention.core_attention.fused_attention._extra_state"] = sd["self_attention.core_attention._extra_state"]
+            del sd["self_attention.core_attention._extra_state"]
+        torch.save(sd, path)
 
-    # save checkpoint
-    path = "./checkpoint.pt"
-    torch.save(sd, path)
+        param_grads = []
+        for p in block.parameters():
+            if p.requires_grad:
+                param_grads.append(p.grad.clone())
 
-    # reinit the model
-    del block
-    with fp8_model_init(enabled=True):
-        block_new = TransformerLayer(
-            config.hidden_size,
-            4 * config.hidden_size,
-            config.num_attention_heads,
-            fuse_qkv_params=True,
-            params_dtype=dtype,
-            device="cuda",
-        )
-    FP8GlobalStateManager.reset()
+        _cpu_rng_state_new = torch.get_rng_state()
+        _cuda_rng_state_new = torch.cuda.get_rng_state()
 
-    # load from checkpoint
-    block_new.load_state_dict(torch.load(path))
+        del block
+        block = get_model(dtype, config)
+        block.load_state_dict(torch.load(path))
+        torch.set_rng_state(_cpu_rng_state_new)
+        torch.cuda.set_rng_state(_cuda_rng_state_new)
 
-    # check state_dict
-    sd_new = block_new.state_dict()
-    attn_extra_state_new = sd_new["self_attention.core_attention._extra_state"]
-    attn_extra_state_new.seek(0)
-    attn_extra_state_new = torch.load(attn_extra_state_new, map_location="cuda")
-    for k, v in attn_extra_state_new.items():
-        if k != "extra_fp8_variables":
-            assert torch.equal(v, attn_extra_state[k]), f"{k} is not equal"
-        else:
-            for ek, ev in attn_extra_state_new["extra_fp8_variables"].items():
-                assert ev == attn_extra_state["extra_fp8_variables"][ek], f"{ek} is not equal"
+        for p in block.parameters():
+            if p.requires_grad:
+                p.grad = param_grads.pop(0)
+
+        assert not param_grads, "Oops!"
+
+    for i in range((steps+1) // 2):
+        with fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe):
+            output = block(hidden_states, None)
+            loss = output.sum()
+            loss.backward()
+
+    torch.cuda.synchronize()
+
+    if os.path.exists(path):
+        os.remove(path)
+
+    outputs = [output, hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+
+    return outputs
