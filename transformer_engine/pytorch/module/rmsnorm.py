@@ -13,6 +13,7 @@ from torch.nn import init
 
 from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
+from ..graph import is_graph_capturing, cached_empty_like
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
@@ -67,9 +68,9 @@ class _RMSNorm(torch.autograd.Function):
         d_rmsnorm_out = grad_output.view(inputmat.shape)
 
         if is_graph_capturing():
-            dxmat = cached_empty_like(dgrad, key="rmsnorm_dgrad")
+            dxmat = cached_empty_like(d_rmsnorm_out, key="rmsnorm_dgrad")
         else:
-            dxmat = torch.empty_like(dgrad)
+            dxmat = torch.empty_like(d_rmsnorm_out)
 
         dgamma = tex.rmsnorm_bwd(
             d_rmsnorm_out,

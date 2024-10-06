@@ -30,25 +30,125 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
-cudagraph_alloc_cache = {}
 
-def reset_cudagraph_alloc_cache():
-    cudagraph_alloc_cache = {}
-    
+
+class CudagraphCache():
+    """Reduces the memory overhead of cudagraph capture by sharing temporary 
+    tensors over different transformer layers. The cache is expected to be populated
+    during warmup. Memory is allocated during warmup via `cached_empty_like` and 
+    `cached_empty` and is identified with a key. Different layers use the same key 
+    to access previously allocated memory, allowing different transformer layers to 
+    reuse this memory. """
+
+    OLD_CACHES = []
+    CUDAGRAPH_CACHE = [{}]
+    total_microbatches = 1
+    current_microbatch = 0
+
+    @staticmethod
+    def set_microbatches(total_microbatches):
+        """"Create a copy of the cache for each microbatch. Required for when
+        capturing multiple microbatches, as different micrbatches should not
+        share data, for instance the case of interleaved pipeline parallelism."""
+
+        CudagraphCache.total_microbatches = total_microbatches
+        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE
+        for _ in range(1, total_microbatches):
+            new_cache = {}
+            for key, value in cudagraph_cache[-1].items():
+                new_cache[key] = torch.empty_like(value)
+            cudagraph_cache.append(new_cache)
+
+    @staticmethod
+    def switch_microbatch(current_microbatch):
+        """"Change the cache to the current microbatch. """
+        CudagraphCache.current_microbatch = current_microbatch
+
+    @staticmethod
+    def reset():
+        """Save the current cache and clear the cache."""
+        old_caches = CudagraphCache.OLD_CACHES
+        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE
+
+        old_caches.append(cudagraph_cache)
+        cudagraph_cache = [{}]
+
+        CudagraphCache.total_microbatches = 1
+        CudagraphCache.current_microbatch = 0
+
+    @staticmethod
+    def insert(key, tensor):
+        """Insert a tensor in the cache, identified with `key` """
+        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
+
+        assert key not in cudagraph_cache, f"Tried inserting duplicate key {key} !"
+        cudagraph_cache[key] = tensor
+
+
+    @staticmethod
+    def can_insert(key):
+        """Check if a key is in the cache."""
+        return key not in CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
+
+    @staticmethod
+    def retrieve(key):
+        """Retrieve a tensor in the cache, identified with `key` """
+        return CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
+
 def cached_empty_like(tensor, key):
-    if key not in cudagraph_alloc_cache:
-        cudagraph_alloc_cache[key] = torch.empty_like(tensor)
-    return cudagraph_alloc_cache[key]
+    if CudagraphCache.can_insert(key):
+        CudagraphCache.insert(key, torch.empty_like(tensor))
+    return CudagraphCache.retrieve(key)
 
 def cached_empty(shape, dtype, device, key):
-    if key not in cudagraph_alloc_cache:
-        cudagraph_alloc_cache[key] = torch.empty(
-            shape, 
-            dtype=ctx.activation_dtype, 
-            device=device
+    if CudagraphCache.can_insert(key):
+        tensor = torch.empty(
+            shape,
+            dtype=dtype, 
+            device=device,
+        )
+        CudagraphCache.insert(key, tensor)
+    return CudagraphCache.retrieve(key)
+
+
+class split_cached(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, tensor, split_dim, dim):
+        query, key, value = torch.split(
+            tensor=tensor,
+            split_size_or_sections=split_dim,
+            dim=-1,
         )
 
-    return cudagraph_alloc_cache[key]
+        query_contiguous = cached_empty_like(query, 'qkv_query')
+        key_contiguous = cached_empty_like(key, 'qkv_key')
+        value_contiguous = cached_empty_like(value, 'qkv_value')
+
+        query_contiguous.copy_(query)
+        key_contiguous.copy_(key)
+        value_contiguous.copy_(value)
+
+        ctx.split_size_or_sections = split_dim
+        ctx.dim = dim
+
+        return query_contiguous, key_contiguous, value_contiguous
+
+    @staticmethod
+    def backward(ctx, *grads):
+        split_size_or_sections = ctx.split_size_or_sections
+        dim = ctx.dim
+       
+        total_shape = list(grads[0].shape)
+        total_shape[dim] = sum([g.shape[dim] for g in grads])
+
+        unsplit_contiguous = cached_empty(
+            total_shape,
+            dtype=grads[0].dtype,
+            device=grads[0].device,
+            key='split_cached_bwd'
+        )
+        torch.cat(grads, dim=dim, out=unsplit_contiguous)
+        return unsplit_contiguous, None, None
 
 
 def set_capture_start() -> None:
@@ -249,6 +349,8 @@ def _make_graphed_callables(
                 del outputs, grad_inputs
     torch.cuda.synchronize()
 
+    CudagraphCache.set_microbatches(num_microbatches)
+
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
     # fwd 1, fwd 2, ... fwd N, then bwd N, bwd N-1, ... bwd 1.
@@ -267,11 +369,11 @@ def _make_graphed_callables(
         fwd_idx = [0] * num_model_chunks
         bwd_idx = [0] * num_model_chunks
         for c_id in _order:
-            reset_cudagraph_alloc_cache()
-
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
+                CudagraphCache.switch_microbatch(fwd_idx[c_id-1])
+
                 for l_no in range(num_layers):
                     func = callables[m_chunk * num_layers + l_no]
                     per_callable_fwd_idx = (m_chunk * num_microbatches * num_layers) + (
@@ -290,6 +392,7 @@ def _make_graphed_callables(
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
+                CudagraphCache.switch_microbatch(bwd_idx[-c_id-1])
                 for l_no in list(reversed(range(num_layers))):
                     per_callable_bwd_idx = (m_chunk * num_microbatches * num_layers) + (
                         bwd_idx[m_chunk] * num_layers + l_no
@@ -326,15 +429,13 @@ def _make_graphed_callables(
 
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
-                bwd_idx[m_chunk] += 1
+                bwd_idx[m_chunk] += 1   
     else:
         # Capture forward graphs
         per_callable_static_outputs = []
         per_callable_output_unflatten_spec = []
         graph_id = 0
-        for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):
-            reset_cudagraph_alloc_cache()
-            
+        for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):            
             with torch.cuda.graph(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
@@ -353,9 +454,7 @@ def _make_graphed_callables(
             reversed(sample_grad_outputs),
             reversed(bwd_graphs),
         ):
-            reset_cudagraph_alloc_cache()
             # For now, assumes all static_outputs require grad
-
             if static_grad_output is None:
                 static_grad_output = tuple(
                     torch.empty_like(o) if o.requires_grad else None for o in static_outputs
@@ -620,6 +719,7 @@ def make_graphed_callables(
                         in the optimizer step.
 
     """
+    CudagraphCache.reset()
     set_capture_start()
 
     fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe
