@@ -757,7 +757,7 @@ class TransformerLayer(torch.nn.Module):
         return output
 
     def _bias_dropout_add(self, hidden_state, bias, residual, drop_path=None):
-        if drop_path is None and bias.numel() != 0:
+        if drop_path is None and bias is not None and bias.numel() != 0:
             if self.bias_dropout_fusion:
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train
@@ -769,7 +769,7 @@ class TransformerLayer(torch.nn.Module):
             with self.bias_dropout_add_exec_handler():
                 output = bias_dropout_add_func(hidden_state, bias, residual, self.hidden_dropout)
         else:
-            if bias.numel() != 0:
+            if bias is not None and bias.numel() != 0:
                 hidden_state = hidden_state + bias
             out = torch.nn.functional.dropout(
                 hidden_state, p=self.hidden_dropout, training=self.training
