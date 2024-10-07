@@ -86,53 +86,6 @@ from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
 
-_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-_flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
-_flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_max_version = PkgVersion("2.6.3")
-_flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
-_flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
-_flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
-_flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
-_flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
-_flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
-_flash_attn_3_plus = False
-_use_flash_attn_3 = False
-try:
-    _flash_attn_v3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
-    _flash_attn_3_plus = _flash_attn_v3_version >= PkgVersion("2.6.1")
-except PackageNotFoundError:
-    if get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
-        warnings.warn(
-            "To use flash-attn v3, please use the following commands to install: \n"
-            """(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper" \n"""
-            """(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"` \n"""
-            """(3) mkdir -p $python_path/flashattn_hopper \n"""
-            """(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
-        )
-else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flashattn_hopper.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
-        _flash_attn_forward as _flash_attn_forward_v3,
-    )
-    from flashattn_hopper.flash_attn_interface import (  # pylint: disable=unused-import
-        _flash_attn_backward as _flash_attn_backward_v3,
-    )
-
-    _use_flash_attn_3 = True
-
-if _flash_attn_version >= _flash_attn_version_required:
-    from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
-    from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
-    from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-
-
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
@@ -143,6 +96,91 @@ _log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
+
+_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
+_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
+
+# detect flash-attn installation in the environment
+_flash_attn_is_installed = False
+_flash_attn_version = PkgVersion("0")
+_flash_attn_version_required = PkgVersion("2.0.6")
+_flash_attn_max_version = PkgVersion("2.6.3")
+_flash_attn_2_plus = False
+_flash_attn_2_1_plus = False
+_flash_attn_2_3_plus = False
+_flash_attn_2_4_plus = False
+_flash_attn_2_4_1_plus = False
+_flash_attn_2_5_7_plus = False
+fa_logger = logging.getLogger()
+fa_logger.setLevel(_log_level)
+if not fa_logger.hasHandlers():
+    fa_logger.addHandler(_stream_handler)
+_flash_attn_installation_steps = """\
+pip install "git+https://github.com/Dao-AILab/flash-attention.git" """
+try:
+    _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+except PackageNotFoundError:
+    if get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+        fa_logger.debug(
+            "To use flash-attn v2, please use the following commands to install: \n%s",
+            _flash_attn_installation_steps,
+        )
+else:
+    if _flash_attn_version >= _flash_attn_version_required and _flash_attn_version <= _flash_attn_max_version:
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
+        from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        _flash_attn_is_installed = True
+        _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
+        _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
+        _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
+        _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
+        _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
+        _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
+    elif get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+        fa_logger.warning(
+            "Transformer Engine currently supports >= %s and <= %s. Found %s.",
+            _flash_attn_version_required,
+            _flash_attn_max_version,
+            _flash_attn_version,
+        )
+
+# detect flashattn-hopper installation in the environment
+_flash_attn_3_is_installed = False
+_flash_attn_3_version = PkgVersion("0")
+_flash_attn_3_0_0_beta = False
+_use_flash_attn_3 = False
+fa3_logger = logging.getLogger()
+fa3_logger.setLevel(_log_level)
+if not fa3_logger.hasHandlers():
+    fa3_logger.addHandler(_stream_handler)
+_flash_attn_3_installation_steps = """\
+(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(3) mkdir -p $python_path/flashattn_hopper
+(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
+try:
+    _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
+except PackageNotFoundError:
+    if get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
+        fa3_logger.debug(
+            "To use flash-attn v3, please follow these steps to install the flashattn-hopper "
+            "package: \n%s",
+            _flash_attn_3_installation_steps,
+        )
+else:
+    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flashattn_hopper.flash_attn_interface import (
+        flash_attn_varlen_func as flash_attn_varlen_func_v3,
+    )
+    _flash_attn_3_is_installed = True
+    _flash_attn_3_0_0_beta = _flash_attn_3_version < PkgVersion("3.0.0")
+    # this flag will be removed once FA3 (flashattn-hopper) is integrated
+    # into the regular FA package (flash-attn)
+    _use_flash_attn_3 = True
+
 
 _attention_backends = {
     "attention_params": None,
@@ -312,7 +350,8 @@ def get_attention_backend(
         + str(
             (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
         ),
-        "flash_attn_version": _flash_attn_version,
+        "flash_attn_version": _flash_attn_version if _flash_attn_is_installed else "Not installed",
+        "flash_attn_3_version": _flash_attn_3_version if _flash_attn_3_is_installed else "Not installed",
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
     attention_params_dict = {
@@ -323,6 +362,7 @@ def get_attention_backend(
         run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
     logger.debug("Running with config=%s", run_config)
 
+    global _flash_attn_version_required, _flash_attn_max_version
     # Filter: Environment variables
     global _NVTE_FLASH_ATTN, _NVTE_FUSED_ATTN, _NVTE_UNFUSED_ATTN
     _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -331,7 +371,7 @@ def get_attention_backend(
     use_flash_attention = _NVTE_FLASH_ATTN
     use_fused_attention = _NVTE_FUSED_ATTN
     use_unfused_attention = _NVTE_UNFUSED_ATTN
-    if not use_flash_attention:
+    if not use_flash_attention and _flash_attn_is_installed:
         logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
@@ -340,7 +380,7 @@ def get_attention_backend(
 
     # Filter: ONNX mode
     if is_in_onnx_export_mode():
-        if use_flash_attention:
+        if use_flash_attention and _flash_attn_is_installed:
             logger.debug("Disabling FlashAttention due to ONNX mode")
         use_flash_attention = False
         if use_fused_attention:
@@ -348,32 +388,32 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: Compute capability
-    global _flash_attn_3_plus, _use_flash_attn_3
+    global _use_flash_attn_3
     if device_compute_capability < (8, 0):
-        if use_flash_attention:
+        if use_flash_attention and _flash_attn_is_installed:
             logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
-            use_flash_attention = False
+        use_flash_attention = False
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
             use_fused_attention = False
     if device_compute_capability < (9, 0):
-        if use_flash_attention and _flash_attn_3_plus:
+        if use_flash_attention and _flash_attn_3_is_installed:
             logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
-            _use_flash_attn_3 = False
+        _use_flash_attn_3 = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
         torch.Tensor,
         Float8Tensor,
     ]:
-        if use_flash_attention:
+        if use_flash_attention and _flash_attn_is_installed:
             logger.debug(
                 "Disabling FlashAttention due to unsupported QKV data type. "
                 "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
                 "Found: qkv_dtype = %s.",
                 qkv_dtype,
             )
-            use_flash_attention = False
+        use_flash_attention = False
         if use_fused_attention:
             logger.debug(
                 "Disabling FusedAttention due to unsupported QKV data type. "
@@ -386,7 +426,8 @@ def get_attention_backend(
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
         if use_flash_attention and not _use_flash_attn_3:
-            logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
+            if _flash_attn_is_installed:
+                logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
             use_flash_attention = False
         if use_flash_attention and _use_flash_attn_3 and is_training:
             logger.debug(
@@ -399,22 +440,24 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if use_flash_attention and head_dim_qk != head_dim_v:
-        logger.debug("Disabling FlashAttention as it does not support MLA.")
+        if _flash_attn_is_installed:
+            logger.debug("Disabling FlashAttention as it does not support MLA.")
         use_flash_attention = False
     if use_flash_attention and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
         or (head_dim_qk > 192 and device_compute_capability not in ((8, 0), (9, 0)))
     ):
-        logger.debug(
-            "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
-            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-            "head_dim_qk <= 256 (>192 requires sm80/90). "
-            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
-            head_dim_qk,
-            head_dim_v,
-            ".".join([str(i) for i in device_compute_capability]),
-        )
+        if _flash_attn_is_installed:
+            logger.debug(
+                "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
+                "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
+                "head_dim_qk <= 256 (>192 requires sm80/90). "
+                "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+                head_dim_qk,
+                head_dim_v,
+                ".".join([str(i) for i in device_compute_capability]),
+            )
         use_flash_attention = False
     qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
     if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
@@ -431,17 +474,18 @@ def get_attention_backend(
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
         if use_flash_attention and pad_between_seqs:
-            logger.debug(
-                "Disabling FlashAttention for qkv_format = thd when there is "
-                "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
+                )
             use_flash_attention = False
 
     # Filter: Dropout
     if attention_dropout != 0.0 and use_flash_attention:
-        if _flash_attn_3_plus and _use_flash_attn_3:
+        if _flash_attn_3_is_installed and _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for dropout")
-            _use_flash_attn_3 = False
+        _use_flash_attn_3 = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -461,38 +505,43 @@ def get_attention_backend(
         )
         use_unfused_attention = False
     if context_parallel and use_flash_attention:
-        if _flash_attn_3_plus and _use_flash_attn_3:
+        if _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for context parallelism")
             _use_flash_attn_3 = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            logger.debug(
-                "Disabling FlashAttention as it does not support context parallelism with FP8"
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with FP8"
+                )
             use_flash_attention = False
         if "bottom_right" in attn_mask_type:
-            logger.debug(
-                "Disabling FlashAttention as it does not support context parallelism with"
-                " causal_bottom_right masking"
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with"
+                    " causal_bottom_right masking"
+                )
             use_flash_attention = False
         elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
-            logger.debug(
-                "Disabling FlashAttention as it does not support context parallelism with causal"
-                " masking for cross-attention"
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with causal"
+                    " masking for cross-attention"
+                )
             use_flash_attention = False
         elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
-            logger.debug(
-                "Disabling FlashAttention as it does not support context parallelism with bias type"
-                " of %s",
-                core_attention_bias_type,
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with bias type"
+                    " of %s",
+                    core_attention_bias_type,
+                )
             use_flash_attention = False
         elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
-            logger.debug(
-                "Disabling FlashAttention as it does not support context parallelism with attention"
-                " bias for THD format"
-            )
+            if _flash_attn_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention as it does not support context parallelism with attention"
+                    " bias for THD format"
+                )
             use_flash_attention = False
 
     if context_parallel and use_fused_attention:
@@ -548,7 +597,7 @@ def get_attention_backend(
     # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
-        if use_flash_attention:
+        if use_flash_attention and _flash_attn_is_installed:
             logger.debug("Disabling FlashAttention for arbitrary mask")
         use_flash_attention = False
         if use_fused_attention:
@@ -556,7 +605,7 @@ def get_attention_backend(
         use_fused_attention = False
     if (
         use_flash_attention
-        and _flash_attn_3_plus
+        and _flash_attn_3_is_installed
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
@@ -568,28 +617,32 @@ def get_attention_backend(
         _use_flash_attn_3 = False
     if (
         use_flash_attention
-        and _flash_attn_2_1_plus
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
-        logger.warning(
-            "Disabling FlashAttention as it only supports bottom-right-diagonal "
-            "causal mask since flash-attn 2.1. See "
-            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-        )
-        use_flash_attention = False
+        if _flash_attn_2_1_plus:
+            logger.warning(
+                "Disabling FlashAttention as it only supports bottom-right-diagonal "
+                "causal mask since flash-attn 2.1. See "
+                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+            )
+            use_flash_attention = False
+        if not _flash_attn_is_installed:
+            _flash_attn_max_version = PkgVersion("2.1")
     if (
         use_flash_attention
-        and not _flash_attn_2_1_plus
         and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
         and max_seqlen_q != max_seqlen_kv
     ):
-        logger.warning(
-            "Disabling FlashAttention as it only supports top-left-diagonal "
-            "causal mask before flash-attn 2.1. See "
-            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-        )
-        use_flash_attention = False
+        if not _flash_attn_is_installed:
+            _flash_attn_version_required = PkgVersion("2.1")
+        elif not _flash_attn_2_1_plus:
+            logger.warning(
+                "Disabling FlashAttention as it only supports top-left-diagonal "
+                "causal mask before flash-attn 2.1. See "
+                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
+            )
+            use_flash_attention = False
 
     # Filter: Sliding window attention
     #    backend                 |      window_size       | diagonal alignment
@@ -636,21 +689,20 @@ def get_attention_backend(
         if (
             use_flash_attention
             and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-            and _flash_attn_3_plus
         ):
-            logger.debug(
-                "Disabling FlashAttention 3 as it does not support sliding window attention"
-            )
+            if _flash_attn_3_is_installed:
+                logger.debug(
+                    "Disabling FlashAttention 3 as it does not support sliding window attention"
+                )
             _use_flash_attn_3 = False
-        if (
-            use_flash_attention
-            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-            and not _flash_attn_2_3_plus
-        ):
-            logger.debug(
-                "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
-            )
-            use_flash_attention = False
+            if not _flash_attn_is_installed:
+                _flash_attn_version_required = PkgVersion("2.3")
+            elif not _flash_attn_2_3_plus:
+                logger.debug(
+                    "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
+                )
+                use_flash_attention = False
+
 
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
@@ -662,18 +714,21 @@ def get_attention_backend(
     # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
     #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
     if use_flash_attention and core_attention_bias_type == "alibi":
-        if _flash_attn_3_plus and _use_flash_attn_3:
+        if _flash_attn_3_is_installed and _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for ALiBi")
-            _use_flash_attn_3 = False
-            if not _flash_attn_2_4_plus:
-                logger.debug("Disabling FlashAttention for ALiBi")
-                use_flash_attention = False
+        _use_flash_attn_3 = False
+        if not _flash_attn_is_installed:
+            _flash_attn_version_required = PkgVersion("2.4")
+        elif not _flash_attn_2_4_plus:
+            logger.debug("Disabling FlashAttention for ALiBi")
+            use_flash_attention = False
 
     if use_flash_attention and (
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
     ):
-        logger.debug("Disabling FlashAttention for pre/post_scale_bias")
+        if _flash_attn_is_installed:
+            logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
 
     fu_core_attention_bias_type = core_attention_bias_type
@@ -777,13 +832,16 @@ def get_attention_backend(
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
-    if use_flash_attention and deterministic and not _flash_attn_2_4_1_plus:
-        logger.warning(
-            "Disabling FlashAttention as version <2.4.1 does not support deterministic "
-            "execution. To use FlashAttention with deterministic behavior, "
-            "please install flash-attn >= 2.4.1."
-        )
-        use_flash_attention = False
+    if use_flash_attention and deterministic:
+        if not _flash_attn_is_installed:
+            _flash_attn_version_required = PkgVersion("2.4.1")
+        elif not _flash_attn_2_4_1_plus:
+            logger.warning(
+                "Disabling FlashAttention as version <2.4.1 does not support deterministic "
+                "execution. To use FlashAttention with deterministic behavior, "
+                "please install flash-attn >= 2.4.1."
+            )
+            use_flash_attention = False
     if use_fused_attention and deterministic:
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
             logger.debug("Disabling FusedAttention for determinism reasons")
@@ -802,6 +860,17 @@ def get_attention_backend(
 
     # All available backends
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+    #if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
+    if use_flash_attention and not _flash_attn_is_installed:
+        logger.warning(
+            "flash-attn may provide significant performance boost. Please install "
+            "flash-attn >= %s, <= %s.",
+            _flash_attn_version_required,
+            _flash_attn_max_version,
+            )
+    if use_flash_attention and not _flash_attn_is_installed:
+        use_flash_attention = False
+        available_backends[0] = False
     logger.debug(
         "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
         " UnfusedDotProductAttention=%s}",
@@ -828,20 +897,20 @@ def get_attention_backend(
             )
             use_flash_attention = False
 
-    # Select FusedAttention for FP8
-    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
-    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
-    if (
-        use_flash_attention
-        and use_fused_attention
-        and fused_attention_backend == FusedAttnBackend["FP8"]
-        and _use_flash_attn_3
-    ):
-        logger.debug(
-            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
-            "supports more accurate scaling factors in FP8 execution"
-        )
-        use_flash_attention = False
+#    # Select FusedAttention for FP8
+#    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
+#    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
+#    if (
+#        use_flash_attention
+#        and use_fused_attention
+#        and fused_attention_backend == FusedAttnBackend["FP8"]
+#        and _use_flash_attn_3
+#    ):
+#        logger.debug(
+#            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
+#            "supports more accurate scaling factors in FP8 execution"
+#        )
+#        use_flash_attention = False
 
     # Selected backend
     if use_flash_attention:
@@ -4815,12 +4884,13 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        assert (
-            _flash_attn_version >= _flash_attn_version_required
-        ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
-        assert (
-            _flash_attn_version <= _flash_attn_max_version
-        ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
+        if _flash_attn_is_installed:
+            assert (
+                _flash_attn_version >= _flash_attn_version_required
+            ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
+            assert (
+                _flash_attn_version <= _flash_attn_max_version
+            ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -7589,7 +7659,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
-            global _attention_backends, _flash_attn_3_plus, _use_flash_attn_3
+            global _attention_backends, _flash_attn_3_is_installed, _use_flash_attn_3
             if (
                 _attention_backends["attention_params"] is None
                 or attention_params != _attention_backends["attention_params"]
@@ -7597,7 +7667,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 _attention_backends["attention_params"] = attention_params
                 _attention_backends["backend_selection_requires_update"] = True
             if _attention_backends["backend_selection_requires_update"]:
-                _use_flash_attn_3 = _flash_attn_3_plus
+                _use_flash_attn_3 = _flash_attn_3_is_installed
                 (
                     use_flash_attention,
                     use_fused_attention,
@@ -7608,7 +7678,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if use_flash_attention:
                     self.logger.info(
                         "Running with FlashAttention backend (version %s)",
-                        _flash_attn_version if not _use_flash_attn_3 else _flash_attn_v3_version,
+                        _flash_attn_version if not _use_flash_attn_3 else _flash_attn_3_version,
                     )
                 elif use_fused_attention:
                     self.logger.info(
