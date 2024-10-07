@@ -127,11 +127,19 @@ except PackageNotFoundError:
             _flash_attn_installation_steps,
         )
 else:
-    if _flash_attn_version >= _flash_attn_version_required and _flash_attn_version <= _flash_attn_max_version:
+    if (
+        _flash_attn_version >= _flash_attn_version_required
+        and _flash_attn_version <= _flash_attn_max_version
+    ):
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as _flash_attn_forward
-        from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as _flash_attn_backward
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_forward,
+        )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_backward as _flash_attn_backward,
+        )
         from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+
         _flash_attn_is_installed = True
         _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
         _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
@@ -175,6 +183,7 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
+
     _flash_attn_3_is_installed = True
     _flash_attn_3_0_0_beta = _flash_attn_3_version < PkgVersion("3.0.0")
     # this flag will be removed once FA3 (flashattn-hopper) is integrated
@@ -351,7 +360,9 @@ def get_attention_backend(
             (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
         ),
         "flash_attn_version": _flash_attn_version if _flash_attn_is_installed else "Not installed",
-        "flash_attn_3_version": _flash_attn_3_version if _flash_attn_3_is_installed else "Not installed",
+        "flash_attn_3_version": (
+            _flash_attn_3_version if _flash_attn_3_is_installed else "Not installed"
+        ),
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
     attention_params_dict = {
@@ -524,23 +535,23 @@ def get_attention_backend(
         elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
             if _flash_attn_is_installed:
                 logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with causal"
-                    " masking for cross-attention"
+                    "Disabling FlashAttention as it does not support context parallelism with"
+                    " causal masking for cross-attention"
                 )
             use_flash_attention = False
         elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
             if _flash_attn_is_installed:
                 logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with bias type"
-                    " of %s",
+                    "Disabling FlashAttention as it does not support context parallelism with bias"
+                    " type of %s",
                     core_attention_bias_type,
                 )
             use_flash_attention = False
         elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
             if _flash_attn_is_installed:
                 logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with attention"
-                    " bias for THD format"
+                    "Disabling FlashAttention as it does not support context parallelism with"
+                    " attention bias for THD format"
                 )
             use_flash_attention = False
 
@@ -686,10 +697,7 @@ def get_attention_backend(
                     attn_mask_type,
                 )
                 use_fused_attention = False
-        if (
-            use_flash_attention
-            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
-        ):
+        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
             if _flash_attn_3_is_installed:
                 logger.debug(
                     "Disabling FlashAttention 3 as it does not support sliding window attention"
@@ -702,7 +710,6 @@ def get_attention_backend(
                     "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
                 )
                 use_flash_attention = False
-
 
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
@@ -860,14 +867,14 @@ def get_attention_backend(
 
     # All available backends
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
-    #if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
+    # if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
     if use_flash_attention and not _flash_attn_is_installed:
         logger.warning(
             "flash-attn may provide significant performance boost. Please install "
             "flash-attn >= %s, <= %s.",
             _flash_attn_version_required,
             _flash_attn_max_version,
-            )
+        )
     if use_flash_attention and not _flash_attn_is_installed:
         use_flash_attention = False
         available_backends[0] = False
@@ -897,20 +904,20 @@ def get_attention_backend(
             )
             use_flash_attention = False
 
-#    # Select FusedAttention for FP8
-#    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
-#    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
-#    if (
-#        use_flash_attention
-#        and use_fused_attention
-#        and fused_attention_backend == FusedAttnBackend["FP8"]
-#        and _use_flash_attn_3
-#    ):
-#        logger.debug(
-#            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
-#            "supports more accurate scaling factors in FP8 execution"
-#        )
-#        use_flash_attention = False
+    #    # Select FusedAttention for FP8
+    #    # FA3 uses default scaling factors (i.e. 1) in FP8 execution, while FusedAttention takes
+    #    # scaling factors from `fp8_meta` and offers more accurate quantization/de-quantization
+    #    if (
+    #        use_flash_attention
+    #        and use_fused_attention
+    #        and fused_attention_backend == FusedAttnBackend["FP8"]
+    #        and _use_flash_attn_3
+    #    ):
+    #        logger.debug(
+    #            "Disabling FlashAttention 3 to give FusedAttention preference as FusedAttention "
+    #            "supports more accurate scaling factors in FP8 execution"
+    #        )
+    #        use_flash_attention = False
 
     # Selected backend
     if use_flash_attention:
