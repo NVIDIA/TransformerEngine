@@ -46,7 +46,7 @@ from ..cpp_extensions import (
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing
+from ..graph import is_graph_capturing, cached_empty_like, cached_empty
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 
@@ -448,6 +448,19 @@ class _Linear(torch.autograd.Function):
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
             if ctx.requires_dgrad:
+                dgrad_size = list(grad_output.size())
+                dgrad_size[1] = weight.size(1)
+
+                if is_graph_capturing():
+                    dgrad = cached_empty(
+                        dgrad_size, 
+                        dtype=ctx.activation_dtype, 
+                        device=weight.device,
+                        requires_grad=True,
+                        key='layernormlinear_dgrad')
+                else:  
+                    dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+        
                 if ctx.fp8:
                     if ctx.is_input_fp8:
                         out_index, meta_tensor, output_te_dtype, output_dtype = (

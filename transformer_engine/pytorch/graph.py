@@ -30,8 +30,6 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
-
-
 class CudagraphCache():
     """Reduces the memory overhead of cudagraph capture by sharing temporary 
     tensors over different transformer layers. The cache is expected to be populated
@@ -97,58 +95,22 @@ class CudagraphCache():
 
 def cached_empty_like(tensor, key):
     if CudagraphCache.can_insert(key):
-        CudagraphCache.insert(key, torch.empty_like(tensor))
+        CudagraphCache.insert(
+            key, 
+            torch.empty_like(tensor, requires_grad=tensor.requires_grad)
+        )
     return CudagraphCache.retrieve(key)
 
-def cached_empty(shape, dtype, device, key):
+def cached_empty(shape, dtype, device, key, requires_grad):
     if CudagraphCache.can_insert(key):
         tensor = torch.empty(
             shape,
             dtype=dtype, 
             device=device,
+            requires_grad=requires_grad,
         )
         CudagraphCache.insert(key, tensor)
     return CudagraphCache.retrieve(key)
-
-
-class split_cached(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, tensor, split_dim, dim):
-        query, key, value = torch.split(
-            tensor=tensor,
-            split_size_or_sections=split_dim,
-            dim=-1,
-        )
-
-        query_contiguous = cached_empty_like(query, 'qkv_query')
-        key_contiguous = cached_empty_like(key, 'qkv_key')
-        value_contiguous = cached_empty_like(value, 'qkv_value')
-
-        query_contiguous.copy_(query)
-        key_contiguous.copy_(key)
-        value_contiguous.copy_(value)
-
-        ctx.split_size_or_sections = split_dim
-        ctx.dim = dim
-
-        return query_contiguous, key_contiguous, value_contiguous
-
-    @staticmethod
-    def backward(ctx, *grads):
-        split_size_or_sections = ctx.split_size_or_sections
-        dim = ctx.dim
-       
-        total_shape = list(grads[0].shape)
-        total_shape[dim] = sum([g.shape[dim] for g in grads])
-
-        unsplit_contiguous = cached_empty(
-            total_shape,
-            dtype=grads[0].dtype,
-            device=grads[0].device,
-            key='split_cached_bwd'
-        )
-        torch.cat(grads, dim=dim, out=unsplit_contiguous)
-        return unsplit_contiguous, None, None
 
 
 def set_capture_start() -> None:

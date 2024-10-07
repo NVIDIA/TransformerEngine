@@ -70,7 +70,7 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
-from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.graph import is_graph_capturing, cached_empty_like, cached_empty
 
 
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
@@ -3628,7 +3628,23 @@ class _SplitAlongDim(torch.autograd.Function):
                     dim=split_dim,
                 )
             )
-        return torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
+
+        out = torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
+
+        # torch.split produces a view, for cudagraphs make contiguous, in case the
+        # the next operation on these outputs requires `.contiguous` for instance DPA
+        if is_graph_capturing():
+            out_contiguous = []
+            for idx, o in enumerate(out):
+                out_contiguous.append(cached_empty_like(o, f'split_fwd_{idx}'))
+
+            for idx, o in enumerate(out):
+                out_contiguous[idx].copy_(o)
+                out_contiguous[idx].requires_grad = True
+
+            out = out_contiguous
+        return out
+
 
     @staticmethod
     def backward(ctx, *grad_outputs):
@@ -3711,6 +3727,21 @@ class _SplitAlongDim(torch.autograd.Function):
             )
             return ret, None, None
 
+        # if is_graph_capturing():
+        #     total_shape = list(grad_outputs[0].shape)
+        #     total_shape[dim] = sum([g.shape[split_dim] for g in grads])
+
+        #     grad_input = cached_empty(
+        #         total_shape,
+        #         dtype=grad_outputs[0].dtype,
+        #         device=grad_outputs[0].device,
+        #         requires_grad=all([g.requires_grad for g in grad_outputs]),
+        #         key='split_cached_bwd'
+        #     )
+        #     torch.cat(grads, dim=split_dim, out=grad_input)
+        #     return grad_input, None, None
+
+        # else:
         return torch.cat(grad_outputs, dim=split_dim), None, None
 
 

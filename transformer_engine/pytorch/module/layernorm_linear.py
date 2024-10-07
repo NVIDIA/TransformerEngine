@@ -480,6 +480,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad_size, 
                         dtype=ctx.activation_dtype, 
                         device=weight.device,
+                        requires_grad=True,
                         key='layernormlinear_dgrad')
                 else:  
                     dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
