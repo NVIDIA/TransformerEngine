@@ -1854,13 +1854,6 @@ def _run_ref_mha_f16(dtype, config, backend):
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
     block = DotProductAttention(
         config.num_heads,
         config.head_dim_qk,

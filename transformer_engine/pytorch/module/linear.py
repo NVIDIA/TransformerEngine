@@ -48,6 +48,7 @@ from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 from ..tensor import QuantizedTensor
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["Linear"]
 
@@ -87,8 +88,9 @@ class _Linear(torch.autograd.Function):
         is_input_fp8 = isinstance(inp, Float8Tensor)
 
         # Make sure input dimensions are compatible
-        in_features = weight.shape[-1]
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        out_features, in_features = weight.shape
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view(-1, in_features)
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -180,7 +182,7 @@ class _Linear(torch.autograd.Function):
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
-                dim_size[1] = weight_fp8.size(0)
+                dim_size[1] = out_features
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
                     if ub_obj_projout.is_atomic_gemm():
@@ -200,7 +202,7 @@ class _Linear(torch.autograd.Function):
                     ub_obj_projout.set_ubuf_scale_inv(meta_tensor.scale_inv[proj_out_index])
             else:
                 dim_size = list(inputmat_total.size())
-                dim_size[1] = weight_fp8.size(0)
+                dim_size[1] = out_features
                 out = torch.empty(dim_size, dtype=proj_out_pttype, device=inputmat_total.device)
 
             _ = fp8_gemm(
@@ -260,7 +262,7 @@ class _Linear(torch.autograd.Function):
                 out = ub_obj_projout.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // get_distributed_world_size(tp_group)
-                dim_size[1] = weight.size(0)
+                dim_size[1] = out_features
                 rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
                 if ub_obj_projout.is_p2p_overlap():
                     ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
@@ -268,7 +270,7 @@ class _Linear(torch.autograd.Function):
                     ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
             else:
                 dim_size = list(inputmat_total.size())
-                dim_size[1] = weight.size(0)
+                dim_size[1] = out_features
                 out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
 
             _ = gemm(
@@ -334,7 +336,7 @@ class _Linear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.ub_overlap_ag = ub_overlap_ag
@@ -358,7 +360,7 @@ class _Linear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.view(-1, *inp_shape[1:-1], out_features)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -941,7 +943,7 @@ class Linear(TransformerEngineBaseModule):
         ) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [getattr(self, name) for name in self.weight_names]
+            unfused_weights = [self._fast_get_param(name) for name in self.weight_names]
             if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
@@ -952,11 +954,9 @@ class Linear(TransformerEngineBaseModule):
                     unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
-                bias_tensor = _noop_cat(
-                    [getattr(self, name) for name in self.bias_names],
-                )
+                bias_tensor = _noop_cat([self._fast_get_param(name) for name in self.bias_names])
             else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+                bias_tensor = self._fast_get_param(self.bias_names[0])  # Unused
 
             # Initialize FP8 weights if needed
             weight_fp8 = None
@@ -983,8 +983,6 @@ class Linear(TransformerEngineBaseModule):
                         fsdp_group=self.fsdp_group,
                     )
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
                 args = []
@@ -1002,7 +1000,7 @@ class Linear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
