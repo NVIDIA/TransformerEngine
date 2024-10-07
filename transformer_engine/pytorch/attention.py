@@ -589,7 +589,13 @@ def get_attention_backend(
             "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
         )
         use_flash_attention = False
-    if use_flash_attention and _use_flash_attn_3 and fp8 and fp8_meta["recipe"].fp8_dpa and "padding" in attn_mask_type:
+    if (
+        use_flash_attention
+        and _use_flash_attn_3
+        and fp8
+        and fp8_meta["recipe"].fp8_dpa
+        and "padding" in attn_mask_type
+    ):
         logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
         _use_flash_attn_3 = False
 
