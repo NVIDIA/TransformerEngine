@@ -27,12 +27,22 @@ class CustomCallAPIVersion(IntEnum):
     FFI = 1
 
 
+class CustomCallWithCudaGraph(IntEnum):
+    """Enum for enabling cudaGraph support"""
+
+    DISABLE = 0
+    ENABLE = 1  # Supported only for custom calls implemented with XLA FFI
+
+
 for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
-            # COMMAND_BUFFER_COMPATIBLE i.e. cudaGraph enabled by default
             xla_client.register_custom_call_target(
-                _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
+                _name,
+                _value,
+                platform="CUDA",
+                api_version=CustomCallAPIVersion.FFI.value,
+                traits=CustomCallWithCudaGraph.ENABLE.value,
             )
     else:
         xla_client.register_custom_call_target(
