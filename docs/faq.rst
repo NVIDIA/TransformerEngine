@@ -9,11 +9,12 @@ Frequently Asked Questions (FAQ)
 FP8 checkpoint compatibility
 ----------------------------
 
-Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 metadata, i.e. scaling factors and amax histories, under a `._extra_state` key in the checkpoint. As our FP8 attention support expands, the location of the key has also shifted. Here we take the `MultiheadAttention` module as an example and list the checkpointing behaviors with different Transformer Engine versions.
+Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 metadata, i.e. scaling factors and amax histories, under a `._extra_state` key in the checkpoint. As the FP8 attention support expands from one backend to multiple backends, the location of the `._extra_state` key has also shifted.
+
+Here, we take the `MultiheadAttention` module as an example. Its FP8 attention metadata in Transformer Engine 1.11 is stored as `core_attention._extra_state` as shown below.
 
 .. code-block:: python
 
-    >>> # Transformer Engine 1.11
     >>> from transformer_engine.pytorch import MultiheadAttention, fp8_model_init
     >>> with fp8_model_init(enabled=True):
     ...     mha = MultiheadAttention(
@@ -30,33 +31,33 @@ Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 met
     >>> state_dict = mha.state_dict()
     >>> print(state_dict.keys())
     odict_keys(['qkv.weight', 'qkv.bias', 'qkv._extra_state', 'core_attention._extra_state', 'proj.weight', 'proj.bias', 'proj._extra_state'])
-    >>> # core_attention._extra_state is the key for FP8 attention metadata in 1.11
 
+Here is a full list of the checkpoint save/load behaviors from all Transformer Engine versions.
 
 .. list-table::
 
    * - **Version: <= 1.5**
 
-         - Saves no FP8 metadata to checkpoint
-         - Loading checkpoints saved by version:
+         - Saves no FP8 metadata since FP8 attention is not supported
+         - Loading behavior for checkpoints created by the following versions:
 
-             :<= 1.5:    No FP8 metadata is loaded (as expected)
+             :<= 1.5:    Loads no FP8 metadata
              :>  1.5:    Error: unexpected key
    * - **Version: 1.6, 1.7**
 
          - Saves FP8 metadata to `core_attention.fused_attention._extra_state`
-         - Loading checkpoints saved by version:
+         - Loading behavior for checkpoints created by the following versions:
 
-             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
+             :<= 1.5:    Initializes FP8 metadata to the default, i.e. 1s for scaling factors, and 0s for amaxes
              :1.6, 1.7:  Loads FP8 metadata from checkpoint
              :>= 1.8:    Error: unexpected key
    * - **Version: >=1.8, <= 1.11**
 
          - Saves FP8 metadata to `core_attention._extra_state`
-         - Loading checkpoints saved by version:
+         - Loading behavior for checkpoints created by the following versions:
 
-             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
-             :1.6, 1.7:  Relies on users to map 1.6/1.7 key to 1.8-1.11 key; otherwise, initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes. Mapping in this `MultiheadAttention` example can be done via:
+             :<= 1.5:    Initializes FP8 metadata to the default, i.e. 1s for scaling factors, and 0s for amaxes
+             :1.6, 1.7:  This save/load combination relies on users to map the 1.6/1.7 key to the 1.8-1.11 key. Otherwise, it initializes FP8 metadata to the default, i.e. 1s for scaling factors, and 0s for amaxes. The mapping can be done, in this `MultiheadAttention` example, by
 
               .. code-block:: python
 
@@ -68,7 +69,7 @@ Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 met
    * - **Version: >=1.12**
 
          - Saves FP8 metadata to `core_attention._extra_state`
-         - Loading checkpoints saved by version:
+         - Loading behavior for checkpoints created by the following versions:
 
-             :<= 1.5:    Initializes FP8 metadata to default, i.e. 1s for scaling factors and 0s for amaxes
+             :<= 1.5:    Initializes FP8 metadata to the default, i.e. 1s for scaling factors, and 0s for amaxes
              :>= 1.6:    Loads FP8 metadata from checkpoint

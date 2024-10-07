@@ -6989,10 +6989,9 @@ class DotProductAttention(TransformerEngineBaseModule):
 
     .. note::
 
-        Transformer Engine starts to support FP8 attention in 1.6. It stores the FP8 metadata
-        under a `._extra_state` key in the checkpoint. As the FP8 attention support expands
-        from one backend to multiple backends, the location of the key has also shifted in
-        different Transformer Engine versions. Please see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more information.
+        Transformer Engine stores the FP8 metadata under a `._extra_state` key when checkpointing.
+        As the FP8 attention support expands from one backend to multiple backends, the location
+        of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
 
 
     Parameters
@@ -7249,10 +7248,10 @@ class DotProductAttention(TransformerEngineBaseModule):
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
         """
-        This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 metadata
-        is stored under the `core_attention.fused_attention._extra_state` key and not the
-        `core_attention._extra_state` key. For more information, please see
-        `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_.
+        This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
+        metadata is stored under the `core_attention.fused_attention._extra_state` key and not the
+        `core_attention._extra_state` key. Please see `FP8 checkpoint compatibility
+        <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
         """
         fused_attn_key = False
         dot_product_attn_key = False
