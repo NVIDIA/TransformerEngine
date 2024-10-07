@@ -15,7 +15,10 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import dtype_to_ir_type
 
-from transformer_engine.transformer_engine_jax import DType as TEDType
+from transformer_engine.transformer_engine_jax import (
+    DType as TEDType,
+    get_device_compute_capability,
+)
 from transformer_engine import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
@@ -167,3 +170,8 @@ def is_ffi_enabled():
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
     assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
     return is_supported and is_enabled
+
+
+def is_bf16_compatible() -> None:
+    """Returns if device supports bfloat16 compute."""
+    return get_device_compute_capability(-1)[0] >= 8

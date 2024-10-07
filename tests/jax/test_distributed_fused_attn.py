@@ -30,9 +30,19 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
 )
+from transformer_engine_jax import get_device_compute_capability
 
 
 DTYPES = [jnp.float16, jnp.bfloat16]
+
+
+@pytest.fixture(autouse=True)
+def skip_if_not_hopper_or_later():
+    sm_ver = get_device_compute_capability(-1)
+    if sm_ver < 90:
+        pytest.skip(f"Jax distributed attention is only supported on SM90+ ({sm_ver=})")
+    else:
+        yield
 
 
 class TestDistributedSelfAttn:
