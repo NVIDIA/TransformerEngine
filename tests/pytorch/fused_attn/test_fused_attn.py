@@ -249,7 +249,7 @@ def test_dot_product_attention(
     # Test backend availability
     window_size = (-1, -1)
     if swa:
-        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+        window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
@@ -1853,13 +1853,6 @@ def _run_ref_mha_f16(dtype, config, backend):
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
 
     def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
