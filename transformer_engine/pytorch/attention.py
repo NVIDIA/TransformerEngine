@@ -664,7 +664,7 @@ def get_attention_backend(
         if _use_flash_attn_3:
             logger.debug("Disabling FlashAttention 3 for ALiBi")
             _use_flash_attn_3 = False
-        elif not _flash_attn_2_4_plus:
+        if not _use_flash_attn_3 and not _flash_attn_2_4_plus:
             logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
             use_flash_attention = False
 
