@@ -145,8 +145,7 @@ except PackageNotFoundError:
         )
 else:
     if (
-        _flash_attn_version >= _flash_attn_version_required
-        and _flash_attn_version <= _flash_attn_max_version
+        _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version
         and all(_flash_attn_version != x for x in _flash_attn_version_not_supported)
     ):
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
@@ -204,9 +203,7 @@ else:
     )
 
     _flash_attn_3_is_installed = True
-    _flash_attn_3_0_0_beta = _flash_attn_3_version > PkgVersion(
-        "3.0.0b"
-    ) and _flash_attn_3_version < PkgVersion("3.0.0")
+    _flash_attn_3_0_0_beta = PkgVersion("3.0.0b") < _flash_attn_3_version < PkgVersion("3.0.0")
     _use_flash_attn_3 = True
 
 _attention_backends = {
