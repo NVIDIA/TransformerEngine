@@ -20,7 +20,6 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
     RotaryPositionEmbedding,
     get_attention_backend,
-    _flash_attn_2_plus,
     _flash_attn_2_3_plus,
     _flash_attn_3_is_installed,
     check_set_window_size,
