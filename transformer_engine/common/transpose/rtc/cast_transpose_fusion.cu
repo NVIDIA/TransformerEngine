@@ -229,12 +229,16 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
     }
   }
 
-  // warp tile amax reduce
-  const CType max_block = reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(amax, warp_id);
-
-  if (threadIdx.x == 0) {
-    if (param.amax != nullptr) {
+  // Reduce amax over block
+  if (param.amax != nullptr) {
+    const CType max_block = reduce_max<BLOCK_SIZE / THREADS_PER_WARP>(amax, warp_id);
+    if (threadIdx.x == 0) {
       atomicMaxFloat(param.amax, max_block);
     }
+  }
+
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && param.scale_inv != nullptr) {
+    reciprocal<CType>(param.scale_inv, scale);
   }
 }

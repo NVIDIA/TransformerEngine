@@ -48,6 +48,7 @@ set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      pycudnn.cpp
      transformer_engine.cpp
+     common.cu
      transpose/cast_transpose.cu
      transpose/transpose.cu
      transpose/cast_transpose_fusion.cu
@@ -65,10 +66,12 @@ list(APPEND transformer_engine_SOURCES
      layer_norm/ln_api.cpp
      layer_norm/ln_bwd_semi_cuda_kernel.cu
      layer_norm/ln_fwd_cuda_kernel.cu
+     permutation/permutation.cu
      rmsnorm/rmsnorm_api.cpp
      rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
+     util/padding.cu
      util/cuda_driver.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
