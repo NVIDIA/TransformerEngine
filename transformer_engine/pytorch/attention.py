@@ -98,6 +98,7 @@ _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
 _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
 _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
 _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
+_flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
 _flash_attn_3_plus = False
 _use_flash_attn_3 = False
 try:
@@ -1363,9 +1364,9 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
-def flash_attn_fwd_out_correction(out, out_per_step, seq_dim, softmax_lse, softmax_lse_per_step):
+def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step, movedim_src, movedim_dst):
     """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(movedim_src, movedim_dst)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step * softmax_lse_corrected_exp
     out.add_(out_corrected)
@@ -1684,6 +1685,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
 
+        softmax_lse_in_packed_format = not use_fused_attention and (_flash_attn_2_6_0_plus or _use_flash_attn_3)
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale" : softmax_scale}
             if _use_flash_attn_3:
@@ -2166,6 +2168,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if use_fused_attention:
                     # [b, np, sq, 1] -> [b, np, sq]
                     softmax_lse_per_step[i - 1].squeeze_(-1)
+                if causal and qkv_format != "thd" and softmax_lse_in_packed_format:
+                    # [np, t] -> [np, b, sq]
+                    softmax_lse_per_step[i - 1] = softmax_lse_per_step[i - 1].view(q.shape[-2], q.shape[0], -1)
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if fp8:
@@ -2180,7 +2185,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if causal and qkv_format != "thd":
-                            # [b, np, sq] -> [b, np, 2, sq//2]
+                            # [b, np, sq] -> [b, np, 2, sq//2] lse not in packed format
+                            # [np, b, sq] -> [np, b, 2, sq//2] lse in packed format
                             softmax_lse_ = softmax_lse.view(
                                 *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1] // 2
                             )
@@ -2194,7 +2200,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse,
                                 softmax_lse_per_step[i - 1],
                                 cu_seqlens_q_padded,
-                                False,
+                                softmax_lse_in_packed_format,
                             )
                         else:
                             flash_attn_fwd_softmax_lse_correction(
@@ -2220,9 +2226,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     flash_attn_fwd_out_correction(
                         out.view(*out_per_step[i].shape),
                         out_per_step[i],
-                        seq_dim,
                         softmax_lse,
                         softmax_lse_per_step[i],
+                        0 if softmax_lse_in_packed_format else 2,
+                        2 if softmax_lse_in_packed_format else seq_dim,
                     )
                 elif qkv_format == "thd":
                     tex.thd_out_correction(
@@ -2232,16 +2239,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_per_step[i],
                         cu_seqlens_q_padded,
                         False,
-                        False,
+                        softmax_lse_in_packed_format,
                     )
             else:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(
                         out_,
                         out_per_step[i],
-                        seq_dim,
                         softmax_lse_[..., 1, :],
                         softmax_lse_per_step[i],
+                        0 if softmax_lse_in_packed_format else 2,
+                        2 if softmax_lse_in_packed_format else seq_dim,
                     )
                 elif qkv_format == "thd":
                     tex.thd_out_correction(
@@ -2251,9 +2259,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_per_step[i],
                         cu_seqlens_q_padded,
                         True,
-                        False,
+                        softmax_lse_in_packed_format,
                     )
 
+        if causal and qkv_format != "thd" and softmax_lse_in_packed_format:
+            # [np, b, sq] -> [np, t]
+            softmax_lse = softmax_lse.view(softmax_lse.shape[0], -1)
         kv = p2p_comm_buffers[-1]
         if qkv_format == "bshd":
             out = out.view(out.shape[0], -1, *out.shape[-2:])
@@ -2399,10 +2410,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             attn_dbias = None
 
+        softmax_lse_in_packed_format = not ctx.use_fused_attention and (_flash_attn_2_6_0_plus or _use_flash_attn_3)
+
         if causal:
-            if ctx.qkv_format == "thd":
+            if ctx.qkv_format == "thd" or softmax_lse_in_packed_format:
                 softmax_lse_ = tex.thd_read_second_half_lse(
-                    softmax_lse, cu_seqlens_q_padded, False
+                    softmax_lse, cu_seqlens_q_padded, softmax_lse_in_packed_format
                 )
             else:
                 # [b, np, sq] -> [b, np, 2, sq//2]
