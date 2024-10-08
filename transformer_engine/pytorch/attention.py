@@ -2232,6 +2232,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_per_step[i],
                         cu_seqlens_q_padded,
                         False,
+                        False,
                     )
             else:
                 if qkv_format in ["bshd", "sbhd"]:
@@ -2250,6 +2251,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_per_step[i],
                         cu_seqlens_q_padded,
                         True,
+                        False,
                     )
 
         kv = p2p_comm_buffers[-1]

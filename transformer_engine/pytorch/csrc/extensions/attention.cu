@@ -1609,7 +1609,8 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
 template <typename dtype, int only_second_half, int tile_size>
 __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
                                           float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int max_seqlen) {
+                                          int num_heads, int dim_per_head, int lse_seqlen,
+                                          bool lse_packed) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
@@ -1627,11 +1628,16 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
     for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
       size_t idx, idx_per_step;
 
-      size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
-      int col = token_id - cu_seqlens_s[seq_id];
-      int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-      idx = row * max_seqlen + col + seq_len * only_second_half;
-      idx_per_step = row * max_seqlen / (only_second_half + 1) + col;
+      if (lse_packed) {
+         idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
+         idx_per_step = head_id * lse_seqlen / (only_second_half + 1) + token_id;
+      } else {
+        size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
+        int col = token_id - cu_seqlens_s[seq_id];
+        int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+        idx = row * lse_seqlen + col + seq_len * only_second_half;
+        idx_per_step = row * lse_seqlen / (only_second_half + 1) + col;
+      }
       float lse_corrected_exp = exp(lse_per_step[idx_per_step] - lse[idx]);
 
       idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
@@ -1657,7 +1663,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
 template <typename dtype, int only_second_half>
 static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_step,
                                       const at::Tensor &lse, const at::Tensor &lse_per_step,
-                                      const at::Tensor &cu_seqlens) {
+                                      const at::Tensor &cu_seqlens, bool lse_packed) {
   NVTE_CHECK(out.scalar_type() == out_per_step.scalar_type());
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
@@ -1666,17 +1672,30 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   int total_tokens = out.size(0);
   int num_heads = out.size(1);
   int dim_per_head = out.size(2);
-  int batch = lse.size(0);
-  int max_seqlen = lse.size(2);
 
   NVTE_CHECK(out_per_step.size(0) == total_tokens / (only_second_half + 1));
   NVTE_CHECK(out_per_step.size(1) == num_heads);
   NVTE_CHECK(out_per_step.size(2) == dim_per_head);
-  NVTE_CHECK(lse.size(1) == num_heads);
-  NVTE_CHECK(lse_per_step.size(0) == batch);
-  NVTE_CHECK(lse_per_step.size(1) == num_heads);
-  NVTE_CHECK(lse_per_step.size(2) == max_seqlen / (only_second_half + 1));
-  NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+
+  int batch, lse_seqlen;
+  if (lse_packed) {
+    batch = cu_seqlens.size(0) - 1;
+    lse_seqlen = total_tokens;
+
+    NVTE_CHECK(lse.size(0) == num_heads);
+    NVTE_CHECK(lse.size(1) == lse_seqlen);
+    NVTE_CHECK(lse_per_step.size(0) == num_heads);
+    NVTE_CHECK(lse_per_step.size(1) == lse_seqlen / (only_second_half + 1));
+  } else {
+    batch = lse.size(0);
+    lse_seqlen = lse.size(2);
+
+    NVTE_CHECK(lse.size(1) == num_heads);
+    NVTE_CHECK(lse_per_step.size(0) == batch);
+    NVTE_CHECK(lse_per_step.size(1) == num_heads);
+    NVTE_CHECK(lse_per_step.size(2) == lse_seqlen / (only_second_half + 1));
+    NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+  }
 
   constexpr int tile = 16;
   constexpr int block = 512;
@@ -1688,35 +1707,35 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
       <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
           out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
           lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
-          dim_per_head, max_seqlen);
+          dim_per_head, lse_seqlen, lse_packed);
 }
 
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half) {
+                        bool only_second_half, bool lse_packed) {
   if (only_second_half) {
     if (out.scalar_type() == at::ScalarType::Half) {
       using dtype = at::Half;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else if (out.scalar_type() == at::ScalarType::BFloat16) {
       using dtype = at::BFloat16;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else if (out.scalar_type() == at::ScalarType::Float) {
       using dtype = float;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else {
       NVTE_ERROR("Unsupported dtype of out\n");
     }
   } else {
     if (out.scalar_type() == at::ScalarType::Half) {
       using dtype = at::Half;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else if (out.scalar_type() == at::ScalarType::BFloat16) {
       using dtype = at::BFloat16;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else if (out.scalar_type() == at::ScalarType::Float) {
       using dtype = float;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
     } else {
       NVTE_ERROR("Unsupported dtype of out\n");
     }
