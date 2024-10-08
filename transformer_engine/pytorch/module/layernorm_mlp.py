@@ -54,6 +54,7 @@ from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ._common import _apply_normalization
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["LayerNormMLP"]
 
@@ -124,7 +125,8 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -433,7 +435,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight.weight_offloading = True
                 fc1_weight.weight_offloading = True
                 fc2_weight.weight_offloading = True
-                fc1_bias.weight_offloading = True
+                if fc1_bias is not None:
+                    fc1_bias.weight_offloading = True
 
                 inputmat.activation_offloading = True
                 if normalization == "LayerNorm":
@@ -487,7 +490,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.use_fc2_bias = use_fc2_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
             ctx.bias_gelu_nvfusion = bias_gelu_nvfusion
@@ -519,11 +522,11 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out, _ = allreduce(fc2_out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        fc2_out = fc2_out.view(-1, *inp.shape[1:-1], fc2_out.shape[-1])
+        fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
-                shape = list(inp.shape)
+                shape = list(inp_shape)
                 shape[0] *= tp_size
                 return fc2_out, ln_out_return.view(shape)
             return fc2_out, ln_out_return.view_as(inp)
@@ -1470,8 +1473,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
 
             # Get weight tensors
-            fc1_weight = self.fc1_weight
-            fc2_weight = self.fc2_weight
+            fc1_weight = self._fast_get_param("fc1_weight")
+            fc1_bias = self._fast_get_param("fc1_bias")
+            fc2_weight = self._fast_get_param("fc2_weight")
+            fc2_bias = self._fast_get_param("fc2_bias")
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.from_float8()
@@ -1524,8 +1529,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.bias_gelu_nvfusion and not use_reentrant_activation_recompute():
                 self.bias_gelu_nvfusion = False
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormMLP.apply
                 args = []
@@ -1534,15 +1537,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
+                self._fast_get_param("layer_norm_weight"),
+                self._fast_get_param("layer_norm_bias"),
                 fc1_weight,
                 fc1_weight_fp8,
-                self.fc1_bias,
+                fc1_bias,
                 self.use_bias,
                 fc2_weight,
                 fc2_weight_fp8,
-                self.fc2_bias,
+                fc2_bias,
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
@@ -1550,7 +1553,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
@@ -1580,12 +1583,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             out, ln_out = out
 
         if self.gemm_bias_unfused_add:
-            out = out + cast_if_needed(self.fc2_bias, self.activation_dtype)
+            out = out + cast_if_needed(fc2_bias, self.activation_dtype)
 
         if self.return_bias:
             if self.return_layernorm_output:
-                return out, cast_if_needed(self.fc2_bias, self.activation_dtype), ln_out
-            return out, cast_if_needed(self.fc2_bias, self.activation_dtype)
+                return out, cast_if_needed(fc2_bias, self.activation_dtype), ln_out
+            return out, cast_if_needed(fc2_bias, self.activation_dtype)
         if self.return_layernorm_output:
             return out, ln_out
         return out
