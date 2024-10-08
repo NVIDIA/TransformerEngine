@@ -67,6 +67,10 @@ model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
+small_model_configs = {
+    "small": ModelConfig(128, 1e-5, 8, 36, 4, 128),
+}
+
 model_configs_inference = {
     # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
@@ -113,11 +117,15 @@ def assert_allclose(
     l1: List[torch.Tensor],
     l2: List[torch.Tensor],
     atol: float,
+    rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        result = torch.allclose(t1, t2, atol=atol)
+        if rtol is not None:
+            result = torch.allclose(t1, t2, atol=atol, rtol=rtol)
+        else:
+            result = torch.allclose(t1, t2, atol=atol)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
@@ -809,10 +817,10 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", small_model_configs.keys())
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
-    config = model_configs[model]
+    config = small_model_configs[model]
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -868,11 +876,24 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     te_outputs = _test_e2e_gpt_accuracy(te_gpt, bs, dtype, config)
     torch_outputs = _test_e2e_gpt_accuracy(torch_gpt, bs, dtype, config)
 
+    atol = {
+        torch.float32: 5e-3,
+        torch.half: 5e-2,
+        torch.bfloat16: 5e-2,
+    }
+    rtol = {
+        torch.float32: 1e-2,
+        torch.half: 1e-2,
+        torch.bfloat16: 1e-2,
+    }
+
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
+    atol[torch.float32] = 5e-2
+    # Check gradients
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
@@ -906,10 +927,10 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", small_model_configs.keys())
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
-    config = model_configs[model]
+    config = small_model_configs[model]
 
     te_mha = MultiheadAttention(
         config.hidden_size,
@@ -941,11 +962,27 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
     te_outputs = _test_mha_accuracy(te_mha, bs, dtype, config, mask_type, te=True)
     torch_outputs = _test_mha_accuracy(torch_mha, bs, dtype, config, mask_type, te=False)
 
+    atol = {
+        torch.float32: 5e-3,
+        torch.half: 5e-2,
+        torch.bfloat16: 5e-2,
+    }
+    rtol = {
+        torch.float32: 1e-2,
+        torch.half: 1e-2,
+        torch.bfloat16: 1e-2,
+    }
+
+
     # Check output.
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    
+    atol[torch.float32] = 5e-2
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 def _test_granular_accuracy(block, bs, dtype, config):
@@ -1028,11 +1065,29 @@ def test_dpa_accuracy(dtype, bs, model):
     te_outputs = _test_dpa_accuracy(te_dpa, bs, dtype, config)
     torch_outputs = _test_dpa_accuracy(torch_dpa, bs, dtype, config)
 
+
+    atol = {
+        torch.float32: 5e-3,
+        torch.half: 5e-2,
+        torch.bfloat16: 5e-2,
+    }
+    rtol = {
+        torch.float32: 1e-2,
+        torch.half: 1e-2,
+        torch.bfloat16: 1e-2,
+    }
+
+
     # Check output.
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    
+    atol[torch.float32] = 5e-2
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+        
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1066,10 +1121,10 @@ def test_linear_accuracy(dtype, bs, model):
     torch_outputs = _test_granular_accuracy(torch_linear, bs, dtype, config)
 
     # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    tolerance = 5e-3 if dtype == torch.float32 else 5e-2
+    for te_output, torch_output in zip(te_outputs, torch_outputs):
+        assert_allclose(te_output, torch_output, tolerance)
+
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1102,13 +1157,24 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     te_outputs = _test_granular_accuracy(te_rmsnorm, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_rmsnorm, bs, dtype, config)
 
-    # Check output.
     atol = {
         torch.float32: 1e-7,
         torch.half: 2e-3,
         torch.bfloat16: 2e-2,
     }
-    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+    rtol = {
+        torch.float32: 1.3e-6,
+        torch.half: 1e-3,
+        torch.bfloat16: 1.6e-2,
+    }
+
+    # Check output.
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
+    atol[torch.float32] = 2e-3
+    # Check gradients
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1142,13 +1208,24 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
     te_outputs = _test_granular_accuracy(te_layernorm, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_layernorm, bs, dtype, config)
 
-    # Check output.
     atol = {
         torch.float32: 1e-7,
         torch.half: 2e-3,
         torch.bfloat16: 2e-2,
     }
-    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+    rtol = {
+        torch.float32: 1.3e-6,
+        torch.half: 1e-3,
+        torch.bfloat16: 1.6e-2,
+    }
+
+    # Check output.
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
+    atol[torch.float32] = 1e-4
+    # Check gradients
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1195,22 +1272,34 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
     te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
-    # Check output.
     atol = {
         torch.float32: 2.5e-4,
         torch.half: 2e-3,
         torch.bfloat16: 2e-2,
     }
-    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+    rtol = {
+        torch.float32: 1.3e-6,
+        torch.half: 1e-3,
+        torch.bfloat16: 1.6e-2,
+    }
+
+    # Check output.
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
+    atol[torch.float32] = 1e-3
+    rtol[torch.float32] = 1e-3
+    # Check gradients
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", small_model_configs.keys())
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
-    config = model_configs[model]
+    config = small_model_configs[model]
 
     te_ln_mlp = LayerNormMLP(
         config.hidden_size,
@@ -1246,12 +1335,23 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
 
-    # Check output.
-    if dtype == torch.float32:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
-    else:
-        assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
+    atol = {
+        torch.float32: 5e-3,
+        torch.half: 5e-1,
+        torch.bfloat16: 1e-1,
+    }
+    rtol = {
+        torch.float32: 1.3e-6,
+        torch.half: 1e-3,
+        torch.bfloat16: 1.6e-2,
+    }
 
+    # Check output.
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
+
+    # Check gradients
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]): 
+        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
     reset_rng_states()
