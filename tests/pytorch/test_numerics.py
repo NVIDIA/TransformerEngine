@@ -114,10 +114,7 @@ def dtype_tols(dtype: torch.dtype) -> Dict[str, float]:
 
 
 def assert_allclose(
-    l1: List[torch.Tensor],
-    l2: List[torch.Tensor],
-    atol: float,
-    rtol: float = None
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
 ) -> bool:
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
@@ -973,13 +970,12 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
         torch.bfloat16: 1e-2,
     }
 
-
     # Check output.
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
-    
+
     atol[torch.float32] = 5e-2
     for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
         assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
@@ -1065,7 +1061,6 @@ def test_dpa_accuracy(dtype, bs, model):
     te_outputs = _test_dpa_accuracy(te_dpa, bs, dtype, config)
     torch_outputs = _test_dpa_accuracy(torch_dpa, bs, dtype, config)
 
-
     atol = {
         torch.float32: 5e-3,
         torch.half: 5e-2,
@@ -1077,17 +1072,15 @@ def test_dpa_accuracy(dtype, bs, model):
         torch.bfloat16: 1e-2,
     }
 
-
     # Check output.
     if dtype == torch.float32:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-3)
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
-    
+
     atol[torch.float32] = 5e-2
     for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
         assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
-        
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1124,7 +1117,6 @@ def test_linear_accuracy(dtype, bs, model):
     tolerance = 5e-3 if dtype == torch.float32 else 5e-2
     for te_output, torch_output in zip(te_outputs, torch_outputs):
         assert_allclose(te_output, torch_output, tolerance)
-
 
 
 @pytest.mark.parametrize("dtype", param_types)
@@ -1350,8 +1342,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
 
     # Check gradients
-    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]): 
+    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
         assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
     reset_rng_states()
