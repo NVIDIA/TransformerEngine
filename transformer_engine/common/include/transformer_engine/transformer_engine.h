@@ -24,7 +24,7 @@ extern "C" {
 enum NVTEDType {
   kNVTEByte = 0,       /*!< Byte */
   kNVTEInt32 = 1,      /*!< 32-bit integer */
-  kNVTEInt64 = 2,      /*!< 32-bit integer */
+  kNVTEInt64 = 2,      /*!< 64-bit integer */
   kNVTEFloat32 = 3,    /*!< 32-bit float */
   kNVTEFloat16 = 4,    /*!< 16-bit float (E5M10) */
   kNVTEBFloat16 = 5,   /*!< 16-bit bfloat (E8M7) */
