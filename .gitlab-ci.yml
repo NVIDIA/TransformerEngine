@@ -787,6 +787,14 @@ L0_pytorch_unittest--L40_1GPU:
     - .L0_test
     - .L40_1GPU
 
+L0_pytorch_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_4GPU
+
 L1_pytorch_context_parallel_test--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
