@@ -1322,7 +1322,6 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
 
-
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
     reset_rng_states()
     if fp8:
