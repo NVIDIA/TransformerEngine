@@ -2163,7 +2163,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 if use_fused_attention:
                     # [b, np, sq, 1] -> [b, np, sq]
                     softmax_lse_per_step[i - 1].squeeze_(-1)
-                if causal and qkv_format != "thd" and softmax_lse_in_packed_format:
+                if qkv_format != "thd" and softmax_lse_in_packed_format:
                     # [np, t] -> [np, b, sq]
                     softmax_lse_per_step[i - 1] = softmax_lse_per_step[i - 1].view(q.shape[-2], q.shape[0], -1)
 
@@ -2257,7 +2257,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse_in_packed_format,
                     )
 
-        if causal and qkv_format != "thd" and softmax_lse_in_packed_format:
+        if qkv_format != "thd" and softmax_lse_in_packed_format:
             # [np, b, sq] -> [np, t]
             softmax_lse = softmax_lse.view(softmax_lse.shape[0], -1)
         kv = p2p_comm_buffers[-1]
