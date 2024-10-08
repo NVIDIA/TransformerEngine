@@ -1466,7 +1466,7 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
 
 template <typename lse_dtype, typename Functor>
 __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens, int batch,
-                               int num_heads, int max_seqlen) {
+                               int num_heads, int total_tokens, bool lse_packed) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / 2;
@@ -1480,12 +1480,18 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
   for (int token_id = tid; token_id < num_total_tokens; token_id += num_threads) {
     int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
     for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
-      size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
-      int col = token_id - cu_seqlens_s[seq_id];
-      int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+      size_t idx, half_idx;
+      if (lse_packed) {
+        idx = head_id * total_tokens + token_id + cu_seqlens_s[seq_id + 1];
+        half_idx = head_id * total_tokens / 2 + token_id;
+      } else {
+        size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
+        int col = token_id - cu_seqlens_s[seq_id];
+        int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
 
-      size_t idx = row * max_seqlen + col + seq_len;
-      size_t half_idx = row * max_seqlen / 2 + col;
+        idx = row * total_tokens + col + seq_len;
+        half_idx = row * total_tokens / 2 + col;
+      }
 
       Functor::run(lse, half_lse, idx, half_idx);
     }
@@ -1504,23 +1510,37 @@ struct LseCorrectionFunctor {
 };
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
-                                    const at::Tensor &cu_seqlens, int total_tokens) {
+                                    const at::Tensor &cu_seqlens, bool lse_packed) {
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Double);
   NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
-
-  NVTE_CHECK(lse.dim() == 3);
-  NVTE_CHECK(lse_per_step.dim() == 3);
   NVTE_CHECK(cu_seqlens.dim() == 1);
 
-  int batch = lse.size(0);
-  int num_heads = lse.size(1);
-  int max_seqlen = lse.size(2);
+  int batch, num_heads, total_tokens;
 
-  NVTE_CHECK(lse_per_step.size(0) == batch);
-  NVTE_CHECK(lse_per_step.size(1) == num_heads);
-  NVTE_CHECK(lse_per_step.size(2) == max_seqlen / 2);
-  NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+  if (lse_packed) {
+    NVTE_CHECK(lse.dim() == 2);
+    NVTE_CHECK(lse_per_step.dim() == 2);
+
+    batch = cu_seqlens.size(0) - 1;
+    num_heads = lse.size(0);
+    total_tokens = lse.size(1);
+
+    NVTE_CHECK(lse_per_step.size(0) == num_heads);
+    NVTE_CHECK(lse_per_step.size(1) == total_tokens / 2);
+  } else {
+    NVTE_CHECK(lse.dim() == 3);
+    NVTE_CHECK(lse_per_step.dim() == 3);
+
+    batch = lse.size(0);
+    num_heads = lse.size(1);
+    total_tokens = lse.size(2);
+
+    NVTE_CHECK(lse_per_step.size(0) == batch);
+    NVTE_CHECK(lse_per_step.size(1) == num_heads);
+    NVTE_CHECK(lse_per_step.size(2) == total_tokens / 2);
+    NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+  }
 
   constexpr unsigned int block = 256;
   unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
@@ -1529,7 +1549,7 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   thd_lse_kernel<double, LseCorrectionFunctor>
       <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
           lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-          num_heads, max_seqlen);
+          num_heads, total_tokens, lse_packed);
 }
 
 struct ReadLseFunctor {
@@ -1540,19 +1560,34 @@ struct ReadLseFunctor {
 };
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
-                                    int total_tokens) {
+                                    bool lse_packed) {
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
-  NVTE_CHECK(lse.dim() == 3);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
 
-  int batch = lse.size(0);
-  int num_heads = lse.size(1);
-  int max_seqlen = lse.size(2);
+  int batch, num_heads, total_tokens;
+  std::vector<int64_t> shape;
 
-  NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+  if (lse_packed) {
+    NVTE_CHECK(lse.dim() == 2);
 
-  std::vector<int64_t> shape = {batch, num_heads, max_seqlen / 2};
+    batch = cu_seqlens.size(0) - 1;
+    num_heads = lse.size(0);
+    total_tokens = lse.size(1);
+
+    shape = {num_heads, total_tokens / 2};
+  } else {
+    NVTE_CHECK(lse.dim() == 3);
+
+    batch = lse.size(0);
+    num_heads = lse.size(1);
+    total_tokens = lse.size(2);
+
+    NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+
+    shape = {batch, num_heads, total_tokens / 2};
+  }
+
   at::Tensor half_lse = at::zeros(shape, at::CUDA(lse.scalar_type()));
 
   constexpr unsigned int block = 256;
@@ -1562,7 +1597,7 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   thd_lse_kernel<float, ReadLseFunctor>
       <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
           lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-          num_heads, max_seqlen);
+          num_heads, total_tokens, lse_packed);
 
   return half_lse;
 }
