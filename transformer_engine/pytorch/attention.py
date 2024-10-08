@@ -144,9 +144,8 @@ except PackageNotFoundError:
             ),
         )
 else:
-    if (
-        _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version
-        and all(_flash_attn_version != x for x in _flash_attn_version_not_supported)
+    if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version and all(
+        _flash_attn_version != x for x in _flash_attn_version_not_supported
     ):
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import (
