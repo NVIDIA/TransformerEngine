@@ -101,9 +101,18 @@ fa_logger.setLevel(_log_level)
 if not fa_logger.hasHandlers():
     fa_logger.addHandler(_stream_handler)
 
+
 @functools.lru_cache(maxsize=None)
 def _get_supported_versions(version_min, version_not_supported, version_max):
-    return ">= " + str(version_min) + ", " + "".join(["!= " + str(x) + ", " for x in version_not_supported]) + "<= " + str(version_max)
+    return (
+        ">= "
+        + str(version_min)
+        + ", "
+        + "".join(["!= " + str(x) + ", " for x in version_not_supported])
+        + "<= "
+        + str(version_max)
+    )
+
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -128,7 +137,11 @@ except PackageNotFoundError:
         fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install a version in [%s] by \n"
             "pip install flash-attn==<version>",
-            _get_supported_versions(_flash_attn_version_required, _flash_attn_version_not_supported, _flash_attn_max_version),
+            _get_supported_versions(
+                _flash_attn_version_required,
+                _flash_attn_version_not_supported,
+                _flash_attn_max_version,
+            ),
         )
 else:
     if (
@@ -155,7 +168,11 @@ else:
     elif get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.warning(
             "Transformer Engine currently supports flash-attn %s. Found %s.",
-            _get_supported_versions(_flash_attn_version_required, _flash_attn_version_not_supported, _flash_attn_max_version),
+            _get_supported_versions(
+                _flash_attn_version_required,
+                _flash_attn_version_not_supported,
+                _flash_attn_max_version,
+            ),
             _flash_attn_version,
         )
 
@@ -187,7 +204,9 @@ else:
     )
 
     _flash_attn_3_is_installed = True
-    _flash_attn_3_0_0_beta = _flash_attn_3_version > PkgVersion("3.0.0b") and _flash_attn_3_version < PkgVersion("3.0.0")
+    _flash_attn_3_0_0_beta = _flash_attn_3_version > PkgVersion(
+        "3.0.0b"
+    ) and _flash_attn_3_version < PkgVersion("3.0.0")
     _use_flash_attn_3 = True
 
 _attention_backends = {
@@ -880,9 +899,13 @@ def get_attention_backend(
     # users to install flash-attn with the appropriate versions.
     if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
         logger.warning(
-            "flash-attn may add important feature support or provide significant performance boost. "
-            "Please install flash-attn %s.",
-            _get_supported_versions(_flash_attn_version_required, _flash_attn_version_not_supported, _flash_attn_max_version),
+            "flash-attn may add important feature support or provide significant performance boost."
+            " Please install flash-attn %s.",
+            _get_supported_versions(
+                _flash_attn_version_required,
+                _flash_attn_version_not_supported,
+                _flash_attn_max_version,
+            ),
         )
     if use_flash_attention and not _flash_attn_is_installed:
         use_flash_attention = False
