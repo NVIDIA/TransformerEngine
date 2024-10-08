@@ -67,7 +67,7 @@ model_configs = {
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
-small_model_configs = {
+model_configs_small = {
     "small": ModelConfig(128, 1e-5, 8, 36, 4, 128),
 }
 
@@ -119,10 +119,7 @@ def assert_allclose(
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        if rtol is not None:
-            result = torch.allclose(t1, t2, atol=atol, rtol=rtol)
-        else:
-            result = torch.allclose(t1, t2, atol=atol)
+        result = torch.allclose(t1, t2, atol=atol, **({'rtol': rtol} if rtol is not None else {}))
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
@@ -814,10 +811,10 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", small_model_configs.keys())
+@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
-    config = small_model_configs[model]
+    config = (model_configs | model_configs_small)[model]
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -887,10 +884,11 @@ def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     # Check output.
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
 
-    atol[torch.float32] = 5e-2
-    # Check gradients
-    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
-        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+    # Check gradients, only for small model
+    if model == "small":
+        atol[torch.float32] = 5e-2
+        for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+            assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
@@ -924,10 +922,10 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", small_model_configs.keys())
+@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
-    config = small_model_configs[model]
+    config = (model_configs | model_configs_small)[model]
 
     te_mha = MultiheadAttention(
         config.hidden_size,
@@ -976,9 +974,11 @@ def test_mha_accuracy(dtype, bs, model, mask_type):
     else:
         assert_allclose(te_outputs[0], torch_outputs[0], 5e-2)
 
-    atol[torch.float32] = 5e-2
-    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
-        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+    # Check gradients, only for small model
+    if model == "small":
+        atol[torch.float32] = 5e-2
+        for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+            assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 def _test_granular_accuracy(block, bs, dtype, config):
@@ -1287,11 +1287,11 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", small_model_configs.keys())
+@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
-    config = small_model_configs[model]
+    config = (model_configs | model_configs_small)[model]
 
     te_ln_mlp = LayerNormMLP(
         config.hidden_size,
@@ -1341,9 +1341,10 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     # Check output.
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
 
-    # Check gradients
-    for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
-        assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
+    # Check gradients, only for small model
+    if model == "small":
+        for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
+            assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
