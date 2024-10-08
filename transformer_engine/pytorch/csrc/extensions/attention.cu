@@ -1629,8 +1629,8 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
       size_t idx, idx_per_step;
 
       if (lse_packed) {
-         idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-         idx_per_step = head_id * lse_seqlen / (only_second_half + 1) + token_id;
+        idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
+        idx_per_step = head_id * lse_seqlen / (only_second_half + 1) + token_id;
       } else {
         size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
         int col = token_id - cu_seqlens_s[seq_id];
@@ -1716,26 +1716,32 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
   if (only_second_half) {
     if (out.scalar_type() == at::ScalarType::Half) {
       using dtype = at::Half;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else if (out.scalar_type() == at::ScalarType::BFloat16) {
       using dtype = at::BFloat16;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else if (out.scalar_type() == at::ScalarType::Float) {
       using dtype = float;
-      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 1>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else {
       NVTE_ERROR("Unsupported dtype of out\n");
     }
   } else {
     if (out.scalar_type() == at::ScalarType::Half) {
       using dtype = at::Half;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else if (out.scalar_type() == at::ScalarType::BFloat16) {
       using dtype = at::BFloat16;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else if (out.scalar_type() == at::ScalarType::Float) {
       using dtype = float;
-      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens, lse_packed);
+      thd_out_correction_helper<dtype, 0>(out, out_per_step, lse, lse_per_step, cu_seqlens,
+                                          lse_packed);
     } else {
       NVTE_ERROR("Unsupported dtype of out\n");
     }

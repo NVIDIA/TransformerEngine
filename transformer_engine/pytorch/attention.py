@@ -136,8 +136,12 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_varlen_forward as flash_attn_varlen_fwd_v3
-    from flashattn_hopper.flash_attn_interface import _flash_attn_varlen_backward as flash_attn_varlen_bwd_v3
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_varlen_forward as flash_attn_varlen_fwd_v3,
+    )
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_varlen_backward as flash_attn_varlen_bwd_v3,
+    )
 
     _use_flash_attn_3 = True
 
@@ -1359,9 +1363,13 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
-def flash_attn_fwd_out_correction(out, out_per_step, softmax_lse, softmax_lse_per_step, movedim_src, movedim_dst):
+def flash_attn_fwd_out_correction(
+    out, out_per_step, softmax_lse, softmax_lse_per_step, movedim_src, movedim_dst
+):
     """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(movedim_src, movedim_dst)
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(
+        movedim_src, movedim_dst
+    )
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step * softmax_lse_corrected_exp
     out.add_(out_corrected)
@@ -1680,9 +1688,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
 
-        softmax_lse_in_packed_format = not use_fused_attention and (_flash_attn_2_6_0_plus or _use_flash_attn_3)
+        softmax_lse_in_packed_format = not use_fused_attention and (
+            _flash_attn_2_6_0_plus or _use_flash_attn_3
+        )
         if not use_fused_attention:
-            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_fwd = flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
@@ -2165,7 +2175,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     softmax_lse_per_step[i - 1].squeeze_(-1)
                 if qkv_format != "thd" and softmax_lse_in_packed_format:
                     # [np, t] -> [np, b, sq]
-                    softmax_lse_per_step[i - 1] = softmax_lse_per_step[i - 1].view(q.shape[-2], q.shape[0], -1)
+                    softmax_lse_per_step[i - 1] = softmax_lse_per_step[i - 1].view(
+                        q.shape[-2], q.shape[0], -1
+                    )
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if fp8:
@@ -2405,7 +2417,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             attn_dbias = None
 
-        softmax_lse_in_packed_format = not ctx.use_fused_attention and (_flash_attn_2_6_0_plus or _use_flash_attn_3)
+        softmax_lse_in_packed_format = not ctx.use_fused_attention and (
+            _flash_attn_2_6_0_plus or _use_flash_attn_3
+        )
 
         if causal:
             if ctx.qkv_format == "thd" or softmax_lse_in_packed_format:
@@ -2504,7 +2518,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_recv_reqs = []
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
@@ -3233,7 +3247,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         if not use_fused_attention:
-            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_fwd = flash_attn_varlen_fwd_v3
             else:
@@ -3447,7 +3461,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
@@ -3650,7 +3664,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         if not use_fused_attention:
-            fa_forward_kwargs = {"softmax_scale" : softmax_scale}
+            fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_fwd = flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
@@ -3936,7 +3950,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         )
 
         if not ctx.use_fused_attention:
-            fa_backward_kwargs = {"softmax_scale" : ctx.softmax_scale}
+            fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
                 flash_attn_bwd = flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["window_size"] = ctx.window_size
