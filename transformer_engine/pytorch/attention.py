@@ -367,7 +367,9 @@ def get_attention_backend(
         + str(
             (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
         ),
-        "flash_attn_version": str(_flash_attn_version) if _flash_attn_is_installed else "not installed",
+        "flash_attn_version": (
+            str(_flash_attn_version) if _flash_attn_is_installed else "not installed"
+        ),
         "flash_attn_3_version": (
             str(_flash_attn_3_version) if _flash_attn_3_is_installed else "not installed"
         ),
