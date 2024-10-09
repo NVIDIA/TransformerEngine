@@ -311,7 +311,7 @@ class FusedAttnRunner:
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip("QKVPACKED layout requires max_seqlen_q and max_seqlen_kv to be equal.")
 
-        if self.max_seqlen_q > self.max_seqlen_kv and self.window_size[0] > 0:
+        if self.max_seqlen_q > self.max_seqlen_kv and self.window_size is not None:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
@@ -328,7 +328,7 @@ class FusedAttnRunner:
             self.max_seqlen_q,
             self.max_seqlen_kv,
             self.head_dim,
-            self.window_size,
+            (-1, -1) if self.window_size is None else self.window_size,
         ).get_fused_attn_backend()
         if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
             pytest.skip("Unsupported inputs combination or device compute capability.")
@@ -753,7 +753,7 @@ class TestFusedAttn:
         This test is not intended to run automatically during CI as it is time-consuming
         It is kept for development and debugging
         """
-        window_size = (-1, -1)
+        window_size = None
         if swa:
             window_size = (s_kv // 10, 0)
         runner = FusedAttnRunner(
@@ -793,7 +793,7 @@ class TestFusedAttn:
         """
         Test backward with parameterized configs
         """
-        window_size = (-1, -1)
+        window_size = None
         if swa:
             window_size = (s_kv // 10, 0)
         runner = FusedAttnRunner(
