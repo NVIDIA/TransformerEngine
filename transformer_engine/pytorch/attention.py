@@ -385,8 +385,8 @@ def get_attention_backend(
 
     # The following sections check if `FlashAttention` supports the provided attention params,
     # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
-    # determined to be necessary for performance/functionality, we issue a warning at the end
-    # to prompt users to install appropriate FA versions.
+    # necessary for performance/functionality, a warning will be issued to prompt users to
+    # install an appropriate FA version.
     global _flash_attn_version_required, _flash_attn_max_version, _use_flash_attn_3
 
     # Filter: Environment variables
