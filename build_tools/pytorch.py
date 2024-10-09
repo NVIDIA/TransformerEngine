@@ -81,7 +81,7 @@ def setup_pytorch_extension(
                 continue  # Already handled
             nvcc_flags.extend(["-gencode", f"arch=compute_{arch},code=sm_{arch}"])
 
-    if os.getenv("NVTE_UB_WITH_MPI") is not None:
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
         ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
