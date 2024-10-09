@@ -442,7 +442,7 @@ void destroy_communicator(communicator *comm) {
         if (rank != comm->nvrank) {
           cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]);
         } else if (comm->mem_dealloc[hndl]) {
-          NVTE_CHECK_CUDA(cudaFree(comm->peer_ptr[hndl][rank]));
+          cudaFree(comm->peer_ptr[hndl][rank]);
         } else {
           comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
         }

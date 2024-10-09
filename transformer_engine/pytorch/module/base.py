@@ -48,6 +48,7 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
+_MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = tex.get_stream_priority_range()
 layers_atomic_ring_exchange = []
 
 
@@ -253,6 +254,8 @@ def initialize_ub(
             "atomic_gemm": False,
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
+            "comm_priority": _MAX_STREAM_PRIORITY,
+            "gemm_priority": _MIN_STREAM_PRIORITY,
         }
         return default_cfg
 
@@ -268,6 +271,8 @@ def initialize_ub(
         atomic_gemm: int = 0,
         use_ce: bool = True,
         fp8_buf: bool = False,
+        comm_priority: int = 0,
+        gemm_priority: int = 0,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -325,6 +330,8 @@ def initialize_ub(
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 use_ce,  # Use copy engine for P2P communications
                 ub_callbacks,
+                comm_priority,
+                gemm_priority,
             )
         else:
             ub_obj = tex.UbufCommOverlap(
@@ -343,6 +350,8 @@ def initialize_ub(
                 _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
                 atomic_gemm,  # Use a single GEMM with atomic-counters
                 ub_callbacks,
+                comm_priority,
+                gemm_priority,
             )
         _ub_communicators[name] = ub_obj
 
