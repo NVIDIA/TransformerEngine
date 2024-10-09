@@ -136,6 +136,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          // d=256 only supported for forward
          (sm_arch_ >= 90 && cudnn_runtime_version >= 90000 && head_dim_qk <= 256 &&
           head_dim_qk % 8 == 0 && head_dim_v <= 256 && head_dim_v % 8 == 0)) &&
+        // bfloat support in SM80+
+        ((q_dtype == NVTEDType::kNVTEFloat16 || sm_arch_ >= 80)) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
          ((cudnn_runtime_version >= 8906) &&
