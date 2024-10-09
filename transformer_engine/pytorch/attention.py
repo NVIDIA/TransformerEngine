@@ -6790,10 +6790,10 @@ class FusedAttention(torch.nn.Module):
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove fused_attention._extra_state as a missing key
-            or an unexpected key when loading TransformerEngine checkpoints.
+            or an unexpected key when loading Transformer Engine checkpoints.
             Please store FP8 metadata as DotProductAttention's _extra_state,
             rather than FusedAttention's _extra_state. This hook will be
-            phased out in TransformerEngine 2.0.
+            phased out in Transformer Engine 2.0.
             """
             for key in incompatible_keys.missing_keys:
                 if "fused_attention._extra_state" in key:
@@ -7023,6 +7023,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
+    .. note::
+
+        Transformer Engine stores the FP8 metadata under a `._extra_state` key when checkpointing.
+        As the FP8 attention support expands from one backend to multiple backends, the location
+        of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
+
+
     Parameters
     ----------
     num_attention_heads : int
@@ -7051,7 +7058,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                    e.g. a different mask for training and inference.
                    1. For "`no_mask`", no attention mask is applied.
                    2. For "`causal`", "`causal_bottom_right`", or the causal mask in
-                   "`padding_causal`" and "`padding_causal_bottom_right`", TransformerEngine
+                   "`padding_causal`" and "`padding_causal_bottom_right`", Transformer Engine
                    calculates and applies an upper triangular mask to the softmax input.
                    No user input is needed. Causal masks without the "`bottom_right`" appendix align
                    the diagonal line to the top left corner of the softmax matrix. With
@@ -7264,14 +7271,36 @@ class DotProductAttention(TransformerEngineBaseModule):
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove core_attention._extra_state as a missing key
-            when loading older TransformerEngine checkpoints. Will phase out
-            this hook in TransformerEngine 2.0.
+            when loading older Transformer Engine checkpoints. Will phase out
+            this hook in Transformer Engine 2.0.
             """
             for key in incompatible_keys.missing_keys:
                 if "core_attention._extra_state" in key:
                     incompatible_keys.missing_keys.remove(key)
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """
+        This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
+        metadata is stored under the `core_attention.fused_attention._extra_state` key and not the
+        `core_attention._extra_state` key. Please see `FP8 checkpoint compatibility
+        <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
+        """
+        fused_attn_key = False
+        dot_product_attn_key = False
+        for k in state_dict.keys():
+            if "core_attention.fused_attention._extra_state" in k:
+                fused_attn_key = True
+            if "core_attention._extra_state" in k:
+                dot_product_attn_key = True
+        if fused_attn_key and not dot_product_attn_key:
+            prefix = prefix + "fused_attention."
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
 
     def _checkpointed_attention_forward(
         self,
@@ -7382,14 +7411,14 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. TransformerEngine prioritizes
+            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
             FlashAttention over FusedAttention and over UnfusedDotProductAttention.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
             flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
             can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, TransformerEngine determines the code path
+            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
             based on its internal logic. These optimizations trade memory for performance
             and should be used with care.
 
