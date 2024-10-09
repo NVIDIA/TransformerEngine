@@ -42,9 +42,11 @@ int sm_count(int device_id = -1);
  *
  * \param[in] device_id CUDA device (default is current device)
  *
- * \return Minimum and maximum stream priorities (zero if device does not support priorities)
+ * \param[out] lowest_priority Lowest stream priority value supported by the device.
+ *
+ * \param[out] highest_priority Highest stream priority value supported by the device.
  */
-std::pair<int, int> stream_priority_range(int device_id = -1);
+void stream_priority_range(int *lowest_priority, int *highest_priority, int device_id = -1);
 
 /* \brief Check if device supports CUDA Multicast features
  *

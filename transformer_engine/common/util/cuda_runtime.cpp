@@ -80,6 +80,51 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
+void stream_priority_range(int *lowest_priority, int *highest_priority, int device_id) {
+  static std::vector<std::vector<int>> cache(num_devices());
+  static std::vector<std::once_flag> flags(num_devices());
+
+  auto init = [&]() {
+    int ori_dev, low_pri, high_pri;
+    if (device_id >= 0) {
+      ori_dev = current_device();
+      NVTE_CHECK_CUDA(cudaSetDevice(device_id));
+    }
+    NVTE_CHECK_CUDA(cudaDeviceGetStreamPriorityRange(&low_pri, &high_pri));
+    if (device_id >= 0) NVTE_CHECK_CUDA(cudaSetDevice(ori_dev));
+    cache[device_id] = {low_pri, high_pri};
+  };
+  std::call_once(flags[device_id], init);
+  *lowest_priority = cache[device_id][0];
+  *highest_priority = cache[device_id][1];
+}
+
+bool supports_multicast(int device_id) {
+  static std::vector<bool> cache(num_devices());
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0)
+    device_id = current_device();
+
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    int cuda_version;
+    NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cuda_version));
+    if (cuda_version >= 12010) {
+      int result;
+      CUdevice cudev;
+      if (device_id < 0) NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
+                                  CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+      cache[device_id] = static_cast<bool>(result);
+    } else {
+      cache[device_id] = false;
+    }
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+
 const std::string &include_directory(bool required) {
   static std::string path;
 
@@ -143,29 +188,6 @@ const std::string &include_directory(bool required) {
 
   // Return cached path
   return path;
-}
-
-std::pair<int, int> stream_priority_range(int device_id) {
-  int ori_dev;
-  if (device_id >= 0) {
-    ori_dev = current_device();
-    NVTE_CHECK_CUDA(cudaSetDevice(device_id));
-  }
-  int min_priority, max_priority;
-  NVTE_CHECK_CUDA(cudaDeviceGetStreamPriorityRange(&min_priority, &max_priority));
-  if (device_id >= 0) NVTE_CHECK_CUDA(cudaSetDevice(ori_dev));
-  return std::make_pair(min_priority, max_priority);
-}
-
-bool supports_multicast(int device_id) {
-  int result;
-  CUdevice cudev;
-  if (device_id < 0) NVTE_CHECK_CUDA(cudaGetDevice(&device_id));
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
-                              CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
-
-  return static_cast<bool>(result);
 }
 
 }  // namespace cuda

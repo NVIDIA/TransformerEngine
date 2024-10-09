@@ -35,11 +35,17 @@ using namespace std::placeholders;
 
 namespace ubuf {
 
-void set_stream_priority(at::cuda::CUDAStream stream, int priority) {
-  cudaLaunchAttributeValue attributes;
-  attributes.priority = priority;
-  NVTE_CHECK_CUDA(
-      cudaStreamSetAttribute((cudaStream_t)stream, cudaStreamAttributePriority, &attributes));
+void _set_stream_priority(at::cuda::CUDAStream *torch_stream, int priority) {
+  cudaLaunchAttributeValue value;
+  value.priority = priority;
+  NVTE_CHECK_CUDA(cudaStreamSetAttribute(torch_stream->stream(), cudaStreamAttributePriority,
+                                         &value));
+}
+
+int _get_stream_priority(const at::cuda::CUDAStream &torch_stream) {
+  int priority;
+  NVTE_CHECK_CUDA(cudaStreamGetPriority(torch_stream.stream(), &priority));
+  return priority;
 }
 
 bool ubuf_built_with_mpi() {
@@ -189,8 +195,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // if priorities are zero, use max priority for comm and min priority for GEMM
     if (gemm_priority == 0 && comm_priority == 0)
-      std::tie(gemm_priority, comm_priority) = transformer_engine::cuda::stream_priority_range();
-    set_stream_priority(_stream_comm, comm_priority);
+      transformer_engine::cuda::stream_priority_range(&gemm_priority, &comm_priority);
+    _set_stream_priority(&_stream_comm, comm_priority);
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
       cudaStream_t stream_tmp;
@@ -199,6 +205,10 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
       _stream_compute.push_back(
           at::cuda::getStreamFromExternal(stream_tmp, stream_main.device_index()));
     }
+    if (transformer_engine::getenv<bool>("NVTE_UBDEBUG") && _ub_comm->myrank) {
+      printf("!!! [UB] Comm priority: %d | GEMM priority: %d\n",
+             _get_stream_priority(_stream_comm), _get_stream_priority(_stream_compute[0]));
+    }
 
     _num_splits = num_splits;
     _tp_size = tp_size;
@@ -206,9 +216,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     _ubuf_scale_inv_initialized = false;
 
     // Set the number of SMs for GEMM with margin
-    cudaDeviceProp prop;
-    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
+    int sm_count = transformer_engine::cuda::sm_count();
+    _math_sms = (set_sm_margin) ? sm_count - num_comm_sm : sm_count;
     _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
     output_tensor = torch::Tensor();
@@ -243,15 +252,15 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
     }
   }
 
-  void set_comm_priority(int priority) { set_stream_priority(_stream_comm, priority); }
+  void set_comm_priority(int priority) { _set_stream_priority(&_stream_comm, priority); }
 
   void set_gemm_priority(int priority) {
-    for (auto stream : _stream_compute) set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) _set_stream_priority(&stream, priority);
   }
 
-  int get_comm_priority() { return _stream_comm.priority(); }
+  int get_comm_priority() { return _get_stream_priority(_stream_comm); }
 
-  int get_gemm_priority() { return _stream_compute[0].priority(); }
+  int get_gemm_priority() { return _get_stream_priority(_stream_compute[0]); }
 
   /*
   ** Bulk GEMM + COMM
@@ -734,9 +743,9 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
 
     // if priorities are zero, use max priority for comm and min priority for GEMM
     if (gemm_priority == 0 && comm_priority == 0)
-      std::tie(gemm_priority, comm_priority) = transformer_engine::cuda::stream_priority_range();
-    set_stream_priority(_stream_send, comm_priority);
-    set_stream_priority(_stream_recv, comm_priority);
+      transformer_engine::cuda::stream_priority_range(&gemm_priority, &comm_priority);
+    _set_stream_priority(&_stream_send, comm_priority);
+    _set_stream_priority(&_stream_recv, comm_priority);
     at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
     for (int i = 0; i < std::min(num_max_streams, tp_size); i++) {
       cudaStream_t stream_tmp;
@@ -745,11 +754,15 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
       _stream_compute.push_back(
           at::cuda::getStreamFromExternal(stream_tmp, stream_main.device_index()));
     }
+    if (transformer_engine::getenv<bool>("NVTE_UBDEBUG") && _ub_comm->myrank) {
+      printf("!!! [UBP2P] Send priority: %d | Recv priority: %d | GEMM priority: %d\n",
+            _get_stream_priority(_stream_send), _get_stream_priority(_stream_recv),
+            _get_stream_priority(_stream_compute[0]));
+    }
 
     // Set the number of SMs for GEMM with margin
-    cudaDeviceProp prop;
-    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-    _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
+    int sm_count = transformer_engine::cuda::sm_count();
+    _math_sms = (set_sm_margin) ? sm_count - num_comm_sm : sm_count;
     _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
     _tp_size = tp_size;
@@ -809,17 +822,17 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
   }
 
   void set_comm_priority(int priority) {
-    set_stream_priority(_stream_send, priority);
-    set_stream_priority(_stream_recv, priority);
+    _set_stream_priority(&_stream_send, priority);
+    _set_stream_priority(&_stream_recv, priority);
   }
 
   void set_gemm_priority(int priority) {
-    for (auto stream : _stream_compute) set_stream_priority(stream, priority);
+    for (auto stream : _stream_compute) _set_stream_priority(&stream, priority);
   }
 
-  int get_comm_priority() { return _stream_send.priority(); }
+  int get_comm_priority() { return _get_stream_priority(_stream_send); }
 
-  int get_gemm_priority() { return _stream_compute[0].priority(); }
+  int get_gemm_priority() { return _get_stream_priority(_stream_compute[0]); }
 
   /*
   ** Split AllGather + AtomicGEMM using P2P communication
