@@ -151,7 +151,7 @@ def make_swa_mask(
     max_seqlen_kv: int,
     window_size: Optional[Tuple[int, int]] = None,
     attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
-    dtype: jax.typing.DTypeLike = jnp.float32
+    dtype: jax.typing.DTypeLike = jnp.float32,
 ):
     """
     Generate sliding window mask. `True` or `1` means keep the element.
@@ -185,7 +185,7 @@ def make_swa_mask(
         return swa_mask
     bottom_right_masks = [
         AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
+        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
     ]
     left_window, right_window = window_size
     if attn_mask_type in bottom_right_masks:
