@@ -173,11 +173,14 @@ def _make_graphed_callables(
         ]
     else:
         per_callable_module_params = []
-        for c in callables:
-            for i in range(num_microbatches):
-                per_callable_module_params.append(
-                    tuple(c.parameters()) if isinstance(c, torch.nn.Module) else ()
-                )
+        for m_chunk in range(num_model_chunks):
+            for _ in range(num_microbatches):
+                for l_no in range(num_layers):
+                    per_callable_module_params.append(
+                        tuple(callables[m_chunk * num_layers + l_no].parameters())
+                        if isinstance(callables[m_chunk * num_layers + l_no], torch.nn.Module)
+                        else ()
+                    )
         assert len(per_callable_module_params) == len(flatten_sample_args)
         per_callable_static_input_surfaces = [
             flatten_sample_args[i] + per_callable_module_params[i]
@@ -201,8 +204,37 @@ def _make_graphed_callables(
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
     # from ending up in any captures.
     torch.cuda.synchronize()
-    with torch.cuda.stream(torch.cuda.Stream()):
+
+    # Get warmup func and func_idx.
+    warmup_func_idx = []
+    warmup_func = []
+    if _order is None:
         for func_idx, func in enumerate(callables):
+            warmup_func_idx.append(func_idx)
+            warmup_func.append(func)
+    else:
+        fwd_idx = [0] * num_model_chunks
+        for idx, c_id in enumerate(_order):
+            if c_id > 0:
+                m_chunk = c_id - 1
+                for l_no in range(num_layers):
+                    func = callables[m_chunk * num_layers + l_no]
+                    func_idx = (m_chunk * num_microbatches * num_layers) + (
+                        fwd_idx[m_chunk] * num_layers + l_no
+                    )
+                    warmup_func_idx.append(func_idx)
+                    warmup_func.append(func)
+                fwd_idx[m_chunk] += 1
+    assert len(warmup_func) == len(
+        sample_args
+    ), f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}."
+    assert len(warmup_func_idx) == len(
+        set(warmup_func_idx)
+    ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
+
+    # Run warmup.
+    with torch.cuda.stream(torch.cuda.Stream()):
+        for func_idx, func in zip(warmup_func_idx, warmup_func):
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
