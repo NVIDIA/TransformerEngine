@@ -263,20 +263,19 @@ def initialize_ub(
         world_size = torch.distributed.get_world_size(world_group)
 
         # We have single-node NVLink so we can color based on physical node hostnames.
-        # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
-        #       address on that interface instead of the hostname. Otherwise, allow the user to
-        #       set a network interface via NVTE_UB_SOCKET_IFNAME variable. This can help avoid
-        #       issues when  different hosts have the same hostname on managed clusters.
+        # NOTE: Prefer a network interface defined via the NVTE_UB_SOCKET_IFNAME variable, and
+        #       otherwise fall back on NCCL_SOCKET_IFNAME or GLOO_SOCKET_IFNAME depending on
+        #       the chosen bootstrap backend.
         mydomain = socket.gethostname()
         ifname = os.getenv(
-            f"{bootstrap_backend.upper()}_SOCKET_IFNAME", os.getenv("NVTE_UB_SOCKET_IFNAME")
+            "NVTE_UB_SOCKET_IFNAME", os.getenv(f"{bootstrap_backend.upper()}_SOCKET_IFNAME")
         )
         if ifname is not None:
             # Make sure the ifname found in the environment is a valid network interface
             if ifname in [name for _, name in socket.if_nameindex()]:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 try:
-                    hostname = socket.inet_ntoa(
+                    mydomain = socket.inet_ntoa(
                         fcntl.ioctl(
                             s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
                         )[20:24]
@@ -288,10 +287,11 @@ def initialize_ub(
             else:
                 ifname_warning = (
                     f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will"
-                    " attempt to detect ranks on the same node by matching 'socket.gethostname()', "
-                    + "which is known to fail on virtual clusters like Kubernetes. If Userbuffers "
-                    + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
-                    + "your environment to the correct network interface."
+                    + " attempt to detect ranks on the same node by matching "
+                    + "'socket.gethostname()', which is known to fail on virtual clusters like "
+                    + "Kubernetes. If Userbuffers initialization fails, please set the "
+                    + "'NVTE_UB_SOCKET_IFNAME' variable in your environment to the correct network "
+                    + "interface."
                 )
                 warnings.warn(ifname_warning, UserWarning)
 
