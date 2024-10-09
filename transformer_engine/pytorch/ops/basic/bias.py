@@ -62,9 +62,6 @@ class Bias(BasicOperation):
             device = canonicalize_device(None)
         self.device: torch.device = device
 
-        # Bias tensor datatype
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
-
         # Tensor parallel configuration
         tensor_parallel_size = 1
         local_size = size
@@ -88,7 +85,7 @@ class Bias(BasicOperation):
         bias = torch.empty(
             local_size,
             device="meta",
-            dtype=dtype,
+            dtype=canonicalize_dtype(dtype),
         )
         bias = torch.nn.Parameter(bias)
         self.bias: torch.nn.Parameter
@@ -103,7 +100,8 @@ class Bias(BasicOperation):
         bias = self.bias
         if bias.device.type != "cuda":
             bias = torch.empty_like(bias, device=self.device)
-        bias = bias.to(device=self.device, dtype=self.dtype)
+        else:
+            bias = bias.to(device=self.device)
 
         # Initialize values
         bias.zero_()
