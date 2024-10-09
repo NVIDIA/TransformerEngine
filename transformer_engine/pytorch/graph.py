@@ -12,6 +12,7 @@ from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.constants import dist_group_type
 from .fp8 import (
     fp8_autocast,
     FP8GlobalStateManager,
@@ -248,6 +249,9 @@ def _make_graphed_callables(
                     allow_unused=allow_unused_input,
                 )
                 del outputs, grad_inputs
+            for module in func.modules():
+                if hasattr(module, "is_first_microbatch"):
+                    module.is_first_microbatch = True
     torch.cuda.synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
@@ -570,6 +574,7 @@ def make_graphed_callables(
     fp8_enabled: bool = False,
     fp8_calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
+    fp8_group: Optional[dist_group_type] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
@@ -611,6 +616,9 @@ def make_graphed_callables(
                      using a higher precision.
     fp8_recipe: recipe.DelayedScaling, default = `None`
                 recipe used for FP8 training.
+    fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
+               distributed group over which amaxes for the fp8 tensors
+               are reduced at the end of each training step.
     fp8_weight_caching: bool, default = `False`
                         Whether or not to cache FP8 weights across microbatches. if set to `True`,
                         the `is_first_microbatch` boolean argument must be passed into the forward
@@ -639,7 +647,11 @@ def make_graphed_callables(
 
         def forward_func(*args, **kwargs):
             with fp8_autocast(
-                enabled=fp8_enabled, calibrating=fp8_calibrating, fp8_recipe=fp8_recipe, _graph=True
+                enabled=fp8_enabled,
+                calibrating=fp8_calibrating,
+                fp8_recipe=fp8_recipe,
+                fp8_group=fp8_group,
+                _graph=True,
             ):
                 outputs = old_forward(*args, **kwargs)
             return outputs

@@ -1152,7 +1152,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        else:
+            skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
@@ -1214,7 +1217,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.apply_bias and not self.gemm_bias_unfused_add,
                 self.eps,
                 is_first_microbatch,
-                self.fp8,
+                False if self.fp8 is None else self.fp8,
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
