@@ -226,11 +226,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
       .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
 
-  m.def("get_stream_priority_range", [](int device_id = -1) {
-            int low_pri, high_pri;
-            transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);
-            return std::make_pair(low_pri, high_pri);
-        }, py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);
+  m.def(
+      "get_stream_priority_range",
+      [](int device_id = -1) {
+        int low_pri, high_pri;
+        transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);
+        return std::make_pair(low_pri, high_pri);
+      },
+      py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);
 
   m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,
         py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);

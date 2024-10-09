@@ -38,8 +38,8 @@ namespace ubuf {
 void _set_stream_priority(at::cuda::CUDAStream *torch_stream, int priority) {
   cudaLaunchAttributeValue value;
   value.priority = priority;
-  NVTE_CHECK_CUDA(cudaStreamSetAttribute(torch_stream->stream(), cudaStreamAttributePriority,
-                                         &value));
+  NVTE_CHECK_CUDA(
+      cudaStreamSetAttribute(torch_stream->stream(), cudaStreamAttributePriority, &value));
 }
 
 int _get_stream_priority(const at::cuda::CUDAStream &torch_stream) {
@@ -206,8 +206,8 @@ struct UbufCommOverlap : torch::CustomClassHolder, UbufBase {
           at::cuda::getStreamFromExternal(stream_tmp, stream_main.device_index()));
     }
     if (transformer_engine::getenv<bool>("NVTE_UBDEBUG") && _ub_comm->myrank) {
-      printf("!!! [UB] Comm priority: %d | GEMM priority: %d\n",
-             _get_stream_priority(_stream_comm), _get_stream_priority(_stream_compute[0]));
+      printf("!!! [UB] Comm priority: %d | GEMM priority: %d\n", _get_stream_priority(_stream_comm),
+             _get_stream_priority(_stream_compute[0]));
     }
 
     _num_splits = num_splits;
@@ -756,8 +756,8 @@ struct UbufP2PCommOverlap : torch::CustomClassHolder, UbufBase {
     }
     if (transformer_engine::getenv<bool>("NVTE_UBDEBUG") && _ub_comm->myrank) {
       printf("!!! [UBP2P] Send priority: %d | Recv priority: %d | GEMM priority: %d\n",
-            _get_stream_priority(_stream_send), _get_stream_priority(_stream_recv),
-            _get_stream_priority(_stream_compute[0]));
+             _get_stream_priority(_stream_send), _get_stream_priority(_stream_recv),
+             _get_stream_priority(_stream_compute[0]));
     }
 
     // Set the number of SMs for GEMM with margin

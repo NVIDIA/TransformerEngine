@@ -102,8 +102,7 @@ void stream_priority_range(int *lowest_priority, int *highest_priority, int devi
 bool supports_multicast(int device_id) {
   static std::vector<bool> cache(num_devices());
   static std::vector<std::once_flag> flags(num_devices());
-  if (device_id < 0)
-    device_id = current_device();
+  if (device_id < 0) device_id = current_device();
 
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
   auto init = [&]() {
