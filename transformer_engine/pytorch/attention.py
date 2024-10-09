@@ -108,7 +108,7 @@ def _get_supported_versions(version_min, version_not_supported, version_max):
         ">= "
         + str(version_min)
         + ", "
-        + "".join(["!= " + str(x) + ", " for x in version_not_supported])
+        + "".join(["!= " + str(x) + ", " if x > version_min else "" for x in version_not_supported])
         + "<= "
         + str(version_max)
     )
@@ -135,13 +135,8 @@ try:
 except PackageNotFoundError:
     if get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
-            "flash-attn v2 is not installed. To use, please install a version in [%s] by \n"
-            "pip install flash-attn==<version>",
-            _get_supported_versions(
-                _flash_attn_version_required,
-                _flash_attn_version_not_supported,
-                _flash_attn_max_version,
-            ),
+            "flash-attn v2 is not installed. To use, please install it by"
+            """ "pip install flash-attn".""",
         )
 else:
     if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version and all(
@@ -165,7 +160,7 @@ else:
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
     elif get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.warning(
-            "Transformer Engine currently supports flash-attn %s. Found %s.",
+            "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
                 _flash_attn_version_required,
                 _flash_attn_version_not_supported,
@@ -182,17 +177,16 @@ _flash_attn_3_version = PkgVersion("0")
 _flash_attn_3_0_0_beta = False
 _use_flash_attn_3 = False
 _flash_attn_3_installation_steps = """\
-pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
-python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-mkdir -p $python_path/flashattn_hopper
-wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py
-"""
+(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(3) mkdir -p $python_path/flashattn_hopper
+(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py"""
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
     if get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
-            "flash-attn v3 is not installed. To use, please follow these steps: \n%s",
+            "flash-attn v3 is not installed. To use, please install it by \n%s",
             _flash_attn_3_installation_steps,
         )
 else:
@@ -373,9 +367,9 @@ def get_attention_backend(
         + str(
             (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
         ),
-        "flash_attn_version": _flash_attn_version if _flash_attn_is_installed else "not installed",
+        "flash_attn_version": str(_flash_attn_version) if _flash_attn_is_installed else "not installed",
         "flash_attn_3_version": (
-            _flash_attn_3_version if _flash_attn_3_is_installed else "not installed"
+            str(_flash_attn_3_version) if _flash_attn_3_is_installed else "not installed"
         ),
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
@@ -749,7 +743,7 @@ def get_attention_backend(
         if not _flash_attn_is_installed:
             _flash_attn_version_required = PkgVersion("2.4")
         elif not _flash_attn_2_4_plus:
-            logger.debug("Disabling FlashAttention for ALiBi")
+            logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
             use_flash_attention = False
 
     if use_flash_attention and (
@@ -891,11 +885,11 @@ def get_attention_backend(
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
 
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
-    # When `FusedAttention` is not available, and `FlashAttention` has the support, we recommend
-    # users to install flash-attn with the appropriate versions.
+    # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
+    # does, we recommend users to install flash-attn if not installed already.
     if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
         logger.warning(
-            "flash-attn may add important feature support or provide significant performance boost."
+            "flash-attn may provide important feature support or performance improvement."
             " Please install flash-attn %s.",
             _get_supported_versions(
                 _flash_attn_version_required,
@@ -5328,7 +5322,7 @@ class FlashAttention(torch.nn.Module):
                         if _flash_attn_3_0_0_beta:
                             e.args = (
                                 e.args[0]
-                                + ". Please update your FlashAttention 3 (beta) installation as it "
+                                + ". Please update your flash-attn v3 (beta) installation as it "
                                 + "may have added more supported arguments to its API. \n"
                                 + _flash_attn_3_installation_steps,
                             ) + e.args[1:]
