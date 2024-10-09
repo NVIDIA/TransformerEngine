@@ -64,11 +64,8 @@ class ModelConfig:
 
 
 model_configs = {
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
-}
-
-model_configs_small = {
     "small": ModelConfig(128, 1e-5, 8, 36, 4, 128),
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 2048),
 }
 
 model_configs_inference = {
@@ -531,7 +528,7 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
@@ -636,7 +633,7 @@ def _test_e2e_full_recompute(
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
@@ -769,7 +766,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 def test_gpt_checkpointing(dtype, bs, model):
     config = model_configs[model]
     outputs = _test_e2e_checkpointing(bs, dtype, config, checkpoint=False)
@@ -814,10 +811,10 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
+@pytest.mark.parametrize("model", ["small", "126m"])
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
-    config = (model_configs | model_configs_small)[model]
+    config = model_configs[model]
 
     te_gpt = TransformerLayer(
         hidden_size=config.hidden_size,
@@ -925,10 +922,10 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
+@pytest.mark.parametrize("model", ["small", "126m"])
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
-    config = (model_configs | model_configs_small)[model]
+    config = model_configs[model]
 
     te_mha = MultiheadAttention(
         config.hidden_size,
@@ -1036,7 +1033,7 @@ def _test_dpa_accuracy(block, bs, dtype, config):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 def test_dpa_accuracy(dtype, bs, model):
     config = model_configs[model]
 
@@ -1074,7 +1071,7 @@ def test_dpa_accuracy(dtype, bs, model):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 def test_linear_accuracy(dtype, bs, model):
     config = model_configs[model]
 
@@ -1110,7 +1107,7 @@ def test_linear_accuracy(dtype, bs, model):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
@@ -1160,7 +1157,7 @@ def test_rmsnorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("eps", [1e-1, 1e-3, 1e-5, 1e-7])
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
@@ -1211,7 +1208,7 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
@@ -1275,11 +1272,11 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", (model_configs | model_configs_small).keys())
+@pytest.mark.parametrize("model", ["small", "126m"])
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
-    config = (model_configs | model_configs_small)[model]
+    config = model_configs[model]
 
     te_ln_mlp = LayerNormMLP(
         config.hidden_size,
@@ -1373,7 +1370,7 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_grouped_linear_accuracy(
@@ -1433,7 +1430,7 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
         dtype=torch.float32,
         num_gemms=6,
         bs=2,
-        model=list(model_configs.keys())[0],
+        model="126m",
         fp8=True,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
@@ -1446,7 +1443,7 @@ def test_grouped_linear_accuracy_single_gemm():
         dtype=torch.float32,
         num_gemms=1,
         bs=2,
-        model=list(model_configs.keys())[0],
+        model="126m",
         fp8=True,
         fp8_model_params=True,
     )
@@ -1547,7 +1544,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", "126m")
 @pytest.mark.parametrize("fp8", [True])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
@@ -1666,7 +1663,7 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", "126m")
 def test_gpt_cuda_graph(dtype, bs, model):
     config = model_configs[model]
 
@@ -1758,7 +1755,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", "126m")
 def test_gpt_fp8_parameters(dtype, bs, model):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -1782,7 +1779,7 @@ def test_gpt_fp8_parameters(dtype, bs, model):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", model_configs.keys())
+@pytest.mark.parametrize("model", "126m")
 def test_transformer_layer_hidden_states_format(dtype, bs, model):
     config = model_configs[model]
 
