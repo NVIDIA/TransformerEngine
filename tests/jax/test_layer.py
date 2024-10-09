@@ -196,8 +196,16 @@ ATTRS = [
         _KEY_OF_MLP_ACTIVATIONS: (("relu", "relu")),
     },
     {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
         _KEY_OF_WINDOW_SIZE: (64, 0),  # Left size must < DATA_SHAPE seqlen
+    },
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
     },
 ]
 
@@ -336,8 +344,6 @@ class EncoderRunner(BaseRunner):
             mask = causal_mask
         else:
             mask = padded_mask
-            if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
-                pytest.skip("cuDNN only supports SWA with causal / padding_causal mask")
 
         ref_masks = (1 - mask,)
         test_masks = (None, mask)  # The second arg of Transformer is encoded tokens.
@@ -391,8 +397,6 @@ class DecoderRunner(BaseRunner):
             self_mask = causal_mask
         else:
             self_mask = padded_mask
-            if self.attrs[_KEY_OF_WINDOW_SIZE][0] > 0:
-                pytest.skip("cuDNN only supports SWA with causal / padding_causal mask")
 
         ref_masks = (1 - self_mask, 1 - padded_mask)
         test_masks = (self_mask, padded_mask)

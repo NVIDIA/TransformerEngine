@@ -6,7 +6,6 @@
 from enum import Enum
 from functools import partial
 from typing import Optional, Tuple
-import warnings
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
@@ -85,65 +84,6 @@ def get_qkv_format(qkv_layout):
     Get qkv_format from qkv_layout
     """
     return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
-
-
-# Following check_set_window_size() in transformer_engine/pytorch/attention.py
-def check_set_window_size(
-    attn_mask_type: AttnMaskType,
-    window_size: Tuple[int, int] = None,
-):
-    """Check if sliding window size is compliant with attention mask type.
-    If not, set it to the appropriate size.
-
-         attn_mask_type                              |   window_size
-    -------------------------------------------------------------------------
-    NO_MASK, PADDING_MASK                            | (-1, -1) or (>=0, >=0)
-    CAUSAL_MASK                                      | (-1,  0) or (>=0, 0)
-    PADDING_CAUSAL_MASK                              | (-1,  0) or (>=0, 0)
-    CAUSAL_BOTTOM_RIGHT_MASK                         | (-1,  0) or (>=0, 0)
-    PADDING_CAUSAL_BOTTOM_RIGHT_MASK                 | (-1,  0) or (>=0, 0)
-    """
-    orig_window_size = window_size
-    non_causal_mask_types = {AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK}
-    causal_mask_types = {
-        AttnMaskType.CAUSAL_MASK,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    }
-    if attn_mask_type in causal_mask_types:
-        if orig_window_size is None:
-            window_size = (-1, 0)
-        elif orig_window_size == (-1, -1) or (
-            orig_window_size[0] >= 0 and orig_window_size[1] != 0
-        ):
-            window_size = (orig_window_size[0], 0)
-            warnings.warn(
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="
-                + attn_mask_type.name
-            )
-        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
-            assert False, (
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="
-                + attn_mask_type.name
-            )
-    elif attn_mask_type in non_causal_mask_types:
-        if orig_window_size is None:
-            window_size = (-1, -1)
-        elif orig_window_size == (-1, 0):
-            window_size = (-1, -1)
-            warnings.warn(
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="
-                + attn_mask_type.name
-            )
-        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
-            assert False, (
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="
-                + attn_mask_type.name
-            )
-    else:
-        assert False, "Invalid attn_mask_type: " + attn_mask_type.name
-    return window_size
 
 
 def make_swa_mask(

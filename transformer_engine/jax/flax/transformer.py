@@ -212,12 +212,11 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
                 mask = None
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size is None:
                 mask = None
+            if mask is not None:
+                mask = apply_swa_mask(attn_mask_type, mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
-                if self.window_size[0] < 0:
-                    return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
-                swa_mask = apply_swa_mask(attn_mask_type, mask)
-                return SoftmaxType.SCALED_MASKED, swa_mask
+                return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
             if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK]:
                 if mask is not None:
                     return SoftmaxType.SCALED_MASKED, mask

@@ -921,9 +921,10 @@ def apply_swa_mask(
     assert _attn_mask_type is not None
     max_seqlen_q = original_mask.shape[-2]
     max_seqlen_kv = original_mask.shape[-1]
-    swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, window_size, _attn_mask_type)
+    swa_mask = make_swa_mask(
+        max_seqlen_q, max_seqlen_kv, window_size, _attn_mask_type, dtype=original_mask.dtype
+    )
     # In swa_mask and original_mask 0 is masked out
-    swa_mask = swa_mask.astype(original_mask.dtype)
     swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
     new_mask = jnp.where(original_mask == 1, swa_mask_bcast, original_mask)
     return new_mask
@@ -972,12 +973,11 @@ class EncoderLayer(nn.Module):
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
         # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-        if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size[0] > 0:
-            encoder_mask = apply_swa_mask(
-                self.self_attn_mask_type,
-                encoder_mask,
-                self.window_size,
-            )
+        encoder_mask = apply_swa_mask(
+            self.self_attn_mask_type,
+            encoder_mask,
+            self.window_size,
+        )
 
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
@@ -1141,13 +1141,17 @@ class DecoderLayer(nn.Module):
         decode=False,
         max_decode_length=None,
     ):
-        # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
-        if self.self_attn_mask_type in ["causal", "padding_causal"] and self.window_size[0] > 0:
-            decoder_mask = apply_swa_mask(
-                self.self_attn_mask_type,
-                decoder_mask,
-                self.window_size,
-            )
+        decoder_mask = apply_swa_mask(
+            self.self_attn_mask_type,
+            decoder_mask,
+            self.window_size,
+        )
+
+        encoder_decoder_mask = apply_swa_mask(
+            "padding",
+            encoder_decoder_mask,
+            self.window_size,
+        )
 
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
