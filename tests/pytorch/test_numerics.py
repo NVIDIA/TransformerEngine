@@ -119,7 +119,10 @@ def assert_allclose(
     """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        result = torch.allclose(t1, t2, atol=atol, **({"rtol": rtol} if rtol is not None else {}))
+        tols = dict(atol=atol)
+        if rtol is not None:
+            tols["rtol"] = rtol
+        result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2).flatten()
             m = torch.argmax(diff)
