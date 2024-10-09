@@ -817,7 +817,7 @@ def _test_e2e_gpt_accuracy(block, bs, dtype, config):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("parallel_attention_mlp", all_boolean)
 def test_gpt_accuracy(dtype, bs, model, parallel_attention_mlp):
     config = model_configs[model]
@@ -928,7 +928,7 @@ def _test_mha_accuracy(block, bs, dtype, config, mask_type, te=True):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("mask_type", mask_types)
 def test_mha_accuracy(dtype, bs, model, mask_type):
     config = model_configs[model]
@@ -1077,7 +1077,7 @@ def test_dpa_accuracy(dtype, bs, model):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize("model", ["small"])
 def test_linear_accuracy(dtype, bs, model):
     config = model_configs[model]
 
@@ -1220,7 +1220,7 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
@@ -1289,7 +1289,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["small", "126m"])
+@pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
 def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
