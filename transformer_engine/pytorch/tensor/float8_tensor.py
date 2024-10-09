@@ -348,6 +348,7 @@ class Float8Tensor(QuantizedTensor):
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
         fp8_scale_inv: Optional[torch.Tensor] = None,
         dtype: torch.dtype = torch.float32,
+        requires_grad: bool = False,
         data_transpose: Optional[torch.Tensor] = None,
     ):
 
@@ -369,7 +370,7 @@ class Float8Tensor(QuantizedTensor):
             storage_offset=data.storage_offset(),
             dtype=dtype,
             layout=data.layout,
-            requires_grad=data.requires_grad,
+            requires_grad=requires_grad,
             device=data.device,
         )
         self._data: torch.Tensor = data
@@ -953,14 +954,81 @@ class Float8Tensor(QuantizedTensor):
         """Get tensor data property"""
         return super().data
 
+    @torch.no_grad()
     def _set_data(self, tensor: torch.Tensor) -> None:
         """Set tensor data property
 
-        Cast tensor to FP8 and store in FP8 buffer.
+        Just takes FP8 data if setting from a Float8Tensor. Otherwise
+        casts to FP8.
 
         """
-        with torch.no_grad():
-            self.copy_(tensor)
+
+        # Tensor device
+        new_device = tensor.device if tensor.is_cuda else self.device
+
+        # Check whether grad is required
+        if self.requires_grad != tensor.requires_grad:
+            self.requires_grad_(requires_grad=tensor.requires_grad)
+
+        # Just copy FP8 data if other tensor is Float8Tensor
+        if isinstance(tensor, Float8Tensor):
+            if (  # pylint: disable=too-many-boolean-expressions
+                self.size() != tensor.size()
+                or self.stride() != tensor.stride()
+                or self.storage_offset() != tensor.storage_offset()
+                or self.dtype != tensor.dtype
+                or self.layout != tensor.layout
+                or not devices_match(self.device, new_device)
+            ):
+                dummy_tensor = torch.Tensor._make_wrapper_subclass(
+                    Float8Tensor,
+                    tensor.size(),
+                    strides=tensor.stride(),
+                    storage_offset=tensor.storage_offset(),
+                    dtype=tensor.dtype,
+                    layout=tensor.layout,
+                    requires_grad=tensor.requires_grad,
+                    device=new_device,
+                )
+                super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
+            self._data = tensor._data
+            self._fp8_attrs = tensor._fp8_attrs
+            return
+
+        # Reallocate FP8 data if needed
+        if (
+            self.size() != tensor.size()
+            or self.stride() != tensor.stride()
+            or self.dtype != tensor.dtype
+            or self.layout != tensor.layout
+            or not devices_match(self.device, new_device)
+        ):
+            self._data = torch.empty_like(
+                tensor,
+                dtype=torch.uint8,
+                device=new_device,
+            )
+            dummy_tensor = torch.Tensor._make_wrapper_subclass(
+                Float8Tensor,
+                self._data.size(),
+                strides=self._data.stride(),
+                storage_offset=self._data.storage_offset(),
+                dtype=tensor.dtype,
+                layout=self._data.layout,
+                requires_grad=tensor.requires_grad,
+                device=self._data.device,
+            )
+            super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
+            if self._transpose is not None:
+                self._transpose = torch.empty(
+                    (self._data.size(-1), self._data.numel() // self._data.size(-1)),
+                    dtype=torch.uint8,
+                    device=self.device,
+                )
+            self._transpose_invalid = True
+
+        # Copy values from other tensor
+        self.quantize_(tensor)
 
     # Cast to FP8 when setting Float8Tensor.data
     data = property(_get_data, _set_data)
