@@ -1056,10 +1056,9 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
     def partition(config, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
-        if is_context_parallel and config.window_size[0] > -1:
-            assert (
-                is_context_parallel and config.window_size[0] == -1
-            ), "Sliding window attention is not supported when context parallelism is enabled"
+        assert (
+            is_context_parallel and config.window_size[0] == -1
+        ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
@@ -1154,10 +1153,9 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
     def partition(config, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
-        if is_context_parallel and config.window_size[0] > -1:
-            assert (
-                is_context_parallel and config.window_size[0] == -1
-            ), "Sliding window attention is not supported when context parallelism is enabled"
+        assert (
+            is_context_parallel and config.window_size[0] == -1
+        ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
@@ -1306,7 +1304,7 @@ def fused_attn_fwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
-    window_size: Tuple[int, int],
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ) -> jnp.ndarray:
@@ -1341,7 +1339,7 @@ def fused_attn_fwd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
-        window_size (Tuple[int, int]): Sliding window size.
+        window_size (Optional[Tuple[int, int]]): Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -1384,7 +1382,7 @@ def fused_attn_fwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
+        window_size=(-1, -1) if window_size is None else window_size,
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )
@@ -1419,7 +1417,7 @@ def fused_attn_bwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
-    window_size: Tuple[int, int],
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -1455,7 +1453,7 @@ def fused_attn_bwd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
-        window_size (Tuple[int, int]): Sliding window size .
+        window_size (Optional[Tuple[int, int]]): Sliding window size .
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -1501,7 +1499,7 @@ def fused_attn_bwd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
-        window_size=window_size,
+        window_size=(-1, -1) if window_size is None else window_size,
         context_parallel_load_balanced=context_parallel_causal_load_balanced,
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )

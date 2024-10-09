@@ -6,7 +6,7 @@ from enum import Enum
 from dataclasses import dataclass
 from functools import partial
 from math import sqrt
-from typing import Tuple
+from typing import Tuple, Optional
 
 import jax
 import jax.numpy as jnp
@@ -28,8 +28,7 @@ from transformer_engine.jax.attention import (
     fused_attn,
     fused_attn_thd,
     get_qkv_format,
-    check_set_window_size,
-    get_swa_mask,
+    make_swa_mask,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.transformer_engine_jax import (
@@ -126,7 +125,7 @@ def make_mask(
     segment_pad_q: ArrayLike,
     segment_pad_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
-    window_size: Tuple[int, int],
+    window_size: Optional[Tuple[int, int]] = None,
 ) -> Array:
     """
     Create attention mask based on mask type. A `True` value in the mask means
@@ -145,13 +144,13 @@ def make_mask(
         )
         inv_mask = combine_masks(inv_pad_mask, inv_mask)
 
-    if window_size[0] >= 0:
+    if window_size is not None:
         max_seqlen_q = inv_mask.shape[-2]
         max_seqlen_kv = inv_mask.shape[-1]
-        swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
-        swa_mask_bcast = jnp.broadcast_to(swa_mask, inv_mask.shape)
-        # In swa_mask and inv_mask 0 is masked out
-        inv_mask = jnp.where(inv_mask != 0, swa_mask_bcast, inv_mask)
+        inv_swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, window_size, attn_mask_type)
+        inv_swa_mask = jnp.broadcast_to(inv_swa_mask, inv_mask.shape)
+        # In inv_swa_mask and inv_mask 0 is masked out
+        inv_mask = jnp.where(inv_mask != 0, inv_swa_mask, inv_mask)
 
     mask = jnp.logical_not(inv_mask)
     return mask
@@ -287,7 +286,7 @@ class FusedAttnRunner:
     is_training: bool
     qkv_layout: QKVLayout
     bias_shape: BiasShape
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.

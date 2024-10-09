@@ -18,7 +18,7 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
-from transformer_engine.jax.attention import AttnMaskType, get_swa_mask
+from transformer_engine.jax.attention import AttnMaskType, make_swa_mask
 from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
@@ -921,7 +921,7 @@ def apply_swa_mask(
     assert _attn_mask_type is not None
     max_seqlen_q = original_mask.shape[-2]
     max_seqlen_kv = original_mask.shape[-1]
-    swa_mask = get_swa_mask(window_size, max_seqlen_q, max_seqlen_kv, _attn_mask_type)
+    swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, window_size, _attn_mask_type)
     # In swa_mask and original_mask 0 is masked out
     swa_mask = swa_mask.astype(original_mask.dtype)
     swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)

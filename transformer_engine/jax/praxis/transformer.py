@@ -80,7 +80,7 @@ class DotProductAttention(TransformerEngineBaseLayer):
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     def setup(self) -> None:
         """setup"""
@@ -153,7 +153,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -296,7 +296,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:

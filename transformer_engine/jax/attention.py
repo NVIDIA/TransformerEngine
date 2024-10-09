@@ -146,58 +146,63 @@ def check_set_window_size(
     return window_size
 
 
-# Following get_swa_mask() in transformer_engine/pytorch/attention.py
-def get_swa_mask(
-    window_size: Tuple[int, int],
+def make_swa_mask(
     max_seqlen_q: int,
     max_seqlen_kv: int,
+    window_size: Optional[Tuple[int, int]] = None,
     attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
+    dtype: jax.typing.DTypeLike = jnp.float32
 ):
     """
-    Convert sliding window `window_size` to an equivalent "`arbitrary`" mask.
-    For "`causal`" mask type, the sliding window diagonal is aligned to the top left corner,
-    and for other mask types, the bottom right corner.
+    Generate sliding window mask. `True` or `1` means keep the element.
+
+    For `CAUSAL_BOTTOM_RIGHT_MASK` and `PADDING_CAUSAL_BOTTOM_RIGHT_MASK` mask type,
+    the sliding window diagonal is aligned to the bottom right corner, and for other
+    mask types, the top left corner.
 
     Parameters
     ----------
-    window_size: Tuple[int, int]
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-        `attn_mask_type`.
     max_seqlen_q: int
         Maximum sequence length for queries.
     max_seqlen_kv: int
         Maximum sequence length for keys and values.
+    window_size: Optional[Tuple[int, int]] = None
+        Sliding window size for local attention, where query at position i attends to keys
+        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+        + window_size[1]] inclusive. Negative number in window size means infinity window.
+        `None` means no sliding window.
     attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
-        Attention mask type, {AttnMaskType.NO_MASK, AttnMaskType.PADDING_MASK,
-        AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK,
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK, AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK}
-
+    dtype: jax.typing.DTypeLike, default=jnp.float32
+        The mask data type.
     Returns
     ----------
     swa_mask: jax.numpy.tensor
         Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
         that will get attention, value 0 are the masked out positions.
     """
-    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv))
-    causal_mask_types = {
-        AttnMaskType.CAUSAL_MASK,
-        AttnMaskType.PADDING_CAUSAL_MASK,
-    }
-    if window_size[0] >= 0:
-        if attn_mask_type in causal_mask_types:
-            left = window_size[0] if window_size[0] != -1 else max_seqlen_q
-            right = window_size[1] if window_size[1] != -1 else max_seqlen_q
-            swa_mask = jnp.triu(swa_mask, k=-left)
-            swa_mask = jnp.tril(swa_mask, k=right)
-        else:
-            left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
-            right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
-            swa_mask = jnp.triu(swa_mask, k=max_seqlen_kv - max_seqlen_q - left)
-            swa_mask = jnp.tril(swa_mask, k=max_seqlen_kv - max_seqlen_q + right)
+    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
+    if window_size is None:
+        return swa_mask
+    bottom_right_masks = [
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
+    ]
+    left_window, right_window = window_size
+    if attn_mask_type in bottom_right_masks:
+        if left_window < 0:
+            left_window = max_seqlen_kv
+        if right_window < 0:
+            right_window = max_seqlen_kv
+        bottom_right_shift = max_seqlen_kv - max_seqlen_q
+        swa_mask = jnp.triu(swa_mask, k=-left_window + bottom_right_shift)
+        swa_mask = jnp.tril(swa_mask, k=right_window + bottom_right_shift)
+    else:
+        if left_window < 0:
+            left_window = max_seqlen_q
+        if right_window < 0:
+            right_window = max_seqlen_q
+        swa_mask = jnp.triu(swa_mask, k=-left_window)
+        swa_mask = jnp.tril(swa_mask, k=right_window)
     return swa_mask
 
 
@@ -244,7 +249,7 @@ def is_fused_attn_kernel_available(
     q_max_seqlen,
     kv_max_seqlen,
     head_dim,
-    window_size: Tuple[int, int] = (-1, -1),
+    window_size: Optional[Tuple[int, int]] = None,
 ):
     """
     To check whether the fused attention kernel is supported
@@ -261,7 +266,7 @@ def is_fused_attn_kernel_available(
         q_max_seqlen,
         kv_max_seqlen,
         head_dim,
-        window_size,
+        (-1, -1) if window_size is None else window_size,
     ).is_fused_attn_kernel_available()
 
 
@@ -364,7 +369,7 @@ def fused_attn(
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
-    window_size: Tuple[int, int] = (-1, -1),
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -393,7 +398,7 @@ def fused_attn(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
-        window_size (Tuple[int, int]): Sliding window size.
+        window_size (Optional[Tuple[int, int]]): Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
         context_parallel_axis (str): The name of the context parallel axis.
@@ -474,7 +479,7 @@ def fused_attn_thd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int = 1,
-    window_size: Tuple[int, int] = (-1, -1),
+    window_size: Optional[Tuple[int, int]] = None,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -515,7 +520,7 @@ def fused_attn_thd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
-        window_size (Tuple[int, int]):
+        window_size (Optional[Tuple[int, int]]):
             Sliding window size.
         context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
@@ -598,7 +603,7 @@ def _fused_attn(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
-    window_size: Tuple[int, int],
+    window_size: Optional[Tuple[int, int]],
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
 ):

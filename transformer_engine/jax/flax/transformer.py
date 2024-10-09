@@ -25,7 +25,7 @@ from jax.ad_checkpoint import checkpoint_name
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
 from ..attention import AttnBiasType, AttnMaskType, QKVLayout
-from ..attention import is_fused_attn_kernel_available, get_swa_mask, canonicalize_attn_mask_type
+from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..softmax import SoftmaxType
 from ..sharding import num_of_devices
@@ -118,7 +118,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     float32_logits: bool = False
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     @nn.compact
     def __call__(
@@ -198,7 +198,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             """Apply the sliding window mask to a given mask"""
             max_seqlen_q = original_mask.shape[-2]
             max_seqlen_kv = original_mask.shape[-1]
-            swa_mask = get_swa_mask(self.window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type)
+            swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, self.window_size, attn_mask_type)
             # In swa_mask 0 is masked out, in original_mask 1 is masked out
             swa_mask = 1 - swa_mask.astype(original_mask.dtype)
             swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
@@ -210,7 +210,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             # mask is ignored for no_mask and causal_mask without sliding window
             if attn_mask_type == AttnMaskType.NO_MASK:
                 mask = None
-            if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size[0] < 0:
+            if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size is None:
                 mask = None
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
@@ -262,7 +262,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     @nn.compact
     def __call__(
@@ -462,8 +462,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. if set to True, the input tensors
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
-    window_size: Tuple[int, int], default = (-1, -1)
-        Sliding window size. The default value == no sliding window.
+    window_size: Optional[Tuple[int, int]], default = None
+        Sliding window size. The default value is no sliding window.
 
     Optimization parameters
     -----------------------
@@ -483,7 +483,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     @nn.compact
     def __call__(
@@ -884,8 +884,8 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         For fused attention backend, the accumulation is always float32 without the perf overhead.
     fuse_qkv: bool, default = None
         Deprecated. Please refer `fuse_qkv_params`
-    window_size: Tuple[int, int], default = (-1, -1)
-        Sliding window size. Default value == no sliding window.
+    window_size: Optional[Tuple[int, int]], default = None
+        Sliding window size. Default value is no sliding window.
     """
 
     head_dim: int
@@ -916,7 +916,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -1587,8 +1587,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         :math:`\frac{alpha}{rank} * lora\_output`. None means no scaling.
     enable_sequence_parallel: bool, default = False
         Whether to enable sequence parallelism to operations except dot.
-    window_size: Tuple[int, int], default = (-1, -1)
-        Sliding window size. Default value == no sliding window.
+    window_size: Optional[Tuple[int, int]], default = None
+        Sliding window size. Default value is no sliding window.
 
     Optimization parameters
     -----------------------
@@ -1652,7 +1652,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
-    window_size: Tuple[int, int] = (-1, -1)
+    window_size: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
