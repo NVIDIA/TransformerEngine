@@ -1338,7 +1338,6 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     # Check output.
     assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
 
-
     # Check gradients, only for small model
     rtol = {
         torch.float32: 1e-3,
@@ -1350,7 +1349,6 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
     if model == "small":
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
-
 
 
 def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
