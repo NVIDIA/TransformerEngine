@@ -4781,74 +4781,105 @@ def get_qkv_layout(
        `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
        `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
        `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
+    q: torch.Tensor
+        Query tensor. It may be different from input `q` as we try to fit tensors to
+        a supported layout.
+    k: torch.Tensor
+        Key tensor. It may be different from input `k` as we try to fit tensors to
+        a supported layout.
+    v: torch.Tensor
+        Value tensor. It may be different from input `v` as we try to fit tensors to
+        a supported layout.
     """
 
     check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
     assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
 
     def run_iteratively(q, k, v):
+        # check data pointers
         data_ptr = q.untyped_storage().data_ptr()
         check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
+        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
         data_ptr = k.untyped_storage().data_ptr()
         check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
 
+        # check tensor shapes
+        shape = q.shape
+        check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
+        shape = k.shape
+        check_shapes_kv = shape[:-1] == v.shape[:-1]
+
+        # check tensor strides
         stride = q.stride()
         check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
         check_strides_kv = tuple(sk / k.shape[-1] for sk in k.stride()[:-1]) == tuple(
             sv / v.shape[-1] for sv in v.stride()[:-1]
         )
 
-        shape = q.shape
-        check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
-        shape = k.shape
-        check_shapes_kv = shape[:-1] == v.shape[:-1]
-
-        last_dim_size = q.shape[-1]
-        check_last_dim_offsets_qkv = all(
-            i * last_dim_size == x.storage_offset() for i, x in enumerate([q, k, v])
-        )
-        last_dim_size = k.shape[-1]
-        check_last_dim_offsets_kv = all(
-            i * last_dim_size == x.storage_offset() for i, x in enumerate([k, v])
+        # check tensor offsets for h3d and 3hd layouts
+        prod_h_d = q.shape[-1] * q.shape[-2]
+        check_3hd_offsets = all(x.storage_offset() == i * prod_h_d for i, x in enumerate([q, k, v]))
+        check_h3d_offsets = all(
+            x.storage_offset() == i * q.shape[-1] for i, x in enumerate([q, k, v])
         )
 
-        last_two_dims_size = q.shape[-1] * q.shape[-2]
-        check_last_two_dims_offsets_qkv = all(
-            i * last_two_dims_size == x.storage_offset() for i, x in enumerate([q, k, v])
+        # check tensor offsets for hd_h2d and hd_2hd layouts
+        prod_all_dims = [np.prod(x.shape) for x in [q, k]]
+        offset = prod_all_dims[0] if check_ptrs_qkv else 0
+        prod_h_d = k.shape[-1] * k.shape[-2]
+        check_2hd_offsets = all(
+            x.storage_offset() == (offset + i * prod_h_d) for i, x in enumerate([k, v])
         )
-        last_two_dims_size = k.shape[-1] * k.shape[-2]
-        check_last_two_dims_offsets_kv = all(
-            i * last_two_dims_size == x.storage_offset() for i, x in enumerate([k, v])
+        check_h2d_offsets = all(
+            x.storage_offset() == (offset + i * k.shape[-1]) for i, x in enumerate([k, v])
         )
 
-        if (
-            check_ptrs_qkv
-            and check_strides_qkv
-            and check_shapes_qkv
-            and check_last_two_dims_offsets_qkv
-            and not check_last_dim_offsets_qkv
-        ):
+        # check tensor offsets for hd_hd_hd layouts
+        check_hd_offsets_qkv = (
+            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k, v]))
+            if check_ptrs_qkv
+            else all(x.storage_offset() == 0 for i, x in enumerate([q, k, v]))
+        )
+        check_hd_offsets_qk = (
+            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k]))
+            if not check_ptrs_qkv and check_ptrs_qk
+            else all(x.storage_offset() == 0 for i, x in enumerate([q, k]))
+        )
+        check_hd_offsets_kv = (
+            all(x.storage_offset() == sum(prod_all_dims[1 : i + 1]) for i, x in enumerate([k, v]))
+            if not check_ptrs_qkv and check_ptrs_kv
+            else all(x.storage_offset() == 0 for i, x in enumerate([k, v]))
+        )
+
+        if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_3hd_offsets:
             # sb3hd, bs3hd, t3hd
+            # one chunk of memory, qkv, with q, k, v interleaved at dim=-3 in qkv
             qkv_layout = qkv_format[:-2] + "3" + qkv_format[-2:]
-        elif (
-            check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_last_dim_offsets_qkv
-        ):
+        elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_h3d_offsets:
             # sbh3d, bsh3d, th3d
+            # one chunk of memory, qkv, with q, k, v interleaved at dim=-2 in qkv
             qkv_layout = qkv_format[:-1] + "3" + qkv_format[-1:]
-        elif (
-            check_ptrs_kv
-            and check_strides_kv
-            and check_shapes_kv
-            and check_last_two_dims_offsets_kv
-            and not check_last_dim_offsets_kv
-        ):
+        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_2hd_offsets:
             # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
+            # two chunks of memory, q and kv, with k, v interleaved at dim=-3 in kv
+            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
+            # have the same data pointer, i.e. check_ptrs_qkv=True
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
-        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_last_dim_offsets_kv:
+        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_h2d_offsets:
             # sbhd_sbh2d, bshd_bsh2d, thd_th2d
+            # two chunks of memory, q and kv, with k, v interleaved at dim=-2 in kv
+            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
+            # have the same data pointer, i.e. check_ptrs_qkv=True
             qkv_layout = qkv_format + "_" + qkv_format[:-1] + "2" + qkv_format[-1:]
-        elif check_strides_kv and check_shapes_kv:
+        elif (
+            check_strides_kv
+            and check_shapes_kv
+            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
+        ):
             # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
+            # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
+            # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
+            # check_ptrs_qk=True or check_ptrs_kv=True
             qkv_layout = "_".join(list([qkv_format]) * 3)
         else:
             qkv_layout = "not_supported"
@@ -6772,10 +6803,10 @@ class FusedAttention(torch.nn.Module):
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove fused_attention._extra_state as a missing key
-            or an unexpected key when loading TransformerEngine checkpoints.
+            or an unexpected key when loading Transformer Engine checkpoints.
             Please store FP8 metadata as DotProductAttention's _extra_state,
             rather than FusedAttention's _extra_state. This hook will be
-            phased out in TransformerEngine 2.0.
+            phased out in Transformer Engine 2.0.
             """
             for key in incompatible_keys.missing_keys:
                 if "fused_attention._extra_state" in key:
@@ -7005,6 +7036,13 @@ class DotProductAttention(TransformerEngineBaseModule):
         and set the environment variable :attr:`NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`. In order
         to disable`flash-attn` entirely, set :attr:`NVTE_FLASH_ATTN=0`.
 
+    .. note::
+
+        Transformer Engine stores the FP8 metadata under a `._extra_state` key when checkpointing.
+        As the FP8 attention support expands from one backend to multiple backends, the location
+        of that key has also shifted (see `FP8 checkpoint compatibility <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_).
+
+
     Parameters
     ----------
     num_attention_heads : int
@@ -7033,7 +7071,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                    e.g. a different mask for training and inference.
                    1. For "`no_mask`", no attention mask is applied.
                    2. For "`causal`", "`causal_bottom_right`", or the causal mask in
-                   "`padding_causal`" and "`padding_causal_bottom_right`", TransformerEngine
+                   "`padding_causal`" and "`padding_causal_bottom_right`", Transformer Engine
                    calculates and applies an upper triangular mask to the softmax input.
                    No user input is needed. Causal masks without the "`bottom_right`" appendix align
                    the diagonal line to the top left corner of the softmax matrix. With
@@ -7246,14 +7284,36 @@ class DotProductAttention(TransformerEngineBaseModule):
         def remove_extra_states_check(self, incompatible_keys):  # pylint: disable=unused-argument
             """
             Temporarily remove core_attention._extra_state as a missing key
-            when loading older TransformerEngine checkpoints. Will phase out
-            this hook in TransformerEngine 2.0.
+            when loading older Transformer Engine checkpoints. Will phase out
+            this hook in Transformer Engine 2.0.
             """
             for key in incompatible_keys.missing_keys:
                 if "core_attention._extra_state" in key:
                     incompatible_keys.missing_keys.remove(key)
 
         self.register_load_state_dict_post_hook(remove_extra_states_check)
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    ):
+        """
+        This function helps to load Transformer Engine 1.6 and 1.7 checkpoints, where FP8 attention
+        metadata is stored under the `core_attention.fused_attention._extra_state` key and not the
+        `core_attention._extra_state` key. Please see `FP8 checkpoint compatibility
+        <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/faq.html#fp8-checkpoint-compatibility>`_ for more details.
+        """
+        fused_attn_key = False
+        dot_product_attn_key = False
+        for k in state_dict.keys():
+            if "core_attention.fused_attention._extra_state" in k:
+                fused_attn_key = True
+            if "core_attention._extra_state" in k:
+                dot_product_attn_key = True
+        if fused_attn_key and not dot_product_attn_key:
+            prefix = prefix + "fused_attention."
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
 
     def _checkpointed_attention_forward(
         self,
@@ -7364,14 +7424,14 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             Users can use environment variables :attr:`NVTE_FLASH_ATTN`, :attr:`NVTE_FUSED_ATTN`,
             and :attr:`NVTE_FUSED_ATTN_BACKEND` to control which DotProductAttention backend,
-            and FusedAttention backend if applicable, to use. TransformerEngine prioritizes
+            and FusedAttention backend if applicable, to use. Transformer Engine prioritizes
             FlashAttention over FusedAttention and over UnfusedDotProductAttention.
             If FusedAttention is being used, users can also choose to switch to flash-attn's
             implementation for backward by setting :attr:`NVTE_FUSED_ATTN_USE_FAv2_BWD=1`
             (default: 0), because of the performance differences between various versions of
             flash-attn and FusedAttention. Further, :attr:`NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT`
             can be used to enable (:attr:`1`) or disable (:attr:`0`) the workspace related
-            optimizations in FusedAttention. When unset, TransformerEngine determines the code path
+            optimizations in FusedAttention. When unset, Transformer Engine determines the code path
             based on its internal logic. These optimizations trade memory for performance
             and should be used with care.
 
