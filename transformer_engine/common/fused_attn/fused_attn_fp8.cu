@@ -902,6 +902,15 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
                              void* devPtrDropoutSeed, void* devPtrDropoutOffset,
                              cudnnDataType_t tensorType, void* workspace_ptr,
                              size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle_) {
+  auto cudnn_runtime_version = cudnnGetVersion();
+
+  // We choose between 32-bit and 64-bit offsets depending on need.
+  // This allows us to support older cuDNN runtimes gracefully.
+  const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+  const DType ragged_offset_type = get_ragged_offset_dtype(layout_group, h, h, s_q, s_kv, d, d);
+  NVTE_CHECK((ragged_offset_type != DType::kInt64 || cudnn_runtime_version >= 90500),
+             "64-bit ragged offsets require cuDNN 9.5+");
+
   try {
     FADescriptor descriptor{b,
                             h,
@@ -940,10 +949,12 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
       int64_t raggedDim[4] = {b + 1, 1, 1, 1};
       int64_t raggedStride[4] = {1, 1, 1, 1};
       // Create offset tensors
-      auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["QKV_RAGGED"],
-                                           raggedDim, raggedStride, false, false);
-      auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["O_RAGGED"],
-                                               raggedDim, raggedStride, false, false);
+      auto QKVOffsetTensor =
+          tensor_create(get_cudnn_dtype(ragged_offset_type), tensor_name_to_uid["QKV_RAGGED"],
+                        raggedDim, raggedStride, false, false);
+      auto ORaggedOffsetTensor =
+          tensor_create(get_cudnn_dtype(ragged_offset_type), tensor_name_to_uid["O_RAGGED"],
+                        raggedDim, raggedStride, false, false);
 
       int64_t seqlen_dim[4] = {b, 1, 1, 1};
       int64_t seqlen_stride[4] = {1, 1, 1, 1};
@@ -1087,10 +1098,14 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
 
     auto plan = get_plan(fa_fprop_cache, descriptor);
     size_t wkspace_size = static_cast<size_t>(plan.getWorkspaceSize());
+    const size_t num_bytes_per_ragged_offset = (b + 1) * typeToSize(ragged_offset_type);
+    const size_t seqlen_offsets_workspace_size = 2 * num_bytes_per_ragged_offset;
+    const size_t actual_seqlens_workspace_size = b * sizeof(int32_t);
 
     // Exit to request upper level API to allocate memory if needed
     if (workspace_ptr == nullptr) {
-      *workspace_size = wkspace_size + ((b + 1) * 2 + b) * sizeof(int32_t);
+      *workspace_size =
+          wkspace_size + seqlen_offsets_workspace_size + actual_seqlens_workspace_size;
       return;
     }
 
@@ -1098,18 +1113,17 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    int32_t* qkv_ragged_offset =
-        reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
-    int32_t* o_ragged_offset = reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) +
-                                                          wkspace_size + (b + 1) * sizeof(int32_t));
-    int32_t* actual_seqlens_q = reinterpret_cast<int32_t*>(
-        reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size + (b + 1) * 2 * sizeof(int32_t));
+    int8_t* base_workspace_ptr = reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size;
+    void* qkv_ragged_offset = base_workspace_ptr;
+    void* o_ragged_offset = (base_workspace_ptr + num_bytes_per_ragged_offset);
+    int32_t* actual_seqlens_q =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + seqlen_offsets_workspace_size);
     // FP8 currently only supports self-attention, so doesn't use devPtrcuSeqlensKV
     dim3 blockDims(128);
     dim3 gridDims((b + blockDims.x) / blockDims.x);
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
-        b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
-        o_ragged_offset);
+        b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, ragged_offset_type,
+        qkv_ragged_offset, o_ragged_offset);
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
@@ -1183,6 +1197,15 @@ void fused_attn_fp8_bwd_impl(
     void* devPtrAmaxdV, void* devPtrcuSeqlensQ, void* devPtrcuSeqlensKV, void* devPtrDropoutSeed,
     void* devPtrDropoutOffset, cudnnDataType_t tensorType, void* workspace_ptr,
     size_t* workspace_size, cudaStream_t stream, cudnnHandle_t handle_) {
+  auto cudnn_runtime_version = cudnnGetVersion();
+
+  // We choose between 32-bit and 64-bit offsets depending on need.
+  // This allows us to support older cuDNN runtimes gracefully.
+  const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+  const DType ragged_offset_type = get_ragged_offset_dtype(layout_group, h, h, s_q, s_kv, d, d);
+  NVTE_CHECK((ragged_offset_type != DType::kInt64 || cudnn_runtime_version >= 90500),
+             "64-bit ragged offsets require cuDNN 9.5+");
+
   try {
     FADescriptor descriptor{b,
                             h,
@@ -1219,10 +1242,12 @@ void fused_attn_fp8_bwd_impl(
       int64_t raggedDim[4] = {b + 1, 1, 1, 1};
       int64_t raggedStride[4] = {1, 1, 1, 1};
       // Create offset tensors
-      auto QKVOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["QKV_RAGGED"],
-                                           raggedDim, raggedStride, false, false);
-      auto ORaggedOffsetTensor = tensor_create(CUDNN_DATA_INT32, tensor_name_to_uid["O_RAGGED"],
-                                               raggedDim, raggedStride, false, false);
+      auto QKVOffsetTensor =
+          tensor_create(get_cudnn_dtype(ragged_offset_type), tensor_name_to_uid["QKV_RAGGED"],
+                        raggedDim, raggedStride, false, false);
+      auto ORaggedOffsetTensor =
+          tensor_create(get_cudnn_dtype(ragged_offset_type), tensor_name_to_uid["O_RAGGED"],
+                        raggedDim, raggedStride, false, false);
 
       // Create shared ptrs to ragged offset tensors for multiple tensors
       std::shared_ptr<cudnn_frontend::Tensor> QKVRaggedOffsetTensorPtr =
@@ -1553,10 +1578,14 @@ void fused_attn_fp8_bwd_impl(
 
     auto plan = get_plan(fa_bprop_cache, descriptor);
     size_t wkspace_size = static_cast<size_t>(plan.getWorkspaceSize());
+    const size_t num_bytes_per_ragged_offset = (b + 1) * typeToSize(ragged_offset_type);
+    const size_t seqlen_offsets_workspace_size = 2 * num_bytes_per_ragged_offset;
+    const size_t actual_seqlens_workspace_size = b * sizeof(int32_t);
 
     // Exit to request upper level API to allocate memory if needed
     if (workspace_ptr == nullptr) {
-      *workspace_size = wkspace_size + ((b + 1) * 2 + b) * sizeof(int32_t);
+      *workspace_size =
+          wkspace_size + seqlen_offsets_workspace_size + actual_seqlens_workspace_size;
       return;
     }
 
@@ -1564,18 +1593,17 @@ void fused_attn_fp8_bwd_impl(
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    int32_t* qkv_ragged_offset =
-        reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
-    int32_t* o_ragged_offset = reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) +
-                                                          wkspace_size + (b + 1) * sizeof(int32_t));
-    int32_t* actual_seqlens_q = reinterpret_cast<int32_t*>(
-        reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size + (b + 1) * 2 * sizeof(int32_t));
+    int8_t* base_workspace_ptr = reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size;
+    void* qkv_ragged_offset = base_workspace_ptr;
+    void* o_ragged_offset = (base_workspace_ptr + num_bytes_per_ragged_offset);
+    int32_t* actual_seqlens_q =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + seqlen_offsets_workspace_size);
     // FP8 currently only supports self-attention, so doesn't use devPtrcuSeqlensKV
     dim3 blockDims(128);
     dim3 gridDims((b + blockDims.x) / blockDims.x);
     cu_seqlens_to_offsets<<<gridDims, blockDims, 0, stream>>>(
-        b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, qkv_ragged_offset,
-        o_ragged_offset);
+        b, h, d, reinterpret_cast<int32_t*>(devPtrcuSeqlensQ), actual_seqlens_q, ragged_offset_type,
+        qkv_ragged_offset, o_ragged_offset);
     void* devPtrQKVRaggedOffset = reinterpret_cast<void*>(qkv_ragged_offset);
     void* devPtrORaggedOffset = reinterpret_cast<void*>(o_ragged_offset);
     void* devPtrMNKOverride = reinterpret_cast<void*>(actual_seqlens_q);
