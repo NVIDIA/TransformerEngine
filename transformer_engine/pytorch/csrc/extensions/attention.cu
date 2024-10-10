@@ -1549,13 +1549,13 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   if (lse_packed) {
     thd_lse_kernel<double, true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-            num_heads, total_tokens);
+            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
+            batch, num_heads, total_tokens);
   } else {
     thd_lse_kernel<double, false, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-            num_heads, total_tokens);
+            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
+            batch, num_heads, total_tokens);
   }
 }
 
