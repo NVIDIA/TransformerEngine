@@ -20,9 +20,8 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
     RotaryPositionEmbedding,
     get_attention_backend,
-    _flash_attn_2_plus,
     _flash_attn_2_3_plus,
-    _flash_attn_3_plus,
+    _flash_attn_3_is_installed,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
@@ -1353,7 +1352,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         if RoPE:
             pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -1381,7 +1380,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1534,7 +1533,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1561,7 +1560,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
