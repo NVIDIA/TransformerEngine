@@ -30,6 +30,7 @@ Transformer Engine documentation
 
    installation
    examples/quickstart.ipynb
+   faq
 
 .. toctree::
    :hidden:
