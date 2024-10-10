@@ -41,8 +41,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "fused out correction after qkv calculation with lse_",
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_out_correction_", &fused_out_correction_,
-      "fused out correction after qkv calculation without lse_",
-      py::call_guard<py::gil_scoped_release>());
+        "fused out correction after qkv calculation without lse_",
+        py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8",

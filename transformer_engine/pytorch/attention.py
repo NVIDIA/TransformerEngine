@@ -2228,13 +2228,30 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse = softmax_lse.to(torch.float)
 
         if qkv_format == "thd" or not causal:
-            tex.fused_out_correction_(out, out_per_step, softmax_lse,
-                softmax_lse_per_step, cu_seqlens_q_padded,
-                qkv_format, cp_size, rank,causal)  
+            tex.fused_out_correction_(
+                out,
+                out_per_step,
+                softmax_lse,
+                softmax_lse_per_step,
+                cu_seqlens_q_padded,
+                qkv_format,
+                cp_size,
+                rank,
+                causal,
+            )
         else:
-            tex.fused_out_correction_lse_(out, out_per_step, softmax_lse,softmax_lse_,
-                softmax_lse_per_step, cu_seqlens_q_padded,
-                qkv_format, cp_size, rank,causal) 
+            tex.fused_out_correction_lse_(
+                out,
+                out_per_step,
+                softmax_lse,
+                softmax_lse_,
+                softmax_lse_per_step,
+                cu_seqlens_q_padded,
+                qkv_format,
+                cp_size,
+                rank,
+                causal,
+            )
 
         kv = p2p_comm_buffers[-1]
         if qkv_format == "bshd":

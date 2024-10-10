@@ -1502,17 +1502,13 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
               out.data_ptr<dtype>(), d_out_per_step_ptrs, lse.data_ptr<float>(),
               d_lse_per_step_ptrs, rank, cp_size, max_seqlen, batch, num_heads, dim_per_head,
               lse_->data_ptr<double>());
-    }
-
-    else {
+    } else {
       fused_out_correction_kernel_sbhd<dtype, 16, false>
           <<<block_num, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
               out.data_ptr<dtype>(), d_out_per_step_ptrs, lse.data_ptr<float>(),
               d_lse_per_step_ptrs, rank, cp_size, max_seqlen, batch, num_heads, dim_per_head);
     }
-  }
-
-  else if (qkv_format == "bshd") {
+  } else if (qkv_format == "bshd") {
     int max_seqlen;
     int batch;
     int num_heads;
@@ -1558,18 +1554,14 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
               out.data_ptr<dtype>(), d_out_per_step_ptrs, lse.data_ptr<float>(),
               d_lse_per_step_ptrs, rank, cp_size, max_seqlen, batch, num_heads, dim_per_head,
               lse_->data_ptr<double>());
-    }
-
-    else {
+    } else {
       fused_out_correction_kernel_bshd<dtype, 16, false>
           <<<block_num, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
               out.data_ptr<dtype>(), d_out_per_step_ptrs, lse.data_ptr<float>(),
               d_lse_per_step_ptrs, rank, cp_size, max_seqlen, batch, num_heads, dim_per_head);
     }
 
-  }
-
-  else if (qkv_format == "thd") {
+  } else if (qkv_format == "thd") {
     int total_tokens = out.size(0);
     int num_heads = out.size(1);
     int dim_per_head = out.size(2);
