@@ -200,6 +200,7 @@ ATTRS = [
         _KEY_OF_RELATIVE_EMBEDDING: False,
         _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
         _KEY_OF_WINDOW_SIZE: (64, 0),  # Left size must < DATA_SHAPE seqlen
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
     },
     {
         _KEY_OF_TRANSPOSE_BS: False,
