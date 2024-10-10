@@ -12,7 +12,6 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 
 import transformer_engine_torch as tex
-from .base import TransformerEngineBaseModule
 from ..cpp_extensions import (
     layernorm_fwd_inf,
 )
@@ -143,6 +142,7 @@ class LayerNorm(torch.nn.Module):
             )
         )
         self.sequence_parallel = sequence_parallel
+        self.activation_dtype: Optional[torch.dtype] = None
 
         self.reset_parameters(defer_init=(device == "meta"))
 
@@ -186,8 +186,21 @@ class LayerNorm(torch.nn.Module):
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
         """LayerNorm FWD"""
+
         # Set the activation type for AMP.
-        TransformerEngineBaseModule.set_activation_dtype(self, inp)
+        # Note: This will soon be deprecated with
+        # https://github.com/NVIDIA/TransformerEngine/pull/1033
+        if torch.is_autocast_enabled():
+            self.activation_dtype = torch.get_autocast_gpu_dtype()
+        elif self.activation_dtype != inp.dtype:
+            dtype = inp.dtype
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
+            self.activation_dtype = dtype
 
         if torch.is_grad_enabled():
             fwd_fn = _LayerNorm.apply
