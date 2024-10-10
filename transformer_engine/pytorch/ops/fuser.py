@@ -5,12 +5,12 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
+from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -26,6 +26,24 @@ from transformer_engine.pytorch.ops.fused import (
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
     """Split tuple at index"""
     return t[:idx], t[idx:]
+
+
+# Lazily imported function used in _is_graph_capturing
+_is_graph_capturing_function: Optional[Callable[[], bool]] = None
+
+
+def _is_graph_capturing() -> bool:
+    """Whether function is called within `make_graphed_callables`
+
+    Avoid circular import with lazy import.
+
+    """
+    global _is_graph_capturing_function
+    if _is_graph_capturing_function is None:
+        from ..graph import is_graph_capturing
+
+        _is_graph_capturing_function = is_graph_capturing
+    return _is_graph_capturing_function()
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -255,7 +273,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             grad_extra_inputs_flat.extend(dxs)
 
         # Update FP8 scaling factors
-        if func_ctx.is_first_module and not is_graph_capturing():
+        if func_ctx.is_first_module and not _is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (

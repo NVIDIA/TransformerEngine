@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Functions for CUDA Graphs support in FP8"""
+from collections.abc import Iterable
 from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar, Union
 
 import torch
@@ -18,7 +19,7 @@ from .fp8 import (
 )
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
-
+from .ops.op import BasicOperation
 
 __all__ = ["make_graphed_callables"]
 
@@ -484,28 +485,46 @@ def _make_graphed_callables(
     return tuple(ret)
 
 
-def save_fp8_tensors(modules, amax_history_len):
+def save_fp8_tensors(
+    modules: Iterable[torch.nn.Module],
+    fp8_recipe: DelayedScaling,
+) -> List[Any]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
-    saved_fp8_meta_tensors = []
+    fp8_tensors = []
     for module in modules:
         for m in module.modules():
+            module_tensors = None
             if isinstance(m, TransformerEngineBaseModule):
                 if m.primary_weights_in_fp8:
-                    m.adjust_amax_history_length(amax_history_len)
-                saved_fp8_meta_tensors.append(m.get_fp8_meta_tensors())
-    return saved_fp8_meta_tensors
+                    m.adjust_amax_history_length(fp8_recipe.amax_history_len)
+                module_tensors = m.get_fp8_meta_tensors()
+            elif isinstance(m, BasicOperation):
+                m.pre_forward(fp8_enabled=True, fp8_recipe=fp8_recipe)
+                module_tensors = m._save_fp8_metas()
+            fp8_tensors.append(module_tensors)
+    return fp8_tensors
 
 
-def restore_fp8_tensors(modules, fp8_tensors):
+def restore_fp8_tensors(
+    modules: Iterable[torch.nn.Module],
+    fp8_tensors: List[Any],
+) -> None:
     """Restore FP8 tensors."""
     for module in modules:
         for m in module.modules():
+            module_tensors = fp8_tensors.pop(0)
             if isinstance(m, TransformerEngineBaseModule):
-                m.reset_fp8_meta_tensors(fp8_tensors.pop(0))
-    assert len(fp8_tensors) == 0, "TE internal error."
+                m.reset_fp8_meta_tensors(module_tensors)
+            elif isinstance(m, BasicOperation):
+                m._load_fp8_metas(module_tensors)
+    if len(fp8_tensors) != 0:
+        raise RuntimeError(
+            f"Got FP8 state for {len(fp8_tensors)} more modules than expected. "
+            "There is probably a discrepancy with `save_fp8_tensors`."
+        )
 
 
 def make_graphed_callables(
@@ -578,7 +597,7 @@ def make_graphed_callables(
         modules = (modules,)
 
     # Store FP8 tensors to reset later.
-    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe.amax_history_len)
+    saved_fp8_tensors = save_fp8_tensors(modules, fp8_recipe=fp8_recipe)
 
     # FP8 wrapper.
     def wrap_autocast(block):

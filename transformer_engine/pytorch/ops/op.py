@@ -14,6 +14,7 @@ import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import (
+    DelayedScaling,
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
@@ -232,25 +233,37 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         )
 
     @classmethod
-    def _maybe_update_fp8_meta(cls, fp8_meta: Optional[dict[str, Any]]) -> None:
+    def _maybe_update_fp8_meta(
+        cls,
+        fp8_meta: Optional[dict[str, Any]],
+        *,
+        fp8_recipe: Optional[DelayedScaling] = None,
+    ) -> None:
         if fp8_meta is None:
             return
 
-        # Update FP8 recipe and communication group
-        recipe = FP8GlobalStateManager.get_fp8_recipe()
-        fp8_meta["recipe"] = recipe
+        # Update FP8 recipe
+        if fp8_recipe is None:
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+        fp8_meta["recipe"] = fp8_recipe
+
+        # Update FP8 communication group
         fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
         # Adjust amax history length if needed
-        amax_history_len = recipe.amax_history_len
+        amax_history_len = fp8_recipe.amax_history_len
         for is_forward in (True, False):
-            key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
-            if key not in fp8_meta:
+            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
+            if fp8_meta_key not in fp8_meta:
                 continue
-            meta = fp8_meta[key]
+            meta = fp8_meta[fp8_meta_key]
             curr_len = meta.amax_history.size(0)
+
+            # Nothing to be done if amax history is already correct
             if curr_len == amax_history_len:
                 continue
+
+            # Reallocate amax history
             with torch.no_grad():
                 if curr_len > amax_history_len:
                     meta.amax_history = meta.amax_history[:amax_history_len].clone()
@@ -259,6 +272,21 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         meta.amax_history,
                         pad=(0, 0, 0, amax_history_len - curr_len),
                     )
+
+            # Update global buffers for amax reductions
+            buffer_info_key = FP8GlobalStateManager.get_buffer_info()
+            if buffer_info_key in fp8_meta:
+                fwd_pos, fwd_key, bwd_pos, bwd_key = fp8_meta[buffer_info_key]
+                for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
+                    assert (
+                        buffer_key in FP8GlobalStateManager.global_amax_history_buffer
+                    ), "TE internal error during amax history change."
+                    FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = fp8_meta[
+                        fp8_meta_key
+                    ].amax_history[0]
+                    FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = fp8_meta[
+                        fp8_meta_key
+                    ].amax_history
 
     def get_fp8_meta(self, mode: str) -> Optional[dict[str, Any]]:
         """FP8 metadata
@@ -273,11 +301,67 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self._fp8_metas = self._make_fp8_metas()
         return self._fp8_metas[mode]
 
-    def pre_forward(self) -> None:
+    @torch.no_grad()
+    def _save_fp8_metas(self) -> Optional[dict[str, Any]]:
+        """Create copies of tensors in FP8 metadata
+
+        Tensor copies can be loaded with _load_fp8_metas.
+
+        """
+        if self._fp8_metas is None:
+            return None
+        out = {}
+        for mode, fp8_meta in self._fp8_metas.items():
+            if fp8_meta is None:
+                continue
+            out[mode] = {}
+            for is_forward in (True, False):
+                fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=is_forward)
+                if fp8_meta_key not in fp8_meta:
+                    continue
+                out[mode][fp8_meta_key] = (
+                    fp8_meta[fp8_meta_key].scale.clone(),
+                    fp8_meta[fp8_meta_key].scale_inv.clone(),
+                    fp8_meta[fp8_meta_key].amax_history.clone(),
+                )
+        return out
+
+    @torch.no_grad()
+    def _load_fp8_metas(self, fp8_metas: Optional[dict[str, Any]]) -> None:
+        """Update FP8 metadata with saved tensor copies
+
+        Tensor copies should be generated with _save_fp8_metas.
+
+        """
+        assert (self._fp8_metas is None) == (
+            fp8_metas is None
+        ), "Saved FP8 metadata does not match operation's FP8 metadata"
+        if fp8_metas is None:
+            return
+        for mode, fp8_meta in fp8_metas.items():
+            assert (
+                mode in self._fp8_metas
+            ), f"Found an unexpected key ({mode=}) in saved FP8 metadata"
+            for fp8_meta_key, tensors in fp8_meta.items():
+                assert (
+                    fp8_meta_key in self._fp8_metas[mode]
+                ), f"Found an unexpected key ({mode=}, {fp8_meta_key=}) in saved FP8 metadata"
+                scale, scale_inv, amax_history = tensors
+                self._fp8_metas[mode][fp8_meta_key].scale.copy_(scale)
+                self._fp8_metas[mode][fp8_meta_key].scale_inv.copy_(scale_inv)
+                self._fp8_metas[mode][fp8_meta_key].amax_history.copy_(amax_history)
+
+    def pre_forward(
+        self,
+        *,
+        fp8_enabled: Optional[bool] = None,
+        fp8_recipe: Optional[DelayedScaling] = None,
+    ) -> None:
         """Preprocessing before forward pass"""
 
         # Initialize FP8 metadata if needed
-        fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
+        if fp8_enabled is None:
+            fp8_enabled = FP8GlobalStateManager.is_fp8_enabled()
         if fp8_enabled:
 
             # Construct FP8 metadata if needed
@@ -286,7 +370,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
             # Make sure FP8 metadata matches FP8 autocast context
             for fp8_meta in self._fp8_metas.values():
-                self._maybe_update_fp8_meta(fp8_meta)
+                self._maybe_update_fp8_meta(fp8_meta, fp8_recipe=fp8_recipe)
 
             # Register FP8 metadata for amax and scale update
             if not FP8GlobalStateManager.fp8_graph_capturing():
