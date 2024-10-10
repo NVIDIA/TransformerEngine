@@ -1464,9 +1464,9 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
  * Support THD format for Context Parallel: softmax_lse related operations
  **************************************************************************************************/
 
-template <typename lse_dtype, typename Functor>
+template <typename lse_dtype, bool lse_packed, typename Functor>
 __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens, int batch,
-                               int num_heads, int total_tokens, bool lse_packed) {
+                               int num_heads, int total_tokens) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / 2;
@@ -1481,7 +1481,7 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
     int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
     for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
       size_t idx, half_idx;
-      if (lse_packed) {
+      if constexpr (lse_packed) {
         idx = head_id * total_tokens + token_id + cu_seqlens_s[seq_id + 1];
         half_idx = head_id * total_tokens / 2 + token_id;
       } else {
@@ -1546,10 +1546,17 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
-  thd_lse_kernel<double, LseCorrectionFunctor>
-      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-          lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-          num_heads, total_tokens, lse_packed);
+  if (lse_packed) {
+    thd_lse_kernel<double, true, LseCorrectionFunctor>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
+            num_heads, total_tokens);
+  } else {
+    thd_lse_kernel<double, false, LseCorrectionFunctor>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
+            num_heads, total_tokens);
+  }
 }
 
 struct ReadLseFunctor {
@@ -1594,10 +1601,17 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
-  thd_lse_kernel<float, ReadLseFunctor>
-      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-          lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-          num_heads, total_tokens, lse_packed);
+  if (lse_packed) {
+    thd_lse_kernel<float, true, ReadLseFunctor>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
+            num_heads, total_tokens);
+  } else {
+    thd_lse_kernel<float, false, ReadLseFunctor>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
+            num_heads, total_tokens);
+  }
 
   return half_lse;
 }
@@ -1606,11 +1620,10 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
  * Support THD format for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
-template <typename dtype, int only_second_half, int tile_size>
+template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
 __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
                                           float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen,
-                                          bool lse_packed) {
+                                          int num_heads, int dim_per_head, int lse_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
@@ -1628,7 +1641,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
     for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
       size_t idx, idx_per_step;
 
-      if (lse_packed) {
+      if constexpr (lse_packed) {
         idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
         idx_per_step = head_id * lse_seqlen / (only_second_half + 1) + token_id;
       } else {
@@ -1703,11 +1716,19 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
       (static_cast<size_t>(total_tokens) / (only_second_half + 1) * tile + block - 1) / block;
   dim3 grid = {grid_x, (unsigned int)num_heads};
 
-  thd_out_correction_kernel<dtype, only_second_half, tile>
-      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-          out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
-          lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
-          dim_per_head, lse_seqlen, lse_packed);
+  if (lse_packed) {
+    thd_out_correction_kernel<dtype, only_second_half, tile, true>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
+            lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
+            dim_per_head, lse_seqlen);
+  } else {
+    thd_out_correction_kernel<dtype, only_second_half, tile, false>
+        <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+            out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
+            lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
+            dim_per_head, lse_seqlen);
+  }
 }
 
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
