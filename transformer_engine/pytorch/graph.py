@@ -11,6 +11,7 @@ from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
 from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.pytorch.constants import dist_group_type
 from .fp8 import (
     fp8_autocast,
     FP8GlobalStateManager,
@@ -172,11 +173,14 @@ def _make_graphed_callables(
         ]
     else:
         per_callable_module_params = []
-        for c in callables:
-            for i in range(num_microbatches):
-                per_callable_module_params.append(
-                    tuple(c.parameters()) if isinstance(c, torch.nn.Module) else ()
-                )
+        for m_chunk in range(num_model_chunks):
+            for _ in range(num_microbatches):
+                for l_no in range(num_layers):
+                    per_callable_module_params.append(
+                        tuple(callables[m_chunk * num_layers + l_no].parameters())
+                        if isinstance(callables[m_chunk * num_layers + l_no], torch.nn.Module)
+                        else ()
+                    )
         assert len(per_callable_module_params) == len(flatten_sample_args)
         per_callable_static_input_surfaces = [
             flatten_sample_args[i] + per_callable_module_params[i]
@@ -200,13 +204,71 @@ def _make_graphed_callables(
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
     # from ending up in any captures.
     torch.cuda.synchronize()
-    with torch.cuda.stream(torch.cuda.Stream()):
+
+    # Get warmup func and func_idx.
+    warmup_func_idx = []
+    warmup_func = []
+    if _order is None:
         for func_idx, func in enumerate(callables):
+            warmup_func_idx.append(func_idx)
+            warmup_func.append(func)
+    else:
+        fwd_idx = [0] * num_model_chunks
+        for idx, c_id in enumerate(_order):
+            if c_id > 0:
+                m_chunk = c_id - 1
+                for l_no in range(num_layers):
+                    func = callables[m_chunk * num_layers + l_no]
+                    func_idx = (m_chunk * num_microbatches * num_layers) + (
+                        fwd_idx[m_chunk] * num_layers + l_no
+                    )
+                    warmup_func_idx.append(func_idx)
+                    warmup_func.append(func)
+                fwd_idx[m_chunk] += 1
+    assert len(warmup_func) == len(
+        sample_args
+    ), f"Warmup runs {len(warmup_func)} don't match args {len(sample_args)}."
+    assert len(warmup_func_idx) == len(
+        set(warmup_func_idx)
+    ), f"Warmup runs {len(warmup_func)} but only {len(set(warmup_func_idx))} are unique."
+
+    # Filter the TE modules that cudagraph can access.
+    visited_te_modules = set()
+
+    def hook_fn(module, input, output):
+        if (
+            isinstance(module, TransformerEngineBaseModule)
+            and FP8GlobalStateManager.is_fp8_enabled()
+        ):
+            visited_te_modules.add(module)
+
+    # Filter the weights without gradients in backward. These weights are not in the computation graph so can be removed from cudagraph inputs.
+    no_grad_weights = None
+
+    def get_no_grads(static_input_surface, grad_inputs, func_idx):
+        grad_index = 0
+        none_grads = []
+        for i in range(len(static_input_surface)):
+            if static_input_surface[i].requires_grad:
+                if grad_inputs[grad_index] is None and i >= len(flatten_sample_args[func_idx]):
+                    none_grads.append(i)
+                grad_index += 1
+        return set(none_grads)
+
+    # Run warmup and do the above two filtering.
+    with torch.cuda.stream(torch.cuda.Stream()):
+        for func_idx, func in zip(warmup_func_idx, warmup_func):
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
             for _ in range(num_warmup_iters):
+                hooks = []
+                for module in func.modules():
+                    hook = module.register_forward_hook(hook_fn)
+                    hooks.append(hook)
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
+                for hook in hooks:
+                    hook.remove()
                 grad_inputs = torch.autograd.grad(
                     outputs=tuple(o for o in outputs if o.requires_grad),
                     inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -214,7 +276,24 @@ def _make_graphed_callables(
                     only_inputs=True,
                     allow_unused=allow_unused_input,
                 )
+                if no_grad_weights is None:
+                    no_grad_weights = get_no_grads(static_input_surface, grad_inputs, func_idx)
                 del outputs, grad_inputs
+            for module in func.modules():
+                if hasattr(module, "is_first_microbatch"):
+                    module.is_first_microbatch = True
+            if len(no_grad_weights) > 0:
+                per_callable_static_input_surfaces[func_idx] = tuple(
+                    inp
+                    for i, inp in enumerate(per_callable_static_input_surfaces[func_idx])
+                    if i not in no_grad_weights
+                )
+                per_callable_module_params[func_idx] = tuple(
+                    param
+                    for i, param in enumerate(per_callable_module_params[func_idx])
+                    if i + len(flatten_sample_args[func_idx]) not in no_grad_weights
+                )
+            no_grad_weights = None
     torch.cuda.synchronize()
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
@@ -459,6 +538,17 @@ def _make_graphed_callables(
                                 isinstance(m, TransformerEngineBaseModule)
                                 and FP8GlobalStateManager.is_fp8_enabled()
                             ):
+                                if m not in visited_te_modules:
+                                    # Only Set the FP8 meta for the modules included by forward
+                                    continue
+                                fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+                                if (
+                                    not fp8_recipe.fp8_mha
+                                    and not fp8_recipe.fp8_dpa
+                                    and hasattr(m, "attention_dropout")
+                                    and m.deterministic
+                                ):
+                                    continue
                                 m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
                                 m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
                                 FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
@@ -517,6 +607,7 @@ def make_graphed_callables(
     fp8_enabled: bool = False,
     fp8_calibrating: bool = False,
     fp8_recipe: Optional[DelayedScaling] = None,
+    fp8_group: Optional[dist_group_type] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
@@ -558,6 +649,9 @@ def make_graphed_callables(
                      using a higher precision.
     fp8_recipe: recipe.DelayedScaling, default = `None`
                 recipe used for FP8 training.
+    fp8_group: torch._C._distributed_c10d.ProcessGroup, default = `None`
+               distributed group over which amaxes for the fp8 tensors
+               are reduced at the end of each training step.
     fp8_weight_caching: bool, default = `False`
                         Whether or not to cache FP8 weights across microbatches. if set to `True`,
                         the `is_first_microbatch` boolean argument must be passed into the forward
@@ -586,7 +680,11 @@ def make_graphed_callables(
 
         def forward_func(*args, **kwargs):
             with fp8_autocast(
-                enabled=fp8_enabled, calibrating=fp8_calibrating, fp8_recipe=fp8_recipe, _graph=True
+                enabled=fp8_enabled,
+                calibrating=fp8_calibrating,
+                fp8_recipe=fp8_recipe,
+                fp8_group=fp8_group,
+                _graph=True,
             ):
                 outputs = old_forward(*args, **kwargs)
             return outputs
