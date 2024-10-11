@@ -103,12 +103,11 @@ if not fa_logger.hasHandlers():
 
 
 @functools.lru_cache(maxsize=None)
-def _get_supported_versions(version_min, version_not_supported, version_max):
+def _get_supported_versions(version_min, version_max):
     return (
         ">= "
         + str(version_min)
         + ", "
-        + "".join(["!= " + str(x) + ", " if x > version_min else "" for x in version_not_supported])
         + "<= "
         + str(version_max)
     )
@@ -121,8 +120,7 @@ _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 # Detect flash-attn v2 in the environment
 _flash_attn_is_installed = False
 _flash_attn_version = PkgVersion("0")
-_flash_attn_version_required = PkgVersion("2.0.6")
-_flash_attn_version_not_supported = (PkgVersion("2.0.9"), PkgVersion("2.1.0"))
+_flash_attn_version_required = PkgVersion("2.1.1")
 _flash_attn_max_version = PkgVersion("2.6.3")
 _flash_attn_2_plus = False
 _flash_attn_2_1_plus = False
@@ -139,9 +137,7 @@ except PackageNotFoundError:
             """ "pip install flash-attn".""",
         )
 else:
-    if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version and all(
-        _flash_attn_version != x for x in _flash_attn_version_not_supported
-    ):
+    if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_forward as _flash_attn_forward,
@@ -163,7 +159,6 @@ else:
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
                 _flash_attn_version_required,
-                _flash_attn_version_not_supported,
                 _flash_attn_max_version,
             ),
             _flash_attn_version,
@@ -895,7 +890,6 @@ def get_attention_backend(
             " Please install flash-attn %s.",
             _get_supported_versions(
                 _flash_attn_version_required,
-                _flash_attn_version_not_supported,
                 _flash_attn_max_version,
             ),
         )
