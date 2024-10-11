@@ -269,7 +269,7 @@ def _make_graphed_callables(
                     module.is_first_microbatch = True
 
     # Remove cudagraph input params that are not accessed.
-    for idx in range(len(flatten_sample_args)):
+    for idx, _ in enumerate(flatten_sample_args):
         per_callable_module_params[idx] = tuple(
             param for param in per_callable_module_params[idx] if param in visited_params
         )
