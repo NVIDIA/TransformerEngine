@@ -36,17 +36,20 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
   TransposeImpl(input, rows, cols, dtype, stream, output);
 }
 
-Error_Type TransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf) {
+Error_Type TransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf,
+                        int64_t transpose_axis) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
-  assert(in_dtype == out_dtype);
 
   void *input = input_buf.untyped_data();
   void *output = output_buf->untyped_data();
 
   auto input_dims = input_buf.dimensions();
-  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + 1, 1, std::multiplies<>());
-  auto n = std::accumulate(input_dims.end() - 1, input_dims.end(), 1, std::multiplies<>());
+  if (transpose_axis < 0) transpose_axis += input_dims.size();
+  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
+                           std::multiplies<>());
+  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
+                           std::multiplies<>());
   auto input_shape = std::vector<size_t>{m, n};
   auto output_shape = std::vector<size_t>{n, m};
 
@@ -61,7 +64,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(TransposeHandler, TransposeFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // input
-                                  .Ret<Buffer_Type>());    // output
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<int64_t>("transpose_axis"));
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];

@@ -174,6 +174,8 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,

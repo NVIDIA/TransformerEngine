@@ -55,6 +55,7 @@ pybind11::dict Registrations() {
   dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
   dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
   return dict;
 }

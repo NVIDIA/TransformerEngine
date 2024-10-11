@@ -104,7 +104,7 @@ class TransposePrimitive(BasePrimitive):
 
         if is_ffi_enabled():
             name = "te_transpose_ffi"
-            out = ffi.ffi_lowering(name)(ctx, x)
+            out = ffi.ffi_lowering(name)(ctx, x, transpose_axis=transpose_axis_boundary)
         else:
             ir_x_type = ir.RankedTensorType(x.type)
             ir_x_shape = ir_x_type.shape
