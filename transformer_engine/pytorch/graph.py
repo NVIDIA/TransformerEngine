@@ -238,10 +238,7 @@ def _make_graphed_callables(
     visited_params = set()
 
     def hook_fn(module, input, output):
-        if (
-            isinstance(module, TransformerEngineBaseModule)
-            and FP8GlobalStateManager.is_fp8_enabled()
-        ):
+        if isinstance(module, TransformerEngineBaseModule):
             visited_te_modules.add(module)
         visited_params.update(module.parameters(recurse=False))
 
