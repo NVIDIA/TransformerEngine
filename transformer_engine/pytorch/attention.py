@@ -3500,29 +3500,53 @@ class FusedRoPEFunc(torch.autograd.Function):
         tensor_format: str = "sbhd",
         cu_seqlens: Union[torch.Tensor, None] = None,
     ) -> torch.Tensor:
+
+        if is_graph_capturing:
+            output = cached_empty_like(t, key=f'rope_fwd_{t.shape}')
+        else:
+            output = torch.empty_like(t, requires_grad=t.requires_grad)
+
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         if tensor_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, False)
+            output = tex.fused_rope_forward(t, freqs, output, False)
         elif tensor_format == "bshd":
-            output = tex.fused_rope_forward(t.transpose(0, 1), freqs, True).transpose(0, 1)
+            output = tex.fused_rope_forward(
+                t.transpose(0, 1), freqs, output, True).transpose(0, 1)
         elif tensor_format == "thd":
             output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
         else:
             raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
         ctx.save_for_backward(freqs, cu_seqlens)
         ctx.tensor_format = tensor_format
+        ctx.output_shape = list(output.shape)
 
         return output
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         freqs, cu_seqlens = ctx.saved_tensors
+
+        if is_graph_capturing:
+            grad_input = cached_empty(
+                ctx.output_shape, 
+                device=grad_output.device,
+                dtype=grad_output.dtype,
+                requires_grad=grad_output.requires_grad,
+                key=f'rope_bwd_{ctx.output_shape}')
+        else:
+            grad_input = torch.empty(
+                ctx.output_shape,
+                device=grad_output.device,
+                dtype=grad_output.dtype,
+                requires_grad=grad_output.requires_grad
+            )
+
         if ctx.tensor_format == "sbhd":
-            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
+            grad_input = tex.fused_rope_backward(grad_output, freqs, grad_input, False)
         elif ctx.tensor_format == "bshd":
             grad_input = tex.fused_rope_backward(
-                grad_output.transpose(0, 1), freqs, True
+                grad_output.transpose(0, 1), freqs, grad_input, True
             ).transpose(0, 1)
         elif ctx.tensor_format == "thd":
             grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
@@ -3628,21 +3652,15 @@ class _SplitAlongDim(torch.autograd.Function):
                     dim=split_dim,
                 )
             )
-
+        ctx.save_for_backward(mixed_x_layer)
         out = torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
 
         # torch.split produces a view, for cudagraphs make contiguous, in case the
         # the next operation on these outputs requires `.contiguous` for instance DPA
         if is_graph_capturing():
-            out_contiguous = []
             for idx, o in enumerate(out):
-                out_contiguous.append(cached_empty_like(o, f'split_fwd_{idx}'))
-
-            for idx, o in enumerate(out):
-                out_contiguous[idx].copy_(o)
-                out_contiguous[idx].requires_grad = True
-
-            out = out_contiguous
+                cached_contiguous = cached_empty_like(o, f'split_fwd_{idx}',)
+                o.data = cached_contiguous.data
         return out
 
 
@@ -3727,21 +3745,20 @@ class _SplitAlongDim(torch.autograd.Function):
             )
             return ret, None, None
 
-        # if is_graph_capturing():
-        #     total_shape = list(grad_outputs[0].shape)
-        #     total_shape[dim] = sum([g.shape[split_dim] for g in grads])
+        if is_graph_capturing():
+            total_shape = list(grad_outputs[0].shape)
+            total_shape[split_dim] = sum([g.shape[split_dim] for g in grad_outputs])
 
-        #     grad_input = cached_empty(
-        #         total_shape,
-        #         dtype=grad_outputs[0].dtype,
-        #         device=grad_outputs[0].device,
-        #         requires_grad=all([g.requires_grad for g in grad_outputs]),
-        #         key='split_cached_bwd'
-        #     )
-        #     torch.cat(grads, dim=split_dim, out=grad_input)
-        #     return grad_input, None, None
+            grad_input = cached_empty(
+                total_shape,
+                dtype=grad_outputs[0].dtype,
+                device=grad_outputs[0].device,
+                requires_grad=any([g.requires_grad for g in grad_outputs]),
+                key='split_cached_bwd'
+            )
+            torch.cat(grad_outputs, dim=split_dim, out=grad_input)
+            return grad_input, None, None
 
-        # else:
         return torch.cat(grad_outputs, dim=split_dim), None, None
 
 

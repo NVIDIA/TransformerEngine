@@ -7,6 +7,7 @@
 #include "extensions.h"
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
+                              const at::Tensor &output,
                               const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
@@ -41,12 +42,8 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 
   // output
   auto act_options = input.options().requires_grad(false);
-  at::Tensor output;
-  if (transpose_output_memory) {
-    output = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
-  } else {
-    output = torch::empty({s, b, h, d}, act_options);
-  }
+  auto output_ = transpose_output_memory ? output.transpose(0, 1) : output;
+
   // output strides
   const int o_stride_s = output.stride(0);
   const int o_stride_b = output.stride(1);
@@ -55,7 +52,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 
   auto input_cu = makeTransformerEngineTensor(input);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
-  auto output_cu = makeTransformerEngineTensor(output);
+  auto output_cu = makeTransformerEngineTensor(output_);
 
   nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), s, b, h, d, d2,
                           stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,
@@ -65,6 +62,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 }
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
+                               const at::Tensor &input_grads,
                                const bool transpose_output_memory) {
   using namespace transformer_engine;
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
@@ -98,20 +96,16 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   const int d2 = freqs.size(3);
 
   auto act_options = output_grads.options().requires_grad(false);
-  at::Tensor input_grads;
-  if (transpose_output_memory) {
-    input_grads = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
-  } else {
-    input_grads = torch::empty({s, b, h, d}, act_options);
-  }
-  const int o_stride_s = input_grads.stride(0);
-  const int o_stride_b = input_grads.stride(1);
-  const int o_stride_h = input_grads.stride(2);
-  const int o_stride_d = input_grads.stride(3);
+  at::Tensor input_grads_ = transpose_output_memory ? input_grads.transpose(0, 1) : input_grads;
+  
+  const int o_stride_s = input_grads_.stride(0);
+  const int o_stride_b = input_grads_.stride(1);
+  const int o_stride_h = input_grads_.stride(2);
+  const int o_stride_d = input_grads_.stride(3);
 
   auto output_grads_cu = makeTransformerEngineTensor(output_grads);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
-  auto input_grads_cu = makeTransformerEngineTensor(input_grads);
+  auto input_grads_cu = makeTransformerEngineTensor(input_grads_);
 
   nvte_fused_rope_backward(output_grads_cu.data(), freqs_cu.data(), input_grads_cu.data(), s, b, h,
                            d, d2, stride_s, stride_b, stride_h, stride_d, o_stride_s, o_stride_b,

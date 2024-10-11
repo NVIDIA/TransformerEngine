@@ -481,7 +481,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         dtype=ctx.activation_dtype, 
                         device=weight.device,
                         requires_grad=True,
-                        key='layernormlinear_dgrad')
+                        key=f'dgrad_{ctx.ub_name}')
                 else:  
                     dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
@@ -685,7 +685,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
             if is_graph_capturing():
-                dgrad_lnout = cached_empty_like(dgrad, key="layernormlinear_dgrad_lnout")
+                dgrad_lnout = cached_empty_like(dgrad, key=f"dgrad_lnout_{ctx.ub_name}")
             else:
                 dgrad_lnout = torch.empty_like(dgrad)
 
@@ -749,8 +749,13 @@ class _LayerNormLinear(torch.autograd.Function):
         if ctx.fp8 and not isinstance(weight, Float8Tensor):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
 
+            # dgamma = torch.ones([4096], device=torch.cuda.current_device(), dtype=torch.bfloat16)
+            # dbeta = None
+            # wgrad = None
+            # grad_bias = None
+            
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            inputmat.view(ctx.inp_shape),
             dgamma,
             dbeta,
             wgrad,

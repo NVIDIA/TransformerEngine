@@ -457,7 +457,7 @@ class _Linear(torch.autograd.Function):
                         dtype=ctx.activation_dtype, 
                         device=weight.device,
                         requires_grad=True,
-                        key='layernormlinear_dgrad')
+                        key=f'linear_dgrad_{ctx.ub_name}')
                 else:  
                     dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
         

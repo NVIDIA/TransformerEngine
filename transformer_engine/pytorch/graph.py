@@ -89,9 +89,14 @@ class CudagraphCache():
         return key not in CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
 
     @staticmethod
-    def retrieve(key):
+    def get_copy(key, requires_grad):
         """Retrieve a tensor in the cache, identified with `key` """
-        return CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
+        cached = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
+        copy = torch.Tensor()
+        copy.requires_grad = requires_grad
+        copy.data = cached
+        return copy
+
 
 def cached_empty_like(tensor, key):
     if CudagraphCache.can_insert(key):
@@ -99,7 +104,7 @@ def cached_empty_like(tensor, key):
             key, 
             torch.empty_like(tensor, requires_grad=tensor.requires_grad)
         )
-    return CudagraphCache.retrieve(key)
+    return CudagraphCache.get_copy(key, tensor.requires_grad)
 
 def cached_empty(shape, dtype, device, key, requires_grad):
     if CudagraphCache.can_insert(key):
@@ -110,7 +115,15 @@ def cached_empty(shape, dtype, device, key, requires_grad):
             requires_grad=requires_grad,
         )
         CudagraphCache.insert(key, tensor)
-    return CudagraphCache.retrieve(key)
+
+    out = CudagraphCache.get_copy(key, requires_grad)
+    return out
+
+def cached_contiguous(tensor, key):
+    cached_copy = cached_empty_like(tensor, key)
+    tensor.data = cached_copy
+
+    return tensor
 
 
 def set_capture_start() -> None:
@@ -288,8 +301,8 @@ def _make_graphed_callables(
                 fwd_graph.register_generator_state(state)
                 bwd_graph.register_generator_state(state)
 
-    mempool = graph_pool_handle()
-
+    # mempool = graph_pool_handle()
+    mempool = torch.cuda.graph_pool_handle()
     # Warmup
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
     # from ending up in any captures.
@@ -322,6 +335,7 @@ def _make_graphed_callables(
     pyt1 = torch.cuda.memory_allocated() / (1024 ** 2)
     el1 = (torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]) / (1024 ** 2)
 
+    ms1 = torch.cuda.memory_stats()['allocated_bytes.all.current']
 
     if _order is not None:  # pylint: disable=too-many-nested-blocks
         per_callable_static_outputs = [None] * len(flatten_sample_args)
@@ -454,8 +468,9 @@ def _make_graphed_callables(
     torch.cuda.empty_cache()
     pyt2 = torch.cuda.memory_allocated() / (1024 ** 2)
     el2 = (torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]) / (1024 ** 2)
+    ms2 = torch.cuda.memory_stats()['allocated_bytes.all.current']
 
-    print(f"{torch.cuda.current_device()} CG MEM ALLOC {pyt2-pyt1} {el2-el1}")
+    print(f"{torch.cuda.current_device()} CG MEM ALLOC {pyt2-pyt1} {el2-el1} {(ms1-ms2)/1024/1024}")
 
 
     def make_graphed_autograd_function(

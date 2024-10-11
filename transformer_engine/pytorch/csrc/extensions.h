@@ -386,9 +386,10 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const bool transpose_output_memory);
+                              const at::Tensor &output, const bool transpose_output_memory);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
+                               const at::Tensor &input_grads,
                                const bool transpose_output_memory);
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
