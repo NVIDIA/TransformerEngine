@@ -551,6 +551,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                    .set_dim({b, h, s_q, d_v})
                                    .set_stride(o_stride)
                                    .set_ragged_offset(offset_o));
+        stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                   .set_name("stats")
+                                   .set_dim({b, h, s_q, 1})
+                                   .set_stride({h * s_q, 1, h, 1})
+                                   .set_data_type(fe::DataType_t::FLOAT));
       } else {
         q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Q")
@@ -572,12 +577,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                    .set_name("dO")
                                    .set_dim({b, h, s_q, d_v})
                                    .set_stride(o_stride));
+        stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                   .set_name("stats")
+                                   .set_dim({b, h, s_q, 1})
+                                   .set_stride({h * s_q, s_q, 1, 1})
+                                   .set_data_type(fe::DataType_t::FLOAT));
       }
-      stats = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                    .set_name("stats")
-                                    .set_dim({b, h, s_q, 1})
-                                    .set_stride({h * s_q, s_q, 1, 1})
-                                    .set_data_type(fe::DataType_t::FLOAT));
 
       attn_scale = mha_graph->tensor(fe::graph::Tensor_attributes()
                                          .set_name("attn_scale")
