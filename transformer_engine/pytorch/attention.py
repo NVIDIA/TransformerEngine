@@ -104,13 +104,7 @@ if not fa_logger.hasHandlers():
 
 @functools.lru_cache(maxsize=None)
 def _get_supported_versions(version_min, version_max):
-    return (
-        ">= "
-        + str(version_min)
-        + ", "
-        + "<= "
-        + str(version_max)
-    )
+    return ">= " + str(version_min) + ", " + "<= " + str(version_max)
 
 
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
