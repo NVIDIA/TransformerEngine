@@ -237,7 +237,7 @@ def _make_graphed_callables(
     visited_te_modules = set()
     visited_params = set()
 
-    def hook_fn(module, inputs, outputs): # pylint: disable=unused-argument
+    def hook_fn(module, inputs, outputs):  # pylint: disable=unused-argument
         if isinstance(module, TransformerEngineBaseModule):
             visited_te_modules.add(module)
         visited_params.update(module.parameters(recurse=False))
