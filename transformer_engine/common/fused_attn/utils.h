@@ -129,9 +129,9 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu
 __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
                                              size_t hg, size_t d_qk, size_t d_v,
                                              int32_t *cu_seqlens_q_padded,
-                                             int32_t *cu_seqlens_kv_padded, int32_t *offsets_q,
-                                             int32_t *offsets_k, int32_t *offsets_v,
-                                             int32_t *offsets_o);
+                                             int32_t *cu_seqlens_kv_padded, int64_t *offsets_q,
+                                             int64_t *offsets_k, int64_t *offsets_v,
+                                             int64_t *offsets_o, int64_t *offsets_s);
 }  // namespace fused_attn
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);

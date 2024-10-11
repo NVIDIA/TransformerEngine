@@ -145,22 +145,22 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                        .set_name("offset_q")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_k")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_v")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_o")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
 
       std::vector<int64_t> q_stride(4);
       std::vector<int64_t> k_stride(4);
@@ -274,10 +274,17 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         O->set_output(true).set_dim({b, h, s_q, d_v}).set_stride(o_stride);
       }
 
+      if (is_ragged) {
+      Stats->set_output(true)
+          .set_data_type(fe::DataType_t::FLOAT)
+          .set_dim({b, h, s_q, 1})
+          .set_stride({h * s_q, 1, h, 1});
+      } else {
       Stats->set_output(true)
           .set_data_type(fe::DataType_t::FLOAT)
           .set_dim({b, h, s_q, 1})
           .set_stride({h * s_q, s_q, 1, 1});
+      }
 
       std::tuple<std::shared_ptr<fe::graph::Tensor_attributes>,  // Q
                  std::shared_ptr<fe::graph::Tensor_attributes>,  // K
@@ -314,7 +321,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
     size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -353,15 +360,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int32_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int32_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int32_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsS = nullptr;
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
-          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int32_t *>(devOffsetsQ),
-          static_cast<int32_t *>(devOffsetsK), static_cast<int32_t *>(devOffsetsV),
-          static_cast<int32_t *>(devOffsetsO));
+          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
+          static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
+          static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
@@ -451,6 +459,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
@@ -474,29 +483,34 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
       std::shared_ptr<fe::graph::Tensor_attributes> q, k, v, o, dO, stats, attn_scale;
       std::shared_ptr<fe::graph::Tensor_attributes> bias, dBias, seq_q, seq_kv;
-      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o;
+      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o, offset_stats;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       offset_q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_q")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_k")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_v")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
       offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_o")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT32));
+                                       .set_data_type(fe::DataType_t::INT64));
+      offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                       .set_name("offset_stats")
+                                       .set_dim({b + 1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(fe::DataType_t::INT64));
       std::vector<int64_t> q_stride(4);
       std::vector<int64_t> k_stride(4);
       std::vector<int64_t> v_stride(4);
@@ -577,6 +591,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_causal_mask(is_causal)
                                   .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
+
+      if (is_ragged) {
+        sdpa_backward_options.set_max_total_seq_len_q(s_q);
+      }
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
         sdpa_backward_options.set_sliding_window_length(window_size_left + 1);
@@ -671,8 +689,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o)
-                                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
+      auto offset_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o, offset_stats)
+                                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr, nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
@@ -690,17 +708,18 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     };
 
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, seq_q, seq_kv,
-          offset_q, offset_k, offset_v, offset_o, dropout_seed, dropout_offset] =
+          offset_q, offset_k, offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_bprop_cache, descriptor);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
     // Exit to request upper level API to allocate memory if needed
     size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
+      printf("workspace_sizes %d, %d, %d, %d\n",plan_workspace_size, actual_seqlen_workspace_size, seqlen_offsets_workspace_size, *workspace_size);
       return;
     }
 
@@ -749,19 +768,21 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int32_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int32_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int32_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
-          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int32_t *>(devOffsetsQ),
-          static_cast<int32_t *>(devOffsetsK), static_cast<int32_t *>(devOffsetsV),
-          static_cast<int32_t *>(devOffsetsO));
+          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
+          static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
+          static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
       variant_pack[offset_o] = devOffsetsO;
+      variant_pack[offset_stats] = devOffsetsS;
     }
 
     if (is_dropout) {
@@ -789,6 +810,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   const auto QKV_type = input_QKV->data.dtype;
   void *devPtrQKV = input_QKV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
     stride = typeToSize(QKV_type) * num_attn_heads * head_dim;
@@ -817,7 +839,11 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
@@ -831,7 +857,11 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
@@ -974,6 +1004,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrKV = input_KV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   size_t stride = 0;
   if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     stride = typeToSize(QKV_type) * num_gqa_groups * head_dim;
@@ -1004,7 +1035,11 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen_q, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
@@ -1018,7 +1053,11 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen_q, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
@@ -1163,6 +1202,7 @@ void fused_attn_arbitrary_seqlen_fwd(
   using namespace transformer_engine;
 
   const auto QKV_type = input_Q->data.dtype;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
@@ -1187,7 +1227,11 @@ void fused_attn_arbitrary_seqlen_fwd(
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen_q, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
@@ -1201,7 +1245,11 @@ void fused_attn_arbitrary_seqlen_fwd(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+          output_S->data.shape = {max_seqlen_q, num_attn_heads, 1};
+      } else {
+          output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
+      }
       output_S->data.dtype = DType::kFloat32;
       Tensor *output_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
       output_rng_state->data.dptr = nullptr;
