@@ -617,21 +617,21 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
 
 
-qkv_layouts_thd = ["thd_thd_thd"] #["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
+qkv_layouts_thd = ["thd_thd_thd"]  # ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    #"layout_0_1": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
-    #"layout_0_2": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
-    #"layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    #"layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    #"layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    # "layout_0_1": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
+    # "layout_0_2": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
+    # "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
+    # "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
+    # "layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
     "layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    #"layout_1_3": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    #"layout_1_4": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    #"layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
-    #"layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    #"layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    #"layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    # "layout_1_3": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    # "layout_1_4": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    # "layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
+    # "layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
+    # "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    # "layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
 }
 
 
@@ -645,10 +645,10 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-#    pad_between_seqs = True
-#    test_dot_product_attention(
-#        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
-#    )
+    #    pad_between_seqs = True
+    #    test_dot_product_attention(
+    #        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    #    )
     if get_cudnn_version() >= (9, 3, 0):
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
@@ -706,8 +706,8 @@ def _run_dot_product_attention(
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
-    print('cu_seqlens_q',cu_seqlens_q)
-    print('cu_seqlens_kv',cu_seqlens_kv)
+    print("cu_seqlens_q", cu_seqlens_q)
+    print("cu_seqlens_kv", cu_seqlens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
