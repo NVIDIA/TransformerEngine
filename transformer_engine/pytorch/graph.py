@@ -215,7 +215,7 @@ def _make_graphed_callables(
             warmup_func.append(func)
     else:
         fwd_idx = [0] * num_model_chunks
-        for idx, c_id in enumerate(_order):
+        for c_id in _order:
             if c_id > 0:
                 m_chunk = c_id - 1
                 for l_no in range(num_layers):
@@ -237,7 +237,7 @@ def _make_graphed_callables(
     visited_te_modules = set()
     visited_params = set()
 
-    def hook_fn(module, input, output):
+    def hook_fn(module, inputs, outputs): # pylint: disable=unused-argument
         if isinstance(module, TransformerEngineBaseModule):
             visited_te_modules.add(module)
         visited_params.update(module.parameters(recurse=False))
