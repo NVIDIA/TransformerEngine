@@ -2226,50 +2226,32 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
         softmax_lse = softmax_lse.to(torch.float)
-        for i in range(cp_size):
-            if qkv_format == "bshd":
-                out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
-                out_ = out[:, 1, ...]
-            elif qkv_format == "sbhd":
-                out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
-                out_ = out[1]
 
-            if i <= rank or not causal:
-                if qkv_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_out_correction(
-                        out.view(*out_per_step[i].shape),
-                        out_per_step[i],
-                        seq_dim,
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                    )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        False,
-                    )
-            else:
-                if qkv_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_out_correction(
-                        out_,
-                        out_per_step[i],
-                        seq_dim,
-                        softmax_lse_[..., 1, :],
-                        softmax_lse_per_step[i],
-                    )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        True,
-                    )
+        if qkv_format == "thd" or not causal:
+            tex.fused_out_correction_(
+                out,
+                out_per_step,
+                softmax_lse,
+                softmax_lse_per_step,
+                cu_seqlens_q_padded,
+                qkv_format,
+                cp_size,
+                rank,
+                causal,
+            )
+        else:
+            tex.fused_out_correction_lse_(
+                out,
+                out_per_step,
+                softmax_lse,
+                softmax_lse_,
+                softmax_lse_per_step,
+                cu_seqlens_q_padded,
+                qkv_format,
+                cp_size,
+                rank,
+                causal,
+            )
 
         kv = p2p_comm_buffers[-1]
         if qkv_format == "bshd":
