@@ -102,32 +102,36 @@ class TransposePrimitive(BasePrimitive):
             jnp.float8_e5m2,
         ]
 
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        ir_out_dtype = jax_dtype_to_ir_dtype(x_aval.dtype)
-        if static_axis_boundary >= 0:
-            for i in range(static_axis_boundary + 1):
-                assert ir_x_shape[i] == 1
+        if is_ffi_enabled():
+            name = "te_transpose_ffi"
+            out = ffi.ffi_lowering(name)(ctx, x)
+        else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            ir_out_dtype = jax_dtype_to_ir_dtype(x_aval.dtype)
+            if static_axis_boundary >= 0:
+                for i in range(static_axis_boundary + 1):
+                    assert ir_x_shape[i] == 1
 
-        transposed_x_shape = multidim_transpose(
-            ir_x_shape, static_axis_boundary, transpose_axis_boundary
-        )
+            transposed_x_shape = multidim_transpose(
+                ir_x_shape, static_axis_boundary, transpose_axis_boundary
+            )
 
-        out_types = [ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype)]
-        operands = [x]
-        operand_shapes = [ir_x_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [ir.RankedTensorType.get(transposed_x_shape, ir_out_dtype)]
+            operands = [x]
+            operand_shapes = [ir_x_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        te_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
-        contracted_x_shape = (
-            reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
-            reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),
-        )
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            contracted_x_shape, te_dtype, te_dtype
-        )
+            te_dtype = jax_dtype_to_te_dtype(x_aval.dtype)
+            contracted_x_shape = (
+                reduce(operator.mul, ir_x_shape[:transpose_axis_boundary]),
+                reduce(operator.mul, ir_x_shape[transpose_axis_boundary:]),
+            )
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                contracted_x_shape, te_dtype, te_dtype
+            )
 
-        out = custom_caller(TransposePrimitive.name, args, opaque, False)
+            out = custom_caller(TransposePrimitive.name, args, opaque, False)
 
         return out
 

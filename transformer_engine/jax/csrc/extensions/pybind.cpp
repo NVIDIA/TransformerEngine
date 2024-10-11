@@ -52,6 +52,7 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
 
+  dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
   dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
