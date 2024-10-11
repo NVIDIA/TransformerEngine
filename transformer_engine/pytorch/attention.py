@@ -4341,6 +4341,7 @@ def apply_rotary_pos_emb(
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
+        Should be `cu_seqlens_padded` when cp_size > 1.
     cp_size: int, default = 1.
         Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
     cp_rank: int, default = 0.
