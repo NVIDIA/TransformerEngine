@@ -17,7 +17,8 @@ void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType
   using namespace transformer_engine;
   if (A.data_ptr() == nullptr || B.data_ptr() == nullptr) {
     if (D.data_ptr() != nullptr && !accumulate) D.zero_();
-    if (bias.data_ptr() != nullptr) bias.zero_();
+    // torch.sum is able to handle 0-dim tensors
+    if (bias.data_ptr() != nullptr && grad) bias.copy_(B.sum(0));
     if (pre_gelu_out.data_ptr() != nullptr) pre_gelu_out.zero_();
     return;
   }
@@ -111,7 +112,8 @@ void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int 
   for (size_t i = 0; i < A.size(); i++) {
     if (A[i].data_ptr() == nullptr || B[i].data_ptr() == nullptr) {
       if (D[i].data_ptr() != nullptr && !accumulate) D[i].zero_();
-      if (bias[i].data_ptr() != nullptr) bias[i].zero_();
+      // torch.sum is able to handle 0-dim tensors
+      if (bias[i].data_ptr() != nullptr && grad) bias[i].copy_(B[i].sum(0));
       if (pre_gelu_out[i].data_ptr() != nullptr) pre_gelu_out[i].zero_();
       continue;
     }
