@@ -166,7 +166,7 @@ Error_Type ActLuFP8FFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type a
 
   auto *output = output_buf->untyped_data();
   float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX ActLuFP8 primitive.");
 
   if (!use_fp8(out_dtype)) {
     scale = nullptr;

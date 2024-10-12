@@ -113,7 +113,7 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto *input_cast = input_cast_buf->untyped_data();
   auto *input_cast_trans = input_cast_trans_buf->untyped_data();
   float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX CastTranspose primitive.");
 
   if (!use_fp8(out_dtype)) {
     scale = nullptr;

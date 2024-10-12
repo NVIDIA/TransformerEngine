@@ -216,6 +216,8 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
+
 void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 // Softmax
