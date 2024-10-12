@@ -165,11 +165,6 @@ void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int 
                      std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
                      bool use_split_accumulator, int math_sm_count);
 
-/*
- * This method is a performance-optimized version for the calculation of fwd and dgrad.
- * It's not for general purpose use. Taking the GEMM (m, k) * (k, n) for example, it handles
- * the case where m = 0, but not k = 0 or n = 0. For those cases, please use `te_grouped_gemm`.
- */
 void te_grouped_gemm_single_output(
     std::vector<at::Tensor> A, std::vector<at::Tensor> A_scale_inverse, int A_offset,
     transformer_engine::DType A_type, bool transa, std::vector<at::Tensor> B,

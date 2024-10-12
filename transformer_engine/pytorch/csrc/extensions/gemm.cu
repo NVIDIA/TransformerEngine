@@ -177,6 +177,8 @@ void te_grouped_gemm_single_output(
   void* d_i_ptr = reinterpret_cast<void*>(D.data_ptr());
   for (size_t i = 0; i < A.size(); i++) {
     if (m_splits[i] == 0) continue;
+    NVTE_CHECK(A[i].data_ptr() != nullptr, "A[", i, "] must not be nullptr.");
+    NVTE_CHECK(B[i].data_ptr() != nullptr, "B[", i, "] must not be nullptr.");
     NVTE_CHECK(A[i].is_contiguous(), "A[", i, "] must be contiguous.");
     NVTE_CHECK(B[i].is_contiguous(), "B[", i, "] must be contiguous.");
     te_A.emplace_back(make_tensor(
