@@ -25,6 +25,7 @@ def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor()
 
+
 def general_gemm(
     A: Union[torch.Tensor, Float8Tensor],
     B: Union[torch.Tensor, Float8Tensor],
@@ -76,9 +77,9 @@ def general_gemm(
         B,
         False,  # transb
         out,
-        empty_tensor, # if out_index is None else fp8_meta_tensor.scale[out_index],
+        empty_tensor,  # if out_index is None else fp8_meta_tensor.scale[out_index],
         out_dtype,
-        empty_tensor, # if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
+        empty_tensor,  # if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
         bias if use_bias else empty_tensor,
         bias_dtype,
         gelu_input,  # this is pre_gelu_out

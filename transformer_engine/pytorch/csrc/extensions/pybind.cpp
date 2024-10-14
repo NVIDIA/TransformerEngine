@@ -7,6 +7,7 @@
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
+
 #include <stdexcept>
 
 #include "../comm_gemm_overlap.h"
@@ -18,7 +19,8 @@ namespace pybind11::detail {
 template <>
 struct type_caster<transformer_engine::Float8Tensor> {
  public:
-  PYBIND11_TYPE_CASTER(transformer_engine::Float8Tensor, _("transformer_engine.pytorch.tensor.Float8Tensor"));
+  PYBIND11_TYPE_CASTER(transformer_engine::Float8Tensor,
+                       _("transformer_engine.pytorch.tensor.Float8Tensor"));
 
   bool load(handle src, bool) {
     std::cout << "Loading Float8Tensor!" << std::endl;
@@ -35,7 +37,7 @@ struct type_caster<transformer_engine::Float8Tensor> {
     return true;
   }
 
-  static handle cast(const transformer_engine::Float8Tensor& src, return_value_policy, handle) {
+  static handle cast(const transformer_engine::Float8Tensor &src, return_value_policy, handle) {
     throw std::runtime_error("Casting back from Float8Tensor not implemented yet!");
     return none().release();
   }
@@ -44,8 +46,8 @@ struct type_caster<transformer_engine::Float8Tensor> {
 }  // namespace pybind11::detail
 
 void test(pybind11::handle handle) {
-    at::Tensor t = handle.cast<at::Tensor>();
-    std::cout << t.size(0) << std::endl;
+  at::Tensor t = handle.cast<at::Tensor>();
+  std::cout << t.size(0) << std::endl;
 }
 
 std::string to_string(transformer_engine::DType t) {
@@ -72,23 +74,24 @@ std::string to_string(transformer_engine::DType t) {
 }
 
 void test2(transformer_engine::Float8Tensor tensor) {
-    //at::Tensor t = handle.cast<at::Tensor>();
-    std::cout << tensor.data.size(0) << std::endl;
-    std::cout << tensor.scale_inv.size(0) << std::endl;
-    std::cout << to_string(tensor.dtype) << std::endl;
+  //at::Tensor t = handle.cast<at::Tensor>();
+  std::cout << tensor.data.size(0) << std::endl;
+  std::cout << tensor.scale_inv.size(0) << std::endl;
+  std::cout << to_string(tensor.dtype) << std::endl;
 }
 
 template <typename InputType>
-using GemmFunc = std::vector<at::Tensor> (*)(InputType, bool, InputType,
-              bool, std::optional<at::Tensor>, at::Tensor, transformer_engine::DType,
-              at::Tensor, at::Tensor, transformer_engine::DType,
-              at::Tensor, bool, at::Tensor, size_t,
-              bool, bool, int);
+using GemmFunc = std::vector<at::Tensor> (*)(InputType, bool, InputType, bool,
+                                             std::optional<at::Tensor>, at::Tensor,
+                                             transformer_engine::DType, at::Tensor, at::Tensor,
+                                             transformer_engine::DType, at::Tensor, bool,
+                                             at::Tensor, size_t, bool, bool, int);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_test", test);
   m.def("cast_test2", test2);
-  m.def("te_gemm2", static_cast<GemmFunc<transformer_engine::Float8Tensor>>(&te_gemm2), "CublasLt GEMM");
+  m.def("te_gemm2", static_cast<GemmFunc<transformer_engine::Float8Tensor>>(&te_gemm2),
+        "CublasLt GEMM");
   m.def("te_gemm2", static_cast<GemmFunc<at::Tensor>>(&te_gemm2), "CublasLt GEMM");
 
   // Permutation functions
