@@ -139,7 +139,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
       std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
       std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
-      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o, offset_stats;
+      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o,
+          offset_stats;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       offset_q = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -163,10 +164,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                        .set_stride({1, 1, 1, 1})
                                        .set_data_type(fe::DataType_t::INT64));
       offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                       .set_name("offset_stats")
-                                       .set_dim({b + 1, 1, 1, 1})
-                                       .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                           .set_name("offset_stats")
+                                           .set_dim({b + 1, 1, 1, 1})
+                                           .set_stride({1, 1, 1, 1})
+                                           .set_data_type(fe::DataType_t::INT64));
 
       std::vector<int64_t> q_stride(4);
       std::vector<int64_t> k_stride(4);
@@ -303,8 +304,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o, offset_stats)
-                                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr, nullptr);
+      auto offset_tuple =
+          is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o, offset_stats)
+                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr, nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
