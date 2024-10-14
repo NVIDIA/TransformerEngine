@@ -115,6 +115,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_k
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_v
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_o
+                   std::shared_ptr<fe::graph::Tensor_attributes>,   // offset_stats
                    std::shared_ptr<fe::graph::Tensor_attributes>,   // dropout_seed
                    std::shared_ptr<fe::graph::Tensor_attributes>>;  // dropout_offset
 
@@ -138,7 +139,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
       std::shared_ptr<fe::graph::Tensor_attributes> Q, K, V, attn_scale;
       std::shared_ptr<fe::graph::Tensor_attributes> bias, seq_q, seq_kv;
-      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o;
+      std::shared_ptr<fe::graph::Tensor_attributes> offset_q, offset_k, offset_v, offset_o, offset_stats;
       std::shared_ptr<fe::graph::Tensor_attributes> dropout_seed, dropout_offset;
 
       offset_q = mha_graph->tensor(fe::graph::Tensor_attributes()
@@ -158,6 +159,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                        .set_data_type(fe::DataType_t::INT64));
       offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_o")
+                                       .set_dim({b + 1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(fe::DataType_t::INT64));
+      offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                       .set_name("offset_stats")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
                                        .set_data_type(fe::DataType_t::INT64));
@@ -278,7 +284,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         Stats->set_output(true)
             .set_data_type(fe::DataType_t::FLOAT)
             .set_dim({b, h, s_q, 1})
-            .set_stride({h * s_q, 1, h, 1});
+            .set_stride({h * s_q, 1, h, 1})
+            .set_ragged_offset(offset_stats);
       } else {
         Stats->set_output(true)
             .set_data_type(fe::DataType_t::FLOAT)
@@ -296,8 +303,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o)
-                                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
+      auto offset_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o, offset_stats)
+                                    : std::make_tuple(nullptr, nullptr, nullptr, nullptr, nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
@@ -315,13 +322,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     };
 
     auto [mha_graph, Q, K, V, attn_scale, O, Stats, bias, seq_q, seq_kv, offset_q, offset_k,
-          offset_v, offset_o, dropout_seed, dropout_offset] =
+          offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_fprop_cache, descriptor);
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
     size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 4 * (b + 1) * sizeof(int64_t);
+    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -363,7 +370,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
       void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
       void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsS = nullptr;
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
@@ -374,6 +381,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
       variant_pack[offset_o] = devOffsetsO;
+      variant_pack[offset_stats] = devOffsetsS;
     }
 
     if (is_dropout) {
@@ -555,7 +563,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                       .set_name("stats")
                                       .set_dim({b, h, s_q, 1})
                                       .set_stride({h * s_q, 1, h, 1})
-                                      .set_data_type(fe::DataType_t::FLOAT));
+                                      .set_data_type(fe::DataType_t::FLOAT)
+                                      .set_ragged_offset(offset_stats));
       } else {
         q = mha_graph->tensor(fe::graph::Tensor_attributes()
                                   .set_name("Q")
@@ -726,8 +735,6 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
-      printf("workspace_sizes %d, %d, %d, %d\n", plan_workspace_size, actual_seqlen_workspace_size,
-             seqlen_offsets_workspace_size, *workspace_size);
       return;
     }
 

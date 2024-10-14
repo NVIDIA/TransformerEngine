@@ -371,9 +371,7 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < b + 1) {
     offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
-    if (offsets_s != nullptr) {
-      offsets_s[tid] = h * cu_seqlens_q_padded[tid];
-    }
+    offsets_s[tid] = h * cu_seqlens_q_padded[tid];
     switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
         offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
