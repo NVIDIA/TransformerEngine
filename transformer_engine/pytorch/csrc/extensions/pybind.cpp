@@ -37,6 +37,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &scaled_aligned_causal_masked_softmax_backward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
         py::call_guard<py::gil_scoped_release>());
+  m.def("fused_out_correction_lse_", &fused_out_correction_lse_,
+        "fused out correction after qkv calculation with lse_",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_out_correction_", &fused_out_correction_,
+        "fused out correction after qkv calculation without lse_",
+        py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8",
@@ -180,9 +186,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Correct the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
   m.def("thd_read_second_half_lse", &thd_read_second_half_lse,
         "Read the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
-  m.def("thd_out_correction", &thd_out_correction,
-        "Correct the THD format output of context parallelism in forward pass",
-        py::call_guard<py::gil_scoped_release>());
   m.def("thd_grad_correction", &thd_grad_correction,
         "Correct the THD format gradients of context parallelism in backward pass",
         py::call_guard<py::gil_scoped_release>());
