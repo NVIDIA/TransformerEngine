@@ -88,7 +88,6 @@ target_include_directories(transformer_engine PUBLIC
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cuda_driver
                       CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
