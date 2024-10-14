@@ -811,6 +811,14 @@ L1_pytorch_distributed_unittest--H100_4GPU:
     - .L1_test
     - .H100_4GPU
 
+L1_pytorch_FA_versions_test--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_1GPU
+
 L0_jax_unittest--V100_1GPU:
     variables:
       FRAMEWORK: jax
