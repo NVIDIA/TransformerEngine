@@ -49,7 +49,7 @@ def _make_fp8_attr_property_funcs(name: str) -> Any:
     def del_func(self) -> None:
         del self._fp8_attrs[name]
 
-    return dict(fget=get_func, fset=set_func, fdel=del_func)
+    return {"fget": get_func, "fset": set_func, "fdel": del_func}
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -192,15 +192,15 @@ class _IdentityFunc(torch.autograd.Function):
             return tensor
 
         # Construct new tensor if constructor kwargs are provided
-        default_kwargs = dict(
-            data=tensor._data,
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
-            fp8_dtype=tensor._fp8_dtype,
-            fp8_scale_inv=tensor._scale_inv,
-            dtype=tensor.dtype,
-        )
+        default_kwargs = {
+            "data": tensor._data,
+            "fp8_meta": tensor._fp8_meta,
+            "fp8_meta_forward": tensor._fp8_meta_forward,
+            "fp8_meta_index": tensor._fp8_meta_index,
+            "fp8_dtype": tensor._fp8_dtype,
+            "fp8_scale_inv": tensor._scale_inv,
+            "dtype": tensor.dtype,
+        }
         for key, val in default_kwargs.items():
             if key not in init_kwargs:
                 init_kwargs[key] = val
@@ -456,14 +456,14 @@ class Float8Tensor(QuantizedTensor):
         See constructor for list of keyword arguments.
 
         """
-        default_kwargs = dict(
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
-            fp8_dtype=tensor._fp8_dtype,
-            fp8_scale_inv=tensor._scale_inv,
-            dtype=tensor.dtype,
-        )
+        default_kwargs = {
+            "fp8_meta": tensor._fp8_meta,
+            "fp8_meta_forward": tensor._fp8_meta_forward,
+            "fp8_meta_index": tensor._fp8_meta_index,
+            "fp8_dtype": tensor._fp8_dtype,
+            "fp8_scale_inv": tensor._scale_inv,
+            "dtype": tensor.dtype,
+        }
         for key, val in default_kwargs.items():
             if key not in kwargs:
                 kwargs[key] = val
@@ -710,10 +710,7 @@ class Float8Tensor(QuantizedTensor):
             data_transpose = self._transpose.detach().clone()
         return _IdentityFunc.apply(
             self,
-            dict(
-                data=data,
-                data_transpose=data_transpose,
-            ),
+            { "data": data, "data_transpose": data_transpose }
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:

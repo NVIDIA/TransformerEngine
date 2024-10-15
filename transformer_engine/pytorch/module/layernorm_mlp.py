@@ -241,23 +241,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 activation_dtype,
                 get_workspace(),
             ]
-            fp8_gemm_kwargs = dict(
-                bias=fc1_bias,
-                use_bias=use_fc1_bias,
-                use_split_accumulator=_2X_ACC_FPROP,
-                ub_algo=ub_algo_ag if ub_overlap_ag else None,
-                ub=ub_obj_lnout if ub_overlap_ag else None,
-                extra_output_tensor=ln_out if ub_overlap_ag else None,
-            )
+            fp8_gemm_kwargs = {
+                "bias": fc1_bias,
+                "use_bias": use_fc1_bias,
+                "use_split_accumulator": _2X_ACC_FPROP,
+                "ub_algo": ub_algo_ag if ub_overlap_ag else None,
+                "ub": ub_obj_lnout if ub_overlap_ag else None,
+                "extra_output_tensor": ln_out if ub_overlap_ag else None,
+            }
             if gemm_gelu_fusion:
                 fp8_gemm_args[8] = torch.uint8  # out_dtype
                 fp8_gemm_kwargs.update(
-                    dict(
-                        gelu=True,
-                        out_index=tex.FP8FwdTensors.GEMM2_INPUT,
-                        fp8_meta_tensor=fp8_meta["scaling_fwd"],
-                        D_dtype=fp8_dtype_forward,
-                    )
+                    {
+                        "gelu": True,
+                        "out_index": tex.FP8FwdTensors.GEMM2_INPUT,
+                        "fp8_meta_tensor": fp8_meta["scaling_fwd"],
+                        "D_dtype": fp8_dtype_forward,
+                    }
                 )
             fp8_gemm_out = tex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
             if not is_grad_enabled:
