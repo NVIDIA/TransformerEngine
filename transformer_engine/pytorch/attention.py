@@ -7506,6 +7506,67 @@ class DotProductAttention(TransformerEngineBaseModule):
             based on its internal logic. These optimizations trade memory for performance
             and should be used with care.
 
+        .. _note::
+
+            Cumulative sequence length tensors `cu_seqlens_q`, `cu_seqlens_kv`, `cu_seqlens_q_padded`,
+            `cu_seqlens_kv_padded` help identify the starting and ending points of each sequence
+            in the batch. They are used in two cases: 1)`qkv_format = {bshd, sbhd}` and
+            `attn_mask_type = {padding, padding_causal, padding_causal_bottom_right}`, and 2)
+            `qkv_format = thd`.
+
+            For self-attention, `cu_seqlens_q = cu_seqlens_kv`, `cu_seqlens_q_padded = cu_seqlens_kv_padded`.
+            For cross-attention, `cu_seqlens_q != cu_seqlens_kv`, `cu_seqlens_q_padded != cu_seqlens_kv_padded`.
+            When there is no padding between sequences in the batch, `cu_seqlens_q_padded = cu_seqlens_q`,
+            `cu_seqlens_kv_padded = cu_seqlens_kv`. When there is padding, an example of self-attention,
+            batch size 3 with sequences [a a PAD b b b PAD c c c c PAD], has cumulative tensors
+            `cu_seqlens_q = cu_seqlens_kv = [0, 2, 5, 9]`, and
+            `cu_seqlens_q_padded = cu_seqlens_kv_padded = [0, 3, 7, 12]`.
+
+            All cumulative tensors should have the shape, [batch_size + 1]. The definition of batch_size
+            is as follows.
+            - `qkv_format = {bshd, sbhd}`: the number of sequences in the batch. It may vary from batch
+              to batch, but it must match the `b` dimension of the tensor shapes of `query_layer`,
+              `key_layer`, and `value_layer`.
+            - `qkv_format = thd`: batch_size >= the maximum number of sequences in any batch in a run.
+              It is constant throughout the run.
+
+            For `max_seqlens_q` and `max_seqlens_kv`, we have the following definitions.
+            - `qkv_format = {bshd, sbhd}`: the maximum sequence length for `query_layer`, and for
+              `key_layer` and `value_layer`. When passed as `None`, they will be set as the `s` dimension
+              of the shapes of `query_layer`, and `key_layer`, `value_layer`, respectively.
+            - `qkv_format = thd`: `max_seqlens_q` and `max_seqlens_kv` must be set to appropriate values
+              since Transformer Engine 2.0. If `t_q`, `t_kv` are respectively the total number of tokens
+              in `query_layer` and `key_layer`, `value_layer` in a given batch, and `max_t_q`, `max_t_kv`
+              are the maximums of `t_q`, `t_kv` for all batches, then it must be satisfied that
+              `max_seqlen_q >= max_t_q` and `max_seqlen_kv >= max_t_kv`. `max_seqlens_q` and `max_seqlens_kv`
+              are constant throughout the run.
+
+            An example of a training scenario with 5 batches is as follows.
+
+            `bshd/sbhd + padding` and `thd` scenarios.
+            , if there are 5 batches, each with 1, 2, 3, 4, 2 sequences, and we consider
+            the self-attention case with no padding between sequences, i.e. all four cumulative
+            sequence length tensors are equal for each batch.
+
+                     | actual_seqlens |       `qkv_format = {bshd, sbhd}`
+            batch id | (without PADs) | batch_size | max_seqlen | cu_seqlens
+            -----------------------------------------------------------------------
+                1    | [8]            |     1      |     8      | [0, 8]
+                2    | [2, 3]         |     2      |     3      | [0, 2, 5]
+                3    | [1, 2, 7]      |     3      |     7      | [0, 1, 3, 10]
+                4    | [1, 1, 2, 1]   |     4      |     2      | [0, 1, 2,  4, 5]
+                5    | [3, 2]         |     2      |     3      | [0, 3, 5]
+
+                     |                |       `qkv_format = thd`
+            batch id | actual_seqlens | batch_size | max_seqlen | cu_seqlens
+            -----------------------------------------------------------------------
+                1    | [8]            |     4      |    10      | [0, 8, 8,  8,  8]
+                2    | [2, 3]         |     4      |    10      | [0, 2, 5,  5,  5]
+                3    | [1, 2, 7]      |     4      |    10      | [0, 1, 3, 10, 10]
+                4    | [1, 1, 2, 1]   |     4      |    10      | [0, 1, 2,  4,  5]
+                5    | [3, 2]         |     4      |    10      | [0, 3, 5,  5,  5]
+
+
         Parameters
         ----------
         query_layer : torch.Tensor
@@ -7527,26 +7588,30 @@ class DotProductAttention(TransformerEngineBaseModule):
                    If provided, overrides :attr:`qkv_format` from initialization.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
-                   with shape [batch_size + 1] and dtype torch.int32.
+                   with shape [batch_size + 1] and dtype torch.int32. See `Note <note>`_ for the
+                   definition of batch_size.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
-                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+                   and `value_layer`, with shape [batch_size + 1] and dtype torch.int32. See
+                   `Note <note>`_ for the definition of batch_size.
         cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (with offset) in a batch for
                    `query_layer`, with shape [batch_size + 1] and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_q_padded = cu_seqlens_q`.
+                   `cu_seqlens_q_padded = cu_seqlens_q`. See `Note <note>`_ for the
+                   definition of batch_size.
         cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
                    When there is no padding between sequences in a batch,
-                   `cu_seqlens_kv_padded = cu_seqlens_kv`.
+                   `cu_seqlens_kv_padded = cu_seqlens_kv`. See `Note <note>`_ for the
+                   definition of batch_size.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
-                      Calculated from `cu_seqlens_q` if not provided.
+                      See `Note <note>`_ for the use of `max_seqlen_q`.
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
-                       Calculated from `cu_seqlens_kv` if not provided.
+                       See `Note <note>`_ for the use of `max_seqlen_q`.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
                        'arbitrary'}, default = `None`. Type of attention mask passed into
