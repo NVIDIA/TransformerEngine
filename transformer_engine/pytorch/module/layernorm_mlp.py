@@ -173,6 +173,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Column Parallel Linear
         ln_out_gathered = False
+        ub_algo_ag = None
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             ln_out = torch.empty_like(ln_out)
@@ -277,12 +278,13 @@ class _LayerNormMLP(torch.autograd.Function):
             if not is_grad_enabled:
                 clear_tensor_data(fc1_out)
 
-            fc2_out_index, fc2_meta_tensor, fc2_te_type, out_type = (
-                None,
-                None,
-                None,
-                activation_dtype,
-            )
+            # Initialize buffer for FC2 output
+            fc2_out_index = None
+            fc2_meta_tensor = None
+            fc2_te_type = None
+            out_type = activation_dtype
+            rs_out = None
+            ub_algo_rs = None
             if ub_overlap_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
@@ -579,26 +581,25 @@ class _LayerNormMLP(torch.autograd.Function):
 
             activation_func = _act_func(ctx.activation)[1]
 
+            # Disable Userbuffers with invalid configurations
+            tp_world_size = get_distributed_world_size(ctx.tp_group)
+            if tp_world_size == 1:
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_overlap_ag = False
+            if ctx.ub_bulk_dgrad and not fc1_weight.requires_grad:
+                ctx.ub_bulk_dgrad = False
+
+            # Initialize Userbuffers
+            ub_algo = None
             if ctx.ub_overlap_rs_dgrad:
                 ctx.ub_bulk_dgrad = False
                 ctx.ub_bulk_wgrad = False
-                tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
-                    ctx.ub_overlap_rs_dgrad = False
-            if ctx.ub_bulk_dgrad:
-                tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1 or not fc1_weight.requires_grad:
-                    ctx.ub_bulk_dgrad = False
             if ctx.ub_bulk_dgrad:
                 dim_size = list(ln_out.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ub_obj_lnout = get_ub("fc1_dgrad")
                 ub_obj_lnout.copy_input_to_ubuf(ln_out, 1)
-            if ctx.ub_overlap_ag:
-                tp_world_size = get_distributed_world_size(ctx.tp_group)
-                if tp_world_size == 1:
-                    ctx.ub_overlap_ag = False
-
             if ctx.ub_overlap_ag:
                 dim_size = list(grad_outputs[0].size())
                 dim_size[0] = dim_size[0] * tp_world_size
@@ -640,6 +641,9 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
+            # FC2 DGRAD and WGRAD
+            fc2_wgrad = None
+            fc1_bias_grad = None
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -774,6 +778,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_obj_dgrad.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
 
                 # Set UB algo and UB obj for fc1_dgrad bulk/pipelined overlap
+                ub_algo = None
+                ub_obj = None
+                rs_out = None
                 if ctx.ub_bulk_dgrad:
                     ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
                     ub_obj = ub_obj_lnout
@@ -793,9 +800,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         else:
                             ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
                     ub_obj = ub_obj_dgrad
-                else:
-                    ub_algo = None
-                    ub_obj = None
+
                 # FC1 DGRAD: Unconditional
                 _ = tex.fp8_gemm(
                     fc1_weight_fp8.transpose_2d(),
@@ -923,6 +928,7 @@ class _LayerNormMLP(torch.autograd.Function):
             elif ctx.set_parallel_mode and ctx.tensor_parallel:
                 fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
 
+            fc1_wgrad = None
             if fc1_weight.requires_grad:
                 if ctx.fp8:
                     # FC1 WGRAD
@@ -1046,6 +1052,8 @@ class _LayerNormMLP(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
                 dbeta = None
+            else:
+                raise RuntimeError(f"Unexpected normalization ({ctx.normalization})")
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
 

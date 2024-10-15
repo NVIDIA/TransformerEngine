@@ -232,6 +232,8 @@ def fused_attn_fwd_qkvpacked(
         ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         assert attn_bias.dtype == qkv.dtype, "attn_bias tensor must be in the same dtype as qkv."
 
+    rng_elts_per_thread = None
+
     assert (
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
@@ -260,6 +262,8 @@ def fused_attn_fwd_qkvpacked(
         assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
         assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
         assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+
+    assert rng_elts_per_thread is not None, "Failed to find number of RNG elements per thread"
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_qkvpacked(
@@ -625,6 +629,8 @@ def fused_attn_fwd_kvpacked(
         ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
 
+    rng_elts_per_thread = None
+
     assert (
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
@@ -653,6 +659,8 @@ def fused_attn_fwd_kvpacked(
         assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
         assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
         assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+
+    assert rng_elts_per_thread is not None, "Failed to find number of RNG elements per thread"
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd_kvpacked(
@@ -1050,6 +1058,8 @@ def fused_attn_fwd(
         ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
         assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
 
+    rng_elts_per_thread = None
+
     assert (
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
@@ -1078,6 +1088,8 @@ def fused_attn_fwd(
         assert q_scale_o is not None, "q_scale_o is required as an input for FP8 fused attention."
         assert amax_s is not None, "amax_s is required as an input for FP8 fused attention."
         assert amax_o is not None, "amax_o is required as an input for FP8 fused attention."
+
+    assert rng_elts_per_thread is not None, "Failed to find number of RNG elements per thread"
 
     # execute kernel
     output_tensors = tex.fused_attn_fwd(

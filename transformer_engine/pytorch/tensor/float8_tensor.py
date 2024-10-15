@@ -977,6 +977,7 @@ class Float8Tensor(QuantizedTensor):
                     requires_grad=tensor.requires_grad,
                     device=new_device,
                 )
+                # pylint: disable=unnecessary-dunder-call
                 super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._data = tensor._data
             self._fp8_attrs = tensor._fp8_attrs
@@ -1005,6 +1006,7 @@ class Float8Tensor(QuantizedTensor):
                 requires_grad=tensor.requires_grad,
                 device=self._data.device,
             )
+            # pylint: disable=unnecessary-dunder-call
             super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
             if self._transpose is not None:
                 self._transpose = torch.empty(
