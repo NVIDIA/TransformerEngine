@@ -147,7 +147,7 @@ class RMSNorm(torch.nn.Module):
         self.sequence_parallel = sequence_parallel
         self.activation_dtype: Optional[torch.dtype] = None
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward RMSNorm C APIs. These envvars can be used to prevent the LN

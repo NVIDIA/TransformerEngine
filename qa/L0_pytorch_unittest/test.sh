@@ -6,7 +6,7 @@ set -e
 
 : ${TE_PATH:=/opt/transformerengine}
 
-pip install pytest==8.2.1 onnxruntime==1.13.1
+pip install pytest==8.2.1 onnxruntime==1.19.2
 pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py
 pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py
 pytest -v -s $TE_PATH/tests/pytorch/test_deferred_init.py

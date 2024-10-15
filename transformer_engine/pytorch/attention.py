@@ -1043,8 +1043,11 @@ def get_alibi(
         assert _alibi_cache["_alibi_slopes"] is not None, "ALiBi slopes can not be None!"
         if _alibi_cache["_alibi_slopes"].dim() == 1:
             slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
-        if _alibi_cache["_alibi_slopes"].dim() == 2:
+        elif _alibi_cache["_alibi_slopes"].dim() == 2:
             slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
+        else:
+            raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
+
         bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
             1, 1, max_seqlen_q, 1
         ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
@@ -1598,6 +1601,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
+        seq_dim = None
         if qkv_format in ["bshd", "sbhd"]:
             seq_dim = qkv_format.index("s")
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]

@@ -252,12 +252,12 @@ class _LayerNormMLP(torch.autograd.Function):
             if gemm_gelu_fusion:
                 fp8_gemm_args[8] = torch.uint8  # out_dtype
                 fp8_gemm_kwargs.update(
-                    dict(
-                        gelu=True,
-                        out_index=tex.FP8FwdTensors.GEMM2_INPUT,
-                        fp8_meta_tensor=fp8_meta["scaling_fwd"],
-                        D_dtype=fp8_dtype_forward,
-                    )
+                    {
+                        "gelu": True,
+                        "out_index": tex.FP8FwdTensors.GEMM2_INPUT,
+                        "fp8_meta_tensor": fp8_meta["scaling_fwd"],
+                        "D_dtype": fp8_dtype_forward,
+                    }
                 )
             fp8_gemm_out = tex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
             if not is_grad_enabled:
@@ -1384,7 +1384,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata(num_gemms=2)
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
