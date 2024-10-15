@@ -46,6 +46,8 @@ class DropPath(torch.nn.Module):
     (when applied in main path of residual blocks).
     """
 
+    # pylint: disable=too-few-public-methods
+
     def __init__(self, drop_prob: float = 0.0) -> None:
         super().__init__()
         self.drop_prob = drop_prob

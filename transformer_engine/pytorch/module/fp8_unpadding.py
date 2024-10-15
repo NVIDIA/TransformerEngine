@@ -71,6 +71,8 @@ class Fp8Unpadding(torch.nn.Module):
                number of GEMMs to be performed simutaneously.
     """
 
+    # pylint: disable=too-few-public-methods
+
     def __init__(
         self,
         num_gemms,
