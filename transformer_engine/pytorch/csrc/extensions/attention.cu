@@ -9,6 +9,9 @@
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
 
+#include <torch/torch.h>
+#include <iostream>
+
 // get the fused attention backend
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
     const transformer_engine::DType q_dtype, const transformer_engine::DType kv_dtype,
@@ -1161,6 +1164,10 @@ std::vector<at::Tensor> fused_attn_bwd(
                       at::cuda::getCurrentCUDAStream());
 
   // allocate memory for workspace
+  // auto shapedim = static_cast<int64_t>(workspace.data[0]);
+  // std::cout << "Shape of the workspace-ndim: " << workspace.shape().ndim << std::endl;
+  // std::cout << "Shape of the workspace-data"  << shapedim << std::endl;
+
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());

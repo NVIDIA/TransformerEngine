@@ -20,6 +20,7 @@ from .fp8 import (
 from .distributed import get_all_rng_states, graph_safe_rng_available
 from .module.base import TransformerEngineBaseModule
 
+from transformer_engine.pytorch import cpp_extensions as tex
 
 __all__ = ["make_graphed_callables"]
 
@@ -30,112 +31,92 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
-class CudagraphCache():
-    """Reduces the memory overhead of cudagraph capture by sharing temporary 
-    tensors over different transformer layers. The cache is expected to be populated
-    during warmup. Memory is allocated during warmup via `cached_empty_like` and 
-    `cached_empty` and is identified with a key. Different layers use the same key 
-    to access previously allocated memory, allowing different transformer layers to 
-    reuse this memory. """
+# class CudagraphCache():
+#     """Reduces the memory overhead of cudagraph capture by sharing temporary 
+#     tensors over different transformer layers. The cache is expected to be populated
+#     during warmup. Memory is allocated during warmup via `cached_empty_like` and 
+#     `cached_empty` and is identified with a key. Different layers use the same key 
+#     to access previously allocated memory, allowing different transformer layers to 
+#     reuse this memory. """
 
-    OLD_CACHES = []
-    CUDAGRAPH_CACHE = [{}]
-    total_microbatches = 1
-    current_microbatch = 0
+#     OLD_CACHES = []
+#     CUDAGRAPH_CACHE = [{}]
+#     total_microbatches = 1
+#     current_microbatch = 0
 
-    @staticmethod
-    def set_microbatches(total_microbatches):
-        """"Create a copy of the cache for each microbatch. Required for when
-        capturing multiple microbatches, as different micrbatches should not
-        share data, for instance the case of interleaved pipeline parallelism."""
+#     @staticmethod
+#     def insert(key, tensor):
+#         """Insert a tensor in the cache, identified with `key` """
+#         cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
 
-        CudagraphCache.total_microbatches = total_microbatches
-        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE
-        for _ in range(1, total_microbatches):
-            new_cache = {}
-            for key, value in cudagraph_cache[-1].items():
-                new_cache[key] = torch.empty_like(value)
-            cudagraph_cache.append(new_cache)
-
-    @staticmethod
-    def switch_microbatch(current_microbatch):
-        """"Change the cache to the current microbatch. """
-        CudagraphCache.current_microbatch = current_microbatch
-
-    @staticmethod
-    def reset():
-        """Save the current cache and clear the cache."""
-        old_caches = CudagraphCache.OLD_CACHES
-        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE
-
-        old_caches.append(cudagraph_cache)
-        cudagraph_cache = [{}]
-
-        CudagraphCache.total_microbatches = 1
-        CudagraphCache.current_microbatch = 0
-
-    @staticmethod
-    def insert(key, tensor):
-        """Insert a tensor in the cache, identified with `key` """
-        cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
-
-        assert key not in cudagraph_cache, f"Tried inserting duplicate key {key} !"
-        cudagraph_cache[key] = tensor
+#         assert key not in cudagraph_cache, f"Tried inserting duplicate key {key} !"
+#         cudagraph_cache[key] = tensor
 
 
-    @staticmethod
-    def can_insert(key):
-        """Check if a key is in the cache."""
-        return key not in CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
+#     @staticmethod
+#     def can_insert(key):
+#         """Check if a key is in the cache."""
+#         return key not in CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
 
-    @staticmethod
-    def get_copy(key, requires_grad):
-        """Retrieve a tensor in the cache, identified with `key` """
-        cached = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
-        copy = torch.Tensor()
-        copy.requires_grad = requires_grad
-        copy.data = cached
-        return copy
+#     @staticmethod
+#     def get_copy(key, requires_grad):
+#         """Retrieve a tensor in the cache, identified with `key` """
+#         cached = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
+#         copy = torch.Tensor()
+#         copy.requires_grad = requires_grad
+#         copy.data = cached
+#         return copy
 
+# def _insert_into_graph(key, tensor):
 
 def cached_empty_like(tensor, key):
-    if CudagraphCache.can_insert(key):
-        CudagraphCache.insert(
-            key, 
-            torch.empty_like(tensor, requires_grad=tensor.requires_grad)
-        )
-    return CudagraphCache.get_copy(key, tensor.requires_grad)
+    copy = tex.empty_like_cached(tensor)
+    wrapper = torch.Tensor()
+    wrapper.data = copy
+    wrapper.requires_grad = tensor.requires_grad
+    
+    return wrapper
 
 def cached_empty(shape, dtype, device, key, requires_grad):
-    if CudagraphCache.can_insert(key):
-        tensor = torch.empty(
-            shape,
-            dtype=dtype, 
-            device=device,
-            requires_grad=requires_grad,
-        )
-        CudagraphCache.insert(key, tensor)
-
-    out = CudagraphCache.get_copy(key, requires_grad)
-    return out
-
-def cached_contiguous(tensor, key):
-    cached_copy = cached_empty_like(tensor, key)
-    tensor.data = cached_copy
-
+    #noop for now
+    tensor = torch.empty(
+        shape,
+        dtype=dtype, 
+        device=device,
+        requires_grad=requires_grad,
+    )   
     return tensor
+    # if CudagraphCache.can_insert(key):
+    #     tensor = torch.empty(
+    #         shape,
+    #         dtype=dtype, 
+    #         device=device,
+    #         requires_grad=requires_grad,
+    #     )
+    #     CudagraphCache.insert(key, tensor)
+
+    # out = CudagraphCache.get_copy(key, requires_grad)
+    # return out
+
+# def cached_contiguous(tensor, key):
+#     cached_copy = cached_empty_like(tensor, key)
+#     tensor.data = cached_copy
+
+#     return tensor
 
 
 def set_capture_start() -> None:
     """Record beginning of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING
     _IS_GRAPH_CAPTURING = True
+    # tex.set_capture_start()
 
 
 def set_capture_end() -> None:
     """Record end of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING
     _IS_GRAPH_CAPTURING = False
+    # tex.set_capture_end()
 
 
 def is_graph_capturing() -> None:
@@ -312,7 +293,9 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
-            for _ in range(num_warmup_iters):
+            for idx in range(num_warmup_iters):
+                print(f"{torch.cuda.current_device()} WARMUP ITER {idx}")
+
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 grad_inputs = torch.autograd.grad(
                     outputs=tuple(o for o in outputs if o.requires_grad),
@@ -322,9 +305,9 @@ def _make_graphed_callables(
                     allow_unused=allow_unused_input,
                 )
                 del outputs, grad_inputs
+                tex.set_graph_cached_locked()
     torch.cuda.synchronize()
 
-    CudagraphCache.set_microbatches(num_microbatches)
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,
     # the safest approach is to capture all passes in the same order they'll run:
@@ -348,7 +331,6 @@ def _make_graphed_callables(
             if c_id > 0:
                 # Capture forward graph for model chunk c_id, microbatch fwd_idx[c_id-1]
                 m_chunk = c_id - 1
-                CudagraphCache.switch_microbatch(fwd_idx[c_id-1])
 
                 for l_no in range(num_layers):
                     func = callables[m_chunk * num_layers + l_no]
@@ -368,7 +350,6 @@ def _make_graphed_callables(
             else:
                 # Capture backward graph for model chunk c_id, microbatch bwd_idx[-c_id-1]
                 m_chunk = -c_id - 1
-                CudagraphCache.switch_microbatch(bwd_idx[-c_id-1])
                 for l_no in list(reversed(range(num_layers))):
                     per_callable_bwd_idx = (m_chunk * num_microbatches * num_layers) + (
                         bwd_idx[m_chunk] * num_layers + l_no
@@ -406,12 +387,14 @@ def _make_graphed_callables(
                     per_callable_static_grad_outputs[per_callable_bwd_idx] = static_grad_outputs
                     per_callable_static_grad_inputs[per_callable_bwd_idx] = static_grad_inputs
                 bwd_idx[m_chunk] += 1   
+   
+        tex.set_graph_cached_locked()
     else:
         # Capture forward graphs
         per_callable_static_outputs = []
         per_callable_output_unflatten_spec = []
         graph_id = 0
-        for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):            
+        for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):   
             with torch.cuda.graph(fwd_graph, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
@@ -420,6 +403,7 @@ def _make_graphed_callables(
             flatten_outputs, spec = _tree_flatten(outputs)
             per_callable_static_outputs.append(tuple(flatten_outputs))
             per_callable_output_unflatten_spec.append(spec)
+            tex.set_graph_cached_locked()         
 
         # Capture backward graphs in reverse order
         per_callable_static_grad_outputs = []
@@ -458,6 +442,7 @@ def _make_graphed_callables(
 
             per_callable_static_grad_outputs.append(static_grad_outputs)
             per_callable_static_grad_inputs.append(static_grad_inputs)
+            tex.set_graph_cached_locked()         
 
         # Reverses the most recent two lists
         per_callable_static_grad_outputs = list(reversed(per_callable_static_grad_outputs))
@@ -696,7 +681,6 @@ def make_graphed_callables(
                         in the optimizer step.
 
     """
-    CudagraphCache.reset()
     set_capture_start()
 
     fp8_recipe = get_default_fp8_recipe() if fp8_recipe is None else fp8_recipe

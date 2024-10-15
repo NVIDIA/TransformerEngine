@@ -8,15 +8,15 @@
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
-                                      const at::Tensor &gamma, const at::Tensor &dx,
-                                      const int sm_margin, const bool zero_centered_gamma) {
+                                      const at::Tensor &gamma, const int sm_margin,
+                                      const bool zero_centered_gamma) {
   const auto &dz_ = dz.contiguous();
   const auto &x_ = x.contiguous();
   const auto &mu_ = mu.contiguous();
   const auto &rsigma_ = rsigma.contiguous();
   const auto &gamma_ = gamma.contiguous();
-  const auto &dx_ = dx.contiguous();
 
+  auto dx = is_graph_capturing() ? empty_like_cached(x) : at::empty_like(x);
   auto dgamma = at::empty_like(gamma_);
   auto dbeta = at::empty_like(gamma_);
   transformer_engine::TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
@@ -26,7 +26,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto mu_cu = makeTransformerEngineTensor(mu_);
   auto rsigma_cu = makeTransformerEngineTensor(rsigma_);
   auto gamma_cu = makeTransformerEngineTensor(gamma_);
-  auto dx_cu = makeTransformerEngineTensor(dx_);
+  auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
   auto dbeta_cu = makeTransformerEngineTensor(dbeta);
 
@@ -58,7 +58,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
           at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
           barrier.data());
 
-  return {dgamma, dbeta};
+  return {dx, dgamma, dbeta};
 }
 
 std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,
@@ -184,16 +184,15 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight,
   return out[0];
 }
 
-at::Tensor rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
+std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
-                                    const at::Tensor &dx,
                                     const int sm_margin, const bool zero_centered_gamma) {
   const auto &dz_ = dz.contiguous();
   const auto &x_ = x.contiguous();
-  const auto &dx_ = dx.contiguous();
   const auto &rsigma_ = rsigma.contiguous();
   const auto &gamma_ = gamma.contiguous();
-  
+
+  auto dx = is_graph_capturing() ? empty_like_cached(x) : at::empty_like(x);
   auto dgamma = at::empty_like(gamma_);
   transformer_engine::TensorWrapper workspace, barrier, dgamma_part;
 
@@ -201,7 +200,7 @@ at::Tensor rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto x_cu = makeTransformerEngineTensor(x_);
   auto rsigma_cu = makeTransformerEngineTensor(rsigma_);
   auto gamma_cu = makeTransformerEngineTensor(gamma_);
-  auto dx_cu = makeTransformerEngineTensor(dx_);
+  auto dx_cu = makeTransformerEngineTensor(dx);
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
   // This call populates tensors with the required config.
@@ -227,7 +226,7 @@ at::Tensor rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
           at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
           barrier.data());
 
-  return dgamma;
+  return {dx, dgamma};
 }
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,

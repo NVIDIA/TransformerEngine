@@ -43,7 +43,7 @@
 #include <random>
 #include <stdexcept>
 #include <vector>
-
+#include <map>
 #include "common/util/logging.h"
 
 namespace transformer_engine {
@@ -83,6 +83,25 @@ enum FP8BwdTensors {
 };
 
 }  // namespace transformer_engine
+
+
+class GraphCache {
+  public:
+    std::vector<at::Tensor> cache;
+    bool graph_locked;
+    bool graph_capturing;
+    int cache_index;
+
+    GraphCache() {
+      graph_locked = false;
+      graph_capturing = false;
+      cache_index = 0;
+    }
+
+    void insert(at::Tensor tensor);
+    at::Tensor retrieve();
+};
+
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);

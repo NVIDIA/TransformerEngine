@@ -257,8 +257,8 @@ at::Tensor dsrelu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
 
 std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                       const at::Tensor &mu, const at::Tensor &rsigma,
-                                      const at::Tensor &gamma, const at::Tensor &dx,
-                                      const int sm_margin, const bool zero_centered_gamma);
+                                      const at::Tensor &gamma, const int sm_margin,
+                                      const bool zero_centered_gamma);
 
 std::vector<at::Tensor> layernorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,
                                           const at::Tensor &bias, float eps, at::Tensor scale,
@@ -297,9 +297,8 @@ at::Tensor layernorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight,
  * RMSNorm
  **************************************************************************************************/
 
-at::Tensor rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
+std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
-                                    const at::Tensor &dx,
                                     const int sm_margin, const bool zero_centered_gamma);
 
 std::vector<at::Tensor> rmsnorm_fwd_fp8(const at::Tensor &input, const at::Tensor &weight,
@@ -386,10 +385,9 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const at::Tensor &output, const bool transpose_output_memory);
+                              const bool transpose_output_memory);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const at::Tensor &input_grads,
                                const bool transpose_output_memory);
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
@@ -476,5 +474,12 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
+
+at::Tensor empty_like_cached(at::Tensor tensor);
+void set_capture_start();
+void set_capture_end();
+void set_graph_cached_locked();
+bool is_graph_capturing();
+
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_

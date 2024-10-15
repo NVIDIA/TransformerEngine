@@ -16,6 +16,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_unpermute_fwd", moe_unpermute_fwd);
   m.def("moe_unpermute_bwd", moe_unpermute_bwd);
 
+
+  m.def("empty_like_cached", &empty_like_cached, "CudaGraph Cache",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("set_capture_start", &set_capture_start, "CudaGraph Cache",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("set_capture_end", &set_capture_end, "CudaGraph Cache",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("set_graph_cached_locked", &set_graph_cached_locked, "CudaGraph Cache",
+        py::call_guard<py::gil_scoped_release>());
+
+
   // Softmax functions
   m.def("scaled_softmax_forward", &scaled_softmax_forward, "Scaled Softmax FWD",
         py::call_guard<py::gil_scoped_release>());
