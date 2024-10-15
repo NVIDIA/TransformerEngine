@@ -1573,7 +1573,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", "126m")
+@pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
