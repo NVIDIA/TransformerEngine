@@ -26,10 +26,6 @@ pytest -v -s $TE_PATH/tests/pytorch/test_permutation.py
 
 # Build custom ONNX extensions for ONNX export test
 pip install onnxruntime==1.19.2
-cd $TE_PATH/tests/pytorch/custom_ort_ops
-git clone --depth=1 -b rel-1.19.2 --single-branch https://github.com/microsoft/onnxruntime.git || true
-mkdir -p build
-cmake -S . -B build -DCMAKE_INSTALL_PREFIX=.
-cmake --build build --verbose
-cmake --install build --verbose
+export CUSTOM_ORT_OPS_PATH=$TE_PATH/tests/pytorch/custom_ort_ops
+bash $CUSTOM_ORT_OPS_PATH/build.sh
 NVTE_TORCH_COMPILE=0 pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py
