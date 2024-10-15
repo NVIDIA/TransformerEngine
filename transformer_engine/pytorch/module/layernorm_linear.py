@@ -46,6 +46,7 @@ from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 from ..tensor import QuantizedTensor
+from ..cpu_offload import is_cpu_offload_enabled
 
 __all__ = ["LayerNormLinear"]
 
@@ -94,8 +95,9 @@ class _LayerNormLinear(torch.autograd.Function):
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
         # Make sure input dimensions are compatible
-        in_features = ln_weight.numel()
-        assert inp.shape[-1] == in_features, "GEMM not possible"
+        out_features, in_features = weight.shape
+        inp_shape = inp.shape
+        assert inp_shape[-1] == in_features, "GEMM not possible"
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
@@ -339,7 +341,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.use_bias = use_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
-            ctx.inp_shape = inp.shape
+            ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
             ctx.tp_size = tp_size
@@ -369,7 +371,7 @@ class _LayerNormLinear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        out = out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        out = out.view(-1, *inp_shape[1:-1], out_features)
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
@@ -1149,7 +1151,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [getattr(self, name) for name in self.weight_names]
+            unfused_weights = [self._fast_get_param(name) for name in self.weight_names]
             if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
@@ -1160,11 +1162,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
-                bias_tensor = _noop_cat(
-                    [getattr(self, name) for name in self.bias_names],
-                )
+                bias_tensor = _noop_cat([self._fast_get_param(name) for name in self.bias_names])
             else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+                bias_tensor = self._fast_get_param(self.bias_names[0])  # Unused
 
             # Initialize FP8 weights if needed
             weight_fp8 = None
@@ -1190,8 +1190,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                         skip_update_flag=skip_fp8_weight_update,
                     )
 
-            from ..cpu_offload import CPUOffloadEnabled
-
             if torch.is_grad_enabled():
                 fwd_fn = _LayerNormLinear.apply
                 args = []
@@ -1200,8 +1198,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self.layer_norm_weight,
-                self.layer_norm_bias,
+                self._fast_get_param("layer_norm_weight"),
+                self._fast_get_param("layer_norm_bias"),
                 weight_tensor,
                 weight_fp8,
                 bias_tensor,
@@ -1212,7 +1210,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8_calibration,
                 self.fp8_meta,
                 self.fuse_wgrad_accumulation,
-                CPUOffloadEnabled,
+                is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
                 self.sequence_parallel,
