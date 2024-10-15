@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "../layer_norm/norms.h"
+#include "../common.h"
 #include "rmsnorm_bwd_kernels.cuh"
 #include "rmsnorm_kernel_traits.h"
 

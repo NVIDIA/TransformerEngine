@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/layer_norm.h>
+#include <transformer_engine/layernorm.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -12,8 +12,8 @@
 #include <numeric>
 #include <vector>
 
+#include "../../common.h"
 #include "../common.h"
-#include "norms.h"
 
 namespace transformer_engine {
 

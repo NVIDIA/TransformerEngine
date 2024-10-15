@@ -6,9 +6,9 @@
 
 #include "ln_fwd_kernels.cuh"
 #include "ln_kernel_traits.h"
-#include "norms.h"
+#include "../common.h"
 
-using namespace transformer_engine::layer_norm;
+using namespace transformer_engine::normalization;
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,

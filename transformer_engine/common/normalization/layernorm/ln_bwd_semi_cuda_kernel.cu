@@ -6,9 +6,9 @@
 
 #include "ln_bwd_kernels.cuh"
 #include "ln_kernel_traits.h"
-#include "norms.h"
+#include "../common.h"
 
-using namespace transformer_engine::layer_norm;
+using namespace transformer_engine::normalization;
 
 template <typename weight_t, typename input_t, typename output_t, typename compute_t,
           typename index_t, int HIDDEN_SIZE, int CTAS_PER_ROW, int WARPS_M, int WARPS_N,
@@ -57,12 +57,12 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params,
                                 stream);
   }
 
-  using Kernel_traits_f = layer_norm::Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t,
+  using Kernel_traits_f = normalization::Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t,
                                                              output_t, compute_t, index_t,
                                                              32 * 32,  // THREADS_PER_CTA
                                                              BYTES_PER_LDG_FINAL>;
 
-  auto kernel_f = &layer_norm::ln_bwd_finalize_tuned_kernel<Kernel_traits_f>;
+  auto kernel_f = &normalization::ln_bwd_finalize_tuned_kernel<Kernel_traits_f>;
   kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(
       launch_params.params);
 }

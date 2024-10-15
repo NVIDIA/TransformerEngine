@@ -10,11 +10,11 @@
 #include <cfloat>
 #include <cstdio>
 
-#include "../utils.cuh"
-#include "norms.h"
+#include "../../utils.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
-namespace layer_norm {
+namespace normalization {
 using namespace transformer_engine;
 
 template <typename Ktraits>
@@ -92,8 +92,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 
     stats_t s = stats.compute(xf, rn);
 
-    compute_t mu = layer_norm::Get<0>::of<stats_t, compute_t>(s);
-    compute_t m2 = layer_norm::Get<1>::of<stats_t, compute_t>(s);
+    compute_t mu = normalization::Get<0>::of<stats_t, compute_t>(s);
+    compute_t m2 = normalization::Get<1>::of<stats_t, compute_t>(s);
 
     if (bidn == 0 && warp_n == 0 && lane == 0) {
       mu_ptr[row] = mu;
@@ -315,7 +315,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
   }
 }
 
-}  // namespace layer_norm
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_

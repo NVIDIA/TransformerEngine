@@ -10,7 +10,7 @@
 #include <cfloat>
 #include <cstdio>
 
-#include "../utils.cuh"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
 namespace rmsnorm {

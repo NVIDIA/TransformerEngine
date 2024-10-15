@@ -6,7 +6,7 @@
 
 /* #include <transformer_engine/layer_norm.h> */
 
-#include "norms.h"
+#include "common.h"
 
 #include <cstdint>
 #include <cstdlib>

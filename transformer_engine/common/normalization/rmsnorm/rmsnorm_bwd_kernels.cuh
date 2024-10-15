@@ -7,7 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 
-#include "../utils.cuh"
+#include "../../utils.cuh"
 
 namespace transformer_engine {
 namespace rmsnorm {

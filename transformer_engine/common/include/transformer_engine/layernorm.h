@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-/*! \file layer_norm.h
+/*! \file layernorm.h
  *  \brief LayerNorm functions.
  */
 

@@ -10,8 +10,8 @@
 #include <numeric>
 #include <vector>
 
+#include "../../common.h"
 #include "../common.h"
-#include "../layer_norm/norms.h"
 #include "transformer_engine/rmsnorm.h"
 
 namespace transformer_engine {

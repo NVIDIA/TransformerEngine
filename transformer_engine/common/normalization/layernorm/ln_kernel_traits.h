@@ -7,13 +7,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
 
-#include "../common.h"
-#include "../utils.cuh"
+#include "../../common.h"
+#include "../../utils.cuh"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 namespace transformer_engine {
-namespace layer_norm {
+namespace normalization {
 template <uint32_t HIDDEN_SIZE_, typename weight_t_, typename input_t_, typename output_t_,
           typename compute_t_, typename index_t_, uint32_t THREADS_PER_CTA_>
 struct Kernel_traits_base {
@@ -131,7 +131,7 @@ struct Kernel_traits : public Base {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-}  // namespace layer_norm
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
