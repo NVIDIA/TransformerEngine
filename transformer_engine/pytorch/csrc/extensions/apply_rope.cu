@@ -121,7 +121,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 }
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs) {
+                                  const at::Tensor &freqs, const int cp_size, const int cp_rank) {
   using namespace transformer_engine;
   TORCH_CHECK(input.dim() == 3, "expected 3D tensor");
   TORCH_CHECK(cu_seqlens.dim() == 1, "expected 1D tensor");
@@ -165,14 +165,15 @@ at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_
   auto output_cu = makeTransformerEngineTensor(output);
 
   nvte_fused_rope_thd_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                              output_cu.data(), max_s, b, h, d, d2, stride_t, stride_h, stride_d,
-                              o_stride_t, o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
+                              output_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
+                              stride_h, stride_d, o_stride_t, o_stride_h, o_stride_d,
+                              at::cuda::getCurrentCUDAStream());
 
   return output;
 }
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs) {
+                                   const at::Tensor &freqs, const int cp_size, const int cp_rank) {
   using namespace transformer_engine;
   TORCH_CHECK(output_grads.dim() == 3, "expected 3D tensor");
   TORCH_CHECK(cu_seqlens.dim() == 1, "expected 1D tensor");
@@ -214,8 +215,8 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Ten
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   nvte_fused_rope_thd_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                               input_grads_cu.data(), max_s, b, h, d, d2, stride_t, stride_h,
-                               stride_d, o_stride_t, o_stride_h, o_stride_d,
+                               input_grads_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2,
+                               stride_t, stride_h, stride_d, o_stride_t, o_stride_h, o_stride_d,
                                at::cuda::getCurrentCUDAStream());
 
   return input_grads;

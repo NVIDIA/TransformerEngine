@@ -4397,6 +4397,8 @@ class FusedRoPEFunc(torch.autograd.Function):
         freqs: torch.Tensor,
         tensor_format: str = "sbhd",
         cu_seqlens: Union[torch.Tensor, None] = None,
+        cp_size: int = 1,
+        cp_rank: int = 0,
     ) -> torch.Tensor:
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
@@ -4405,11 +4407,13 @@ class FusedRoPEFunc(torch.autograd.Function):
         elif tensor_format == "bshd":
             output = tex.fused_rope_forward(t.transpose(0, 1), freqs, True).transpose(0, 1)
         elif tensor_format == "thd":
-            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs)
+            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, cp_size, cp_rank)
         else:
             raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
         ctx.save_for_backward(freqs, cu_seqlens)
         ctx.tensor_format = tensor_format
+        ctx.cp_size = cp_size
+        ctx.cp_rank = cp_rank
 
         return output
 
@@ -4423,11 +4427,13 @@ class FusedRoPEFunc(torch.autograd.Function):
                 grad_output.transpose(0, 1), freqs, True
             ).transpose(0, 1)
         elif ctx.tensor_format == "thd":
-            grad_input = tex.fused_rope_thd_backward(grad_output, cu_seqlens, freqs)
+            grad_input = tex.fused_rope_thd_backward(
+                grad_output, cu_seqlens, freqs, ctx.cp_size, ctx.cp_rank
+            )
         else:
             raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
 
-        return grad_input, None, None, None, None
+        return grad_input, None, None, None, None, None
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
@@ -4445,6 +4451,8 @@ def apply_rotary_pos_emb(
     tensor_format: str = "sbhd",
     fused: bool = False,
     cu_seqlens: Union[torch.Tensor, None] = None,
+    cp_size: int = 1,
+    cp_rank: int = 0,
 ) -> torch.Tensor:
     """
     Apply rotary positional embedding tensor to the input tensor.
@@ -4465,12 +4473,17 @@ def apply_rotary_pos_emb(
     cu_seqlens: torch.Tensor, default = None.
         Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
         dtype torch.int32. Only valid when `tensor_format` is 'thd'.
+        Should be `cu_seqlens_padded` when cp_size > 1.
+    cp_size: int, default = 1.
+        Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
+    cp_rank: int, default = 0.
+        Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
     if fused:
         assert (
             tensor_format != "thd" or cu_seqlens is not None
         ), "cu_seqlens must not be None when tensor_format is 'thd'."
-        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens)
+        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens, cp_size, cp_rank)
 
     assert tensor_format in ("sbhd", "bshd"), (
         "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
