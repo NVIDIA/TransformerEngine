@@ -49,7 +49,7 @@ def _make_fp8_attr_property_funcs(name: str) -> Any:
     def del_func(self) -> None:
         del self._fp8_attrs[name]
 
-    return dict(fget=get_func, fset=set_func, fdel=del_func)
+    return {"fget": get_func, "fset": set_func, "fdel": del_func}
 
 
 class _FromFloat8Func(torch.autograd.Function):
@@ -61,6 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        """Cast to higher precision fwd."""
         return tensor.dequantize(dtype=dtype)
 
     @staticmethod
@@ -68,7 +69,9 @@ class _FromFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        # Assume that we want gradients in full precision
+        """Cast to higher precision bwd.
+           Assume that we want gradients in full precision
+        """
         return grad, None
 
 
@@ -112,6 +115,7 @@ class _ToFloat8Func(torch.autograd.Function):
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
     ) -> Float8Tensor:
+        """Cast to FP8 FWD."""
 
         # Tensor attributes
         dtype = tensor.dtype
@@ -167,6 +171,7 @@ class _ToFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        """Cast to FP8 bwd."""
         # Assume that we want gradients in full precision
         return grad, None, None, None, None, None, None, None
 
@@ -185,6 +190,7 @@ class _IdentityFunc(torch.autograd.Function):
         tensor: Float8Tensor,
         init_kwargs: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        """FWD identity."""
 
         # Return input tensor if constructor kwargs are not provided
         ctx.input_dtype = tensor.dtype
@@ -192,15 +198,15 @@ class _IdentityFunc(torch.autograd.Function):
             return tensor
 
         # Construct new tensor if constructor kwargs are provided
-        default_kwargs = dict(
-            data=tensor._data,
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
-            fp8_dtype=tensor._fp8_dtype,
-            fp8_scale_inv=tensor._scale_inv,
-            dtype=tensor.dtype,
-        )
+        default_kwargs = {
+            "data": tensor._data,
+            "fp8_meta": tensor._fp8_meta,
+            "fp8_meta_forward": tensor._fp8_meta_forward,
+            "fp8_meta_index": tensor._fp8_meta_index,
+            "fp8_dtype": tensor._fp8_dtype,
+            "fp8_scale_inv": tensor._scale_inv,
+            "dtype": tensor.dtype,
+        }
         for key, val in default_kwargs.items():
             if key not in init_kwargs:
                 init_kwargs[key] = val
@@ -208,6 +214,7 @@ class _IdentityFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad):
+        """BWD identity."""
         return grad.to(ctx.input_dtype), None
 
 
@@ -224,6 +231,7 @@ class _ViewFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
+        """FWD view."""
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -243,6 +251,7 @@ class _ViewFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        """BWD view."""
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -266,6 +275,7 @@ class _ReshapeFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
+        "FWD reshape."
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -285,6 +295,7 @@ class _ReshapeFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        """BWD reshape."""
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -456,14 +467,14 @@ class Float8Tensor(QuantizedTensor):
         See constructor for list of keyword arguments.
 
         """
-        default_kwargs = dict(
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
-            fp8_dtype=tensor._fp8_dtype,
-            fp8_scale_inv=tensor._scale_inv,
-            dtype=tensor.dtype,
-        )
+        default_kwargs = {
+            "fp8_meta": tensor._fp8_meta,
+            "fp8_meta_forward": tensor._fp8_meta_forward,
+            "fp8_meta_index": tensor._fp8_meta_index,
+            "fp8_dtype": tensor._fp8_dtype,
+            "fp8_scale_inv": tensor._scale_inv,
+            "dtype": tensor.dtype,
+        }
         for key, val in default_kwargs.items():
             if key not in kwargs:
                 kwargs[key] = val
@@ -697,6 +708,7 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def detach(self) -> Float8Tensor:
+        """Returns a detached tensor."""
         return Float8Tensor.make_like(
             self,
             data=self._data,
@@ -704,22 +716,25 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def clone(self) -> Float8Tensor:
+        """Clone the tensor, including the cached transpose."""
         data = self._data.detach().clone()
         data_transpose = None
         if self._transpose is not None:
             data_transpose = self._transpose.detach().clone()
         return _IdentityFunc.apply(
             self,
-            dict(
-                data=data,
-                data_transpose=data_transpose,
-            ),
+            {
+                "data": data,
+                "data_transpose": data_transpose,
+            },
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
+        """Returns a view of shape `shape`."""
         return _ViewFunc.apply(self, shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8Tensor:
+        """Reshapes the tensor."""
         return _ReshapeFunc.apply(self, shape)
 
     def contiguous(
@@ -980,7 +995,7 @@ class Float8Tensor(QuantizedTensor):
                     requires_grad=tensor.requires_grad,
                     device=new_device,
                 )
-                super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
+                super(Float8Tensor, type(self)).data = dummy_tensor
             self._data = tensor._data
             self._fp8_attrs = tensor._fp8_attrs
             return
@@ -1008,7 +1023,7 @@ class Float8Tensor(QuantizedTensor):
                 requires_grad=tensor.requires_grad,
                 device=self._data.device,
             )
-            super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
+            super(Float8Tensor, type(self)).data = dummy_tensor
             if self._transpose is not None:
                 self._transpose = torch.empty(
                     (self._data.size(-1), self._data.numel() // self._data.size(-1)),

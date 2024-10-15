@@ -38,6 +38,7 @@ class _LayerNorm(torch.autograd.Function):
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
     ) -> torch.Tensor:
+        """LayerNorm FWD"""
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -69,6 +70,7 @@ class _LayerNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        """LayerNorm BWD"""
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)

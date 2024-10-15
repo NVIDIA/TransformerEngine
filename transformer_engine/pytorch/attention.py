@@ -316,9 +316,7 @@ def get_attention_backend(
     run_config = {
         "transformer_engine_version": te.__version__,
         "compute_capability": "sm"
-        + str(
-            (lambda x, y: x * 10 + y)(device_compute_capability[0], device_compute_capability[1])
-        ),
+        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
         "flash_attn_version": _flash_attn_version,
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }

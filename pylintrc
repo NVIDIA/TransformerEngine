@@ -10,6 +10,7 @@ extension-pkg-allow-list=transformer_engine.transformer_engine_jax
 disable=too-many-locals,
         too-few-public-methods,
         too-many-public-methods,
+        possibly-used-before-assignment,
         too-many-positional-arguments,
         invalid-name,
         too-many-arguments,

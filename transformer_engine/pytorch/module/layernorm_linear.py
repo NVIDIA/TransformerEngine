@@ -94,6 +94,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+        """LayerNormLinear forward."""
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
@@ -385,6 +386,7 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """LayerNormLinear backward."""
         if isinstance(grad_outputs[0], Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_outputs[
                 0
@@ -479,6 +481,7 @@ class _LayerNormLinear(torch.autograd.Function):
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
+            rs_out = None
             if ctx.ub_bulk_dgrad:
                 ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
                 ub_obj = ub_obj_lnout

@@ -28,6 +28,7 @@ class _Fp8Padding(torch.autograd.Function):
         padded_m_splits: List[int],
         is_grad_enabled: bool,
     ) -> torch.Tensor:
+        "FP8 padding FWD."
         # Make sure input dimensions are compatible
         in_features = inp.shape[-1]
 
@@ -46,6 +47,7 @@ class _Fp8Padding(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        "FP8 padding BWD."
 
         grad_input = None
         if ctx.requires_dgrad:

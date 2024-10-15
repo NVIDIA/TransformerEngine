@@ -694,7 +694,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
-            return
 
     @contextmanager
     def prepare_forward(
