@@ -12,6 +12,11 @@ import torch
 import transformer_engine.pytorch.cpp_extensions as ext
 
 
+def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
+    """Make tensor contiguous if final stride is not 1."""
+    return tensor.contiguous() if tensor.stride(-1) != 1 else tensor
+
+
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """Check if any of the given tensors require gradient."""
     for tensor in tensors:

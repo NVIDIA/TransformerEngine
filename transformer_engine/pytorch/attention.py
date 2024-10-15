@@ -61,6 +61,7 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
     get_device_compute_capability,
     get_default_init_method,
+    maybe_contiguous,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -1281,6 +1282,7 @@ class PackTensors(torch.autograd.Function):
     def forward(
         ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+        """PackTensors FWD."""
         assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
         ctx.save_for_backward(indices)
         ctx.dim0 = tensors[0].shape[0]
@@ -1292,6 +1294,7 @@ class PackTensors(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
+        """PackTensors BWD."""
         (indices,) = ctx.saved_tensors
         if len(grad_outputs) == 1:
             return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
@@ -1312,11 +1315,13 @@ class UnpackTensor(torch.autograd.Function):
         dim0: int,
         tensor: torch.Tensor,
     ) -> torch.Tensor:
+        """UnpackTensors FWD."""
         ctx.save_for_backward(indices)
         return unpack_tensor(indices, dim0, tensor)
 
     @staticmethod
     def backward(ctx, grad_output):
+        """UnpackTensors BWD."""
         (indices,) = ctx.saved_tensors
         return None, None, pack_tensor(indices, grad_output)
 
@@ -1570,6 +1575,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cp_global_ranks,
         cp_stream,
     ):
+        """AttnFuncWithCPAndKVP2P FWD."""
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -2237,7 +2243,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             if qkv_format == "bshd":
-                out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])
+                out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])  # pylint: disable=used-before-assignment
                 out_ = out[:, 1, ...]
             elif qkv_format == "sbhd":
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
@@ -2396,6 +2402,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
+        """AttnFuncWithCPAndKVP2P BWD."""
         cp_size_a2a = ctx.cp_size_a2a
         rank_a2a = ctx.rank_a2a
 
@@ -2525,7 +2532,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
             if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
                 dout = cast_from_fp8(
-                    dout, None, None, dout_fp8_dtype, TE_DType[dout_dtype], scale_inv=dout_scale_inv
+                    dout, None, None, dout_fp8_dtype, TE_DType[dout_dtype], scale_inv=dout_scale_inv  # pylint: disable=used-before-assignment
                 )
 
         out = out.view(*q.shape)
@@ -3016,7 +3023,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
-                dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)
+                dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)  # pylint: disable=used-before-assignment
                 if ctx.qkv_format in ["bshd", "sbhd"]:
                     # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
                     # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
@@ -3244,6 +3251,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_group,
         cp_stream,
     ):
+        """AttnFuncWithCPAndKVAllGather FWD."""
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -3431,6 +3439,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
+        """AttnFuncWithCPAndKVAllGather BWD."""
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
 
@@ -3661,6 +3670,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_group,
         cp_stream,
     ):
+        """AttnFuncWithCPAndQKVOA2A FWD."""
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -3900,6 +3910,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
+        """AttnFuncWithCPAndQKVOA2A BWD."""
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         q, k, v, out = ctx.saved_tensors[:4]
@@ -4310,6 +4321,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         cp_size: int = 1,
         cp_rank: int = 0,
     ) -> torch.Tensor:
+        """FusedRoPEFunc FWD."""
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         if tensor_format == "sbhd":
@@ -4329,6 +4341,7 @@ class FusedRoPEFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        """FusedRoPEFunc BWD."""
         freqs, cu_seqlens = ctx.saved_tensors
         if ctx.tensor_format == "sbhd":
             grad_input = tex.fused_rope_backward(grad_output, freqs, False)
@@ -4435,6 +4448,7 @@ class _SplitAlongDim(torch.autograd.Function):
         split_dim: int,
         split_size_or_sections: Union[int, List[int], Tuple[int]],
     ) -> Tuple[torch.Tensor, ...]:
+        """_SplitAlongDim FWD."""
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
         if isinstance(mixed_x_layer, Float8Tensor):
@@ -4453,6 +4467,7 @@ class _SplitAlongDim(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
+        """_SplitAlongDim BWD."""
         assert len(grad_outputs) > 0, "No gradients received for backprop!"
 
         if isinstance(ctx.split_size_or_sections, (list, tuple)):
@@ -4797,6 +4812,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """_PrepareQKVForFA FWD."""
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
@@ -4814,6 +4830,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dk: torch.Tensor,
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        """_PrepareQKVForFA BWD."""
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
@@ -4965,7 +4982,7 @@ def get_qkv_layout(
         q, k, v = [x.contiguous() for x in [q, k, v]]
         qkv_layout = run_iteratively(q, k, v)
     if qkv_layout == "not_supported":
-        raise Exception("The provided qkv memory layout is not supported!")
+        raise RuntimeError("The provided qkv memory layout is not supported!")
 
     return qkv_layout, q, k, v
 
@@ -5420,6 +5437,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        """FusedAttnFunc_qkvpacked FWD."""
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -5573,6 +5591,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        """FusedAttnFunc_qkvpacked BWD."""
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -5597,7 +5616,6 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
             dqkv = torch.empty_like(qkv)
-            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [
                 maybe_contiguous(x) for x in (d_out, qkv[:, 0], qkv[:, 1], qkv[:, 2], out)
             ]
@@ -5808,6 +5826,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        """FusedAttnFunc_kvpacked FWD."""
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -5989,6 +6008,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        """FusedAttnFunc_kvpacked BWD."""
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -6018,7 +6038,6 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             softmax_lse, rng_state = aux_ctx_tensors
             dq = torch.empty_like(q)
             dkv = torch.empty_like(kv)
-            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x) for x in (d_out, q, kv[:, 0], kv[:, 1], out)]
             flash_attn_cuda_bwd(
                 d_out,
@@ -6260,6 +6279,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
+        """FusedAttnFunc FWD."""
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -6525,6 +6545,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
+        """FusedAttnFunc BWD."""
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -6557,7 +6578,6 @@ class FusedAttnFunc(torch.autograd.Function):
             dq = torch.empty_like(q)
             dk = torch.empty_like(k)
             dv = torch.empty_like(v)
-            maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x) for x in (d_out, q, k, v, out)]
             flash_attn_cuda_bwd(
                 d_out,
@@ -8077,7 +8097,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes=alibi_slopes,
                 )
 
-            raise Exception("No dot product attention support for the provided inputs!")
+            raise ValueError("No dot product attention support for the provided inputs!")
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -8431,6 +8451,7 @@ class MultiheadAttention(torch.nn.Module):
     def _allocate_memory(
         self, inference_max_sequence_len: int, batch_size: int, dtype: torch.dtype
     ) -> torch.Tensor:
+        """Allocates memory for KV cache."""
         return torch.empty(
             inference_max_sequence_len,
             batch_size,
@@ -8601,9 +8622,9 @@ class MultiheadAttention(torch.nn.Module):
         window_size = check_set_window_size(attn_mask_type, window_size)
 
         if "padding" in attn_mask_type and attention_mask is not None:
-            for i, _ in enumerate(attention_mask):
+            for mask in attention_mask:
                 assert (
-                    attention_mask[i].dtype == torch.bool
+                    mask.dtype == torch.bool
                 ), "Attention mask must be in boolean type!"
 
         assert (
@@ -8646,6 +8667,7 @@ class MultiheadAttention(torch.nn.Module):
             and FP8GlobalStateManager.get_fp8_recipe().fp8_mha
         )
 
+        layernorm_output = None
         if self.attention_type == "self":
             # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn]
             if self.input_layernorm:
