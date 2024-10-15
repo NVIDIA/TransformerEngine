@@ -313,10 +313,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           offset_v, offset_o, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_fprop_cache, descriptor);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
-    const size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    const size_t num_bytes_per_ragged_offset = (b + 1) * typeToSize(ragged_offset_type);
+    // n.b. Care should be taken to align each of the added worksapce tensors to their type.
+    // We do this by adding padding at the end of each separate allocation.
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t actual_seqlen_workspace_size = alignTo<16>(2 * b * sizeof(int32_t));
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     const size_t seqlen_offsets_workspace_size = 4 * num_bytes_per_ragged_offset;
     if (workspace == nullptr) {
       *workspace_size =
@@ -700,11 +703,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           offset_q, offset_k, offset_v, offset_o, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_bprop_cache, descriptor);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
-
     // Exit to request upper level API to allocate memory if needed
-    const size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    const size_t num_bytes_per_ragged_offset = (b + 1) * typeToSize(ragged_offset_type);
+    // n.b. Care should be taken to align each of the added worksapce tensors to their type.
+    // We do this by adding padding at the end of each separate allocation.
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t actual_seqlen_workspace_size = alignTo<16>(2 * b * sizeof(int32_t));
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     const size_t seqlen_offsets_workspace_size = 4 * num_bytes_per_ragged_offset;
     if (workspace == nullptr) {
       *workspace_size =
