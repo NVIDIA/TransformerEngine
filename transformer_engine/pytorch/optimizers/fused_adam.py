@@ -84,6 +84,7 @@ class FusedAdam(torch.optim.Optimizer):
         self,
         params,
         lr=1e-3,
+        *,
         bias_correction=True,
         betas=(0.9, 0.999),
         eps=1e-8,

@@ -10,6 +10,8 @@ import torch
 import transformer_engine_torch as tex
 from ._common import canonicalize_fp8_scales
 
+# pylint: disable=too-many-positional-arguments
+
 __all__ = ["cast_to_fp8", "cast_from_fp8"]
 
 

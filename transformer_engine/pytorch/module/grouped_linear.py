@@ -52,7 +52,7 @@ class _GroupedLinear(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-positional-arguments
         ctx,
         inp: torch.Tensor,
         m_splits: List[int],
@@ -546,6 +546,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         num_gemms: int,
         in_features: int,
         out_features: int,
+        *,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
@@ -641,7 +642,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device=="meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

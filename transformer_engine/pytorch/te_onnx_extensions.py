@@ -32,6 +32,9 @@ from torch.onnx._internal import jit_utils
 
 import transformer_engine_torch as tex
 
+# TorchScript operators tend to have more positional arguments than
+# Pylint prefers
+# pylint: disable=too-many-positional-arguments
 
 # This file registers custom op symbolic ONNX functions and does not export any symbols.
 __all__ = []

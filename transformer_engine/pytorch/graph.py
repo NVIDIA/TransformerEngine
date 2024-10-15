@@ -56,6 +56,7 @@ def graph_pool_handle():
 def _make_graphed_callables(
     callables: SingleOrTuple[Callable],
     sample_args: SingleOrTuple[Tuple[torch.Tensor, ...]],
+    *,
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     fp8_weight_caching: bool = False,
@@ -341,7 +342,7 @@ def _make_graphed_callables(
         per_callable_static_grad_inputs = list(reversed(per_callable_static_grad_inputs))
     # Now for every per_callable list, per_callable_*[i] holds the stuff for the ith callable.
 
-    def make_graphed_autograd_function(
+    def make_graphed_autograd_function(  # pylint: disable=too-many-positional-arguments
         fwd_graph,
         bwd_graph,
         module_params,
@@ -511,6 +512,7 @@ def restore_fp8_tensors(modules, fp8_tensors):
 def make_graphed_callables(
     modules: SingleOrTuple[Callable],
     sample_args: SingleOrTuple[Tuple[torch.Tensor, ...]],
+    *,
     num_warmup_iters: int = 3,
     allow_unused_input: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,

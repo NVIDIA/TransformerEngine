@@ -36,7 +36,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
     """
 
-    # pylint: disable=unused-argument
+    # pylint: disable=unused-argument, too-many-positional-arguments
     @staticmethod
     def forward(
         func_ctx: torch.autograd.function.FunctionCtx,

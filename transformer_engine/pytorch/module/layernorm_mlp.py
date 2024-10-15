@@ -80,7 +80,7 @@ class _LayerNormMLP(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-positional-arguments
         ctx,
         inp: torch.Tensor,
         ln_weight: torch.Tensor,
@@ -1247,6 +1247,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self,
         hidden_size: int,
         ffn_hidden_size: int,
+        *,
         eps: float = 1e-5,
         sequence_parallel: bool = False,
         return_bias: bool = False,
@@ -1384,7 +1385,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata(num_gemms=2)
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device=="meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

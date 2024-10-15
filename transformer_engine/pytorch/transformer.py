@@ -237,6 +237,7 @@ class TransformerLayer(torch.nn.Module):
         hidden_size: int,
         ffn_hidden_size: int,
         num_attention_heads: int,
+        *,
         num_gqa_groups: Optional[int] = None,
         layernorm_epsilon: float = 1e-5,
         hidden_dropout: float = 0.1,
@@ -527,6 +528,7 @@ class TransformerLayer(torch.nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        *,
         attention_mask: Optional[torch.Tensor] = None,
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,

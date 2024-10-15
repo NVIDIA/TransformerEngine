@@ -11,6 +11,7 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ._common import canonicalize_fp8_scales, empty_tensor
 
+# pylint: disable=too-many-positional-arguments
 
 __all__ = [
     "fp8_cast_transpose_fused",

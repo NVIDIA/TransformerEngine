@@ -100,7 +100,7 @@ class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
 
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-positional-arguments
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: torch.Tensor,
         fp8_meta: Optional[Dict[str, Any]] = None,

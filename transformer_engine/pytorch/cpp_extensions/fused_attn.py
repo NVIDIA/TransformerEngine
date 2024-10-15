@@ -14,6 +14,7 @@ from transformer_engine_torch import (
     NVTE_Fused_Attn_Backend,
 )
 
+# pylint: disable=too-many-positional-arguments
 
 __all__ = [
     "fused_attn_fwd_qkvpacked",

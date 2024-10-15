@@ -59,7 +59,7 @@ class _Linear(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-positional-arguments
         ctx,
         weight: Union[Float8Tensor, torch.Tensor],
         weight_fp8: Optional[Float8Tensor],
@@ -709,6 +709,7 @@ class Linear(TransformerEngineBaseModule):
         self,
         in_features: int,
         out_features: int,
+        *,
         sequence_parallel: bool = False,
         fuse_wgrad_accumulation: bool = False,
         tp_group: Optional[dist_group_type] = None,
@@ -873,7 +874,7 @@ class Linear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device=="meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

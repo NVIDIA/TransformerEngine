@@ -72,7 +72,7 @@ class FusedSGD(Optimizer):
         The Nesterov version is analogously modified.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-positional-arguments
         self,
         params,
         lr=required,
@@ -80,6 +80,7 @@ class FusedSGD(Optimizer):
         dampening=0,
         weight_decay=0,
         nesterov=False,
+        *,
         wd_after_momentum=False,
         materialize_master_grads=True,
         set_grad_none=False,

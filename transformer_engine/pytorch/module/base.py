@@ -82,6 +82,7 @@ def get_multi_stream_cublas_workspace() -> List[torch.Tensor]:
 def initialize_ub(
     shape: list,
     tp_size: int,
+    *,
     use_fp8: bool = False,
     dtype: torch.dtype = torch.bfloat16,
     ub_cfgs: Optional[dict] = None,
@@ -260,6 +261,7 @@ def initialize_ub(
         name: str,
         method: str,
         is_reduce_scatter: int,
+        *,
         num_sm: int = 16,
         cga_size: int = 2,
         set_sm_margin: int = 0,
@@ -694,7 +696,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
-            return
 
     @contextmanager
     def prepare_forward(
@@ -744,7 +745,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
-            return
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
@@ -1055,8 +1055,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return out
 
-    def _load_from_state_dict(
-        self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+    def _load_from_state_dict(  # pylint: disable=too-many-positional-arguments
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
     ):
         """
         This function loads tensors and extra state including fp8 metadata.

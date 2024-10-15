@@ -314,7 +314,14 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
-    def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
+    def is_kernel_available(  # pylint: disable=too-many-positional-arguments
+        self,
+        mask: torch.Tensor,
+        b: int,
+        np: int,
+        sq: int,
+        sk: int,
+    ) -> bool:
         """Check FusedScaleMaskSoftmax kernel availability based on size"""
         attn_batches = b * np
 

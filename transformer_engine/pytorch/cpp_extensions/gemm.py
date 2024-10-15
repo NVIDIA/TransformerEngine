@@ -10,6 +10,7 @@ import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
+# pylint: disable=too-many-positional-arguments
 
 __all__ = [
     "gemm",

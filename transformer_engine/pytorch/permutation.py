@@ -208,6 +208,7 @@ class _moe_unpermute(torch.autograd.Function):
         inp, row_id_map, probs = ctx.saved_tensors
 
         act_grad = None
+        prob_grad = None
         if ctx.needs_input_grad[0]:
             act_grad, prob_grad = tex.moe_unpermute_bwd(
                 unpermuted_act_grad, inp, dtype, row_id_map, probs

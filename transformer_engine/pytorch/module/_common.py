@@ -40,7 +40,7 @@ def _get_normalization_func(
     return bwd_normalization_funcs[normalization]
 
 
-def _apply_normalization(
+def _apply_normalization(  # pylint: disable=too-many-positional-arguments
     inputmat: torch.Tensor,
     ln_out: torch.Tensor,
     ln_weight: torch.Tensor,

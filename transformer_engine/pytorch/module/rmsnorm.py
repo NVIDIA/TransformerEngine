@@ -15,6 +15,9 @@ from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 
+# This file will be replaced soon in
+# https://github.com/NVIDIA/TransformerEngine/pull/1033
+# pylint: skip-file
 
 __all__ = ["RMSNorm"]
 

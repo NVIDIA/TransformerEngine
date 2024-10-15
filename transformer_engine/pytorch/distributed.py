@@ -145,6 +145,7 @@ def initialize_affine_weight_gpu(
     weight: torch.Tensor,
     init_method: Callable,
     get_rng_state_tracker: Callable,
+    *,
     partition_dim: int = 0,
     stride: int = 1,
     set_tp_attributes: bool = True,
@@ -265,7 +266,7 @@ class _CheckpointFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(
+    def forward(  # pylint: disable=too-many-positional-arguments
         ctx,
         run_function: Callable,
         distribute_saved_activations: bool,
@@ -752,11 +753,11 @@ class CudaRNGStatesTracker:
         """
         # Check seed is not already used.
         if seed in self.seeds_:
-            raise Exception(f"seed {seed} already exists")
+            raise ValueError(f"seed {seed} already exists")
         self.seeds_.add(seed)
         # Check that state is not already defined.
         if name in self.states_:
-            raise Exception(f"cuda rng state {name} already exists")
+            raise ValueError(f"cuda rng state {name} already exists")
 
         if graph_safe_rng_available():
             new_state = _get_cuda_rng_state(clone=True)
@@ -786,7 +787,7 @@ class CudaRNGStatesTracker:
         """
         # Check if we have added the state
         if name not in self.states_:
-            raise Exception(f"cuda rng state {name} is not added")
+            raise ValueError(f"cuda rng state {name} is not added")
         # Get the reference to current rng state.
         orig_cuda_rng_state = _get_cuda_rng_state()
         # Set rng state to the desired one
