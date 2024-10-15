@@ -5555,7 +5555,6 @@ class FusedAttnFunc(torch.autograd.Function):
             dv = torch.empty_like(v)
             maybe_contiguous = lambda x: x.contiguous() if x.stride(-1) != 1 else x
             d_out, q, k, v, out = [maybe_contiguous(x) for x in (d_out, q, k, v, out)]
-            torch.distributed.breakpoint()
             flash_attn_cuda_bwd(
                 d_out,
                 q,

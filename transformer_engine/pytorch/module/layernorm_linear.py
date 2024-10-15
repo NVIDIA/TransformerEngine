@@ -43,7 +43,7 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing, cached_empty_like, cached_empty
+from ..graph import is_graph_capturing, cached_empty
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
@@ -704,7 +704,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     ctx.zero_centered_gamma,
                 )
                 dbeta = None
-
             clear_tensor_data(mu)
             clear_tensor_data(rsigma)
 
@@ -747,7 +746,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # grad_bias = None
             
         return (
-            inputmat.view(ctx.inp_shape),
+            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             wgrad,
