@@ -1061,7 +1061,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         assert (
-            is_context_parallel and config.window_size[0] == -1
+            not is_context_parallel or config.window_size[0] == -1
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
@@ -1158,7 +1158,7 @@ class FusedAttnCPWithAllGatherBwdPrimitive(FusedAttnBwdPrimitive):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
         assert (
-            is_context_parallel and config.window_size[0] == -1
+            not is_context_parallel or config.window_size[0] == -1
         ), "Sliding window attention is not supported when context parallelism is enabled"
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
