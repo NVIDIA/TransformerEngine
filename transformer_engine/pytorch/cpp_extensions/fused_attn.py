@@ -892,9 +892,6 @@ def fused_attn_fwd(
     max_seqlen_kv: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_kv: torch.Tensor,
-    max_batch_size: int,
-    max_tokens_q: int,
-    max_tokens_kv: int,
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -943,12 +940,6 @@ def fused_attn_fwd(
                 cumulative sequence lengths for Q; shape [batch_size + 1]
     cu_seqlens_kv: torch.Tensor
                 cumulative sequence lengths for K and V; shape [batch_size + 1]
-    max_batch_size: int
-                max batch size across all batches
-    max_tokens_q: int
-                max number of tokens per batch for query
-    max_tokens_kv: int
-                max number of tokens per batch for key and value
     q: torch.Tensor
                 input tensor Q; shape sbhd, bshd or thd (see `qkv_layout` for details)
     k: torch.Tensor
@@ -1091,9 +1082,6 @@ def fused_attn_fwd(
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,
-        max_batch_size,
-        max_tokens_q,
-        max_tokens_kv,
         is_training,
         attn_scale,
         dropout,
@@ -1136,9 +1124,6 @@ def fused_attn_bwd(
     max_seqlen_kv: int,
     cu_seqlens_q: torch.Tensor,
     cu_seqlens_kv: torch.Tensor,
-    max_batch_size: int,
-    max_tokens_q: int,
-    max_tokens_kv: int,
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -1184,12 +1169,6 @@ def fused_attn_bwd(
                 cumulative sequence lengths for Q; shape [batch_size + 1]
     cu_seqlens_kv: torch.Tensor
                 cumulative sequence lengths for K and V; shape [batch_size + 1]
-    max_batch_size: int
-                max batch size across all batches
-    max_tokens_q: int
-                max number of tokens per batch for query
-    max_tokens_kv: int
-                max number of tokens per batch for key and value
     q: torch.Tensor
                 input tensor Q; shape sbhd, bshd or thd (see `qkv_layout` for details)
     k: torch.Tensor
@@ -1307,9 +1286,6 @@ def fused_attn_bwd(
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,
-        max_batch_size,
-        max_tokens_q,
-        max_tokens_kv,
         attn_scale,
         dropout,
         fast_zero_fill,

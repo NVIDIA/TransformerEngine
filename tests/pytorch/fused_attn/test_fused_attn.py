@@ -90,9 +90,6 @@ class ModelConfig:
         num_layers: int = 1,
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
-        max_batch_size: int = None,
-        max_tokens_q: int = None,
-        max_tokens_kv: int = None,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -111,9 +108,6 @@ class ModelConfig:
         self.num_layers = num_layers
         self.bias_shape = bias_shape
         self.window_size = window_size
-        self.max_batch_size = batch_size
-        self.max_tokens_q = batch_size * max_seqlen_q
-        self.max_tokens_kv = batch_size * max_seqlen_kv
 
 
 @contextmanager
@@ -654,13 +648,11 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
-    print("======= pad_between_seqs True ========")
-    pad_between_seqs = True
-    test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
-    )
+    #    pad_between_seqs = True
+    #    test_dot_product_attention(
+    #        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    #    )
     if get_cudnn_version() >= (9, 3, 0):
-        print("======= pad_between_seqs False ========")
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
         test_dot_product_attention(
@@ -719,14 +711,6 @@ def _run_dot_product_attention(
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
     print("cu_seqlens_q", cu_seqlens_q)
     print("cu_seqlens_kv", cu_seqlens_kv)
-    #cu_seqlens_q=torch.cat([cu_seqlens_q, (cu_seqlens_q[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
-    #cu_seqlens_kv=torch.cat([cu_seqlens_kv, (cu_seqlens_kv[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
-    #print("-- cu_seqlens_q", cu_seqlens_q)
-    #print("-- cu_seqlens_kv", cu_seqlens_kv)
-    config.max_batch_size = config.batch_size #+ 4
-    config.max_tokens_q = cu_seqlens_q[-1] #+ 10
-    config.max_tokens_kv = cu_seqlens_kv[-1] #+ 10
-    print('----- config.max_batch_size',config.max_batch_size, config.max_tokens_q, config.max_tokens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
@@ -740,12 +724,6 @@ def _run_dot_product_attention(
         seqlens_kv_after_pad = seqlens_kv + pad_len
         cu_seqlens_q_after_pad[1:] = torch.cumsum(seqlens_q_after_pad, dim=0)
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
-        print("cu_seqlens_q_after_pad", cu_seqlens_q_after_pad)
-        print("cu_seqlens_kv_after_pad", cu_seqlens_kv_after_pad)
-        config.max_batch_size = config.batch_size #+ 4
-        config.max_tokens_q = cu_seqlens_q_after_pad[-1] #+ 10
-        config.max_tokens_kv = cu_seqlens_kv_after_pad[-1] #+ 10
-        print('----- config.max_batch_size',config.max_batch_size, config.max_tokens_q, config.max_tokens_kv)
 
     # Create attention mask if padding
     attention_mask = None
@@ -975,13 +953,8 @@ def _run_dot_product_attention(
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
-        #max_seqlen_q=cu_seqlens_q[-1]+10 if backend == "FusedAttention" else config.max_seqlen_q,
-        #max_seqlen_kv=cu_seqlens_kv[-1]+10 if backend == "FusedAttention" else config.max_seqlen_kv,
-        max_seqlen_q=config.max_seqlen_q,
-        max_seqlen_kv=config.max_seqlen_kv,
-        max_batch_size=config.max_batch_size,
-        max_tokens_q=config.max_tokens_q,
-        max_tokens_kv=config.max_tokens_kv,
+        max_seqlen_q=cu_seqlens_q[-1] if backend == "FusedAttention" else config.max_seqlen_q,
+        max_seqlen_kv=cu_seqlens_kv[-1] if backend == "FusedAttention" else config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
         cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,

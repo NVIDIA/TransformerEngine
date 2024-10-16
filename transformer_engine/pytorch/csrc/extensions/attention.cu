@@ -774,7 +774,7 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
 
 // fused attention FWD with separate Q, K and V tensors
 std::vector<at::Tensor> fused_attn_fwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, bool is_training, float attn_scale, float p_dropout,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float p_dropout,
     bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
@@ -900,7 +900,7 @@ std::vector<at::Tensor> fused_attn_fwd(
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
                       te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
+                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
                       attn_mask_type, window_size[0], window_size[1], workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 
@@ -942,7 +942,7 @@ std::vector<at::Tensor> fused_attn_fwd(
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
                       te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
+                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
                       attn_mask_type, window_size[0], window_size[1], workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 
@@ -955,7 +955,7 @@ std::vector<at::Tensor> fused_attn_fwd(
 
 // fused attention BWD with separate Q, K and V
 std::vector<at::Tensor> fused_attn_bwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, float attn_scale, float p_dropout, bool set_zero,
+    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const at::Tensor Q, const at::Tensor K, const at::Tensor V,
@@ -1195,7 +1195,7 @@ std::vector<at::Tensor> fused_attn_bwd(
                       te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(),
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q,
-                      max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
+                      max_seqlen_kv, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
                       window_size[0], window_size[1], deterministic, workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 
@@ -1209,7 +1209,7 @@ std::vector<at::Tensor> fused_attn_bwd(
                       te_dP.data(), &nvte_aux_tensor_pack, te_dQ.data(), te_dK.data(), te_dV.data(),
                       te_dBias.data(), te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
                       te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), max_seqlen_q,
-                      max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
+                      max_seqlen_kv, attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type,
                       window_size[0], window_size[1], deterministic, workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 

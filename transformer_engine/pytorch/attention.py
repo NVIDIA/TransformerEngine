@@ -188,12 +188,6 @@ class AttentionParams:
         The size of each attention head in query and key tensors.
     head_dim_v: int, default = 64
         The size of each attention head in the value tensor.
-    max_batch_size: int, default = 1
-        Maximum batch size for all batches.
-    max_tokens_q: int, default = 128
-        Maximum number of tokens per batch in queries.
-    max_tokens_kv: int, default = 128
-        Maximum number of tokens per batch in keys and values.
     attn_mask_type: str, default = `no_mask`
         Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
         `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
@@ -234,9 +228,6 @@ class AttentionParams:
     max_seqlen_kv: int = 128
     head_dim_qk: int = 64
     head_dim_v: int = 64
-    max_batch_size: int = 1,
-    max_tokens_q: int = 128,
-    max_tokens_kv: int = 128,
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     alibi_slopes_shape: Union[torch.Size, List, None] = None
@@ -301,9 +292,6 @@ def get_attention_backend(
     max_seqlen_kv = attention_params.max_seqlen_kv
     head_dim_qk = attention_params.head_dim_qk
     head_dim_v = attention_params.head_dim_v
-    max_batch_size = attention_params.max_batch_size
-    max_tokens_q = attention_params.max_tokens_q
-    max_tokens_kv = attention_params.max_tokens_kv
     attn_mask_type = attention_params.attn_mask_type
     window_size = attention_params.window_size
     alibi_slopes_shape = attention_params.alibi_slopes_shape
@@ -6251,9 +6239,6 @@ class FusedAttnFunc(torch.autograd.Function):
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
-        max_batch_size,
-        max_tokens_q,
-        max_tokens_kv,
         q,
         k,
         v,
@@ -6325,9 +6310,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 max_seqlen_kv,
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                max_batch_size,
-                max_tokens_q,
-                max_tokens_kv,
                 q_fp8,
                 k_fp8,
                 v_fp8,
@@ -6459,9 +6441,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 max_seqlen_kv,
                 cu_seqlens_q,
                 cu_seqlens_kv,
-                max_batch_size,
-                max_tokens_q,
-                max_tokens_kv,
                 q,
                 k,
                 v,
@@ -6526,9 +6505,6 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.fp8_meta = fp8_meta
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
-        ctx.max_batch_size = max_batch_size
-        ctx.max_tokens_q = max_tokens_q
-        ctx.max_tokens_kv = max_tokens_kv
         ctx.qkv_dtype = qkv_dtype
         ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
@@ -6627,9 +6603,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.max_seqlen_kv,
                         cu_seqlens_q,
                         cu_seqlens_kv,
-                        ctx.max_batch_size,
-                        ctx.max_tokens_q,
-                        ctx.max_tokens_kv,
                         q_fp8,
                         k_fp8,
                         v_fp8,
@@ -6755,9 +6728,6 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.max_seqlen_kv,
                         cu_seqlens_q,
                         cu_seqlens_kv,
-                        ctx.max_batch_size,
-                        ctx.max_tokens_q,
-                        ctx.max_tokens_kv,
                         q,
                         k,
                         v,
@@ -6799,9 +6769,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
-                None,
-                None,
-                None,
                 dq,
                 dk,
                 dv,
@@ -6825,9 +6792,6 @@ class FusedAttnFunc(torch.autograd.Function):
             )
         # else, return (dqkv, dbias)
         return (
-            None,
-            None,
-            None,
             None,
             None,
             None,
@@ -6941,9 +6905,6 @@ class FusedAttention(torch.nn.Module):
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
-        max_batch_size: Optional[int] = None,
-        max_tokens_q: Optional[int] = None,
-        max_tokens_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
@@ -7105,9 +7066,6 @@ class FusedAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     cu_seqlens_q_padded,
                     cu_seqlens_kv_padded,
-                    max_batch_size,
-                    max_tokens_q,
-                    max_tokens_kv,
                     query_layer,
                     key_layer,
                     value_layer,
@@ -7663,7 +7621,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                      is the maximum of "t_q" across all batches.
                      See :ref:`note<max_b_t note>` for more details.
         max_tokens_kv: Optional[int], default = `None`
-                      Maximum number of tokens in `key_layer` and `value_layer` in a run.
+                      Maximum number of tokens in `keyy_layer` in a run.
                       If "t_kv" denotes the total number of key/value tokens in a batch, `max_tokens_kv`
                       is the maximum of "t_kv" across all batches.
                       See :ref:`note<max_b_t note>` for more details.
@@ -7843,11 +7801,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
 
             if qkv_format == "thd":
-                assert (
-                    max_batch_size is not None
-                    and max_tokens_q is not None
-                    and max_tokens_kv is not None
-                ), "max_batch_size, max_tokens_q and max_tokens_kv must be set for qkv_format = thd!"
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
@@ -7896,11 +7849,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                 max_seqlen_q *= cp_size
                 max_seqlen_kv *= cp_size
-                max_batch_size = batch_size if max_batch_size is None else max_batch_size
-                if max_tokens_q is None:
-                    max_tokens_q = batch_size * max_seqlen_q
-                if max_tokens_kv is None:
-                    max_tokens_kv = batch_size * max_seqlen_kv
                 if cu_seqlens_q is not None:
                     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                     assert all(
@@ -8014,9 +7962,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 max_seqlen_kv=max_seqlen_kv,
                 head_dim_qk=query_layer.shape[-1],
                 head_dim_v=value_layer.shape[-1],
-                max_batch_size=max_batch_size,
-                max_tokens_q=max_tokens_q,
-                max_tokens_kv=max_tokens_kv,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
@@ -8124,9 +8069,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                         max_seqlen_q=max_seqlen_q,
                         max_seqlen_kv=max_seqlen_kv,
-                        max_batch_size=max_batch_size,
-                        max_tokens_q=max_tokens_q,
-                        max_tokens_kv=max_tokens_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
                         window_size=window_size,
@@ -8152,9 +8094,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
-                    max_batch_size=max_batch_size,
-                    max_tokens_q=max_tokens_q,
-                    max_tokens_kv=max_tokens_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
                     window_size=window_size,
