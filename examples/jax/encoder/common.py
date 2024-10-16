@@ -1,3 +1,7 @@
+# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# See LICENSE for license information.
+"""Shared functions for the encoder tests"""
 from functools import lru_cache
 
 from transformer_engine.transformer_engine_jax import get_device_compute_capability
