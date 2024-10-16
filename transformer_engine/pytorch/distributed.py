@@ -752,11 +752,11 @@ class CudaRNGStatesTracker:
         """
         # Check seed is not already used.
         if seed in self.seeds_:
-            raise Exception(f"seed {seed} already exists")
+            raise RuntimeError(f"seed {seed} already exists")
         self.seeds_.add(seed)
         # Check that state is not already defined.
         if name in self.states_:
-            raise Exception(f"cuda rng state {name} already exists")
+            raise RuntimeError(f"cuda rng state {name} already exists")
 
         if graph_safe_rng_available():
             new_state = _get_cuda_rng_state(clone=True)
@@ -786,7 +786,7 @@ class CudaRNGStatesTracker:
         """
         # Check if we have added the state
         if name not in self.states_:
-            raise Exception(f"cuda rng state {name} is not added")
+            raise KeyError(f"cuda rng state {name} is not added")
         # Get the reference to current rng state.
         orig_cuda_rng_state = _get_cuda_rng_state()
         # Set rng state to the desired one
