@@ -140,18 +140,18 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 using MaybeTensor = std::optional<at::Tensor>;
 
 std::vector<at::Tensor> te_gemm2(transformer_engine::Float8Tensor A, bool transa,
-                                 transformer_engine::Float8Tensor B, bool transb,
-                                 MaybeTensor D, MaybeTensor D_scale,
-                                 transformer_engine::DType D_type, MaybeTensor D_amax,
-                                 MaybeTensor bias, transformer_engine::DType bias_type,
-                                 bool gelu, bool grad, at::Tensor workspace,
-                                 size_t workspaceSize, bool accumulate, bool use_split_accumulator);
+                                 transformer_engine::Float8Tensor B, bool transb, MaybeTensor D,
+                                 MaybeTensor D_scale, transformer_engine::DType D_type,
+                                 MaybeTensor D_amax, MaybeTensor bias,
+                                 transformer_engine::DType bias_type, bool gelu, bool grad,
+                                 at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                                 bool use_split_accumulator);
 std::vector<at::Tensor> te_gemm2(at::Tensor A, bool transa, at::Tensor B, bool transb,
                                  MaybeTensor D, MaybeTensor D_scale,
                                  transformer_engine::DType D_type, MaybeTensor D_amax,
-                                 MaybeTensor bias, transformer_engine::DType bias_type,
-                                 bool gelu, bool grad, at::Tensor workspace,
-                                 size_t workspaceSize, bool accumulate, bool use_split_accumulator);
+                                 MaybeTensor bias, transformer_engine::DType bias_type, bool gelu,
+                                 bool grad, at::Tensor workspace, size_t workspaceSize,
+                                 bool accumulate, bool use_split_accumulator);
 void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
              bool transa, at::Tensor B, at::Tensor B_scale_inverse,
              transformer_engine::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,

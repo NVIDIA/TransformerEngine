@@ -81,10 +81,9 @@ void test2(transformer_engine::Float8Tensor tensor) {
 }
 
 template <typename InputType>
-using GemmFunc = std::vector<at::Tensor> (*)(InputType, bool, InputType, bool,
-                                             MaybeTensor, MaybeTensor,
-                                             transformer_engine::DType, MaybeTensor, MaybeTensor,
-                                             transformer_engine::DType, bool, bool,
+using GemmFunc = std::vector<at::Tensor> (*)(InputType, bool, InputType, bool, MaybeTensor,
+                                             MaybeTensor, transformer_engine::DType, MaybeTensor,
+                                             MaybeTensor, transformer_engine::DType, bool, bool,
                                              at::Tensor, size_t, bool, bool);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

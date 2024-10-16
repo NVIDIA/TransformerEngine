@@ -108,15 +108,19 @@ class _Linear(torch.autograd.Function):
         if fp8:
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             if not isinstance(inputmat, Float8Tensor):
-                backward_needs_input = not fp8_meta["recipe"].override_linear_precision.wgrad \
-                    and is_grad_enabled \
-                    and weight.requires_grad \
+                backward_needs_input = (
+                    not fp8_meta["recipe"].override_linear_precision.wgrad
+                    and is_grad_enabled
+                    and weight.requires_grad
                     and not sequence_parallel
-                inputmat = Float8Tensor.to_float8(inputmat,
-                                                  fp8_meta=fp8_meta["scaling_fwd"],
-                                                  fp8_meta_index=tex.FP8FwdTensors.GEMM1_INPUT,
-                                                  fp8_dtype=fp8_dtype_forward,
-                                                  with_transpose_cache=backward_needs_input)
+                )
+                inputmat = Float8Tensor.to_float8(
+                    inputmat,
+                    fp8_meta=fp8_meta["scaling_fwd"],
+                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_INPUT,
+                    fp8_dtype=fp8_dtype_forward,
+                    with_transpose_cache=backward_needs_input,
+                )
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
