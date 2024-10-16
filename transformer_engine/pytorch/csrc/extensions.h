@@ -101,12 +101,12 @@ std::vector<at::Tensor> fused_attn_bwd_kvpacked(
     c10::optional<at::Tensor> amax_dP, c10::optional<at::Tensor> amax_dQKV);
 
 std::vector<at::Tensor> fused_attn_fwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q,
-    size_t max_tokens_kv, bool is_training, float attn_scale, float p_dropout, bool set_zero,
-    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    const std::vector<int64_t> window_size, const at::Tensor cu_seqlens_q,
-    const at::Tensor cu_seqlens_kv, const at::Tensor Q, const at::Tensor K, const at::Tensor V,
-    const transformer_engine::DType qkv_type, const c10::optional<at::Tensor> cu_seqlens_q_padded,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, bool is_training, float attn_scale, float p_dropout,
+    bool set_zero, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, const std::vector<int64_t> window_size,
+    const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const at::Tensor Q,
+    const at::Tensor K, const at::Tensor V, const transformer_engine::DType qkv_type,
+    const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
     const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
     const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
@@ -117,8 +117,7 @@ std::vector<at::Tensor> fused_attn_fwd(
     const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<at::Tensor> fused_attn_bwd(
-    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q,
-    size_t max_tokens_kv, float attn_scale, float p_dropout, bool set_zero,
+    size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, float attn_scale, float p_dropout, bool set_zero,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
     const std::vector<int64_t> window_size, bool deterministic, const at::Tensor cu_seqlens_q,
     const at::Tensor cu_seqlens_kv, const at::Tensor Q, const at::Tensor K, const at::Tensor V,

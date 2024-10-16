@@ -234,9 +234,9 @@ class AttentionParams:
     max_seqlen_kv: int = 128
     head_dim_qk: int = 64
     head_dim_v: int = 64
-    max_batch_size: int = (1,)
-    max_tokens_q: int = (128,)
-    max_tokens_kv: int = (128,)
+    max_batch_size: int = 1,
+    max_tokens_q: int = 128,
+    max_tokens_kv: int = 128,
     attn_mask_type: str = "no_mask"
     window_size: Union[Tuple[int, int], None] = None
     alibi_slopes_shape: Union[torch.Size, List, None] = None
@@ -7847,10 +7847,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_batch_size is not None
                     and max_tokens_q is not None
                     and max_tokens_kv is not None
-                ), (
-                    "max_batch_size, max_tokens_q and max_tokens_kv must be set for qkv_format ="
-                    " thd!"
-                )
+                ), "max_batch_size, max_tokens_q and max_tokens_kv must be set for qkv_format = thd!"
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"

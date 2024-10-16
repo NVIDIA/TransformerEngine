@@ -719,19 +719,14 @@ def _run_dot_product_attention(
     cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
     print("cu_seqlens_q", cu_seqlens_q)
     print("cu_seqlens_kv", cu_seqlens_kv)
-    # cu_seqlens_q=torch.cat([cu_seqlens_q, (cu_seqlens_q[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
-    # cu_seqlens_kv=torch.cat([cu_seqlens_kv, (cu_seqlens_kv[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
-    # print("-- cu_seqlens_q", cu_seqlens_q)
-    # print("-- cu_seqlens_kv", cu_seqlens_kv)
-    config.max_batch_size = config.batch_size  # + 4
-    config.max_tokens_q = cu_seqlens_q[-1]  # + 10
-    config.max_tokens_kv = cu_seqlens_kv[-1]  # + 10
-    print(
-        "----- config.max_batch_size",
-        config.max_batch_size,
-        config.max_tokens_q,
-        config.max_tokens_kv,
-    )
+    #cu_seqlens_q=torch.cat([cu_seqlens_q, (cu_seqlens_q[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
+    #cu_seqlens_kv=torch.cat([cu_seqlens_kv, (cu_seqlens_kv[-1]*torch.ones([4]).to('cuda')).to(dtype=torch.int32)], dim=0)
+    #print("-- cu_seqlens_q", cu_seqlens_q)
+    #print("-- cu_seqlens_kv", cu_seqlens_kv)
+    config.max_batch_size = config.batch_size #+ 4
+    config.max_tokens_q = cu_seqlens_q[-1] #+ 10
+    config.max_tokens_kv = cu_seqlens_kv[-1] #+ 10
+    print('----- config.max_batch_size',config.max_batch_size, config.max_tokens_q, config.max_tokens_kv)
 
     seqlens_q_after_pad = seqlens_q.clone()
     seqlens_kv_after_pad = seqlens_kv.clone()
@@ -747,15 +742,10 @@ def _run_dot_product_attention(
         cu_seqlens_kv_after_pad[1:] = torch.cumsum(seqlens_kv_after_pad, dim=0)
         print("cu_seqlens_q_after_pad", cu_seqlens_q_after_pad)
         print("cu_seqlens_kv_after_pad", cu_seqlens_kv_after_pad)
-        config.max_batch_size = config.batch_size  # + 4
-        config.max_tokens_q = cu_seqlens_q_after_pad[-1]  # + 10
-        config.max_tokens_kv = cu_seqlens_kv_after_pad[-1]  # + 10
-        print(
-            "----- config.max_batch_size",
-            config.max_batch_size,
-            config.max_tokens_q,
-            config.max_tokens_kv,
-        )
+        config.max_batch_size = config.batch_size #+ 4
+        config.max_tokens_q = cu_seqlens_q_after_pad[-1] #+ 10
+        config.max_tokens_kv = cu_seqlens_kv_after_pad[-1] #+ 10
+        print('----- config.max_batch_size',config.max_batch_size, config.max_tokens_q, config.max_tokens_kv)
 
     # Create attention mask if padding
     attention_mask = None
@@ -985,8 +975,8 @@ def _run_dot_product_attention(
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
-        # max_seqlen_q=cu_seqlens_q[-1]+10 if backend == "FusedAttention" else config.max_seqlen_q,
-        # max_seqlen_kv=cu_seqlens_kv[-1]+10 if backend == "FusedAttention" else config.max_seqlen_kv,
+        #max_seqlen_q=cu_seqlens_q[-1]+10 if backend == "FusedAttention" else config.max_seqlen_q,
+        #max_seqlen_kv=cu_seqlens_kv[-1]+10 if backend == "FusedAttention" else config.max_seqlen_kv,
         max_seqlen_q=config.max_seqlen_q,
         max_seqlen_kv=config.max_seqlen_kv,
         max_batch_size=config.max_batch_size,
