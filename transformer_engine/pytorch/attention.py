@@ -3819,7 +3819,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             or _flash_attn_2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
-
         flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
