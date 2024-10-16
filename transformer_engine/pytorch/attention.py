@@ -86,6 +86,8 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
+# # pylint: disable=used-before-assignment
+
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
@@ -2243,7 +2245,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             if qkv_format == "bshd":
-                out_per_step[i] = out_per_step[i].view(out.shape[0], -1, *out.shape[-2:])  # pylint: disable=used-before-assignment
+                out_per_step[i] = out_per_step[i].view(
+                    out.shape[0], -1, *out.shape[-2:]
+                )  # pylint: disable=used-before-assignment
                 out_ = out[:, 1, ...]
             elif qkv_format == "sbhd":
                 out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
@@ -2532,7 +2536,12 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
             if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
                 dout = cast_from_fp8(
-                    dout, None, None, dout_fp8_dtype, TE_DType[dout_dtype], scale_inv=dout_scale_inv  # pylint: disable=used-before-assignment
+                    dout,
+                    None,
+                    None,
+                    dout_fp8_dtype,
+                    TE_DType[dout_dtype],
+                    scale_inv=dout_scale_inv,  # pylint: disable=used-before-assignment
                 )
 
         out = out.view(*q.shape)
@@ -3023,7 +3032,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
-                dkv_ = torch.cat((dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0)  # pylint: disable=used-before-assignment
+                dkv_ = torch.cat(
+                    (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0
+                )  # pylint: disable=used-before-assignment
                 if ctx.qkv_format in ["bshd", "sbhd"]:
                     # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
                     # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
@@ -8623,9 +8634,7 @@ class MultiheadAttention(torch.nn.Module):
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
-                assert (
-                    mask.dtype == torch.bool
-                ), "Attention mask must be in boolean type!"
+                assert mask.dtype == torch.bool, "Attention mask must be in boolean type!"
 
         assert (
             core_attention_bias_type in AttnBiasTypes
