@@ -923,26 +923,30 @@ class _FusedAttnCPWithAllGatherHelper:
         header = "Context parallel fused attention"
 
         allowed_layouts = [NVTE_QKV_Layout.NVTE_BSHD_BS2HD, NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD]
-        assert self.config.qkv_layout in allowed_layouts, (
-            f"{header} only supports layouts: {','.join([str(x) for x in allowed_layouts])} got:"
-            f" {self.config.qkv_layout}"
-        )
+        if self.config.qkv_layout not in allowed_layouts:
+            raise ValueError(
+                f"{header} only supports layouts:"
+                f" {','.join([str(x) for x in allowed_layouts])} got: {self.config.qkv_layout}"
+            )
 
-        assert (
-            self.config.attn_bias_type == NVTE_Bias_Type.NVTE_NO_BIAS
-        ), f"{header} does not support bias got: {self.config.attn_bias_type}"
+        if self.config.attn_bias_type != NVTE_Bias_Type.NVTE_NO_BIAS:
+            raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
         allowed_masks = [NVTE_Mask_Type.NVTE_NO_MASK, NVTE_Mask_Type.NVTE_CAUSAL_MASK]
-        assert self.config.attn_mask_type in allowed_masks, (
-            f"{header} only supports masking types: "
-            f" {','.join([str(x) for x in allowed_masks])} got: {self.config.attn_mask_type}"
-        )
+        if self.config.attn_mask_type not in allowed_masks:
+            raise ValueError(
+                f"{header} only supports masking types: "
+                f" {','.join([str(x) for x in allowed_masks])} got: {self.config.attn_mask_type}"
+            )
 
-        assert self.config.max_segments_per_seq == 1, (
-            f"{header} only supports max_segments_per_seq == 1 got:"
-            f" {self.config.max_segments_per_seq}"
-        )
-        assert self.config.dropout_probability == 0.0, f"{header} does not support dropout"
+        if self.config.max_segments_per_seq != 1:
+            raise ValueError(
+                f"{header} only supports max_segments_per_seq == 1 got:"
+                f" {self.config.max_segments_per_seq}"
+            )
+
+        if self.config.dropout_probability != 0.0:
+            raise ValueError(f"{header} does not support dropout")
 
     def get_adjusted_mask(self):
         """Converts the mask for context parallelism."""
