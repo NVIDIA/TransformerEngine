@@ -61,7 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
-        """Cast to higher precision fwd."""
+        # pylint: disable=missing-function-docstring
         return tensor.dequantize(dtype=dtype)
 
     @staticmethod
@@ -69,9 +69,8 @@ class _FromFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        """Cast to higher precision bwd.
-        Assume that we want gradients in full precision
-        """
+        # pylint: disable=missing-function-docstring
+        # Assume that we want gradients in full precision
         return grad, None
 
 
@@ -171,7 +170,7 @@ class _ToFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        """Cast to FP8 bwd."""
+        # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
         return grad, None, None, None, None, None, None, None
 
@@ -708,7 +707,7 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def detach(self) -> Float8Tensor:
-        """Returns a detached tensor."""
+        # pylint: disable=missing-function-docstring
         return Float8Tensor.make_like(
             self,
             data=self._data,
@@ -716,7 +715,7 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def clone(self) -> Float8Tensor:
-        """Clone the tensor, including the cached transpose."""
+        # pylint: disable=missing-function-docstring
         data = self._data.detach().clone()
         data_transpose = None
         if self._transpose is not None:
@@ -730,11 +729,11 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
-        """Returns a view of shape `shape`."""
+        # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8Tensor:
-        """Reshapes the tensor."""
+        # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
     def contiguous(
