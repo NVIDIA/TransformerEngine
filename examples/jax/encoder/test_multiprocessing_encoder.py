@@ -24,6 +24,8 @@ from jax.sharding import PartitionSpec, NamedSharding
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 
+from common import is_bf16_supported
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"
@@ -598,6 +600,7 @@ class TestEncoder(unittest.TestCase):
 
         return results
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         results = self.exec(False)
