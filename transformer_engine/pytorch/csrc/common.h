@@ -83,6 +83,14 @@ enum FP8BwdTensors {
   GRAD_INPUT3 = 5
 };
 
+class Float8Tensor {
+ public:
+  at::Tensor data;
+  std::optional<at::Tensor> transpose = std::nullopt;
+  at::Tensor scale_inv;
+  DType dtype;
+};
+
 }  // namespace transformer_engine
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,

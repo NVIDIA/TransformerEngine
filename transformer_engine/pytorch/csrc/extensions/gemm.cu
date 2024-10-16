@@ -4,8 +4,118 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <optional>
+
 #include "common/util/cuda_runtime.h"
+#include "common/util/system.h"
 #include "extensions.h"
+#include "pytorch/csrc/common.h"
+#include "transformer_engine/transformer_engine.h"
+
+namespace {
+
+void* get_data_ptr(MaybeTensor tensor) {
+  if (tensor.has_value()) return tensor->data_ptr();
+  return nullptr;
+}
+
+size_t get_size(MaybeTensor tensor, int dim) {
+  if (tensor.has_value()) return static_cast<size_t>(tensor->size(dim));
+  return 0;
+}
+
+}  // namespace
+
+std::vector<at::Tensor> te_gemm2_helper(
+    at::Tensor A, transformer_engine::DType A_dtype, MaybeTensor A_scale_inv, bool transa,
+    at::Tensor B, transformer_engine::DType B_dtype, MaybeTensor B_scale_inv, bool transb,
+    MaybeTensor D, MaybeTensor D_scale, transformer_engine::DType D_type, MaybeTensor D_amax,
+    MaybeTensor bias, transformer_engine::DType bias_type, bool gelu, bool grad,
+    at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator) {
+  using namespace transformer_engine;
+  if (A.data_ptr() == nullptr || B.data_ptr() == nullptr) {
+    at::Tensor out;
+    if (D.has_value() && D->data_ptr() != nullptr && !accumulate) {
+      D->zero_();
+      out = *D;
+    } else {
+      out = at::Tensor();  // TODO: Handle D without a value
+    }
+    return {out, at::Tensor()};
+  }
+
+  // Set an external SM Margin to all the GEMMs.
+  // This comes in handy when DP is overlapped with GEMMs
+
+  const int device_id = at::cuda::current_device();
+  const int sm_count = transformer_engine::cuda::sm_count(device_id);
+  int num_math_sms = sm_count - transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", sm_count);
+
+  A = A.contiguous();
+  B = B.contiguous();
+
+  if (!D.has_value()) {
+    auto type = GetATenDType(D_type);
+    auto opts = at::TensorOptions().dtype(type).device(A.options().device());
+    *D = at::empty({B.size(0), A.size(0)}, opts);
+  }
+
+  auto te_A = makeTransformerEngineTensor(
+      A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_dtype,
+      nullptr, nullptr, get_data_ptr(A_scale_inv));
+  auto te_B = makeTransformerEngineTensor(
+      B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_dtype,
+      nullptr, nullptr, get_data_ptr(B_scale_inv));
+  auto te_D = makeTransformerEngineTensor(
+      D->data_ptr(), {static_cast<size_t>(D->size(0)), static_cast<size_t>(D->size(1))}, D_type,
+      get_data_ptr(D_amax), get_data_ptr(D_scale), nullptr);
+  auto te_bias = makeTransformerEngineTensor(get_data_ptr(bias), {get_size(bias, 0)}, bias_type);
+
+  at::Tensor pre_gelu_out;
+  if (gelu) {
+    auto dtype = GetATenDType(bias_type);
+    auto opts = A.options().dtype(dtype);
+    pre_gelu_out = at::empty_like(*D, opts);
+  }
+  const auto gelu_shape = gelu ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
+                                                     static_cast<size_t>(pre_gelu_out.size(1))}
+                               : std::vector<size_t>{0};
+  auto te_pre_gelu_out = makeTransformerEngineTensor(
+      pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
+  auto te_workspace =
+      makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
+
+  nvte_cublas_gemm(te_A.data(), te_B.data(), te_D.data(), te_bias.data(), te_pre_gelu_out.data(),
+                   transa, transb, grad, te_workspace.data(), accumulate, use_split_accumulator,
+                   num_math_sms, at::cuda::getCurrentCUDAStream());
+
+  return {*D, pre_gelu_out};
+}
+
+std::vector<at::Tensor> te_gemm2(transformer_engine::Float8Tensor A, bool transa,
+                                 transformer_engine::Float8Tensor B, bool transb, MaybeTensor D,
+                                 MaybeTensor D_scale, transformer_engine::DType D_type,
+                                 MaybeTensor D_amax, MaybeTensor bias,
+                                 transformer_engine::DType bias_type, bool gelu, bool grad,
+                                 at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                                 bool use_split_accumulator) {
+  return te_gemm2_helper(A.data, A.dtype, A.scale_inv, transa, B.data, B.dtype, B.scale_inv, transb,
+                         D, D_scale, D_type, D_amax, bias, bias_type, gelu, grad, workspace,
+                         workspaceSize, accumulate, use_split_accumulator);
+}
+
+std::vector<at::Tensor> te_gemm2(at::Tensor A, bool transa, at::Tensor B, bool transb,
+                                 MaybeTensor D, MaybeTensor D_scale,
+                                 transformer_engine::DType D_type, MaybeTensor D_amax,
+                                 MaybeTensor bias, transformer_engine::DType bias_type, bool gelu,
+                                 bool grad, at::Tensor workspace, size_t workspaceSize,
+                                 bool accumulate, bool use_split_accumulator) {
+  transformer_engine::DType A_dtype = GetTransformerEngineDType(A.scalar_type());
+  transformer_engine::DType B_dtype = GetTransformerEngineDType(B.scalar_type());
+  return te_gemm2_helper(A, A_dtype, std::nullopt, transa, B, B_dtype, std::nullopt, transb, D,
+                         D_scale, D_type, D_amax, bias, bias_type, gelu, grad, workspace,
+                         workspaceSize, accumulate, use_split_accumulator);
+}
 
 void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
              bool transa, at::Tensor B, at::Tensor B_scale_inverse,

@@ -9,6 +9,7 @@
 
 #include <string>
 
+#include "common/common.h"
 #include "extensions.h"
 
 void fused_amax_and_scale_update_after_reduction(

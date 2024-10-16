@@ -12,10 +12,10 @@ import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
 from ..constants import TE_DType as torch_to_transformer_engine_dtype
-from ..cpp_extensions import (
+from ..cpp_extensions.transpose import fp8_cast_transpose_fused
+from ..cpp_extensions.cast import (
     cast_from_fp8,
     cast_to_fp8,
-    fp8_cast_transpose_fused,
 )
 from ..fp8 import FP8GlobalStateManager
 from ..utils import devices_match
