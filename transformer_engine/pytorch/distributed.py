@@ -206,6 +206,8 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
     activations, followed by calculation of gradients using these values.
     """
 
+    _is_first_fp8_module: List = []
+
     def __init__(self, activation_recompute: bool = False, recompute_phase: bool = False):
         super().__init__()
         self.activation_recompute = activation_recompute
@@ -217,6 +219,15 @@ class activation_recompute_forward(AbstractContextManager, ContextDecorator):
             self.activation_recompute and FP8GlobalStateManager.is_fp8_enabled()
         )
         _FP8_ACTIVATION_RECOMPUTE_PHASE = self.recompute_phase
+
+        if self.activation_recompute and not self.recompute_phase:
+            activation_recompute_forward._is_first_fp8_module.append(
+                FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+            )
+        if self.activation_recompute and self.recompute_phase:
+            FP8GlobalStateManager.IS_FIRST_FP8_MODULE = (
+                activation_recompute_forward._is_first_fp8_module.pop(0)
+            )
 
     def __exit__(self, *exc_details):
         global _FP8_ACTIVATION_RECOMPUTE_ENABLED, _FP8_ACTIVATION_RECOMPUTE_PHASE

@@ -43,6 +43,7 @@ from ..distributed import (
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
     use_reentrant_activation_recompute,
+    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -516,7 +517,10 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.fp8 and requires_grad(
                 inp, ln_weight, ln_bias, fc1_weight, fc2_weight, fc1_bias, fc2_bias
             ):
+                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
+                if in_fp8_activation_recompute_phase():
+                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
         # Row Parallel Linear
         if ub_overlap_rs:

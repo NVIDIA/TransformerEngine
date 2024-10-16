@@ -33,6 +33,7 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -349,10 +350,10 @@ class _Linear(torch.autograd.Function):
             ctx.is_input_fp8 = is_input_fp8
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, weight, bias):
-                ctx.reduce_and_update_bwd_fp8_tensors = (
-                    ctx.reduce_and_update_bwd_fp8_tensors
-                    or FP8GlobalStateManager.is_first_fp8_module()
-                )
+                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
+                if in_fp8_activation_recompute_phase():
+                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
         # Row Parallel Linear
         if ub_overlap_rs:
