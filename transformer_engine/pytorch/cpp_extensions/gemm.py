@@ -13,6 +13,7 @@ from ..tensor import Float8Tensor
 
 
 __all__ = [
+    "general_gemm",
     "gemm",
     "fp8_gemm",
     "grouped_gemm",
@@ -29,13 +30,11 @@ def _empty_tensor() -> torch.Tensor:
 def general_gemm(
     A: Union[torch.Tensor, Float8Tensor],
     B: Union[torch.Tensor, Float8Tensor],
-    out_dtype: torch.dtype,
     workspace: torch.Tensor,
     gelu: bool = False,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
-    use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
     ub_algo: tex.UbufOverlapAlgo = None,
@@ -50,26 +49,19 @@ def general_gemm(
     # assert_dim_for_fp8_exec(A)
     # assert_dim_for_fp8_exec(B)
 
-    if out is None:
-        out = torch.empty(
-            B.shape[0],
-            A.shape[0],
-            dtype=out_dtype,
-            device="cuda",
-        )
-    else:
+    if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
-    if gelu:
-        gelu_input = torch.empty_like(out, dtype=bias_dtype)
-    else:
-        gelu_input = empty_tensor
+    # if gelu:
+    #     gelu_input = torch.empty_like(out, dtype=bias_dtype)
+    # else:
+    #     gelu_input = empty_tensor
     bias_dtype = TE_DType[bias_dtype]
 
-    out_dtype = TE_DType[out.dtype] if D_dtype is None else D_dtype
+    out_dtype = TE_DType[A.dtype] if D_dtype is None else D_dtype
 
     args = (
         A,
@@ -77,12 +69,12 @@ def general_gemm(
         B,
         False,  # transb
         out,
-        empty_tensor,  # if out_index is None else fp8_meta_tensor.scale[out_index],
+        None,  # if out_index is None else fp8_meta_tensor.scale[out_index],
         out_dtype,
-        empty_tensor,  # if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
-        bias if use_bias else empty_tensor,
+        None,  # if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
+        bias,
         bias_dtype,
-        gelu_input,  # this is pre_gelu_out
+        gelu,
         False,  # grad
         workspace,
         workspace.shape[0],
@@ -165,6 +157,7 @@ def general_gemm(
             args = tuple(args + (extra_output_tensor,))
     if ub_algo is not None and ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
         out = fn(*args)
+        gelu_input = empty_tensor
     else:
         out, gelu_input = fn(*args)
 

@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "common/common.h"
 #include "extensions.h"
 
 constexpr int block_size = 512;
