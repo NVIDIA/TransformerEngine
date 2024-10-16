@@ -47,6 +47,23 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   } else {
     output = torch::empty({s, b, h, d}, act_options);
   }
+
+  // if (transpose_output_memory) {
+  //   if (is_graph_capturing()){
+  //     output = empty_cached({b, s, h, d}, act_options).transpose(0, 1);
+  //   }
+  //   else{
+  //     output = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
+  //   }
+  // } else {
+  //   if (is_graph_capturing()){
+  //     output = empty_cached({s, b, h, d}, act_options);
+  //   }
+  //   else{
+  //     output = torch::empty({s, b, h, d}, act_options);
+  //   }
+  // }
+
   // output strides
   const int o_stride_s = output.stride(0);
   const int o_stride_b = output.stride(1);
@@ -100,10 +117,22 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   auto act_options = output_grads.options().requires_grad(false);
   at::Tensor input_grads;
   if (transpose_output_memory) {
-    input_grads = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
-  } else {
-    input_grads = torch::empty({s, b, h, d}, act_options);
+    if (is_graph_capturing()){
+      input_grads = empty_cached({b, s, h, d}, act_options).transpose(0, 1);
+    }
+    else{
+      input_grads = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
+    }
   }
+  else {
+    if (is_graph_capturing()){
+      input_grads = empty_cached({s, b, h, d}, act_options);
+    }
+    else{
+      input_grads = torch::empty({s, b, h, d}, act_options);
+    }
+  }
+
   const int o_stride_s = input_grads.stride(0);
   const int o_stride_b = input_grads.stride(1);
   const int o_stride_h = input_grads.stride(2);

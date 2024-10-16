@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "extensions.h"
 #include "common.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -83,18 +84,26 @@ at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_eng
 }
 
 at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType type,
-                         bool init_to_zeros) {
+                         bool init_to_zeros, bool graph_cache) {
   auto size = shape.ndim;
   if (size == 2 && init_to_zeros) {
     return at::zeros({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
                      at::CUDA(GetATenDType(type)));
   } else if (size == 2) {
-    return at::empty({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
-                     at::CUDA(GetATenDType(type)));
+    if (is_graph_capturing() && graph_cache)
+      return empty_cached({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
+                      at::CUDA(GetATenDType(type)));
+    else
+      return at::empty({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
+                      at::CUDA(GetATenDType(type)));
+
   } else if (size == 1 && init_to_zeros) {
     return at::zeros({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   } else if (size == 1) {
-    return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
+      if (is_graph_capturing() && graph_cache)
+        return empty_cached({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
+      else
+        return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   }
   NVTE_CHECK(false, "Should never reach here! func: allocateSpace");
 }

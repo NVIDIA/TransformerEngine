@@ -178,7 +178,7 @@ at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_eng
                          bool init_to_zeros);
 
 at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType type,
-                         bool init_to_zeros = false);
+                         bool init_to_zeros = false, bool graph_cache = false);
 
 at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype);
 

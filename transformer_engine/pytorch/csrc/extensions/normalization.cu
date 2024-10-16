@@ -213,7 +213,8 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   // Alloc space for Tensors.
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
   auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
-  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
+  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype(), false, true);
+
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
   barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());

@@ -31,44 +31,6 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
-# class CudagraphCache():
-#     """Reduces the memory overhead of cudagraph capture by sharing temporary 
-#     tensors over different transformer layers. The cache is expected to be populated
-#     during warmup. Memory is allocated during warmup via `cached_empty_like` and 
-#     `cached_empty` and is identified with a key. Different layers use the same key 
-#     to access previously allocated memory, allowing different transformer layers to 
-#     reuse this memory. """
-
-#     OLD_CACHES = []
-#     CUDAGRAPH_CACHE = [{}]
-#     total_microbatches = 1
-#     current_microbatch = 0
-
-#     @staticmethod
-#     def insert(key, tensor):
-#         """Insert a tensor in the cache, identified with `key` """
-#         cudagraph_cache = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
-
-#         assert key not in cudagraph_cache, f"Tried inserting duplicate key {key} !"
-#         cudagraph_cache[key] = tensor
-
-
-#     @staticmethod
-#     def can_insert(key):
-#         """Check if a key is in the cache."""
-#         return key not in CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch]
-
-#     @staticmethod
-#     def get_copy(key, requires_grad):
-#         """Retrieve a tensor in the cache, identified with `key` """
-#         cached = CudagraphCache.CUDAGRAPH_CACHE[CudagraphCache.current_microbatch][key]
-#         copy = torch.Tensor()
-#         copy.requires_grad = requires_grad
-#         copy.data = cached
-#         return copy
-
-# def _insert_into_graph(key, tensor):
-
 def cached_empty_like(tensor, key):
     copy = tex.empty_like_cached(tensor)
     wrapper = torch.Tensor()
@@ -77,26 +39,13 @@ def cached_empty_like(tensor, key):
     
     return wrapper
 
-def cached_empty(shape, dtype, device, key, requires_grad):
-    #noop for now
-    tensor = torch.empty(
-        shape,
-        dtype=dtype, 
-        device=device,
-        requires_grad=requires_grad,
-    )   
-    return tensor
-    # if CudagraphCache.can_insert(key):
-    #     tensor = torch.empty(
-    #         shape,
-    #         dtype=dtype, 
-    #         device=device,
-    #         requires_grad=requires_grad,
-    #     )
-    #     CudagraphCache.insert(key, tensor)
+def cached_empty(shape, dtype, device, requires_grad):
+    copy = tex.empty_cached(shape, dtype, device)
+    copy.requires_grad = requires_grad
+    return copy
 
-    # out = CudagraphCache.get_copy(key, requires_grad)
-    # return out
+# def contiguous_cached(tensor):
+#     copy = tex.empty_like_cached(tensor)
 
 # def cached_contiguous(tensor, key):
 #     cached_copy = cached_empty_like(tensor, key)
@@ -306,7 +255,7 @@ def _make_graphed_callables(
                 )
                 del outputs, grad_inputs
                 tex.set_graph_cached_locked()
-    torch.cuda.synchronize()
+                torch.cuda.synchronize()
 
 
     # All captures here share a mempool. To avoid replays corrupting each other's memory,

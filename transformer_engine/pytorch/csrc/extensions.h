@@ -476,6 +476,9 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            bool wd_after_momentum, float scale);
 
 at::Tensor empty_like_cached(at::Tensor tensor);
+at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options);
+at::Tensor empty_cached_py(at::IntArrayRef size, at::ScalarType dtype, at::Device device);
+
 void set_capture_start();
 void set_capture_end();
 void set_graph_cached_locked();
