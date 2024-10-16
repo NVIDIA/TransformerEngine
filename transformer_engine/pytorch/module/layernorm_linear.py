@@ -475,15 +475,15 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_dgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
             else:              
-                if is_graph_capturing():
-                    dgrad = cached_empty(
-                        dgrad_size, 
-                        dtype=ctx.activation_dtype, 
-                        device=weight.device,
-                        requires_grad=True,
-                        key=f'dgrad_{ctx.ub_name}')
-                else:  
-                    dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                # if is_graph_capturing():
+                #     dgrad = cached_empty(
+                #         dgrad_size, 
+                #         dtype=ctx.activation_dtype, 
+                #         device=weight.device,
+                #         requires_grad=True,
+                #         key=f'dgrad_{ctx.ub_name}')
+                # else:  
+                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.ub_bulk_dgrad:
                 ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG

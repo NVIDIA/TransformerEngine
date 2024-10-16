@@ -73,21 +73,8 @@ class _LayerNorm(torch.autograd.Function):
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_ln_out = grad_output.view(inputmat.shape)
-
-        if is_graph_capturing():
-            dxmat = cached_empty_like(dgrad, key="layernorm_dgrad_lnout")
-        else:
-            dxmat = torch.empty_like(dgrad)
-
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
-            d_ln_out, 
-            inputmat, 
-            mu, 
-            rsigma, 
-            ln_weight, 
-            dxmat,
-            ctx.bwd_ln_sm_margin, 
-            ctx.zero_centered_gamma,
+            d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
         return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
 

@@ -503,13 +503,14 @@ class _Linear(torch.autograd.Function):
                             dtype=ctx.activation_dtype,
                         )
                 else:
-                    dgrad, _, _ = gemm(
+                    _, _, _ = gemm(
                         weight,
                         grad_output,
                         ctx.activation_dtype,
                         get_workspace(),
                         layout="NN",
                         grad=True,
+                        out=dgrad,
                         ub_algo=(
                             tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
                             if ctx.ub_overlap_ag

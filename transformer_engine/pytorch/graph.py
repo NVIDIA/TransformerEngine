@@ -58,14 +58,14 @@ def set_capture_start() -> None:
     """Record beginning of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING
     _IS_GRAPH_CAPTURING = True
-    # tex.set_capture_start()
+    tex.set_capture_start()
 
 
 def set_capture_end() -> None:
     """Record end of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING
     _IS_GRAPH_CAPTURING = False
-    # tex.set_capture_end()
+    tex.set_capture_end()
 
 
 def is_graph_capturing() -> None:

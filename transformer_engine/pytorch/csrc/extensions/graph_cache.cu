@@ -12,8 +12,7 @@ void GraphCache::insert(at::Tensor tensor){
 
 at::Tensor GraphCache::retrieve(){
     TORCH_CHECK(this->graph_locked);
-    int cache_size = this->cache.size();
-    TORCH_CHECK(this->cache_index < cache_size, "tried retrieving out of bounds");
+    TORCH_CHECK(this->cache_index < this->cache.size(), "tried retrieving out of bounds");
 
     at::Tensor ret = this->cache[graph_cache.cache_index];
     this->cache_index += 1;
@@ -42,6 +41,32 @@ void set_capture_end(){
 bool is_graph_capturing(){
     return graph_cache.graph_capturing;
 }
+
+at::Tensor empty_like_cached(at::Tensor tensor, at::TensorOptions options){
+    if (!graph_cache.graph_locked){
+        at::Tensor copy = at::empty_like(tensor, options);
+        graph_cache.insert(copy);
+
+        std::cout << tensor.device() << " | EMPTY_LIKE2 ALLOCATE with shape" << tensor.sizes() 
+            << "into index" << graph_cache.cache.size() -1 << std::endl;
+
+        return copy;
+    }
+    else{
+        at::Tensor ret = graph_cache.retrieve();
+        std::cout << tensor.device() << " | EMPTY_LIKE2 RETRIEVE from index"
+            << " from index: " << graph_cache.cache_index -1
+            << " shape: " << ret.sizes()
+            << " options: " << ret.options() << std::endl;
+
+        TORCH_CHECK(ret.sizes() == tensor.sizes(), "cudagraph cache: size mismatch");
+        TORCH_CHECK(ret.dtype() == tensor.dtype(), "cudagraph cache: dtype mismatch");
+        TORCH_CHECK(ret.device() == tensor.device(), "cudagraph cache: device mismatch");
+
+        return ret;
+    }
+}
+
 
 at::Tensor empty_like_cached(at::Tensor tensor){
     if (!graph_cache.graph_locked){

@@ -13,7 +13,6 @@ from torch.nn import init
 
 from .base import TransformerEngineBaseModule
 from .. import cpp_extensions as tex
-from ..graph import is_graph_capturing, cached_empty_like
 from ..jit import no_torch_dynamo
 from ..utils import cast_if_needed
 

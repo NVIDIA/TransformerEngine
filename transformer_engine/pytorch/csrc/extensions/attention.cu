@@ -869,7 +869,7 @@ std::vector<at::Tensor> fused_attn_fwd(
                       at::cuda::getCurrentCUDAStream());
 
   // allocate memory for workspace and auxiliary output tensors
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype(), false, true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
@@ -1013,9 +1013,17 @@ std::vector<at::Tensor> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 2);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-      dQ = torch::empty_like(Q, options);
-      dK = torch::empty_like(K, options);
-      dV = torch::empty_like(V, options);
+      if (is_graph_capturing()){
+        dQ = empty_like_cached(Q, options);
+        dK = empty_like_cached(K, options);
+        dV = empty_like_cached(V, options);
+      }
+      else{
+        dQ = torch::empty_like(Q, options);
+        dK = torch::empty_like(K, options);
+        dV = torch::empty_like(V, options);
+      }
+
       break;
     default:
       NVTE_ERROR("QKV layout not supported!");
@@ -1163,12 +1171,8 @@ std::vector<at::Tensor> fused_attn_bwd(
                       window_size[0], window_size[1], deterministic, workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 
-  // allocate memory for workspace
-  // auto shapedim = static_cast<int64_t>(workspace.data[0]);
-  // std::cout << "Shape of the workspace-ndim: " << workspace.shape().ndim << std::endl;
-  // std::cout << "Shape of the workspace-data"  << shapedim << std::endl;
 
-  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype(), false, true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
