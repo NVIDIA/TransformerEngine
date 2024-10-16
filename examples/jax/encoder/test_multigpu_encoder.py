@@ -22,6 +22,8 @@ from jax.sharding import PartitionSpec, NamedSharding
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 
+from common import is_bf16_supported
+
 DEVICE_DP_AXIS = "data"
 PARAMS_KEY = "params"
 PARAMS_AXES_KEY = PARAMS_KEY + "_axes"
@@ -402,6 +404,7 @@ class TestEncoder(unittest.TestCase):
         """Run 3 epochs for testing"""
         cls.args = encoder_parser(["--epochs", "3"])
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
