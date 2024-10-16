@@ -7462,9 +7462,6 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
-        max_batch_size: Optional[int] = None,
-        max_tokens_q: Optional[int] = None,
-        max_tokens_kv: Optional[int] = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         checkpoint_core_attention: bool = False,
@@ -7512,60 +7509,33 @@ class DotProductAttention(TransformerEngineBaseModule):
         .. note::
             .. _cu_seqlens note:
 
-            When training data has variable sequence lengths, users can choose to pad all sequences
-            to the same length, and utilize the option of :attr:`qkv_format` = {"bshd", "sbhd"} and
-            :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
-            They can provide the actual sequence length information by passing in :attr:`cu_seqlens_q`
-            and :attr:`cu_seqlens_kv`. For example, a batch of 3 sequences [a a a b b c c c c] after
-            padding is [a a a PAD b b PAD PAD c c c c], and the sequence length information should be
-            :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9], for self-attention.
+            When training data has variable sequence lengths, users have two options.
 
-            Users can also choose to *not* pad the training data, and use the option of
-            :attr:`qkv_format` = "thd" and
-            :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
-            In this case, :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv` can still be used to provide
-            the necessary sequence length information. For example, a batch of 3 sequences
-            [a a a b b c c c c] should have :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9],
-            for self-attention.
+            1. Manipulate the data and pad all sequences to the same length. Use
+               :attr:`qkv_format` = {"bshd", "sbhd"} and
+               :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
+               Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`
+               (which will be converted to :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`), to provide
+               the real sequence length information. For example, a batch of 3 sequences
+               [a a a b b c c c c] can be padded to [a a a PAD b b PAD PAD c c c c], and the cumulative
+               sequence length tensors would be
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
 
-            In some use cases, a number of identifier tokens are inserted between sequences in a batch.
-            But these tokens do not contribute to the attention calculation. In such cases,
-            :attr:`cu_seqlens_q_padded` and :attr:`cu_seqlens_kv_padded` must be specified to correctly
-            identify the beginning and end of each sequence. For example, a batch of 3 sequences with
-            extra identifiers "1", "2", "3", [a a a 1 b b 2 2 c c c c 3], should have inputs
-            :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9],
-            :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = [0, 4, 8, 13] for self-attention.
+            2. Do not perform padding on training data. Use :attr:`qkv_format` = "thd" and
+               :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
+               Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`,
+               as in option 1. For example, a batch of 3 sequences [a a a b b c c c c] can be processed
+               without any padding, and the sequence length tensors would be
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
 
-        .. note::
-            .. _max_seqlen note:
-
-            When :attr:`max_seqlens_q` and :attr:`max_seqlens_kv` are `None`, Transformer Engine
-            sets them to the "s" dimension of :attr:`query_layer` and :attr:`key_layer`'s shapes,
-            for :attr:`qkv_format` = {"bshd", "sbhd"}. For :attr:`qkv_format` = "thd", Transformer
-            Engine calculates the maximum sequence length based on the content of :attr:`cu_seqlens_q`
-            and :attr:`cu_seqlens_kv`. To avoid this small GPU kernel and CPU-GPU synchronization,
-            users are *recommended* to provide :attr:`max_seqlens_q` and :attr:`max_seqlens_kv`
-            when :attr:`qkv_format` = "thd".
-
-        .. note::
-            .. _max_b_t note:
-
-            The arguments :attr:`max_batch_size`, :attr:`max_tokens_q` and :attr:`max_tokens_kv`
-            are optional when :attr:`qkv_format` = {"bshd", "sbhd"}, but *required* when
-            :attr:`qkv_format` = "thd".
-
-            When :attr:`qkv_format` = {"bshd", "sbhd"}, if these arguments are unset, Transformer
-            Engine infers the batch size ("b") and maximum sequence lengths ("s_q" and "s_kv")
-            from :attr:`query_layer` and :attr:`key_layer`'s shapes, and sets them to
-            :attr:`max_batch_size` = b, :attr:`max_tokens_q` = b x s_q, :attr:`max_tokens_kv` = b x s_kv.
-
-            When :attr:`qkv_format` = "thd", users are *required* to set these arguments to the
-            maximum batch size, maximum number of tokens in :attr:`query_layer`, and maximum number
-            of tokens in :attr:`key_layer`. The "maximum" here is for all batches, and these three
-            arguments should be constant throughout a run. For example, training with 5 batches of
-            sequence lengths [[2, 3], [4, 6, 5], [4], [5], [9, 7]], users should set
-            :attr:`max_batch_size` = 3 (from batch [4, 6, 5]), and
-            :attr:`max_tokens_q` = :attr:`max_tokens_kv` = 16 (from batch [9, 7]), for self-attention.
+               In certain use cases, a varying number of identifier tokens are inserted between
+               sequences. These tokens do not participate in the attention calculation.
+               :attr:`cu_seqlens_q_padded` and :attr:`cu_seqlens_kv_padded` must be specified
+               in such cases to correctly identify the start and end of each sequence in a batch.
+               For example, a batch of 3 sequences [a a a 1 b b 2 2 c c c c 3] would have
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9], and
+               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = [0, 4, 8, 13]
+               for self-attention.
 
         Parameters
         ----------
@@ -7608,23 +7578,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                    See :ref:`note<cu_seqlens note>` for more details.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
-                      See :ref:`note<max_seqlen note>` for more details.
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
-                       See :ref:`note<max_seqlen note>` for more details.
-        max_batch_size: Optional[int], default = `None`
-                       Maximum batch size in a run.
-                       See :ref:`note<max_b_t note>` for more details.
-        max_tokens_q: Optional[int], default = `None`
-                     Maximum number of tokens in `query_layer` in a run.
-                     If "t_q" denotes the total number of query tokens in a batch, `max_tokens_q`
-                     is the maximum of "t_q" across all batches.
-                     See :ref:`note<max_b_t note>` for more details.
-        max_tokens_kv: Optional[int], default = `None`
-                      Maximum number of tokens in `keyy_layer` in a run.
-                      If "t_kv" denotes the total number of key/value tokens in a batch, `max_tokens_kv`
-                      is the maximum of "t_kv" across all batches.
-                      See :ref:`note<max_b_t note>` for more details.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
                        'arbitrary'}, default = `None`. Type of attention mask passed into
@@ -7815,19 +7770,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     cu_seqlens_q.dtype == torch.int32 and cu_seqlens_kv.dtype == torch.int32
                 ), "cu_seqlens_q and cu_seqlens_q must both be in dtype torch.int32!"
-                if max_seqlen_q is None:
-                    if cu_seqlens_q_padded is not None:
-                        seqlens_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
-                    else:
-                        seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    max_seqlen_q = int((seqlens_q.max().item() + 63) // 64 * 64)
-                if max_seqlen_kv is None:
-                    if cu_seqlens_kv_padded is not None:
-                        seqlens_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
-                    else:
-                        seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
                 batch_size = len(cu_seqlens_q) - 1
+                if get_cudnn_version() < (9, 6, 0):
+                    # required by FlashAttention, FusedAttention (cuDNN < 9.6), and UnfusedDPA
+                    if max_seqlen_q is None:
+                        if cu_seqlens_q_padded is not None:
+                            seqlens_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
+                        else:
+                            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                        max_seqlen_q = int((seqlens_q.max().item() + 63) // 64 * 64)
+                    if max_seqlen_kv is None:
+                        if cu_seqlens_kv_padded is not None:
+                            seqlens_kv = cu_seqlens_kv_padded[1:] - cu_seqlens_kv_padded[:-1]
+                        else:
+                            seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                        max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
+                else:
+                    # not required by FusedAttention (cuDNN >= 9.6); set to dummy values
+                    max_seqlen_q = 1
+                    max_seqlen_kv = 1
 
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
