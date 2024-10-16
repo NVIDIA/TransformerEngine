@@ -28,6 +28,7 @@ class _Fp8Unpadding(torch.autograd.Function):
         padded_m_splits: List[int],
         is_grad_enabled: bool,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         inputmats = torch.split(inp.view(-1, inp.shape[-1]), padded_m_splits)
         out_ret = torch.cat(
             [grad_output_mat[: m_splits[i]] for i, grad_output_mat in enumerate(inputmats)], dim=0
@@ -42,6 +43,7 @@ class _Fp8Unpadding(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
+        # pylint: disable=missing-function-docstring
         grad_input = None
         if ctx.requires_dgrad:
             grad_output = grad_output.contiguous()

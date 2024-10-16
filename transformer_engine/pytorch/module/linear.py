@@ -85,6 +85,8 @@ class _Linear(torch.autograd.Function):
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
+
         is_input_fp8 = isinstance(inp, Float8Tensor)
 
         # Make sure input dimensions are compatible
@@ -372,6 +374,8 @@ class _Linear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
+
         if isinstance(grad_output, Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[
                 tex.FP8BwdTensors.GRAD_OUTPUT1
@@ -403,7 +407,7 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             # Disable Userbuffers if tensor parallelism is not enabled
-            tp_world_size = get_distributed_world_size(tp_group)
+            tp_world_size = get_distributed_world_size(ctx.tp_group)
             if tp_world_size == 1:
                 ctx.ub_overlap_ag = False
 

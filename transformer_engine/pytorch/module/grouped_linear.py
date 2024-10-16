@@ -70,6 +70,7 @@ class _GroupedLinear(torch.autograd.Function):
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -268,6 +269,7 @@ class _GroupedLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
                 inputmat_scale_inv,

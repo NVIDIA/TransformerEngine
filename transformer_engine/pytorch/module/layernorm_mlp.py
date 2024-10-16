@@ -123,6 +123,8 @@ class _LayerNormMLP(torch.autograd.Function):
         gemm_gelu_fusion: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+
         # Make sure input dimensions are compatible
         in_features = ln_weight.numel()
         inp_shape = inp.shape
@@ -538,6 +540,8 @@ class _LayerNormMLP(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
+
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
             (
                 inputmat,

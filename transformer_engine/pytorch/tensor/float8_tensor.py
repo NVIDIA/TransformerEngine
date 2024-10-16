@@ -61,6 +61,7 @@ class _FromFloat8Func(torch.autograd.Function):
         tensor: Float8Tensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return tensor.dequantize(dtype=dtype)
 
     @staticmethod
@@ -68,6 +69,8 @@ class _FromFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
+
         # Assume that we want gradients in full precision
         return grad, None
 
@@ -112,6 +115,7 @@ class _ToFloat8Func(torch.autograd.Function):
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
     ) -> Float8Tensor:
+        # pylint: disable=missing-function-docstring
 
         # Tensor attributes
         dtype = tensor.dtype
@@ -167,6 +171,8 @@ class _ToFloat8Func(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
+
         # Assume that we want gradients in full precision
         return grad, None, None, None, None, None, None, None
 
@@ -185,6 +191,7 @@ class _IdentityFunc(torch.autograd.Function):
         tensor: Float8Tensor,
         init_kwargs: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if constructor kwargs are not provided
         ctx.input_dtype = tensor.dtype
@@ -208,6 +215,7 @@ class _IdentityFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad):
+        # pylint: disable=missing-function-docstring
         return grad.to(ctx.input_dtype), None
 
 
@@ -224,6 +232,7 @@ class _ViewFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -243,6 +252,7 @@ class _ViewFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -266,6 +276,7 @@ class _ReshapeFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -285,7 +296,7 @@ class _ReshapeFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-
+        # pylint: disable=missing-function-docstring
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
                 grad,
@@ -704,6 +715,7 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def clone(self) -> Float8Tensor:
+        # pylint: disable=missing-function-docstring
         data = self._data.detach().clone()
         data_transpose = None
         if self._transpose is not None:
@@ -714,9 +726,11 @@ class Float8Tensor(QuantizedTensor):
         )
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
+        # pylint: disable=missing-function-docstring
         return _ViewFunc.apply(self, shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8Tensor:
+        # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
     def contiguous(

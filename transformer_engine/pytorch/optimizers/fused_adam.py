@@ -136,6 +136,7 @@ class FusedAdam(torch.optim.Optimizer):
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
 
     def zero_grad(self):
+        # pylint: disable=missing-function-docstring
         if self.set_grad_none:
             for group in self.param_groups:
                 for p in group["params"]:

@@ -32,6 +32,8 @@ class _moe_permute(torch.autograd.Function):
         num_out_tokens: int,
         max_token_num: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+
         # Empty input check
         if not inp.numel():
             return inp, torch.tensor([], device=inp.device)
@@ -90,6 +92,8 @@ class _moe_permute(torch.autograd.Function):
         permuted_act_grad: torch.Tensor,
         _,
     ) -> Tuple[torch.Tensor, ...]:
+        # pylint: disable=missing-function-docstring
+
         # Empty input check
         if not permuted_act_grad.numel():
             return permuted_act_grad, None, None, None
@@ -130,6 +134,8 @@ class _moe_unpermute(torch.autograd.Function):
         row_id_map: torch.Tensor,
         probs: torch.Tensor,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
+
         # Empty input check
         if not inp.numel():
             ctx.probs = probs
@@ -188,6 +194,8 @@ class _moe_unpermute(torch.autograd.Function):
         ctx,
         unpermuted_act_grad: torch.Tensor,
     ) -> Tuple[torch.Tensor, None, torch.Tensor]:
+        # pylint: disable=missing-function-docstring
+
         # Empty input check
         if not unpermuted_act_grad.numel():
             return unpermuted_act_grad, None, ctx.probs
