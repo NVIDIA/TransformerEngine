@@ -1397,7 +1397,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata(num_gemms=2)
 
-        self.reset_parameters(defer_init=device=="meta")
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

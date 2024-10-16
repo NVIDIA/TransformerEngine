@@ -720,10 +720,7 @@ class Float8Tensor(QuantizedTensor):
         data_transpose = None
         if self._transpose is not None:
             data_transpose = self._transpose.detach().clone()
-        return _IdentityFunc.apply(
-            self,
-            { "data": data, "data_transpose": data_transpose }
-        )
+        return _IdentityFunc.apply(self, {"data": data, "data_transpose": data_transpose})
 
     def view(self, *shape: Tuple[int]) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
