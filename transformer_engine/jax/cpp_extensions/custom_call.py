@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
-from jax.lib import xla_client
 from jax.interpreters import mlir
 import jax.extend as jex
 
