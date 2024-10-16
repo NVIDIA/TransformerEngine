@@ -575,7 +575,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor rng_state,
-                         size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+                         size_t max_seqlen_q, size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                          int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
@@ -622,7 +622,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, d_qk, d_v, is_training, attn_scale, dropout,
         qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
         input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
@@ -651,7 +651,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTETensor dV, NVTETensor dBias, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
-                         size_t max_seqlen_kv, float attn_scale, float dropout,
+                         size_t max_seqlen_kv, size_t max_batch_size, size_t max_tokens_q, size_t max_tokens_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, int64_t window_size_left,
                          int64_t window_size_right, bool deterministic, NVTETensor workspace,
@@ -711,7 +711,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, attn_scale, dropout, qkv_layout,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, max_batch_size, max_tokens_q, max_tokens_kv, d_qk, d_v, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, window_size_left, window_size_right, deterministic, input_Q,
         input_K, input_V, input_O, input_dO, input_Bias, output_S, output_dQ, output_dK, output_dV,
         output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
