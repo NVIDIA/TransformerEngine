@@ -61,7 +61,6 @@ from transformer_engine.pytorch.utils import (
     split_tensor_along_dim,
     get_device_compute_capability,
     get_default_init_method,
-    maybe_contiguous,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -259,6 +258,11 @@ _alibi_cache = {
 
 
 __all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+
+
+def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
+    """Make tensor contiguous if final stride is not 1."""
+    return tensor.contiguous() if tensor.stride(-1) != 1 else tensor
 
 
 def get_attention_backend(
@@ -1284,7 +1288,7 @@ class PackTensors(torch.autograd.Function):
     def forward(
         ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
-        """PackTensors FWD."""
+        # pylint: disable=missing-function-docstring
         assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
         ctx.save_for_backward(indices)
         ctx.dim0 = tensors[0].shape[0]
@@ -1296,7 +1300,7 @@ class PackTensors(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
-        """PackTensors BWD."""
+        # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         if len(grad_outputs) == 1:
             return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
@@ -1317,13 +1321,13 @@ class UnpackTensor(torch.autograd.Function):
         dim0: int,
         tensor: torch.Tensor,
     ) -> torch.Tensor:
-        """UnpackTensors FWD."""
+        # pylint: disable=missing-function-docstring
         ctx.save_for_backward(indices)
         return unpack_tensor(indices, dim0, tensor)
 
     @staticmethod
     def backward(ctx, grad_output):
-        """UnpackTensors BWD."""
+        # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         return None, None, pack_tensor(indices, grad_output)
 
@@ -1577,7 +1581,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cp_global_ranks,
         cp_stream,
     ):
-        """AttnFuncWithCPAndKVP2P FWD."""
+        # pylint: disable=missing-function-docstring
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -2406,7 +2410,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        """AttnFuncWithCPAndKVP2P BWD."""
+        # pylint: disable=missing-function-docstring
         cp_size_a2a = ctx.cp_size_a2a
         rank_a2a = ctx.rank_a2a
 
@@ -3262,7 +3266,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_group,
         cp_stream,
     ):
-        """AttnFuncWithCPAndKVAllGather FWD."""
+        # pylint: disable=missing-function-docstring
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -3450,7 +3454,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        """AttnFuncWithCPAndKVAllGather BWD."""
+        # pylint: disable=missing-function-docstring
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
 
@@ -3681,7 +3685,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_group,
         cp_stream,
     ):
-        """AttnFuncWithCPAndQKVOA2A FWD."""
+        # pylint: disable=missing-function-docstring
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -3921,7 +3925,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout):
-        """AttnFuncWithCPAndQKVOA2A BWD."""
+        # pylint: disable=missing-function-docstring
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         q, k, v, out = ctx.saved_tensors[:4]
@@ -4332,7 +4336,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         cp_size: int = 1,
         cp_rank: int = 0,
     ) -> torch.Tensor:
-        """FusedRoPEFunc FWD."""
+        # pylint: disable=missing-function-docstring
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
         if tensor_format == "sbhd":
@@ -4352,7 +4356,7 @@ class FusedRoPEFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        """FusedRoPEFunc BWD."""
+        # pylint: disable=missing-function-docstring
         freqs, cu_seqlens = ctx.saved_tensors
         if ctx.tensor_format == "sbhd":
             grad_input = tex.fused_rope_backward(grad_output, freqs, False)
@@ -4459,7 +4463,7 @@ class _SplitAlongDim(torch.autograd.Function):
         split_dim: int,
         split_size_or_sections: Union[int, List[int], Tuple[int]],
     ) -> Tuple[torch.Tensor, ...]:
-        """_SplitAlongDim FWD."""
+        # pylint: disable=missing-function-docstring
         ctx.split_dim = split_dim
         ctx.split_size_or_sections = split_size_or_sections
         if isinstance(mixed_x_layer, Float8Tensor):
@@ -4478,7 +4482,7 @@ class _SplitAlongDim(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, *grad_outputs):
-        """_SplitAlongDim BWD."""
+        # pylint: disable=missing-function-docstring
         assert len(grad_outputs) > 0, "No gradients received for backprop!"
 
         if isinstance(ctx.split_size_or_sections, (list, tuple)):
@@ -4823,7 +4827,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """_PrepareQKVForFA FWD."""
+        # pylint: disable=missing-function-docstring
         # All inputs received are non-contiguous tensors.
         # The `query_layer` tensor is used to access the
         # full memory region of the QKV tensor.
@@ -4841,7 +4845,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dk: torch.Tensor,
         dv: torch.Tensor,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
-        """_PrepareQKVForFA BWD."""
+        # pylint: disable=missing-function-docstring
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
@@ -5448,7 +5452,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        """FusedAttnFunc_qkvpacked FWD."""
+        # pylint: disable=missing-function-docstring
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -5602,7 +5606,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        """FusedAttnFunc_qkvpacked BWD."""
+        # pylint: disable=missing-function-docstring
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -5837,7 +5841,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        """FusedAttnFunc_kvpacked FWD."""
+        # pylint: disable=missing-function-docstring
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -6019,7 +6023,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        """FusedAttnFunc_kvpacked BWD."""
+        # pylint: disable=missing-function-docstring
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor
@@ -6290,7 +6294,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fp8_meta,
         deterministic,
     ):
-        """FusedAttnFunc FWD."""
+        # pylint: disable=missing-function-docstring
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -6556,7 +6560,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, d_out):
-        """FusedAttnFunc BWD."""
+        # pylint: disable=missing-function-docstring
         if ctx.is_output_fp8:
             assert isinstance(
                 d_out, Float8Tensor

@@ -35,7 +35,7 @@ class _RMSNorm(torch.autograd.Function):
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
     ) -> torch.Tensor:
-        "RMSNorm FWD."
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -62,7 +62,7 @@ class _RMSNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        "RMSNorm BWD."
+        # pylint: disable=missing-function-docstring
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
@@ -184,7 +184,7 @@ class RMSNorm(torch.nn.Module):
 
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        """RMSNorm FWD"""
+        # pylint: disable=missing-function-docstring
 
         # Set the activation type for AMP.
         # Note: This will soon be deprecated with

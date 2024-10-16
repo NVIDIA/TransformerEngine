@@ -124,7 +124,7 @@ class _NoopCatFunc(torch.autograd.Function):
         dim: int,
         *tensors: Tuple[torch.Tensor, ...],
     ) -> torch.Tensor:
-        """_NoopCatFunc FWD."""
+        # pylint: disable=missing-function-docstring
 
         # Check first tensor
         if not tensors:
@@ -193,7 +193,7 @@ class _NoopCatFunc(torch.autograd.Function):
         ctx,
         grad_output: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        """_NoopCatFunc BWD."""
+        # pylint: disable=missing-function-docstring
         grad_inputs = []
         for split_start, split_end in ctx.split_ranges:
             slices = [slice(None)] * grad_output.dim()
