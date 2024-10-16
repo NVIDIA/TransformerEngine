@@ -127,7 +127,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
                                   .Arg<Buffer_Type>()      // input
                                   .Ret<Buffer_Type>()      // output
                                   .Attr<int64_t>("act_enum"),
-                              FFI_Traits);
+                              FFI_CudaGraph_Traits);
 
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
@@ -278,7 +278,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuHandler, DActLuFFI,
                                   .Arg<Buffer_Type>()      // act_input
                                   .Ret<Buffer_Type>()      // output
                                   .Attr<int64_t>("act_enum"),
-                              FFI_Traits);
+                              FFI_CudaGraph_Traits);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                         DType in_dtype, DType out_dtype) {
