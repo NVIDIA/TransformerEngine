@@ -385,7 +385,9 @@ class ActLuFp8Primitive(BasePrimitive):
         assert scale_inv_aval.dtype == jnp.float32
         if is_ffi_enabled():
             name = "te_act_lu_fp8_ffi"
-            out = ffi.ffi_lowering(name)(ctx, x, amax, scale, scale_inv, act_enum=act_enum)
+            out = ffi.ffi_lowering(name, operand_output_aliases={1: 1})(
+                ctx, x, amax, scale, scale_inv, act_enum=act_enum
+            )
         else:
             ir_x_type = ir.RankedTensorType(x.type)
             ir_x_shape = ir_x_type.shape
