@@ -187,8 +187,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
 
-void FusedAttnForwardImpl(cudaStream_t stream, void **buffers, const CustomCallFusedAttnDescriptor &descriptor)
-{
+void FusedAttnForwardImpl(cudaStream_t stream, void **buffers,
+                          const CustomCallFusedAttnDescriptor &descriptor) {
   auto qkv_layout = descriptor.qkv_layout;
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
 
@@ -339,20 +339,17 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   FusedAttnForwardImpl(stream, buffers, descriptor);
 }
 
-Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
-                               Buffer_Type v_buf, Buffer_Type bias_buf, Buffer_Type q_cu_seqlens_buf,
-                               Buffer_Type kv_cu_seqlens_buf, Buffer_Type q_seq_offsets_buf,
-                               Buffer_Type k_seq_offsets_buf, Buffer_Type seed_buf,
-                               Result_Type output_buf, Result_Type softmax_aux_buf,
-                               Result_Type rng_state_buf, Result_Type workspace_buf,
-                               int64_t input_batch_, int64_t bias_batch_, int64_t q_max_seqlen_,
-                               int64_t kv_max_seqlen_, int64_t attn_heads_, int64_t num_gqa_groups_,
-                               int64_t bias_heads_, int64_t head_dim_, int64_t max_segments_per_seq_,
-                               int64_t wkspace_size_, double scaling_factor_,
-                               double dropout_probability_, int64_t bias_type_,
-                               int64_t mask_type_, int64_t qkv_layout_, int64_t dtype_,
-                               int64_t wkspace_dtype_, bool is_training, bool deterministic,
-                               int64_t window_size_left, int64_t window_size_right) {
+Error_Type FusedAttnForwardFFI(
+    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
+    Buffer_Type bias_buf, Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
+    Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf, Buffer_Type seed_buf,
+    Result_Type output_buf, Result_Type softmax_aux_buf, Result_Type rng_state_buf,
+    Result_Type workspace_buf, int64_t input_batch_, int64_t bias_batch_, int64_t q_max_seqlen_,
+    int64_t kv_max_seqlen_, int64_t attn_heads_, int64_t num_gqa_groups_, int64_t bias_heads_,
+    int64_t head_dim_, int64_t max_segments_per_seq_, int64_t wkspace_size_, double scaling_factor_,
+    double dropout_probability_, int64_t bias_type_, int64_t mask_type_, int64_t qkv_layout_,
+    int64_t dtype_, int64_t wkspace_dtype_, bool is_training, bool deterministic,
+    int64_t window_size_left, int64_t window_size_right) {
   /* Descriptor data type conversion */
   size_t input_batch = static_cast<size_t>(input_batch_);
   size_t bias_batch = static_cast<size_t>(bias_batch_);
@@ -390,16 +387,27 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
   void *workspace = workspace_buf->untyped_data();
 
   /* Pack pointers and descriptor */
-  void *buffers[13] = {
-    q, k, v, bias, q_cu_seqlens, kv_cu_seqlens, q_seq_offsets, k_seq_offsets,
-    seed, output, softmax_aux, rng_state, workspace
-  };
+  void *buffers[13] = {q,
+                       k,
+                       v,
+                       bias,
+                       q_cu_seqlens,
+                       kv_cu_seqlens,
+                       q_seq_offsets,
+                       k_seq_offsets,
+                       seed,
+                       output,
+                       softmax_aux,
+                       rng_state,
+                       workspace};
   const CustomCallFusedAttnDescriptor descriptor = {
-    input_batch, bias_batch, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups,
-    bias_heads, head_dim, max_segments_per_seq, wkspace_size, scaling_factor, dropout_probability,
-    bias_type, mask_type, qkv_layout, dtype, wkspace_dtype, is_training, deterministic,
-    window_size_left, window_size_right
-  };
+      input_batch,   bias_batch,       q_max_seqlen,
+      kv_max_seqlen, attn_heads,       num_gqa_groups,
+      bias_heads,    head_dim,         max_segments_per_seq,
+      wkspace_size,  scaling_factor,   dropout_probability,
+      bias_type,     mask_type,        qkv_layout,
+      dtype,         wkspace_dtype,    is_training,
+      deterministic, window_size_left, window_size_right};
 
   FusedAttnForwardImpl(stream, buffers, descriptor);
   return ffi_with_cuda_error_check();

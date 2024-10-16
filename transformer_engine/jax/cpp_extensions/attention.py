@@ -373,7 +373,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_fused_attn_forward_ffi"
             out = ffi.ffi_lowering(name)(
-                ctx, q, k, v, bias, q_cu_seqlen, kv_cu_seqlen, q_seq_offsets, k_seq_offsets, seed,
+                ctx,
+                q,
+                k,
+                v,
+                bias,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                seed,
                 input_batch=input_batch,
                 bias_batch=bias_batch,
                 q_max_seqlen=q_max_seqlen,
@@ -397,7 +406,17 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 window_size_right=config.window_size[1],
             )
         else:
-            operands = [q, k, v, bias, q_cu_seqlen, kv_cu_seqlen, q_seq_offsets, k_seq_offsets, seed]
+            operands = [
+                q,
+                k,
+                v,
+                bias,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                seed,
+            ]
             operand_shapes = map(lambda x: x.type.shape, operands)
             out_types = [
                 ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))

@@ -180,8 +180,8 @@ Error_Type ActLuFP8FFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type a
   auto act_len = input_dims.end()[-2];
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
 
-  ActLuImpl(input, m, n, in_dtype, out_dtype, scale, stream, scale_inv, amax_out, output,
-            act_type, act_len);
+  ActLuImpl(input, m, n, in_dtype, out_dtype, scale, stream, scale_inv, amax_out, output, act_type,
+            act_len);
 
   return ffi_with_cuda_error_check();
 }
