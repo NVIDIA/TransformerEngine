@@ -179,7 +179,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
     def is_fused_op(self) -> bool:
         return False
 
-    # pylint: disable=no-self-use
     def num_fp8_scales(
         self,
         mode: str,  # pylint: disable=unused-argument
@@ -225,11 +224,11 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             }
 
         # Construct FP8 metadata for all tensor types
-        return dict(
-            input=_make_meta(self.num_fp8_scales("input"), True),
-            param=_make_meta(self.num_fp8_scales("param"), True),
-            grad_output=_make_meta(self.num_fp8_scales("grad_output"), False),
-        )
+        return {
+            "input": _make_meta(self.num_fp8_scales("input"), True),
+            "param": _make_meta(self.num_fp8_scales("param"), True),
+            "grad_output": _make_meta(self.num_fp8_scales("grad_output"), False),
+        }
 
     @classmethod
     def _maybe_update_fp8_meta(cls, fp8_meta: Optional[dict[str, Any]]) -> None:
