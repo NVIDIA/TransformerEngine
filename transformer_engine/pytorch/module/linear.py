@@ -178,6 +178,8 @@ class _Linear(torch.autograd.Function):
                     activation_dtype,
                 )
 
+            ub_algo = None
+            rs_out = None
             if ub_overlap_rs:
                 ub_obj_projout = get_ub(ub_name + "_fprop")
                 out = ub_obj_projout.get_ubuf_output(1)
@@ -398,6 +400,7 @@ class _Linear(torch.autograd.Function):
 
             tp_world_size = get_distributed_world_size(ctx.tp_group)
             ctx.ub_overlap_ag = False if tp_world_size == 1 else ctx.ub_overlap_ag
+            ub_algo = None
             if ctx.ub_overlap_ag:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
@@ -509,6 +512,7 @@ class _Linear(torch.autograd.Function):
                 elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                     dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
+            wgrad = None
             if weight.requires_grad:
                 if ctx.fp8:
                     # WGRAD

@@ -152,6 +152,12 @@ if _flash_attn_version >= _flash_attn_version_required:
     from flash_attn.flash_attn_interface import _flash_attn_varlen_forward as flash_attn_varlen_fwd
     from flash_attn.flash_attn_interface import _flash_attn_varlen_backward as flash_attn_varlen_bwd
     from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+else:
+    flash_attn_func = None
+    flash_attn_varlen_func = None
+    flash_attn_varlen_fwd = None
+    flash_attn_varlen_bwd = None
+    flash_attn_cuda_bwd = None
 
 _attention_backends = {
     "attention_params": None,
@@ -1627,6 +1633,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
+        fused_attn_qkv_dtype = None
+        fused_attn_backend = None
+        amax_per_step = None
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -1718,6 +1727,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         softmax_lse_in_packed_format = not use_fused_attention and (
             _flash_attn_2_6_0_plus or _use_flash_attn_3
         )
+        flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
@@ -1756,6 +1766,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             p2p_comm_buffers[0] = torch.cat((k.unsqueeze(0), v.unsqueeze(0)), dim=0)
         send_recv_reqs = [[], []]
 
+        softmax_lse_ = None
         for i in range(cp_size + 1):
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
@@ -2248,6 +2259,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
+            out_ = None
             if qkv_format == "bshd":
                 out_per_step[i] = out_per_step[i].view(
                     out.shape[0], -1, *out.shape[-2:]
@@ -2329,6 +2341,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta["scaling_fwd"].amax_history[0][META_S] = amax_cp_fwd[0]
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
+        out_fp8 = None
         out_f16 = out.to(q_fp8.dtype if fp8 and fp8_meta["recipe"].fp8_mha else q_f16.dtype)
         if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
             out_fp8 = cast_to_fp8(out_f16, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward)
@@ -2446,6 +2459,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
         else:
             attn_dbias = None
+            attn_dbias_ = None
 
         softmax_lse_in_packed_format = not ctx.use_fused_attention and (
             _flash_attn_2_6_0_plus or _use_flash_attn_3
@@ -2470,6 +2484,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             softmax_lse.unsqueeze_(-1)
 
         dout_dtype = dout.dtype
+        fused_attn_backend = None
+        fused_attn_qkv_dtype = None
+        fused_attn_dqkv_dtype = None
+        amax_per_step = None
+        seq_dim = None
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -2552,6 +2571,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         dout = dout.view(*q.shape)
         send_recv_reqs = []
 
+        flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
@@ -3284,6 +3304,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             use_fused_attention or _flash_attn_2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
+        flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
@@ -3499,6 +3520,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
 
         local_seq_chunk_ids = [rank, 2 * cp_size - rank - 1]
 
+        flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
@@ -3703,6 +3725,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             or _flash_attn_2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
+
+        flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
@@ -3732,6 +3756,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
 
+        fused_attn_backend = None
+        fused_attn_qkv_dtype = None
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -3939,6 +3965,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         causal = "causal" in ctx.attn_mask_type
         seq_dim = ctx.qkv_format.index("s")
 
+        fused_attn_backend = None
+        fused_attn_dqkv_dtype = None
+        fused_attn_qkv_dtype = None
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -3990,6 +4019,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             [out, dout], chunk_ids_for_a2a, seq_dim, cp_size, ctx.cp_group, ctx.cp_stream, True
         )
 
+        flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
@@ -5292,9 +5322,9 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
+                    activation_dtype = query_layer.dtype
                     if fp8:
                         fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-                        activation_dtype = query_layer.dtype
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
                         def convert_to_torch_float8(tensor, dtype):
@@ -5626,6 +5656,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             fwd_scale_invs,
             *aux_ctx_tensors,
         ) = ctx.saved_tensors
+        rest = [None]
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
@@ -6047,6 +6078,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
             fwd_scale_invs,
             *aux_ctx_tensors,
         ) = ctx.saved_tensors
+        rest = [None]
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
         if ctx.use_FAv2_bwd:
@@ -6588,6 +6620,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ) = ctx.saved_tensors
         if not aux_ctx_tensors[0].is_contiguous():
             aux_ctx_tensors[0] = aux_ctx_tensors[0].contiguous()
+        rest = [None]
         if ctx.use_FAv2_bwd:
             softmax_lse, rng_state = aux_ctx_tensors
             dq = torch.empty_like(q)
@@ -7803,7 +7836,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if qkv_format == "sbhd":
                     max_seqlen_q, max_seqlen_kv = (query_layer.shape[0], key_layer.shape[0])
                     batch_size = query_layer.shape[1]
-                if qkv_format == "bshd":
+                else:
                     max_seqlen_q, max_seqlen_kv = (query_layer.shape[1], key_layer.shape[1])
                     batch_size = query_layer.shape[0]
                 max_seqlen_q *= cp_size
@@ -8848,6 +8881,8 @@ class MultiheadAttention(torch.nn.Module):
                     sequence_length = key_layer.size(0)
                 elif self.qkv_format == "bshd":
                     sequence_length = key_layer.size(1)
+                else:
+                    raise ValueError(f"QKV format {self.qkv_format} not supported for KV caching.")
 
                 sequence_start = inference_params.sequence_len_offset
                 sequence_end = sequence_start + sequence_length

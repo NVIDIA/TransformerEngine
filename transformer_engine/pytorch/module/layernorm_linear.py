@@ -154,6 +154,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Column Parallel Linear
         ln_out_gathered = False
+        ub_algo = None
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             if not return_layernorm_output:
@@ -579,6 +580,7 @@ class _LayerNormLinear(torch.autograd.Function):
             elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                 dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
+            wgrad = None
             if weight.requires_grad:
                 if ctx.fp8:
                     # WGRAD
@@ -681,6 +683,8 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
+            dgamma = None
+            dbeta = None
             if ctx.normalization == "LayerNorm":
                 dgrad, dgamma, dbeta = tex.layernorm_bwd(
                     dgrad,

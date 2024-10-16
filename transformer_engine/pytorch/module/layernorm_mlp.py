@@ -174,6 +174,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Column Parallel Linear
         ln_out_gathered = False
+        ub_algo_ag = None
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             ln_out = torch.empty_like(ln_out)
@@ -284,6 +285,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 None,
                 activation_dtype,
             )
+
+            rs_out = None
+            ub_algo_rs = None
             if ub_overlap_rs:
                 ub_obj_fc2out = get_ub("fc2_fprop")
                 fc2_out = ub_obj_fc2out.get_ubuf_output(1)
@@ -643,6 +647,7 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 accumulate_wgrad_into_param_main_grad = ctx.fuse_wgrad_accumulation
 
+            fc2_wgrad = None
             if ctx.fp8:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
@@ -927,6 +932,7 @@ class _LayerNormMLP(torch.autograd.Function):
             elif ctx.set_parallel_mode and ctx.tensor_parallel:
                 fc1_dgrad, handle = allreduce(fc1_dgrad, ctx.tp_group, async_op=True)
 
+            fc1_wgrad = None
             if fc1_weight.requires_grad:
                 if ctx.fp8:
                     # FC1 WGRAD
@@ -1030,6 +1036,8 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
+            dgamma = None
+            dbeta = None
             if ctx.normalization == "LayerNorm":
                 dgrad, dgamma, dbeta = tex.layernorm_bwd(
                     dgrad,
