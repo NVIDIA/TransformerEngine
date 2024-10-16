@@ -115,7 +115,7 @@ class _ToFloat8Func(torch.autograd.Function):
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
     ) -> Float8Tensor:
-        """Cast to FP8 FWD."""
+        # pylint: disable=missing-function-docstring
 
         # Tensor attributes
         dtype = tensor.dtype
@@ -190,7 +190,7 @@ class _IdentityFunc(torch.autograd.Function):
         tensor: Float8Tensor,
         init_kwargs: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
-        """FWD identity."""
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if constructor kwargs are not provided
         ctx.input_dtype = tensor.dtype
@@ -214,7 +214,7 @@ class _IdentityFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad):
-        """BWD identity."""
+        # pylint: disable=missing-function-docstring
         return grad.to(ctx.input_dtype), None
 
 
@@ -231,7 +231,7 @@ class _ViewFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
-        """FWD view."""
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -251,7 +251,7 @@ class _ViewFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        """BWD view."""
+        # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -275,7 +275,7 @@ class _ReshapeFunc(torch.autograd.Function):
         tensor: torch.Tensor,
         shape: Tuple[int] = None,
     ) -> torch.Tensor:
-        "FWD reshape."
+        # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
         ctx.shape = tensor.shape
@@ -295,7 +295,7 @@ class _ReshapeFunc(torch.autograd.Function):
         ctx,
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
-        """BWD reshape."""
+        # pylint: disable=missing-function-docstring
 
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
@@ -995,7 +995,8 @@ class Float8Tensor(QuantizedTensor):
                     requires_grad=tensor.requires_grad,
                     device=new_device,
                 )
-                super(Float8Tensor, type(self)).data = dummy_tensor
+                # pylint: disable=unnecessary-dunder-call
+                super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._data = tensor._data
             self._fp8_attrs = tensor._fp8_attrs
             return
@@ -1023,7 +1024,8 @@ class Float8Tensor(QuantizedTensor):
                 requires_grad=tensor.requires_grad,
                 device=self._data.device,
             )
-            super(Float8Tensor, type(self)).data = dummy_tensor
+            # pylint: disable=unnecessary-dunder-call
+            super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
             if self._transpose is not None:
                 self._transpose = torch.empty(
                     (self._data.size(-1), self._data.numel() // self._data.size(-1)),

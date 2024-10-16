@@ -86,7 +86,6 @@ from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
 
-# # pylint: disable=used-before-assignment
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -125,6 +124,13 @@ _flash_attn_2_4_plus = False
 _flash_attn_2_4_1_plus = False
 _flash_attn_2_5_7_plus = False
 _flash_attn_2_6_0_plus = False
+
+flash_attn_func = None
+flash_attn_varlen_func = None
+flash_attn_varlen_fwd = None
+flash_attn_varlen_bwd = None
+flash_attn_cuda_bwd = None
+
 try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
@@ -1852,6 +1858,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         send_recv_reqs = [[], []]
 
         softmax_lse_ = None
+        out = None
         for i in range(cp_size + 1):
             if i < cp_size:
                 with torch.cuda.stream(flash_attn_streams[i % 2]):
@@ -2574,6 +2581,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_dqkv_dtype = None
         amax_per_step = None
         seq_dim = None
+        dout_fp8_dtype = None
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -2708,6 +2716,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
+            dk_, dv_ = None, None
             if ctx.fp8 and ctx.use_fused_attention:
                 fp8_meta_kwargs["amax_dp"] = amax_per_step[0][i]
                 fp8_meta_kwargs["amax_dqkv"] = amax_per_step[0][i]
