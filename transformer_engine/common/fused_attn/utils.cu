@@ -394,15 +394,37 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
   }
 }
 
-// map batch size to the next power of 2
+// quantize batch size
 size_t get_max_batch_size(size_t batch_size) {
-  size_t max_b = pow(2, ceil(log2(batch_size)));
+  size_t max_b = batch_size;
+  size_t log2_b = ceil(log2(batch_size));
+  // batch size is expected to be 10s-100s
+  // b = 1, ..., 32   -> max_b = 32
+  // b = 33, ..., 512 -> max_b = next power of 2
+  // otherwise        -> max_b = b
+  if (log2_b <= 5) {
+    max_b = 32;
+  } else if (log2_b <= 9) {
+    max_b = pow(2, log2_b);
+  }
   return max_b;
 }
 
-// map token count to the next power of 2
+// quantize token count
 size_t get_max_tokens(size_t num_tokens) {
-  size_t max_t = pow(2, ceil(log2(num_tokens)));
+  // token count is expected to be 1k's-100k's
+  // t = 0, ..., 1024   -> max_t = 1024
+  // t = 1025, ..., 32k -> max_t = next power of 2
+  // t = 32k+1, ...     -> max_t = increment by 32k
+  size_t log2_t = ceil(log2(num_tokens));
+  size_t max_t = 0;
+  if (log2_t <= 10) {
+    max_t = 1024;
+  } else if (log2_t <= 15) {
+    max_t = pow(2, log2_t);
+  } else {
+    max_t = (num_tokens + 32767)/32768 * 32768;
+  }
   return max_t;
 }
 }  // namespace fused_attn
