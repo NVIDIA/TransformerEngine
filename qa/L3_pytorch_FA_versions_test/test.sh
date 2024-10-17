@@ -7,9 +7,16 @@ set -e
 : ${TE_PATH:=/opt/transformerengine}
 
 pip install pytest==8.2.1
+
+# Limit parallel build jobs to avoid overwhelming system resources
+export MAX_JOBS=4
+
+# Iterate over Flash Attention versions
 FA_versions=(2.1.1 2.3.0 2.4.0.post1 2.4.1 2.5.7 2.6.3 3.0.0b1)
 for fa_version in "${FA_versions[@]}"
 do
+
+  # Build Flash Attention
   if [ "${fa_version}" \< "3.0.0" ]
   then
     pip install flash-attn==${fa_version}
@@ -19,5 +26,8 @@ do
     mkdir -p $python_path/flashattn_hopper
     wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/main/hopper/flash_attn_interface.py
   fi
+
+  # Run tests
   NVTE_TORCH_COMPILE=0 pytest -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py
+
 done
