@@ -423,7 +423,7 @@ size_t get_max_tokens(size_t num_tokens) {
   } else if (log2_t <= 15) {
     max_t = pow(2, log2_t);
   } else {
-    max_t = (num_tokens + 32767)/32768 * 32768;
+    max_t = (num_tokens + 32767) / 32768 * 32768;
   }
   return max_t;
 }
