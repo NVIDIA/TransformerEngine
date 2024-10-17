@@ -42,7 +42,7 @@ def pytorch_permute(tokens, indices, num_out_tokens: int = None):
         topk = 1
     else:
         topk = indices.size(1)
-    flatten_indices = indices.view(-1)
+    flatten_indices = indices.reshape(-1)
     sorted_indices = torch.argsort(flatten_indices, stable=True)
     num_out_tokens = num_out_tokens if num_out_tokens is not None else flatten_indices.size(0)
 

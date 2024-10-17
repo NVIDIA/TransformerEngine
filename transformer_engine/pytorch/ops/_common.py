@@ -107,10 +107,10 @@ def reshape(
     if is_float8_tensor(tensor):
         out = Float8Tensor.make_like(
             tensor,
-            data=tensor._data.view(shape),
+            data=tensor._data.reshape(shape),
             fp8_attrs=tensor._fp8_attrs,
         )
         return out
 
     # Reshape standard PyTorch tensor
-    return tensor.view(shape)
+    return tensor.reshape(shape)

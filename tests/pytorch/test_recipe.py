@@ -347,11 +347,11 @@ class TestFP8Recipe:
                 [[amax_value]], dtype=torch.float32, device="cuda"
             )
             # expected scale is FP32_max
-            expected_scale = fp32_max.view(1).cuda()
+            expected_scale = fp32_max.reshape(1).cuda()
         elif amax_case == "normal":
             # plus a small epsilon to avoid zero amax
             amax_value = torch.rand(1, dtype=torch.float32, device="cuda") + 1e-5
-            fp8_meta[forward_key].amax_history = amax_value.view(1, 1)
+            fp8_meta[forward_key].amax_history = amax_value.reshape(1, 1)
             expected_scale = fp8_max / amax_value
         elif amax_case == "inf":
             fp8_meta[forward_key].amax_history = torch.tensor(
@@ -366,7 +366,7 @@ class TestFP8Recipe:
 
         if fused_update:
             tex.fused_amax_and_scale_update_after_reduction(
-                fp8_meta[forward_key].amax_history.clone().view(-1),
+                fp8_meta[forward_key].amax_history.clone().reshape(-1),
                 [fp8_meta[forward_key].amax_history],
                 [fp8_meta[forward_key].scale],
                 [fp8_meta[forward_key].scale_inv],

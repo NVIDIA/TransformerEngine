@@ -78,7 +78,7 @@ class _GroupedLinear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
-        inputmats = torch.split(inp.view(-1, in_features), m_splits)
+        inputmats = torch.split(inp.reshape(-1, in_features), m_splits)
         if fp8:
             for i in range(num_gemms):
                 assert_dim_for_fp8_exec(inputmats[i])
@@ -265,7 +265,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp.shape[1:-1], out.shape[-1])
+        return out.reshape(-1, *inp.shape[1:-1], out.shape[-1])
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -289,7 +289,7 @@ class _GroupedLinear(torch.autograd.Function):
             # preprocess grad_output
             grad_output = grad_output.contiguous()
             grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.m_splits
+                grad_output.reshape(-1, grad_output.shape[-1]), ctx.m_splits
             )
             grad_output_c = [None] * ctx.num_gemms
             grad_output_t = [None] * ctx.num_gemms
@@ -480,7 +480,7 @@ class _GroupedLinear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
             None,  # m_splits
             None,  # use_bias
             None,  # is_first_microbatch
@@ -783,10 +783,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                 [
                     o + cast_if_needed(b, self.activation_dtype)
                     for o, b in zip(
-                        torch.split(out.view(-1, self.out_features), m_splits), bias_tensors
+                        torch.split(out.reshape(-1, self.out_features), m_splits), bias_tensors
                     )
                 ]
-            ).view(out_shape)
+            ).reshape(out_shape)
 
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]

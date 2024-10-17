@@ -84,38 +84,38 @@ class DotProductAttention(torch.nn.Module):
         hn = value.size(3)
 
         # [sq, b, np, hn] -> [sq, b * np, hn]
-        query = query.view(sq, b * np, -1)
+        query = query.reshape(sq, b * np, -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key = key.view(sk, b * np, -1)
+        key = key.reshape(sk, b * np, -1)
 
         bmm1 = (
             torch.bmm(query.transpose(0, 1), key.transpose(0, 1).transpose(1, 2)) / self.norm_factor
         )
 
         # change view to [b, np, sq, sk]
-        attention_scores = bmm1.view(b, np, sq, sk)
+        attention_scores = bmm1.reshape(b, np, sq, sk)
 
         attention_probs = self.masked_softmax(attention_scores, attention_mask)
 
         attention_probs = self.dropout(attention_probs)
 
         # change view [sk, b * np, hn]
-        value = value.view(sk, b * np, -1)
+        value = value.reshape(sk, b * np, -1)
 
         # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(b * np, sq, -1)
+        attention_probs = attention_probs.reshape(b * np, sq, -1)
 
         # matmul: [b * np, sq, hn]
         context = torch.bmm(attention_probs, value.transpose(0, 1))
 
         # change view [b, np, sq, hn]
-        context = context.view(b, np, sq, hn)
+        context = context.reshape(b, np, sq, hn)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context = context.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
-        context = context.view(sq, b, self.projection_size)
+        context = context.reshape(sq, b, self.projection_size)
 
         return context
 

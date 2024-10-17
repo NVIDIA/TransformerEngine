@@ -129,7 +129,7 @@ class _LayerNormMLP(torch.autograd.Function):
         in_features = ln_weight.numel()
         inp_shape = inp.shape
         assert inp_shape[-1] == in_features, "GEMM not possible"
-        inputmat = inp.view((-1, in_features))
+        inputmat = inp.reshape((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(fc1_weight)
@@ -531,14 +531,14 @@ class _LayerNormMLP(torch.autograd.Function):
             fc2_out, _ = allreduce(fc2_out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        fc2_out = fc2_out.view(-1, *inp_shape[1:-1], fc2_out.shape[-1])
+        fc2_out = fc2_out.reshape(-1, *inp_shape[1:-1], fc2_out.shape[-1])
 
         if return_layernorm_output:
             if return_layernorm_output_gathered:
                 shape = list(inp_shape)
                 shape[0] *= tp_size
-                return fc2_out, ln_out_return.view(shape)
-            return fc2_out, ln_out_return.view_as(inp)
+                return fc2_out, ln_out_return.reshape(shape)
+            return fc2_out, ln_out_return.reshape_as(inp)
         return fc2_out
 
     @staticmethod
@@ -929,7 +929,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     handle.wait()
                 if not ctx.ub_bulk_wgrad and not ctx.ub_overlap_rs_dgrad:
                     if ctx.return_layernorm_output and ctx.return_layernorm_output_gathered:
-                        fc1_dgrad = fc1_dgrad + grad_outputs[1].view_as(fc1_dgrad)
+                        fc1_dgrad = fc1_dgrad + grad_outputs[1].reshape_as(fc1_dgrad)
                     fc1_dgrad, handle = reduce_scatter_along_first_dim(
                         fc1_dgrad, ctx.tp_group, async_op=True
                     )
@@ -1032,13 +1032,13 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # LayerNorm gradient
             if ctx.ub_overlap_rs_dgrad:
-                dgrad = rs_out.view(inputmat.shape)
+                dgrad = rs_out.reshape(inputmat.shape)
             else:
-                dgrad = fc1_dgrad.view(inputmat.shape)
+                dgrad = fc1_dgrad.reshape(inputmat.shape)
 
             # Residual gradient
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
-                dgrad = dgrad + grad_outputs[1].view_as(dgrad)
+                dgrad = dgrad + grad_outputs[1].reshape_as(dgrad)
 
             dgamma = None
             dbeta = None
@@ -1123,7 +1123,7 @@ class _LayerNormMLP(torch.autograd.Function):
             )
 
         return (
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
             fc1_wgrad,

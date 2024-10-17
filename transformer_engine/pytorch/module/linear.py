@@ -93,7 +93,7 @@ class _Linear(torch.autograd.Function):
         out_features, in_features = weight.shape
         inp_shape = inp.shape
         assert inp_shape[-1] == in_features, "GEMM not possible"
-        inputmat = inp.view(-1, in_features)
+        inputmat = inp.reshape(-1, in_features)
         if fp8:
             assert_dim_for_fp8_exec(inputmat)
             assert_dim_for_fp8_exec(weight)
@@ -364,7 +364,7 @@ class _Linear(torch.autograd.Function):
             out, _ = allreduce(out, tp_group)
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
-        return out.view(-1, *inp_shape[1:-1], out_features)
+        return out.reshape(-1, *inp_shape[1:-1], out_features)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
@@ -618,7 +618,7 @@ class _Linear(torch.autograd.Function):
         return (
             wgrad,
             None,  # weight_fp8
-            dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            dgrad.reshape(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
             None,  # use_bias
             None,  # is_first_microbatch

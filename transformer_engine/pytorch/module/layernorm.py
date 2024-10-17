@@ -43,7 +43,7 @@ class _LayerNorm(torch.autograd.Function):
         in_features = ln_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
-        inputmat = inp.view((-1, in_features))
+        inputmat = inp.reshape((-1, in_features))
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -66,18 +66,18 @@ class _LayerNorm(torch.autograd.Function):
                 None,
                 None,
             )
-        return ln_out.view_as(inp)
+        return ln_out.reshape_as(inp)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-        d_ln_out = grad_output.view(inputmat.shape)
+        d_ln_out = grad_output.reshape(inputmat.shape)
         dxmat, dgamma, dbeta = tex.layernorm_bwd(
             d_ln_out, inputmat, mu, rsigma, ln_weight, ctx.bwd_ln_sm_margin, ctx.zero_centered_gamma
         )
-        return dxmat.view(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
+        return dxmat.reshape(ctx.inp_shape), dgamma, dbeta, None, None, None, None, None, None, None
 
 
 class LayerNorm(torch.nn.Module):
@@ -193,7 +193,7 @@ class LayerNorm(torch.nn.Module):
         # Note: This will soon be deprecated with
         # https://github.com/NVIDIA/TransformerEngine/pull/1033
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch.get_autocast_dtype("cuda")
         elif self.activation_dtype != inp.dtype:
             dtype = inp.dtype
             for name, param in self.named_parameters():

@@ -211,7 +211,7 @@ def run_dpa_with_cp(
     if qkv_format == "bshd" or qkv_format == "sbhd":
         seq_dim = qkv_format.index("s")
         q_, k_, v_, dout_ = [
-            x.view(
+            x.reshape(
                 *x.shape[:seq_dim],
                 2 * world_size,
                 x.shape[seq_dim] // (2 * world_size),
@@ -222,7 +222,8 @@ def run_dpa_with_cp(
         seq_idx = torch.tensor([rank, 2 * world_size - rank - 1], device=q_.device)
         q_, k_, v_, dout_ = [x.index_select(seq_dim, seq_idx) for x in [q_, k_, v_, dout_]]
         q_, k_, v_, dout_ = [
-            x.view(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :]) for x in [q_, k_, v_, dout_]
+            x.reshape(*x.shape[:seq_dim], -1, *x.shape[(seq_dim + 2) :])
+            for x in [q_, k_, v_, dout_]
         ]
     elif qkv_format == "thd":
         seq_idx_q = tex.thd_get_partitioned_indices(
@@ -237,11 +238,11 @@ def run_dpa_with_cp(
         assert False, f"{qkv_format} is an unsupported qkv_format!"
     q_, k_, v_ = [x.requires_grad_() for x in [q_, k_, v_]]
     if bias_ is not None:
-        bias_ = bias_.view(
+        bias_ = bias_.reshape(
             *bias_.shape[:-2], 2 * world_size, bias_.shape[-2] // (2 * world_size), bias_.shape[-1]
         )
         bias_ = bias_.index_select(2, seq_idx)
-        bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
+        bias_ = bias_.reshape(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
         cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
         cp_comm_ranks,
@@ -278,7 +279,7 @@ def run_dpa_with_cp(
     # compare results with and without CP
     if qkv_format == "bshd" or qkv_format == "sbhd":
         dq, dk, dv, out = [
-            x.view(
+            x.reshape(
                 *x.shape[:seq_dim],
                 2 * world_size,
                 x.shape[seq_dim] // (2 * world_size),
@@ -288,7 +289,7 @@ def run_dpa_with_cp(
         ]
         dq, dk, dv, out = [x.index_select(seq_dim, seq_idx) for x in [dq, dk, dv, out]]
         dq_, dk_, dv_, out_ = [
-            x.view(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
+            x.reshape(*x.shape[:seq_dim], 2, x.shape[seq_dim] // 2, *x.shape[(seq_dim + 1) :])
             for x in [q_.grad, k_.grad, v_.grad, out_]
         ]
     elif qkv_format == "thd":

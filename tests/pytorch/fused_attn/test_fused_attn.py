@@ -1484,11 +1484,11 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
     layout = layout.replace("s", "sq")
     tensor_shape = [dim_to_num[j] for j in layout.split("_")]
     tensor = 0.01 * torch.randint(-100, 100, tensor_shape, dtype=dtype, device="cuda")
-    hidden_states = tensor.view(*tensor.shape[:-2], -1)
+    hidden_states = tensor.reshape(*tensor.shape[:-2], -1)
     if is_training:
         hidden_states.requires_grad = True
     tensor = 0.01 * torch.randn(tensor_shape, dtype=dtype, device="cuda")
-    out_grad = tensor.view(*tensor.shape[:-2], -1)
+    out_grad = tensor.reshape(*tensor.shape[:-2], -1)
 
     with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
         out = mha(
@@ -1820,8 +1820,8 @@ def _run_custom_mha_fp8(dtype, config, backend):
     out = torch.load("out.pt")
     dqkv = torch.load("dqkv.pt")
     return (
-        out.view(config.batch_size, config.max_seqlen_q, -1),
-        dqkv.view(
+        out.reshape(config.batch_size, config.max_seqlen_q, -1),
+        dqkv.reshape(
             config.batch_size, config.max_seqlen_q, 3, config.num_heads, config.head_dim_qk
         ).contiguous(),
     )
@@ -1845,7 +1845,9 @@ def _run_ref_mha_f16(dtype, config, backend):
     cu_seqlens = torch.zeros(config.batch_size + 1, device="cuda", dtype=torch.int32)
     cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
     out_grad = (
-        torch.load("out_grad.pt").to(device="cuda").view(config.batch_size, config.max_seqlen_q, -1)
+        torch.load("out_grad.pt")
+        .to(device="cuda")
+        .reshape(config.batch_size, config.max_seqlen_q, -1)
     )
 
     _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
@@ -1952,17 +1954,17 @@ class _custom_mha_fp8(torch.autograd.Function):
             use_split_accumulator=_2X_ACC_FPROP,
             D_dtype=fp8_dtype_forward,
         )
-        qkv = qkv.view(-1, 3, h, d)
+        qkv = qkv.reshape(-1, 3, h, d)
         qkv_fp16 = (
             ext.cast_from_fp8(
                 qkv, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward, tex.DType.kFloat16
             )
-            .view(b, max_s, 3, h, d)
+            .reshape(b, max_s, 3, h, d)
             .contiguous()
         )
         torch.save(qkv_fp16, "qkv.pt")
         if cudnn_frontend_version == 1:
-            qkv = qkv.view(b, max_s, 3, h, d)  # bs3hd
+            qkv = qkv.reshape(b, max_s, 3, h, d)  # bs3hd
 
         # FMHA
         out, aux_ctx_tensors, *rest = fused_attn_fwd(
@@ -2022,7 +2024,7 @@ class _custom_mha_fp8(torch.autograd.Function):
         ctx.mask_type = mask_type
         ctx.dtype = inp.dtype
 
-        out = out.view(-1, in_features)  # (bs)(hd)
+        out = out.reshape(-1, in_features)  # (bs)(hd)
         out_fp16 = ext.cast_from_fp8(
             out, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward, tex.DType.kFloat16
         )
@@ -2057,7 +2059,7 @@ class _custom_mha_fp8(torch.autograd.Function):
                 qkv[:, :, 1, :, :] if cudnn_frontend_version == 1 else qkv[:, 1, :, :],
                 qkv[:, :, 2, :, :] if cudnn_frontend_version == 1 else qkv[:, 2, :, :],
                 out,
-                proj_dgrad.view_as(out),
+                proj_dgrad.reshape_as(out),
                 fp8_dtype_forward,
                 fp8_dtype_backward,
                 ctx.aux_ctx_tensors,
@@ -2089,7 +2091,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             dqkv_stride.insert(dim, int(dqkv_stride[-3] / 3))
             dqkv.set_(dq.untyped_storage(), dq.storage_offset(), dqkv_shape, dqkv_stride)  # bs3hd
 
-            dqkv_c = dqkv.view(-1, 3 * ctx.hidden_size)
+            dqkv_c = dqkv.reshape(-1, 3 * ctx.hidden_size)
             dqkv_c_fp16 = ext.cast_from_fp8(
                 dqkv_c,
                 ctx.fp8_meta["scaling_bwd"],
