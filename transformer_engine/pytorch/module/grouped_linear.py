@@ -70,6 +70,7 @@ class _GroupedLinear(torch.autograd.Function):
         weights_fp8: List[Union[Float8Tensor, None]],
         *weights_and_biases: Union[Float8Tensor, torch.Tensor, None],
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
@@ -268,6 +269,7 @@ class _GroupedLinear(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_GroupedLinear_backward"):
             (
                 inputmat_scale_inv,
@@ -441,36 +443,38 @@ class _GroupedLinear(torch.autograd.Function):
                 clear_tensor_data(*inputmats)
                 clear_tensor_data(*inputmats_t)
 
+                def handle_custom_ddp_from_mcore(w, wgrad):
+                    if w.requires_grad:
+                        if ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
+                            w.grad_added_to_main_grad = True
+                            if getattr(w, "zero_out_wgrad", False):
+                                wgrad = torch.zeros(
+                                    w.main_grad.shape,
+                                    dtype=w.dtype,
+                                    device=torch.cuda.current_device(),
+                                    requires_grad=False,
+                                )
+                            else:
+                                wgrad = torch.empty(
+                                    w.main_grad.shape,
+                                    dtype=w.dtype,
+                                    device=torch.cuda.current_device(),
+                                    requires_grad=False,
+                                )
+                        elif ctx.fuse_wgrad_accumulation:
+                            wgrad = None
+                    else:
+                        wgrad = None
+                    return wgrad
+
+                wgrad_list = [
+                    handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
+                ]
+            else:
+                wgrad_list = [None] * ctx.num_gemms
+
             if not ctx.use_bias:
                 grad_biases = [None] * ctx.num_gemms
-
-        def handle_custom_ddp_from_mcore(w, wgrad):
-            if w.requires_grad:
-                if ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
-                    w.grad_added_to_main_grad = True
-                    if getattr(w, "zero_out_wgrad", False):
-                        wgrad = torch.zeros(
-                            w.main_grad.shape,
-                            dtype=w.dtype,
-                            device=torch.cuda.current_device(),
-                            requires_grad=False,
-                        )
-                    else:
-                        wgrad = torch.empty(
-                            w.main_grad.shape,
-                            dtype=w.dtype,
-                            device=torch.cuda.current_device(),
-                            requires_grad=False,
-                        )
-                elif ctx.fuse_wgrad_accumulation:
-                    wgrad = None
-            else:
-                wgrad = None
-            return wgrad
-
-        wgrad_list = [
-            handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
-        ]
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
@@ -641,7 +645,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.primary_weights_in_fp8:
             self.init_fp8_metadata(num_gemms=self.num_gemms)
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM
