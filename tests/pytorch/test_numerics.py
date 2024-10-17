@@ -135,7 +135,7 @@ def assert_allclose(
                     f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
                     f"(diff {max_diff.item()})."
                 )
-                raise AssertionError(msg)
+            raise AssertionError(msg)
 
 
 def reset_rng_states() -> None:
@@ -1692,7 +1692,7 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", "126m")
+@pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
     config = model_configs[model]
 
@@ -1784,7 +1784,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", "126m")
+@pytest.mark.parametrize("model", ["126m"])
 def test_gpt_fp8_parameters(dtype, bs, model):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -1808,7 +1808,7 @@ def test_gpt_fp8_parameters(dtype, bs, model):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", "126m")
+@pytest.mark.parametrize("model", ["126m"])
 def test_transformer_layer_hidden_states_format(dtype, bs, model):
     config = model_configs[model]
 
