@@ -37,11 +37,7 @@ class ForwardLinearBiasAdd(FusedOperation):
     ) -> None:
 
         # Basic operations that comprise this fused operation
-        op_idxs = dict(
-            linear=0,
-            bias=None,
-            add=None,
-        )
+        op_idxs = {"linear": 0, "bias": None, "add": None}
         ops = [linear]
         if bias is not None:
             op_idxs["bias"] = len(ops)

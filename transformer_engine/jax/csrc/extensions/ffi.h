@@ -17,6 +17,7 @@ using Result_Type = xla::ffi::Result<xla::ffi::AnyBuffer>;
 using Error_Type = xla::ffi::Error;
 using FFI = xla::ffi::Ffi;
 using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
+constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type);
 Error_Type ffi_with_cuda_error_check();

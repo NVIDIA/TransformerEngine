@@ -78,10 +78,10 @@ def canonicalize_fp8_scales(
             scale_inv_offset = 0
 
     # Pack tensors and offsets into dicts
-    tensors = dict(scale=scale, amax=amax, scale_inv=scale_inv)
-    offsets = dict(
-        scale_offset=scale_offset,
-        amax_offset=amax_offset,
-        scale_inv_offset=scale_inv_offset,
-    )
+    tensors = {"scale": scale, "amax": amax, "scale_inv": scale_inv}
+    offsets = {
+        "scale_offset": scale_offset,
+        "amax_offset": amax_offset,
+        "scale_inv_offset": scale_inv_offset,
+    }
     return tensors, offsets

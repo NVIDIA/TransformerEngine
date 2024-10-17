@@ -8,7 +8,9 @@ extension-pkg-whitelist=flash_attn_2_cuda,
 extension-pkg-allow-list=transformer_engine.transformer_engine_jax
 
 disable=too-many-locals,
+        too-few-public-methods,
         too-many-public-methods,
+        too-many-positional-arguments,
         invalid-name,
         too-many-arguments,
         abstract-method,

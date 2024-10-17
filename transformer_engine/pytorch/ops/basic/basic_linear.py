@@ -562,12 +562,12 @@ class BasicLinear(BasicOperation):
         _wait_async(x_async)
         x_async = None
         if with_fp8_compute:
-            kwargs = dict(
-                accumulate=accumulate_into_out,
-                out=y,
-                bias=b,
-                use_bias=(b is not None),
-            )
+            kwargs = {
+                "accumulate": accumulate_into_out,
+                "out": y,
+                "bias": b,
+                "use_bias": (b is not None),
+            }
             if with_fp8_output:
                 if y._fp8_meta is None:
                     # Hackily create FP8TensorMeta if needed
@@ -584,12 +584,12 @@ class BasicLinear(BasicOperation):
                     fp8_meta = y._fp8_meta[fp8_meta_key]
                     fp8_meta_index = y._fp8_meta_index
                 kwargs.update(
-                    dict(
-                        out=y._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=y._fp8_dtype,
-                    )
+                    {
+                        "out": y._data,
+                        "out_index": fp8_meta_index,
+                        "fp8_meta_tensor": fp8_meta,
+                        "D_dtype": y._fp8_dtype,
+                    }
                 )
             fp8_gemm(
                 w._data,
@@ -936,10 +936,7 @@ class BasicLinear(BasicOperation):
             _wait_async(dy_async)
             dy_async = None
             if with_fp8_compute:
-                kwargs = dict(
-                    accumulate=accumulate_into_grad_input,
-                    out=dx,
-                )
+                kwargs = {"accumulate": accumulate_into_grad_input, "out": dx}
                 if with_fp8_grad_input:
                     if dx._fp8_meta is None:
                         # Hackily create FP8TensorMeta if needed
@@ -958,12 +955,12 @@ class BasicLinear(BasicOperation):
                         fp8_meta = dx._fp8_meta[fp8_meta_key]
                         fp8_meta_index = dx._fp8_meta_index
                     kwargs.update(
-                        dict(
-                            out=dx._data,
-                            out_index=fp8_meta_index,
-                            fp8_meta_tensor=fp8_meta,
-                            D_dtype=dx._fp8_dtype,
-                        )
+                        {
+                            "out": dx._data,
+                            "out_index": fp8_meta_index,
+                            "fp8_meta_tensor": fp8_meta,
+                            "D_dtype": dx._fp8_dtype,
+                        }
                     )
                 fp8_gemm(
                     w.transpose_2d(),

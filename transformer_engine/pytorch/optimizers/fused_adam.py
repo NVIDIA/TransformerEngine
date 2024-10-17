@@ -100,13 +100,13 @@ class FusedAdam(torch.optim.Optimizer):
 
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
-        defaults = dict(
-            lr=lr,
-            bias_correction=bias_correction,
-            betas=betas,
-            eps=eps,
-            weight_decay=weight_decay,
-        )
+        defaults = {
+            "lr": lr,
+            "bias_correction": bias_correction,
+            "betas": betas,
+            "eps": eps,
+            "weight_decay": weight_decay,
+        }
         super().__init__(params, defaults)
         self.adam_w_mode = 1 if adam_w_mode else 0
         self.set_grad_none = set_grad_none
@@ -135,6 +135,7 @@ class FusedAdam(torch.optim.Optimizer):
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
 
     def zero_grad(self):
+        # pylint: disable=missing-function-docstring
         if self.set_grad_none:
             for group in self.param_groups:
                 for p in group["params"]:

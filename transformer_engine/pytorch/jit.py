@@ -8,6 +8,8 @@ from typing import Callable, Optional, Tuple
 
 import torch
 
+# pylint: disable=unnecessary-lambda-assignment
+
 jit_fuser = torch.jit.script
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
