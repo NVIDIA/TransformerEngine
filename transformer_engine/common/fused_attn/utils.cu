@@ -358,6 +358,9 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu
   if (tid < b) {
     q_seqlens[tid] = q_cu_seqlens[tid + 1] - q_cu_seqlens[tid];
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
+  } else {
+    q_seqlens[tid] = 0;
+    kv_seqlens[tid] = 0;
   }
 }
 
@@ -365,12 +368,13 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu
 __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
                                              size_t hg, size_t d_qk, size_t d_v,
                                              int32_t *cu_seqlens_q_padded,
-                                             int32_t *cu_seqlens_kv_padded, int32_t *offsets_q,
-                                             int32_t *offsets_k, int32_t *offsets_v,
-                                             int32_t *offsets_o) {
+                                             int32_t *cu_seqlens_kv_padded, int64_t *offsets_q,
+                                             int64_t *offsets_k, int64_t *offsets_v,
+                                             int64_t *offsets_o, int64_t *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < b + 1) {
     offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
+    offsets_s[tid] = h * cu_seqlens_q_padded[tid];
     switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
         offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
@@ -390,9 +394,64 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
         offsets_v[tid] = offsets_k[tid];
         break;
     }
+  } else {
+    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[b];
+    offsets_s[tid] = h * cu_seqlens_q_padded[b];
+    switch (layout_group) {
+      case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[b];
+        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[b];
+        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[b];
+        break;
+      case NVTE_QKV_Layout_Group::NVTE_3HD:
+      case NVTE_QKV_Layout_Group::NVTE_H3D:
+        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[b];
+        offsets_k[tid] = offsets_q[tid];
+        offsets_v[tid] = offsets_q[tid];
+        break;
+      case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
+      case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[b];
+        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[b];
+        offsets_v[tid] = offsets_k[tid];
+        break;
+    }
   }
 }
 
+// quantize batch size
+size_t get_max_batch_size(size_t batch_size) {
+  size_t max_b = batch_size;
+  size_t log2_b = ceil(log2(batch_size));
+  // batch size is expected to be 10s-100s
+  // b = 1, ..., 32   -> max_b = 32
+  // b = 33, ..., 512 -> max_b = next power of 2
+  // otherwise        -> max_b = b
+  if (log2_b <= 5) {
+    max_b = 32;
+  } else if (log2_b <= 9) {
+    max_b = pow(2, log2_b);
+  }
+  return max_b;
+}
+
+// quantize token count
+size_t get_max_tokens(size_t num_tokens) {
+  // token count is expected to be 1k's-100k's
+  // t = 0, ..., 1024   -> max_t = 1024
+  // t = 1025, ..., 32k -> max_t = next power of 2
+  // t = 32k+1, ...     -> max_t = increment by 32k
+  size_t log2_t = ceil(log2(num_tokens));
+  size_t max_t = 0;
+  if (log2_t <= 10) {
+    max_t = 1024;
+  } else if (log2_t <= 15) {
+    max_t = pow(2, log2_t);
+  } else {
+    max_t = (num_tokens + 32767) / 32768 * 32768;
+  }
+  return max_t;
+}
 }  // namespace fused_attn
 
 // get cuDNN data type

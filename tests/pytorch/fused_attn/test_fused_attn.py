@@ -619,7 +619,7 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
+    "layout_0_1": ModelConfig(3, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
     "layout_0_2": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
     "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
     "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
@@ -644,6 +644,8 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
+    if qkv_layout in ["t3hd", "th3d"]:
+        pytest.skip("Skip t3hd and th3d before cuDNN frontend change")
     pad_between_seqs = True
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
