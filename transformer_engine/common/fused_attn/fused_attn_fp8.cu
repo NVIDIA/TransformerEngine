@@ -1087,10 +1087,14 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
 
     auto plan = get_plan(fa_fprop_cache, descriptor);
     size_t wkspace_size = static_cast<size_t>(plan.getWorkspaceSize());
+    const size_t num_bytes_per_ragged_offset = (b + 1) * sizeof(int32_t);
+    const size_t seqlen_offsets_workspace_size = 2 * num_bytes_per_ragged_offset;
+    const size_t actual_seqlens_workspace_size = b * sizeof(int32_t);
 
     // Exit to request upper level API to allocate memory if needed
     if (workspace_ptr == nullptr) {
-      *workspace_size = wkspace_size + ((b + 1) * 2 + b) * sizeof(int32_t);
+      *workspace_size =
+          wkspace_size + seqlen_offsets_workspace_size + actual_seqlens_workspace_size;
       return;
     }
 
@@ -1098,12 +1102,12 @@ void fused_attn_fp8_fwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, in
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    int32_t* qkv_ragged_offset =
-        reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
-    int32_t* o_ragged_offset = reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) +
-                                                          wkspace_size + (b + 1) * sizeof(int32_t));
-    int32_t* actual_seqlens_q = reinterpret_cast<int32_t*>(
-        reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size + (b + 1) * 2 * sizeof(int32_t));
+    int8_t* base_workspace_ptr = reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size;
+    int32_t* qkv_ragged_offset = reinterpret_cast<int32_t*>(base_workspace_ptr);
+    int32_t* o_ragged_offset =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + num_bytes_per_ragged_offset);
+    int32_t* actual_seqlens_q =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + seqlen_offsets_workspace_size);
     // FP8 currently only supports self-attention, so doesn't use devPtrcuSeqlensKV
     dim3 blockDims(128);
     dim3 gridDims((b + blockDims.x) / blockDims.x);
@@ -1553,10 +1557,14 @@ void fused_attn_fp8_bwd_impl(
 
     auto plan = get_plan(fa_bprop_cache, descriptor);
     size_t wkspace_size = static_cast<size_t>(plan.getWorkspaceSize());
+    const size_t num_bytes_per_ragged_offset = (b + 1) * sizeof(int32_t);
+    const size_t seqlen_offsets_workspace_size = 2 * num_bytes_per_ragged_offset;
+    const size_t actual_seqlens_workspace_size = b * sizeof(int32_t);
 
     // Exit to request upper level API to allocate memory if needed
     if (workspace_ptr == nullptr) {
-      *workspace_size = wkspace_size + ((b + 1) * 2 + b) * sizeof(int32_t);
+      *workspace_size =
+          wkspace_size + seqlen_offsets_workspace_size + actual_seqlens_workspace_size;
       return;
     }
 
@@ -1564,12 +1572,12 @@ void fused_attn_fp8_bwd_impl(
     // null streams for sizing the cuDNN workspace.
     NVTE_CHECK_CUDNN(cudnnSetStream(handle_, stream));
 
-    int32_t* qkv_ragged_offset =
-        reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size);
-    int32_t* o_ragged_offset = reinterpret_cast<int32_t*>(reinterpret_cast<int8_t*>(workspace_ptr) +
-                                                          wkspace_size + (b + 1) * sizeof(int32_t));
-    int32_t* actual_seqlens_q = reinterpret_cast<int32_t*>(
-        reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size + (b + 1) * 2 * sizeof(int32_t));
+    int8_t* base_workspace_ptr = reinterpret_cast<int8_t*>(workspace_ptr) + wkspace_size;
+    int32_t* qkv_ragged_offset = reinterpret_cast<int32_t*>(base_workspace_ptr);
+    int32_t* o_ragged_offset =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + num_bytes_per_ragged_offset);
+    int32_t* actual_seqlens_q =
+        reinterpret_cast<int32_t*>(base_workspace_ptr + seqlen_offsets_workspace_size);
     // FP8 currently only supports self-attention, so doesn't use devPtrcuSeqlensKV
     dim3 blockDims(128);
     dim3 gridDims((b + blockDims.x) / blockDims.x);
