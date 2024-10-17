@@ -33,7 +33,7 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
 void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
                                        const size_t bias_batch, const size_t attn_heads,
                                        const size_t bias_heads, const size_t q_max_seqlen,
-                                       const size_t kv_max_seqlen, DType dtype, 
+                                       const size_t kv_max_seqlen, DType dtype,
                                        NVTE_Bias_Type bias_type, NVTE_Fused_Attn_Backend backend,
                                        void *softmax_buf, void *rng_state_buf = nullptr,
                                        void *bias_buf = nullptr) {
@@ -78,9 +78,9 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
     TODO(Alp): Refactor the nvte_fused_attn_fwd() to work like nvte_fused_attn_bwd()?
 */
 void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
-                                       const size_t bias_batch, const size_t attn_heads,
-                                       const size_t bias_heads, const size_t q_max_seqlen,
-                                       const size_t kv_max_seqlen, DType dtype,
+                                        const size_t bias_batch, const size_t attn_heads,
+                                        const size_t bias_heads, const size_t q_max_seqlen,
+                                        const size_t kv_max_seqlen, DType dtype,
                                         NVTE_Fused_Attn_Backend backend, void *softmax_buf,
                                         void *rng_state_buf, void *bias_buf) {
   // Backward calls put everything into the tensor pack for every backend
@@ -435,7 +435,8 @@ Error_Type FusedAttnForwardFFI(
                                     backend, softmax_aux);
 
   /* cuDNN workspace */
-  auto workspace_tensor = TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
+  auto workspace_tensor =
+      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
 
   /* Call the underlying NVTE API */
   auto layout_group = nvte_get_qkv_layout_group(qkv_layout);
@@ -443,12 +444,12 @@ Error_Type FusedAttnForwardFFI(
     auto qkv = q_buf.untyped_data();
     auto qkv_shape = std::vector<size_t>{input_batch * q_max_seqlen, 3, attn_heads, head_dim};
     auto qkv_tensor = TensorWrapper(qkv, qkv_shape, dtype);
-    nvte_fused_attn_fwd_qkvpacked(
-        qkv_tensor.data(), bias_tensor.data(), s_tensor.data(), o_tensor.data(),
-        &aux_output_tensors, q_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
-        rng_state_tensor.data(), q_max_seqlen, is_training, scaling_factor,
-        dropout_probability, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
-        workspace_tensor.data(), stream);
+    nvte_fused_attn_fwd_qkvpacked(qkv_tensor.data(), bias_tensor.data(), s_tensor.data(),
+                                  o_tensor.data(), &aux_output_tensors, q_cu_seqlens_tensor.data(),
+                                  q_seq_offsets_tensor.data(), rng_state_tensor.data(),
+                                  q_max_seqlen, is_training, scaling_factor, dropout_probability,
+                                  qkv_layout, bias_type, mask_type, window_size_left,
+                                  window_size_right, workspace_tensor.data(), stream);
   } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
     auto q = q_buf.untyped_data();
     auto kv = k_buf.untyped_data();
