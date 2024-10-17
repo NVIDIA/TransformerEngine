@@ -306,7 +306,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(LayerNormForwardFP8Handler, LayerNormForwardFP8FFI
                                   .Ret<Buffer_Type>()      // barrier
                                   .Attr<bool>("zero_centered_gamma")
                                   .Attr<double>("eps")
-                                  .Attr<int64_t>("sm_margin"));
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
@@ -457,7 +458,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(LayerNormBackwardHandler, LayerNormBackwardFFI,
                                   .Ret<Buffer_Type>()      // dbeta_part
                                   .Attr<bool>("zero_centered_gamma")
                                   .Attr<double>("eps")
-                                  .Attr<int64_t>("sm_margin"));
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
 
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];

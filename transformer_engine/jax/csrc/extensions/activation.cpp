@@ -195,7 +195,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuFP8Handler, ActLuFP8FFI,
                                   .Arg<Buffer_Type>()      // scale_inv
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // amax_out
-                                  .Attr<int64_t>("act_enum"));
+                                  .Attr<int64_t>("act_enum"),
+                              FFI_CudaGraph_Traits);
 
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];

@@ -65,7 +65,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(TransposeHandler, TransposeFFI,
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // input
                                   .Ret<Buffer_Type>()      // output
-                                  .Attr<int64_t>("transpose_axis"));
+                                  .Attr<int64_t>("transpose_axis"),
+                              FFI_CudaGraph_Traits);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];

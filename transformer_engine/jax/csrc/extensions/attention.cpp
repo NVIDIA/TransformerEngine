@@ -525,7 +525,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Attr<bool>("is_training")
                                   .Attr<bool>("deterministic")
                                   .Attr<int64_t>("window_size_left")
-                                  .Attr<int64_t>("window_size_right"));
+                                  .Attr<int64_t>("window_size_right"),
+                              FFI_CudaGraph_Traits);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
