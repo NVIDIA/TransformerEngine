@@ -199,12 +199,16 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
 void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
                          size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardFP8Handler);
+
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
                                                    bool is_layer_norm, bool zero_centered_gamma,
                                                    float eps, int sm_margin);
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormBackwardHandler);
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
