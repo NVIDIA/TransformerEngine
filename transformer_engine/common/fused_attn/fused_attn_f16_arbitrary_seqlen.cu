@@ -72,16 +72,17 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
-  printf("b %d, s_q %d, s_kv %d, max_b %d, max_t_q %d, max_t_kv %d\n", b, s_q, s_kv, max_b, max_t_q,
-         max_t_kv);
+
+  // keep original batch size because cu_seqlens are created with [b+1] shape
+  int64_t orig_b = b;
   if (is_ragged) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
+    // replace batch size and maximum sequence lengths with maximum token counts
+    // for query and key/value so the graph is static within each quantization bucket
     b = max_b;
     s_q = max_t_q;
     s_kv = max_t_kv;
   }
-  printf("b %d, s_q %d, s_kv %d, max_b %d, max_t_q %d, max_t_kv %d\n", b, s_q, s_kv, max_b, max_t_q,
-         max_t_kv);
   auto cudnn_runtime_version = cudnnGetVersion();
 
   try {
@@ -336,8 +337,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
+    size_t actual_seqlen_workspace_size = 2 * orig_b * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 5 * (orig_b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -360,11 +361,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     if (is_padding) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+      const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + orig_b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
       variant_pack[seq_q] = devActualSeqlenQ;
@@ -373,16 +374,16 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     if (is_ragged) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+      const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (orig_b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
           static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
           static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
@@ -433,15 +434,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
-  printf("b %d, s_q %d, s_kv %d, max_b %d, max_t_q %d, max_t_kv %d\n", b, s_q, s_kv, max_b, max_t_q,
-         max_t_kv);
+  // keep original batch size because cu_seqlens are created with [b+1] shape
+  int64_t orig_b = b;
   if (is_ragged) {
+    // replace batch size and maximum sequence lengths with maximum token counts
+    // for query and key/value so the graph is static within each quantization bucket
     b = max_b;
     s_q = max_t_q;
     s_kv = max_t_kv;
   }
-  printf("b %d, s_q %d, s_kv %d, max_b %d, max_t_q %d, max_t_kv %d\n", b, s_q, s_kv, max_b, max_t_q,
-         max_t_kv);
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -749,8 +750,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
+    size_t actual_seqlen_workspace_size = 2 * orig_b * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 5 * (orig_b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -786,11 +787,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     if (is_padding) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
+      const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + orig_b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
       variant_pack[seq_q] = devActualSeqlenQ;
@@ -799,16 +800,16 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     if (is_ragged) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
+      const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (orig_b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
           static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
           static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
@@ -1298,15 +1299,11 @@ void fused_attn_arbitrary_seqlen_fwd(
   size_t max_batch_size = 0;
   size_t max_tokens_q = 0;
   size_t max_tokens_kv = 0;
-  printf("max_batch_size %d, max_tokens_q %d, max_tokens_kv %d\n", max_batch_size, max_tokens_q,
-         max_tokens_kv);
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     max_batch_size = get_max_batch_size(batch);
     max_tokens_q = get_max_tokens(num_tokens_q);
     max_tokens_kv = get_max_tokens(num_tokens_kv);
   }
-  printf("max_batch_size %d, max_tokens_q %d, max_tokens_kv %d\n", max_batch_size, max_tokens_q,
-         max_tokens_kv);
 
   if (Aux_CTX_Tensors->size == 0) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -1419,16 +1416,12 @@ void fused_attn_arbitrary_seqlen_bwd(
   size_t max_batch_size = 0;
   size_t max_tokens_q = 0;
   size_t max_tokens_kv = 0;
-  printf("max_batch_size %d, max_tokens_q %d, max_tokens_kv %d\n", max_batch_size, max_tokens_q,
-         max_tokens_kv);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
   if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     max_batch_size = get_max_batch_size(batch);
     max_tokens_q = get_max_tokens(num_tokens_q);
     max_tokens_kv = get_max_tokens(num_tokens_kv);
   }
-  printf("max_batch_size %d, max_tokens_q %d, max_tokens_kv %d\n", max_batch_size, max_tokens_q,
-         max_tokens_kv);
 
   void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdK = output_dK->data.dptr;
