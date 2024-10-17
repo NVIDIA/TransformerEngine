@@ -361,7 +361,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     if (is_padding) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
+      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
       void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
@@ -374,7 +374,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     if (is_ragged) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
+      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
       void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
@@ -787,7 +787,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     if (is_padding) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
+      const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
       void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
@@ -800,7 +800,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
     if (is_ragged) {
       constexpr size_t nthreads_per_block = 128;
-      const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
+      const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
       void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
