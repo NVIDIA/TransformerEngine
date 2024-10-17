@@ -337,8 +337,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
     auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * orig_b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (orig_b + 1) * sizeof(int64_t);
+    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -363,7 +363,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + orig_b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
@@ -377,10 +377,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
@@ -750,8 +750,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     auto plan_workspace_size = mha_graph->get_workspace_size();
 
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * orig_b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (orig_b + 1) * sizeof(int64_t);
+    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
+    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -789,7 +789,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (orig_b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + orig_b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
@@ -803,10 +803,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       const size_t grid = (orig_b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (orig_b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (orig_b + 1) * sizeof(int64_t);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
