@@ -19,7 +19,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("empty_like_cached", (at::Tensor (*)(at::Tensor)) &empty_like_cached, "CudaGraph Cache",
         py::call_guard<py::gil_scoped_release>());
-  m.def("empty_cached", &empty_cached_py, "CudaGraph Cache",
+  m.def("empty_cached", (at::Tensor (*)(at::IntArrayRef, at::ScalarType, int)) &empty_cached, "CudaGraph Cache",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("empty_cached", (at::Tensor (*)(at::IntArrayRef, at::ScalarType, at::Device)) &empty_cached, "CudaGraph Cache",
         py::call_guard<py::gil_scoped_release>());
   m.def("set_capture_start", &set_capture_start, "CudaGraph Cache",
         py::call_guard<py::gil_scoped_release>());

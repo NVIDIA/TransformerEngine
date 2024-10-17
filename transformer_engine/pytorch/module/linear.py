@@ -451,14 +451,8 @@ class _Linear(torch.autograd.Function):
                 dgrad_size = list(grad_output.size())
                 dgrad_size[1] = weight.size(1)
 
-                if is_graph_capturing():
-                    dgrad = cached_empty(
-                        dgrad_size, 
-                        dtype=ctx.activation_dtype, 
-                        device=weight.device,
-                        requires_grad=True)
-                else:  
-                    dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                empty_func = cached_empty if is_graph_capturing() else torch.empty
+                dgrad = empty_func(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
         
                 if ctx.fp8:
                     if ctx.is_input_fp8:
@@ -612,7 +606,8 @@ class _Linear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    wgrad = torch.empty(
+                    empty_func = cached_empty if is_graph_capturing() else torch.empty
+                    wgrad = empty_func(
                         weight.main_grad.shape,
                         dtype=weight.dtype,
                         device=torch.cuda.current_device(),

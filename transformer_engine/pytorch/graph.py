@@ -39,7 +39,9 @@ def cached_empty_like(tensor, key):
     
     return wrapper
 
-def cached_empty(shape, dtype, device, requires_grad):
+def cached_empty(shape, dtype, device, requires_grad=False):
+    if isinstance(shape, torch.Size):
+        shape = tuple(shape)
     copy = tex.empty_cached(shape, dtype, device)
     copy.requires_grad = requires_grad
     return copy

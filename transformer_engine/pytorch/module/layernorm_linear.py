@@ -475,15 +475,8 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_dgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
             else:              
-                # if is_graph_capturing():
-                #     dgrad = cached_empty(
-                #         dgrad_size, 
-                #         dtype=ctx.activation_dtype, 
-                #         device=weight.device,
-                #         requires_grad=True,
-                #         key=f'dgrad_{ctx.ub_name}')
-                # else:  
-                dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
+                empty_func = cached_empty if is_graph_capturing() else torch.empty
+                dgrad = empty_func(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.ub_bulk_dgrad:
                 ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
@@ -722,7 +715,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    wgrad = torch.empty(
+                    empty_func = cached_empty if is_graph_capturing() else torch.empty
+                    wgrad = empty_func(
                         weight.main_grad.shape,
                         dtype=weight.dtype,
                         device=torch.cuda.current_device(),
@@ -739,11 +733,6 @@ class _LayerNormLinear(torch.autograd.Function):
         # Scatter fp8 weight buffers
         if ctx.fp8 and not isinstance(weight, Float8Tensor):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
-
-            # dgamma = torch.ones([4096], device=torch.cuda.current_device(), dtype=torch.bfloat16)
-            # dbeta = None
-            # wgrad = None
-            # grad_bias = None
             
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,

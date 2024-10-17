@@ -93,7 +93,15 @@ at::Tensor empty_like_cached(at::Tensor tensor){
     }
 }
 
-at::Tensor empty_cached_py(at::IntArrayRef size, at::ScalarType dtype, at::Device device){
+at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, int device_index){
+    at::Device device(at::kCUDA, device_index);
+    auto options = at::TensorOptions()
+        .dtype(dtype)
+        .device(device);
+    return empty_cached(size, options);
+}
+
+at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, at::Device device){
     auto options = at::TensorOptions()
         .dtype(dtype)
         .device(device);

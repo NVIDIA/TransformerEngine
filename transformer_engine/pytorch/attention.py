@@ -3628,21 +3628,7 @@ class _SplitAlongDim(torch.autograd.Function):
                     dim=split_dim,
                 )
             )
-        out = torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
-        return [o.contiguous() for o in out]
-
-        # ctx.save_for_backward(mixed_x_layer)
-        # out = torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
-        # torch.distributed.breakpoint()
-        # out = [o.contiguous() for o in out]
-        # torch.split produces a view, for cudagraphs make contiguous, in case the
-        # the next operation on these outputs requires `.contiguous` for instance DPA
-        # if is_graph_capturing():
-        #     for idx, o in enumerate(out):
-        #         cached_contiguous = cached_empty_like(o, f'split_fwd_{idx}',)
-        #         cached_contiguous.copy_(o)
-                # o.data = cached_contiguous.data
-        return out
+        return torch.split(mixed_x_layer, split_size_or_sections, dim=split_dim)
 
 
     @staticmethod
@@ -3726,18 +3712,18 @@ class _SplitAlongDim(torch.autograd.Function):
             )
             return ret, None, None
 
-        # if is_graph_capturing():
-        #     total_shape = list(grad_outputs[0].shape)
-        #     total_shape[split_dim] = sum([g.shape[split_dim] for g in grad_outputs])
+        if is_graph_capturing():
+            total_shape = list(grad_outputs[0].shape)
+            total_shape[split_dim] = sum([g.shape[split_dim] for g in grad_outputs])
 
-            # grad_input = cached_empty(
-            #     total_shape,
-            #     dtype=grad_outputs[0].dtype,
-            #     device=grad_outputs[0].device,
-            #     requires_grad=any([g.requires_grad for g in grad_outputs]),
-            # )
-            # torch.cat(grad_outputs, dim=split_dim, out=grad_input)
-            # return grad_input, None, None
+            grad_input = cached_empty(
+                total_shape,
+                dtype=grad_outputs[0].dtype,
+                device=grad_outputs[0].device,
+                requires_grad=any([g.requires_grad for g in grad_outputs]),
+            )
+            torch.cat(grad_outputs, dim=split_dim, out=grad_input)
+            return grad_input, None, None
 
         return torch.cat(grad_outputs, dim=split_dim), None, None
 
