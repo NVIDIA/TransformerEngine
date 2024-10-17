@@ -8,7 +8,7 @@
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 
 #include "../utils.cuh"
-#include "ln.h"
+#include "norms.h"
 
 namespace transformer_engine {
 namespace layer_norm {
