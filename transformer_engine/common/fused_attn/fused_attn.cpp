@@ -168,10 +168,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
            bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)) &&
         // qkv format
-        ((qkv_format == NVTE_QKV_Format::NVTE_SBHD) ||
-         (sm_arch_ >= 90 && cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups &&
-          qkv_format == NVTE_QKV_Format::NVTE_THD) ||
-         (qkv_format == NVTE_QKV_Format::NVTE_BSHD)) &&
+        ((qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
+         (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
+          (cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
+          (cudnn_runtime_version >= 90600))) &&
         // sliding window
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
           (window_size_right == -1 || window_size_right == 0)) ||
