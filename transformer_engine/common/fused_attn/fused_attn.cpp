@@ -170,7 +170,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // qkv format
         ((qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
          (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
-          (cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
+              (cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
           (cudnn_runtime_version >= 90600))) &&
         // sliding window
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
