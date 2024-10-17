@@ -2534,6 +2534,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         causal = "causal" in ctx.attn_mask_type
         padding = "padding" in ctx.attn_mask_type
+
+        seq_dim = None
         if ctx.qkv_format in ["bshd", "sbhd"]:
             seq_dim = ctx.qkv_format.index("s")
             qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format[:-2] + "2" + ctx.qkv_format[-2:]
@@ -2580,7 +2582,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_qkv_dtype = None
         fused_attn_dqkv_dtype = None
         amax_per_step = None
-        seq_dim = None
         dout_fp8_dtype = None
         if ctx.fp8:
             if ctx.use_fused_attention:
