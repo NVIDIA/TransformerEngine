@@ -7578,8 +7578,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                    See :ref:`note<cu_seqlens note>` for more details.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
+                      Calculated from `cu_seqlens_q` if not provided.
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
+                       Calculated from `cu_seqlens_kv` if not provided.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
                        'arbitrary'}, default = `None`. Type of attention mask passed into
