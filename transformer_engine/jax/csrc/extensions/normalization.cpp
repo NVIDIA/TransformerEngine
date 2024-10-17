@@ -267,20 +267,16 @@ Error_Type LayerNormForwardFP8FFI(cudaStream_t stream, Buffer_Type x_buf, Buffer
   auto x_dims = x_buf.dimensions();
   auto gamma_dims = gamma_buf.dimensions();
   auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
-  auto gamma_size = std::accumulate(
-    gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>()
-  );
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
   auto hidden_size = gamma_size;
   auto batch_size = x_size / gamma_size;
 
   auto wkspace_dims = wkspace_buf->dimensions();
   auto barrier_dims = barrier_buf->dimensions();
-  auto wkspace_size = std::accumulate(
-    wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>()
-  );
-  auto barrier_size = std::accumulate(
-    barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>()
-  );
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
 
   float eps = static_cast<float>(eps_);
   int sm_margin = static_cast<int>(sm_margin_);
@@ -414,20 +410,16 @@ Error_Type LayerNormBackwardFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_
   auto x_dims = x_buf.dimensions();
   auto gamma_dims = gamma_buf.dimensions();
   auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
-  auto gamma_size = std::accumulate(
-    gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>()
-  );
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
   auto hidden_size = gamma_size;
   auto batch_size = x_size / gamma_size;
 
   auto wkspace_dims = wkspace_buf->dimensions();
   auto barrier_dims = barrier_buf->dimensions();
-  auto wkspace_size = std::accumulate(
-    wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>()
-  );
-  auto barrier_size = std::accumulate(
-    barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>()
-  );
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
 
   auto dgamma_part_dims = dgamma_part_buf->dimensions();
   auto dbeta_part_dims = dbeta_part_buf->dimensions();
