@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -138,15 +138,29 @@ def initialize_ub(
         )
 
         if ifname is not None:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                hostname = socket.inet_ntoa(
-                    fcntl.ioctl(
-                        s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
-                    )[20:24]
+            # Make sure the ifname found in the environment is a valid network interface
+            if ifname in [name for _, name in socket.if_nameindex()]:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    hostname = socket.inet_ntoa(
+                        fcntl.ioctl(
+                            s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
+                        )[20:24]
+                    )
+                except OSError as err:
+                    raise OSError(f"Invalid network interface: {ifname}") from err
+                finally:
+                    s.close()
+            else:
+                ifname_warning = (
+                    f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will"
+                    " attempt to "
+                    + "detect ranks on the same node by matching 'socket.gethostname()', which is "
+                    + "known to fail on virtual clusters like Kubernetes. If Userbuffers "
+                    + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
+                    + "your environment to the correct network interface."
                 )
-            except OSError as err:
-                raise OSError(f"Invalid network interface: {ifname}") from err
+                warnings.warn(ifname_warning, UserWarning)
 
         hostnames = [None for _ in range(world_size)]
         torch.distributed.all_gather_object(hostnames, hostname, world_group)
@@ -392,6 +406,36 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
+        self.activation_dtype: Optional[torch.dtype] = None
+
+        # Fast getter for parameters
+        # Note: torch.nn.Module does not store parameters like normal
+        # attrs, but rather in a dict. When attempting to access, the
+        # module will raise an AttributeError in __getattribute__ and
+        # call a custom __getattr__. This is unnecessary overhead if
+        # we know we are accessing a parameter.
+        self._fast_get_param: Callable[str, torch.nn.Parameter]
+        self._fast_get_param = self.__dict__["_parameters"].get
+
+    # Names of attributes that can be set quickly (see __setattr__
+    # method)
+    _fast_setattr_names: Set[str] = {
+        "activation_dtype",
+        "fp8",
+        "fp8_initialized",
+        "fp8_calibration",
+        "fp8_parameters",
+    }
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in TransformerEngineBaseModule._fast_setattr_names:
+            # torch.nn.Module has a custom __setattr__ that handles
+            # modules, parameters, and buffers. This is unnecessary
+            # overhead when setting plain attrs.
+            self.__dict__[name] = value
+        else:
+            # Default case
+            super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -579,7 +623,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # All checks after this have already been performed once, thus skip
-        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
+        if self.activation_dtype == inp.dtype:
             return
 
         dtype = inp.dtype
@@ -650,7 +694,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
-            return
 
     @contextmanager
     def prepare_forward(
@@ -694,14 +737,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
-            if not allow_non_contiguous:
-                yield inp.contiguous()
-            else:
-                yield inp
+            if not allow_non_contiguous and not inp.is_contiguous():
+                inp = inp.contiguous()
+            yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
-            return
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled

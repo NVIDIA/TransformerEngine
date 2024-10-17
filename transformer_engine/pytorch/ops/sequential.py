@@ -46,6 +46,7 @@ class Sequential(torch.nn.Module):
                 self.append(module)
 
     def add_module(self, name: str, module: Optional[torch.nn.Module]) -> None:
+        # pylint: disable=missing-function-docstring
         self._module_groups = None
         super().add_module(name, module)
 

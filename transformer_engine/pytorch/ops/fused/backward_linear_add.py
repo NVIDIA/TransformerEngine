@@ -78,7 +78,7 @@ class BackwardLinearAdd(FusedOperation):
             input_requires_grad=linear_op_ctx.input_requires_grad,
             weight_requires_grad=linear_op_ctx.weight_requires_grad,
             device=linear_op.device,
-            dtype=linear_op.dtype,
+            dtype=grad_input.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             grad_input=grad_input,

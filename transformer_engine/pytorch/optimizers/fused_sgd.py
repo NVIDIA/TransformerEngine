@@ -91,13 +91,13 @@ class FusedSGD(Optimizer):
         if weight_decay < 0.0:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
 
-        defaults = dict(
-            lr=lr,
-            momentum=momentum,
-            dampening=dampening,
-            weight_decay=weight_decay,
-            nesterov=nesterov,
-        )
+        defaults = {
+            "lr": lr,
+            "momentum": momentum,
+            "dampening": dampening,
+            "weight_decay": weight_decay,
+            "nesterov": nesterov,
+        }
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
         super().__init__(params, defaults)
@@ -120,6 +120,7 @@ class FusedSGD(Optimizer):
             group.setdefault("nesterov", False)
 
     def zero_grad(self):
+        # pylint: disable=missing-function-docstring
         if self.set_grad_none:
             for group in self.param_groups:
                 for p in group["params"]:
