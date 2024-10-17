@@ -132,6 +132,8 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
                                              int32_t *cu_seqlens_kv_padded, int64_t *offsets_q,
                                              int64_t *offsets_k, int64_t *offsets_v,
                                              int64_t *offsets_o, int64_t *offsets_s);
+size_t get_max_batch_size(size_t batch_size);
+size_t get_max_tokens(size_t num_tokens);
 }  // namespace fused_attn
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);

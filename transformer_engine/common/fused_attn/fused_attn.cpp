@@ -257,6 +257,11 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
     NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
   }
   size_t d = input_QKV->data.shape[ndim - 1];
+  size_t t = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t = input_QKV->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
@@ -277,7 +282,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd_qkvpacked(
-        b, h, max_seqlen, d, is_training, attn_scale, dropout, qkv_layout, bias_type,
+        b, h, max_seqlen, d, t, is_training, attn_scale, dropout, qkv_layout, bias_type,
         attn_mask_type, window_size_left, window_size_right, input_QKV, input_Bias, output_O,
         Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens_padded, input_rng_state, wkspace,
         stream, handle);
@@ -334,6 +339,11 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     NVTE_ERROR("nvte_fused_attn_fwd_qkvpacked only supports H3D and 3HD layouts!");
   }
   size_t d = input_QKV->data.shape[ndim - 1];
+  size_t t = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t = input_QKV->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
@@ -362,7 +372,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd_qkvpacked(
-        b, h, max_seqlen, d, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
+        b, h, max_seqlen, d, t, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
         window_size_left, window_size_right, deterministic, input_QKV, input_O, input_dO,
         input_Bias, output_S, output_dQKV, output_dBias, input_cu_seqlens, input_cu_seqlens_padded,
         input_rng_state, wkspace, stream, handle);
@@ -427,6 +437,13 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   } else {
     NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
   }
+  size_t t_q = 0;
+  size_t t_kv = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t_q = input_Q->data.shape[0];
+    t_kv = input_KV->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -448,7 +465,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8903)
     fused_attn_arbitrary_seqlen_fwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, is_training, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, window_size_left, window_size_right, input_Q, input_KV,
         input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream,
@@ -511,6 +528,13 @@ void nvte_fused_attn_bwd_kvpacked(
   } else {
     NVTE_ERROR("nvte_fused_attn_fwd_kvpacked only supports HD_H2D and HD_2HD layouts!");
   }
+  size_t t_q = 0;
+  size_t t_kv = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t_q = input_Q->data.shape[0];
+    t_kv = input_KV->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -541,7 +565,7 @@ void nvte_fused_attn_bwd_kvpacked(
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout, qkv_layout, bias_type,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, attn_scale, dropout, qkv_layout, bias_type,
         attn_mask_type, window_size_left, window_size_right, deterministic, input_Q, input_KV,
         input_O, input_dO, input_Bias, output_S, output_dQ, output_dKV, output_dBias,
         input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
@@ -601,6 +625,13 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   size_t h_kv = input_K->data.shape[ndim - 2];
   size_t d_qk = input_Q->data.shape[ndim - 1];
   size_t d_v = input_V->data.shape[ndim - 1];
+  size_t t_q = 0;
+  size_t t_kv = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t_q = input_Q->data.shape[0];
+    t_kv = input_K->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -622,7 +653,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, is_training, attn_scale, dropout,
         qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
         input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
@@ -681,6 +712,13 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   size_t h_kv = input_K->data.shape[ndim - 2];
   size_t d_qk = input_Q->data.shape[ndim - 1];
   size_t d_v = input_V->data.shape[ndim - 1];
+  size_t t_q = 0;
+  size_t t_kv = 0;
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    t_q = input_Q->data.shape[0];
+    t_kv = input_K->data.shape[0];
+  }
 
   auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
@@ -711,7 +749,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, attn_scale, dropout, qkv_layout,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout, qkv_layout,
         bias_type, attn_mask_type, window_size_left, window_size_right, deterministic, input_Q,
         input_K, input_V, input_O, input_dO, input_Bias, output_S, output_dQ, output_dK, output_dV,
         output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,

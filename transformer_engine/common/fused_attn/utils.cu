@@ -394,6 +394,15 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
   }
 }
 
+size_t get_max_batch_size(size_t batch_size) {
+  size_t max_b = batch_size;
+  return max_b;
+}
+
+size_t get_max_tokens(size_t num_tokens) {
+  size_t max_t = num_tokens;
+  return max_t;
+}
 }  // namespace fused_attn
 
 // get cuDNN data type

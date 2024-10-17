@@ -19,7 +19,7 @@
 namespace transformer_engine {
 #if (CUDNN_VERSION >= 8900)
 void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
-    size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, bool is_training,
+    size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, size_t num_tokens, bool is_training,
     float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, int64_t window_size_left, int64_t window_size_right,
     const Tensor *input_QKV, const Tensor *input_Bias, Tensor *output_O,
@@ -27,7 +27,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
     const Tensor *rng_state, Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle);
 
 void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
-    size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, float attn_scale,
+    size_t batch, size_t num_attn_heads, size_t max_seqlen, size_t head_dim, size_t num_tokens, float attn_scale,
     float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, bool deterministic,
     const Tensor *input_QKV, const Tensor *input_O, const Tensor *input_dO,
@@ -37,7 +37,7 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
 
 void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim, bool is_training, float attn_scale, float p_dropout,
+    size_t max_seqlen_kv, size_t head_dim, size_t num_tokens_q, size_t num_tokens_kv, bool is_training, float attn_scale, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, const Tensor *input_Q,
     const Tensor *input_KV, const Tensor *input_Bias, Tensor *output_O,
@@ -47,7 +47,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 
 void fused_attn_arbitrary_seqlen_bwd_kvpacked(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim, float attn_scale, float p_dropout,
+    size_t max_seqlen_kv, size_t head_dim, size_t num_tokens_q, size_t num_tokens_kv, float attn_scale, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, bool deterministic, const Tensor *input_Q,
     const Tensor *input_KV, const Tensor *input_O, const Tensor *input_dO, const Tensor *input_Bias,
@@ -58,7 +58,7 @@ void fused_attn_arbitrary_seqlen_bwd_kvpacked(
 
 void fused_attn_arbitrary_seqlen_fwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, bool is_training, float attn_scale,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q, size_t num_tokens_kv, bool is_training, float attn_scale,
     float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, const Tensor *input_Q,
     const Tensor *input_K, const Tensor *input_V, const Tensor *input_Bias, Tensor *output_O,
@@ -68,7 +68,7 @@ void fused_attn_arbitrary_seqlen_fwd(
 
 void fused_attn_arbitrary_seqlen_bwd(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
-    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, float attn_scale, float p_dropout,
+    size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, size_t num_tokens_q, size_t num_tokens_kv, float attn_scale, float p_dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     int64_t window_size_left, int64_t window_size_right, bool deterministic, const Tensor *input_Q,
     const Tensor *input_K, const Tensor *input_V, const Tensor *input_O, const Tensor *input_dO,

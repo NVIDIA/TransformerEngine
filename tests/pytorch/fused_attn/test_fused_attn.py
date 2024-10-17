@@ -347,6 +347,8 @@ def test_dot_product_attention(
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
+        torch.save(fused_attn_fwd, f"fused_attn_fwd.pt")
+        torch.save(flash_attn_fwd, f"flash_attn_fwd.pt")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.save(fused_attn_bwd[i], f"fused_attn_bwd_{i}.pt")
@@ -953,8 +955,10 @@ def _run_dot_product_attention(
         window_size=config.window_size,
         attention_mask=attention_mask,
         qkv_format=qkv_format,
-        max_seqlen_q=cu_seqlens_q[-1] if backend == "FusedAttention" else config.max_seqlen_q,
-        max_seqlen_kv=cu_seqlens_kv[-1] if backend == "FusedAttention" else config.max_seqlen_kv,
+        #max_seqlen_q=cu_seqlens_q[-1] if backend == "FusedAttention" else config.max_seqlen_q,
+        #max_seqlen_kv=cu_seqlens_kv[-1] if backend == "FusedAttention" else config.max_seqlen_kv,
+        max_seqlen_q=config.max_seqlen_q,
+        max_seqlen_kv=config.max_seqlen_kv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_kv=cu_seqlens_kv,
         cu_seqlens_q_padded=cu_seqlens_q_after_pad if backend == "FusedAttention" else None,
