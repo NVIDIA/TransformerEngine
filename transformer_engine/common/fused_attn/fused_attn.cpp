@@ -465,9 +465,9 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8903)
     fused_attn_arbitrary_seqlen_fwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, is_training, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, window_size_left, window_size_right, input_Q, input_KV,
-        input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, is_training, attn_scale, dropout,
+        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
+        input_KV, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream,
         handle);
 #else
@@ -565,9 +565,9 @@ void nvte_fused_attn_bwd_kvpacked(
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd_kvpacked(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, attn_scale, dropout, qkv_layout, bias_type,
-        attn_mask_type, window_size_left, window_size_right, deterministic, input_Q, input_KV,
-        input_O, input_dO, input_Bias, output_S, output_dQ, output_dKV, output_dBias,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
+        bias_type, attn_mask_type, window_size_left, window_size_right, deterministic, input_Q,
+        input_KV, input_O, input_dO, input_Bias, output_S, output_dQ, output_dKV, output_dBias,
         input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
 #else
@@ -653,9 +653,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, is_training, attn_scale, dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
-        input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, is_training, attn_scale,
+        dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right,
+        input_Q, input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
         wkspace, stream, handle);
 #else
@@ -749,10 +749,10 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[1]);
     }
     fused_attn_arbitrary_seqlen_bwd(
-        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, window_size_left, window_size_right, deterministic, input_Q,
-        input_K, input_V, input_O, input_dO, input_Bias, output_S, output_dQ, output_dK, output_dV,
-        output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
+        b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout,
+        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, deterministic,
+        input_Q, input_K, input_V, input_O, input_dO, input_Bias, output_S, output_dQ, output_dK,
+        output_dV, output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
 #else
     const char *err_msg =
