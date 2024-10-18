@@ -98,7 +98,7 @@ html_css_files = [
     "css/nvidia_footer.css",
 ]
 
-html_theme_options = { "collapse_navigation": False, "logo_only": False }
+html_theme_options = {"collapse_navigation": False, "logo_only": False}
 
 napoleon_custom_sections = [
     ("Parallelism parameters", "params_style"),
@@ -108,8 +108,8 @@ napoleon_custom_sections = [
     ("FP8-related parameters", "params_style"),
 ]
 
-breathe_projects = { "TransformerEngine": root_path / "docs" / "doxygen" / "xml" }
+breathe_projects = {"TransformerEngine": root_path / "docs" / "doxygen" / "xml"}
 breathe_default_project = "TransformerEngine"
 
 autoapi_generate_api_docs = False
-autoapi_dirs = [ root_path / "transformer_engine" ]
+autoapi_dirs = [root_path / "transformer_engine"]
