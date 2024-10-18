@@ -110,16 +110,20 @@ class RMSNorm(BasicOperation):
         # Number of SMs to exclude when launching CUDA kernels
         self._sm_margins: dict[str, int]
         if isinstance(sm_margin, dict):
+
             def getenv(name: str) -> int:
                 return int(os.getenv(name, "0"))
+
             self._sm_margins = {
                 "forward": sm_margin.get("forward", getenv("NVTE_FWD_LAYERNORM_SM_MARGIN")),
                 "backward": sm_margin.get("backward", getenv("NVTE_BWD_LAYERNORM_SM_MARGIN")),
                 "inference": sm_margin.get("inference", getenv("NVTE_INF_LAYERNORM_SM_MARGIN")),
             }
         else:
+
             def getenv(name: str) -> int:
                 return int(os.getenv(name, str(sm_margin)))
+
             self._sm_margins = {
                 "forward": getenv("NVTE_FWD_LAYERNORM_SM_MARGIN"),
                 "backward": getenv("NVTE_BWD_LAYERNORM_SM_MARGIN"),
