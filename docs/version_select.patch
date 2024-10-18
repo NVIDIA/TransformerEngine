@@ -1,5 +1,5 @@
 diff --git a/sphinx_rtd_theme/layout.html b/sphinx_rtd_theme/layout.html
-index e6a38b1..fa6dae0 100644
+index e6a38b1..579eaec 100644
 --- a/sphinx_rtd_theme/layout.html
 +++ b/sphinx_rtd_theme/layout.html
 @@ -124,6 +124,16 @@
@@ -8,7 +8,7 @@ index e6a38b1..fa6dae0 100644
 
 +          {# Show TE version and version selector #}
 +          <div class="version">
-+            {{ nav_version }}
++            {{ version }}
 +            <br>
 +            Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
 +              <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>

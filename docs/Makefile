@@ -19,7 +19,7 @@ help:
 %: Makefile sphinx_rtd_theme
 	PYTHONPATH=sphinx_rtd_theme:$(PYTHONPATH) $(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
-# Patch Sphinx RTD theme to add version selector in sidebar
+# Patch Sphinx RTD theme 3.0.1 to add version selector in sidebar
 sphinx_rtd_theme:
 	git clone --depth=1 -b 3.0.1 --single-branch https://github.com/readthedocs/sphinx_rtd_theme.git
 	bash -c "cd sphinx_rtd_theme; git apply ../version_select.patch"
