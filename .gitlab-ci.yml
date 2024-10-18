@@ -642,6 +642,9 @@ upload_logs:
 "Run all L2 tests":
     <<: *MANUAL_TEST_TRIGGER
 
+"Run all L3 tests":
+    <<: *MANUAL_TEST_TRIGGER
+
 .V100_1GPU: &V100_1GPU
     tags:
     - V100
@@ -787,22 +790,6 @@ L0_pytorch_unittest--L40_1GPU:
     - .L0_test
     - .L40_1GPU
 
-L0_pytorch_distributed_unittest--H100_4GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test
-    - .H100_4GPU
-
-L1_pytorch_context_parallel_test--H100_4GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L1_test
-    - .H100_4GPU
-
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
@@ -811,12 +798,28 @@ L1_pytorch_distributed_unittest--H100_4GPU:
     - .L1_test
     - .H100_4GPU
 
-L1_pytorch_FA_versions_test--H100_1GPU:
+L1_pytorch_onnx_test--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
     extends:
     - .L1_test
+    - .H100_1GPU
+
+L3_pytorch_convergence_test--H100_4GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L3_test
+    - .H100_4GPU
+
+L3_pytorch_FA_versions_test--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L3_test
     - .H100_1GPU
 
 L0_jax_unittest--V100_1GPU:
