@@ -48,22 +48,6 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     output = torch::empty({s, b, h, d}, act_options);
   }
 
-  // if (transpose_output_memory) {
-  //   if (is_graph_capturing()){
-  //     output = empty_cached({b, s, h, d}, act_options).transpose(0, 1);
-  //   }
-  //   else{
-  //     output = torch::empty({b, s, h, d}, act_options).transpose(0, 1);
-  //   }
-  // } else {
-  //   if (is_graph_capturing()){
-  //     output = empty_cached({s, b, h, d}, act_options);
-  //   }
-  //   else{
-  //     output = torch::empty({s, b, h, d}, act_options);
-  //   }
-  // }
-
   // output strides
   const int o_stride_s = output.stride(0);
   const int o_stride_b = output.stride(1);

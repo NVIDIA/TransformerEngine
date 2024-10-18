@@ -42,19 +42,12 @@ def cached_empty_like(tensor, key):
 def cached_empty(shape, dtype, device, requires_grad=False):
     if isinstance(shape, torch.Size):
         shape = tuple(shape)
+    if isinstance(device, int):
+        device = torch.device(device)
+
     copy = tex.empty_cached(shape, dtype, device)
     copy.requires_grad = requires_grad
     return copy
-
-# def contiguous_cached(tensor):
-#     copy = tex.empty_like_cached(tensor)
-
-# def cached_contiguous(tensor, key):
-#     cached_copy = cached_empty_like(tensor, key)
-#     tensor.data = cached_copy
-
-#     return tensor
-
 
 def set_capture_start() -> None:
     """Record beginning of `make_graphed_callables`."""

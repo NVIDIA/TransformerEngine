@@ -954,6 +954,13 @@ std::vector<at::Tensor> fused_attn_bwd(
   at::Tensor dQKV, dKV;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   std::vector<int64_t> tmp_shape;
+
+  at::Tensor (*empty_like_func)(const at::Tensor &, at::TensorOptions, std::optional<at::MemoryFormat> memory_format);
+  if (is_graph_capturing())
+    empty_like_func = &empty_like_cached;
+  else
+    empty_like_func = &torch::empty_like;
+
   switch (layout_group) {
     case NVTE_QKV_Layout_Group::NVTE_3HD:
       tmp_shape = std::vector<int64_t>{q_sizes.begin(), q_sizes.end()};
@@ -1001,7 +1008,7 @@ std::vector<at::Tensor> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 3);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-      dQ = torch::empty_like(Q, options);
+      dQ = empty_like_func(Q, options, std::nullopt);
       tmp_shape = std::vector<int64_t>{k_sizes.begin(), k_sizes.end()};
       tmp_shape.insert(tmp_shape.begin() + tmp_shape.size() - 1, int64_t(2));
       dKV = torch::empty(c10::IntArrayRef(tmp_shape), options);
@@ -1013,17 +1020,9 @@ std::vector<at::Tensor> fused_attn_bwd(
                .squeeze(tmp_shape.size() - 2);
       break;
     case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-      if (is_graph_capturing()){
-        dQ = empty_like_cached(Q, options);
-        dK = empty_like_cached(K, options);
-        dV = empty_like_cached(V, options);
-      }
-      else{
-        dQ = torch::empty_like(Q, options);
-        dK = torch::empty_like(K, options);
-        dV = torch::empty_like(V, options);
-      }
-
+      dQ = empty_like_func(Q, options, std::nullopt);
+      dK = empty_like_func(K, options, std::nullopt);
+      dV = empty_like_func(V, options, std::nullopt);
       break;
     default:
       NVTE_ERROR("QKV layout not supported!");
