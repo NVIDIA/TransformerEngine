@@ -358,6 +358,7 @@ def _make_graphed_callables(
 
             @staticmethod
             def forward(ctx, skip_fp8_weight_update, *inputs):
+                # pylint: disable=missing-function-docstring
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
@@ -377,6 +378,7 @@ def _make_graphed_callables(
             @staticmethod
             @torch.autograd.function.once_differentiable
             def backward(ctx, *grads):
+                # pylint: disable=missing-function-docstring
 
                 # Replay backward graph
                 assert len(grads) == len(static_grad_outputs)
