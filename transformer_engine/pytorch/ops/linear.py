@@ -91,24 +91,24 @@ class Linear(FusedOperation):
 
         # Construct basic ops
         ops = []
-        linear_kwargs = dict(
-            in_features=in_features,
-            out_features=out_features,
-            device=device,
-            dtype=dtype,
-            tensor_parallel_mode=tensor_parallel_mode,
-            tensor_parallel_group=tensor_parallel_group,
-            sequence_parallel=sequence_parallel,
-            rng_state_tracker_function=rng_state_tracker_function,
-            accumulate_into_main_grad=accumulate_into_main_grad,
-        )
-        bias_kwargs = dict(
-            size=out_features,
-            device=device,
-            dtype=dtype,
-            tensor_parallel=(tensor_parallel_mode is not None),
-            tensor_parallel_group=tensor_parallel_group,
-        )
+        linear_kwargs = {
+            "in_features": in_features,
+            "out_features": out_features,
+            "device": device,
+            "dtype": dtype,
+            "tensor_parallel_mode": tensor_parallel_mode,
+            "tensor_parallel_group": tensor_parallel_group,
+            "sequence_parallel": sequence_parallel,
+            "rng_state_tracker_function": rng_state_tracker_function,
+            "accumulate_into_main_grad": accumulate_into_main_grad,
+        }
+        bias_kwargs = {
+            "size": out_features,
+            "device": device,
+            "dtype": dtype,
+            "tensor_parallel": (tensor_parallel_mode is not None),
+            "tensor_parallel_group": tensor_parallel_group,
+        }
         if tensor_parallel_mode == "row":
             # Row TP: GEMM + bias + reduction
             linear_kwargs["in_features"] = local_in_features

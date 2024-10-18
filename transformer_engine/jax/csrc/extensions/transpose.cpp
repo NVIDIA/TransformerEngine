@@ -120,7 +120,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CastTransposeHandler, CastTransposeFFI,
                                   .Ret<Buffer_Type>()      // input_cast
                                   .Ret<Buffer_Type>()      // input_cast_trans
                                   .Ret<Buffer_Type>()      // amax_out
-                                  .Attr<int64_t>("transpose_axis"));
+                                  .Attr<int64_t>("transpose_axis"),
+                              FFI_CudaGraph_Traits);
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype) {

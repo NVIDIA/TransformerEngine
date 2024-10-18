@@ -20,9 +20,8 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
     RotaryPositionEmbedding,
     get_attention_backend,
-    _flash_attn_2_plus,
     _flash_attn_2_3_plus,
-    _flash_attn_3_plus,
+    _flash_attn_3_is_installed,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
@@ -249,7 +248,7 @@ def test_dot_product_attention(
     # Test backend availability
     window_size = (-1, -1)
     if swa:
-        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+        window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
@@ -1319,6 +1318,8 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:
+        if a.dtype != b.dtype:
+            a = a.to(b.dtype)
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
     except Exception as e:
         logging.debug(e)
@@ -1351,7 +1352,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         if RoPE:
             pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -1379,7 +1380,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1532,7 +1533,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1559,7 +1560,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1851,13 +1852,6 @@ def _run_ref_mha_f16(dtype, config, backend):
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
 
     def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 
