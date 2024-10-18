@@ -175,14 +175,14 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
 size_t product(const std::vector<size_t>& shape);
 
 at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_engine::DType type,
-                         bool init_to_zeros);
+                         bool init_to_zeros, bool graph_cache = false);
 
 at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType type,
                          bool init_to_zeros = false, bool graph_cache = false);
 
-at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype);
+at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype, bool graph_cache = false);
 
-at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
+at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype, bool graph_cache= false);
 
 void* getDataPtr(at::Tensor tensor, int offset = 0);
 

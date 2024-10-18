@@ -31,7 +31,7 @@ at::Tensor dgelu(at::Tensor grad, at::Tensor input, transformer_engine::DType ot
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -69,7 +69,7 @@ at::Tensor drelu(at::Tensor grad, at::Tensor input, transformer_engine::DType ot
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -108,7 +108,7 @@ at::Tensor dgeglu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -147,7 +147,7 @@ at::Tensor dreglu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -186,7 +186,7 @@ at::Tensor dswiglu(at::Tensor grad, at::Tensor input, transformer_engine::DType 
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -224,7 +224,7 @@ at::Tensor dqgelu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());
@@ -262,7 +262,7 @@ at::Tensor dsrelu(at::Tensor grad, at::Tensor input, transformer_engine::DType o
   size_t N = static_cast<size_t>(input.size(-1));
   size_t M = input.numel() / N;
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto output = allocateTorchTensor(M, N, otype, true);
 
   auto itype = GetTransformerEngineDType(input.scalar_type());
   auto gtype = GetTransformerEngineDType(grad.scalar_type());

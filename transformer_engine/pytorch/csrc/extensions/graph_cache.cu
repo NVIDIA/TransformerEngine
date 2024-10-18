@@ -108,9 +108,9 @@ at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, at::Device d
     return empty_cached(size, options);
 }
 
-at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options){
+at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options, ::std::optional<at::MemoryFormat> memory_format){
     if (!graph_cache.graph_locked){
-        at::Tensor copy = at::empty(size, options);
+        at::Tensor copy = at::empty(size, options, memory_format);
         graph_cache.insert(copy);
 
         std::cout << options.device() << " | EMPTY_CACHE ALLOCATE from index "

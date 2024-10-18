@@ -73,7 +73,7 @@ size_t product(const std::vector<size_t>& shape) {
 }
 
 at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_engine::DType type,
-                         bool init_to_zeros) {
+                         bool init_to_zeros, bool graph_cache) {
   std::vector<int64_t> shape_int64(shape.begin(), shape.end());
   c10::IntArrayRef ar_shape(shape_int64);
   if (init_to_zeros) {
@@ -85,36 +85,42 @@ at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_eng
 
 at::Tensor allocateSpace(const NVTEShape& shape, const transformer_engine::DType type,
                          bool init_to_zeros, bool graph_cache) {
+
+  at::Tensor (*empty_func)(at::IntArrayRef, at::TensorOptions, ::std::optional<at::MemoryFormat> memory_format);
+  if (is_graph_capturing() && graph_cache)
+    empty_func = &empty_cached;
+  else
+    empty_func = &at::empty;
+
   auto size = shape.ndim;
   if (size == 2 && init_to_zeros) {
     return at::zeros({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
                      at::CUDA(GetATenDType(type)));
   } else if (size == 2) {
-    if (is_graph_capturing() && graph_cache)
-      return empty_cached({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
-                      at::CUDA(GetATenDType(type)));
-    else
-      return at::empty({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
-                      at::CUDA(GetATenDType(type)));
-
+    return empty_func({static_cast<int64_t>(shape.data[0]), static_cast<int64_t>(shape.data[1])},
+                    at::CUDA(GetATenDType(type)), std::nullopt);
   } else if (size == 1 && init_to_zeros) {
     return at::zeros({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
   } else if (size == 1) {
-      if (is_graph_capturing() && graph_cache)
-        return empty_cached({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
-      else
-        return at::empty({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)));
+    return empty_func({static_cast<int64_t>(shape.data[0])}, at::CUDA(GetATenDType(type)), std::nullopt);
   }
   NVTE_CHECK(false, "Should never reach here! func: allocateSpace");
 }
 
-at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype) {
-  return at::empty({static_cast<int64_t>(M), static_cast<int64_t>(N)},
-                   at::CUDA(GetATenDType(dtype)));
+at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype, bool graph_cache) {
+  if (is_graph_capturing() && graph_cache)
+    return empty_cached({static_cast<int64_t>(M), static_cast<int64_t>(N)},
+                    at::CUDA(GetATenDType(dtype)));
+  else
+    return at::empty({static_cast<int64_t>(M), static_cast<int64_t>(N)},
+                    at::CUDA(GetATenDType(dtype)));
 }
 
-at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype) {
-  return at::empty({static_cast<int64_t>(M)}, at::CUDA(GetATenDType(dtype)));
+at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype, bool graph_cache) {
+  if (is_graph_capturing() && graph_cache)
+    return empty_cached({static_cast<int64_t>(M)}, at::CUDA(GetATenDType(dtype)));
+  else
+    return at::empty({static_cast<int64_t>(M)}, at::CUDA(GetATenDType(dtype)));
 }
 
 void* getDataPtr(at::Tensor tensor, int offset) {

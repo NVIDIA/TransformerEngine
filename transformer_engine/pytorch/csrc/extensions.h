@@ -476,9 +476,9 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            bool wd_after_momentum, float scale);
 
 at::Tensor empty_like_cached(at::Tensor tensor);
-at::Tensor empty_like_cached(at::Tensor tensor, at::TensorOptions options);
+at::Tensor empty_like_cached(at::IntArrayRef size, at::TensorOptions options={}, ::std::optional<at::MemoryFormat> memory_format=::std::nullopt);
 
-at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options);
+at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options={}, ::std::optional<at::MemoryFormat> memory_format=::std::nullopt);
 at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, int device_index);
 at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, at::Device device);
 
