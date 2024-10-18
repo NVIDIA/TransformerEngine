@@ -35,6 +35,7 @@ class _RMSNorm(torch.autograd.Function):
         is_grad_enabled: bool,
         activation_dtype: torch.dtype,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
@@ -61,6 +62,7 @@ class _RMSNorm(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
         d_rmsnorm_out = grad_output.view(inputmat.shape)
@@ -147,7 +149,7 @@ class RMSNorm(torch.nn.Module):
         self.sequence_parallel = sequence_parallel
         self.activation_dtype: Optional[torch.dtype] = None
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward RMSNorm C APIs. These envvars can be used to prevent the LN
@@ -182,7 +184,7 @@ class RMSNorm(torch.nn.Module):
 
     @no_torch_dynamo()
     def forward(self, inp: torch.Tensor) -> torch.Tensor:
-        """RMSNorm FWD"""
+        # pylint: disable=missing-function-docstring
 
         # Set the activation type for AMP.
         # Note: This will soon be deprecated with
