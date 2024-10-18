@@ -266,6 +266,8 @@ def _mlp_backward(
             accumulate_wgrad_into_param_main_grad,
         )
 
+        dgelu_t = None
+        fc1_bgrad_ = None
         if activation == "gelu":
             # GELU Bwd
             dgelu, dgelu_t, fc1_bgrad_ = dgelu_cast_transpose_bgrad_fp8(

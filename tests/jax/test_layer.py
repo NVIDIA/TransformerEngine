@@ -4,7 +4,7 @@
 """Test transformer_engine.jax.flax.TransformerLayer"""
 import os
 from functools import partial
-from typing import Dict
+from typing import Dict, Tuple
 
 import flax
 import jax
@@ -61,6 +61,7 @@ _KEY_OF_SELF_ATTN_MASK_TYPE = "self_attn_mask_type"
 _KEY_OF_FLOAT32_ATTENTION_LOGITS = "float32_attention_logits"
 _KEY_OF_USE_BIAS = "use_bias"
 _KEY_OF_RELATIVE_EMBEDDING = "enable_relative_embedding"
+_KEY_OF_WINDOW_SIZE = "window_size"
 
 BASE_ATTRS = {
     _KEY_OF_TRANSPOSE_BS: True,
@@ -70,6 +71,7 @@ BASE_ATTRS = {
     _KEY_OF_INTERMEDIATE_DROPOUT: 0,
     _KEY_OF_SELF_ATTN_MASK_TYPE: "padding_causal",
     _KEY_OF_LAYERNORM_TYPE: "layernorm",
+    _KEY_OF_WINDOW_SIZE: (-1, -1),
 }
 
 ATTRS = [
@@ -192,6 +194,19 @@ ATTRS = [
     },
     {
         _KEY_OF_MLP_ACTIVATIONS: (("relu", "relu")),
+    },
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "causal",
+        _KEY_OF_WINDOW_SIZE: (64, 0),  # Left size must < DATA_SHAPE seqlen
+        _KEY_OF_FLOAT32_ATTENTION_LOGITS: True,
+    },
+    {
+        _KEY_OF_TRANSPOSE_BS: False,
+        _KEY_OF_RELATIVE_EMBEDDING: False,
+        _KEY_OF_SELF_ATTN_MASK_TYPE: "padding",
+        _KEY_OF_WINDOW_SIZE: (2, 2),
     },
 ]
 
@@ -326,7 +341,7 @@ class EncoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["casual", "padding_causal"]:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             mask = causal_mask
         else:
             mask = padded_mask
@@ -379,7 +394,7 @@ class DecoderRunner(BaseRunner):
 
         padded_mask = jnp.zeros((batch, 1, seqlen, seqlen), dtype=jnp.uint8)
         causal_mask = jnp.triu(jnp.ones((batch, 1, seqlen, seqlen), dtype=jnp.uint8), k=1)
-        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["casual", "padding_causal"]:
+        if self.attrs[_KEY_OF_SELF_ATTN_MASK_TYPE] in ["causal", "padding_causal"]:
             self_mask = causal_mask
         else:
             self_mask = padded_mask
