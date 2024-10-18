@@ -10,7 +10,7 @@ set -e
 # Note: Need to install wheel locally since PaddlePaddle container
 # already contains APT install.
 pip install pydantic
-pip install --user wheel=0.44.0
+pip install --user wheel==0.44.0
 
 cd $TE_PATH
 pip uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-paddle
