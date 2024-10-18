@@ -153,8 +153,8 @@ def test_multi_tensor_l2norm(input_size_pair, applier, repeat, in_type, per_tens
 
     if per_tensor:
         norm, norm_per_tensor = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], True)
-        normab = torch.cat((a.norm().view(1), b.norm().view(1)))
-        norm_per_tensor = norm_per_tensor.view(-1, 2)
+        normab = torch.cat((a.norm().reshape(1), b.norm().reshape(1)))
+        norm_per_tensor = norm_per_tensor.reshape(-1, 2)
     else:
         norm, _ = applier(tex.multi_tensor_l2norm, overflow_buf, [in_list], True)
 
@@ -197,8 +197,8 @@ def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, 
             inv_scale_cuda,
             True,
         )
-        normab = torch.cat(((a * inv_scale).norm().view(1), (b * inv_scale).norm().view(1)))
-        norm_per_tensor = norm_per_tensor.view(-1, 2)
+        normab = torch.cat(((a * inv_scale).norm().reshape(1), (b * inv_scale).norm().reshape(1)))
+        norm_per_tensor = norm_per_tensor.reshape(-1, 2)
     else:
         norm, _ = applier(
             tex.multi_tensor_unscale_l2norm,

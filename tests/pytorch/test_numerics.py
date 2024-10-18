@@ -239,13 +239,13 @@ class TorchDotProductAttention(torch.nn.Module):
         context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
 
         # change view [b, np, sq, hn]
-        context_layer = context_layer.view(*output_size)
+        context_layer = context_layer.reshape(*output_size)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
-        context_layer = context_layer.view(seqlen, batch_size, -1)
+        context_layer = context_layer.reshape(seqlen, batch_size, -1)
 
         return context_layer
 
@@ -1406,7 +1406,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 
     def _unpad_tensor_for_fp8(padded_hidden_states, actual_tokens_per_expert, tokens_per_expert):
         inputmats = torch.split(
-            padded_hidden_states.view(-1, padded_hidden_states.shape[-1]), tokens_per_expert
+            padded_hidden_states.reshape(-1, padded_hidden_states.shape[-1]), tokens_per_expert
         )
         hidden_states = torch.cat(
             [
@@ -1902,9 +1902,9 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     # Incrementaly generate outputs using KV-cache
     for i in range(S):
         if input_format == "sbhd":
-            incremental_input = input[i].view(1, B, D)
+            incremental_input = input[i].reshape(1, B, D)
         else:
-            incremental_input = input[:, i, :].view(B, 1, D)
+            incremental_input = input[:, i, :].reshape(B, 1, D)
 
         line_output = model(
             hidden_states=incremental_input,
@@ -1915,9 +1915,9 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         inference_params.sequence_len_offset += 1
 
         if input_format == "sbhd":
-            incremental_output[i] = line_output.view(B, D)
+            incremental_output[i] = line_output.reshape(B, D)
         else:
-            incremental_output[:, i, :] = line_output.view(B, D)
+            incremental_output[:, i, :] = line_output.reshape(B, D)
 
     if module == "TransformerLayer":
         atol = {

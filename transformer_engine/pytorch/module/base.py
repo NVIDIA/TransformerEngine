@@ -619,7 +619,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch.get_autocast_dtype("cuda")
             return
 
         # All checks after this have already been performed once, thus skip
@@ -777,7 +777,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             grad_output._data = grad_output._data.contiguous()
         else:
             grad_output = grad_output.contiguous()
-        grad_output_mat = grad_output.view(-1, grad_output.shape[-1])
+        grad_output_mat = grad_output.reshape(-1, grad_output.shape[-1])
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         # No-FP8 case: bgrad is fused with wgrad for this case.

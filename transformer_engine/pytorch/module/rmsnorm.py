@@ -40,7 +40,7 @@ class _RMSNorm(torch.autograd.Function):
         in_features = rmsnorm_weight.numel()
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert inp.shape[-1] == in_features, "RMSNorm not possible"
-        inputmat = inp.view((-1, in_features))
+        inputmat = inp.reshape((-1, in_features))
 
         # Cast for native AMP
         inputmat = cast_if_needed(inputmat, activation_dtype)
@@ -58,14 +58,14 @@ class _RMSNorm(torch.autograd.Function):
             rmsnorm_out = tex.rmsnorm_fwd_inf(
                 inputmat, rmsnorm_weight, eps, inf_rmsnorm_sm_margin, zero_centered_gamma
             )
-        return rmsnorm_out.view_as(inp)
+        return rmsnorm_out.reshape_as(inp)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensors
         grad_output = grad_output.contiguous()
-        d_rmsnorm_out = grad_output.view(inputmat.shape)
+        d_rmsnorm_out = grad_output.reshape(inputmat.shape)
         dxmat, dgamma = tex.rmsnorm_bwd(
             d_rmsnorm_out,
             inputmat,
@@ -75,7 +75,7 @@ class _RMSNorm(torch.autograd.Function):
             ctx.zero_centered_gamma,
         )
         return (
-            dxmat.view(ctx.inp_shape),
+            dxmat.reshape(ctx.inp_shape),
             dgamma,
             None,
             None,
@@ -190,7 +190,7 @@ class RMSNorm(torch.nn.Module):
         # Note: This will soon be deprecated with
         # https://github.com/NVIDIA/TransformerEngine/pull/1033
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch.get_autocast_dtype("cuda")
         elif self.activation_dtype != inp.dtype:
             dtype = inp.dtype
             for name, param in self.named_parameters():

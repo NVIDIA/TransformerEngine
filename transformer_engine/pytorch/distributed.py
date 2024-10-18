@@ -178,9 +178,9 @@ def split_tensor_into_1d_equal_chunks(
             device=torch.cuda.current_device(),
             requires_grad=False,
         )
-        data.copy_(tensor.view(-1)[start_index:end_index])
+        data.copy_(tensor.reshape(-1)[start_index:end_index])
     else:
-        data = tensor.view(-1)[start_index:end_index]
+        data = tensor.reshape(-1)[start_index:end_index]
     return data
 
 
@@ -253,15 +253,21 @@ def _get_active_autocast_contexts():
     autocast_cached = torch.is_autocast_cache_enabled()
 
     gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+    gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+    gpu_autocast_ctx = torch.amp.autocast(
+        device_type="cuda",
+        enabled=gpu_autocast_enabled,
+        dtype=gpu_autocast_dtype,
+        cache_enabled=autocast_cached,
     )
 
     cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
     cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+    cpu_autocast_ctx = torch.amp.autocast(
+        device_type="cpu",
+        enabled=cpu_autocast_enabled,
+        dtype=cpu_autocast_dtype,
+        cache_enabled=autocast_cached,
     )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
@@ -351,7 +357,7 @@ class _CheckpointFunction(torch.autograd.Function):
         if ctx.distribute_saved_activations:
             safely_set_viewless_tensor_data(
                 inputs[0],
-                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).view(ctx.input_0_shape),
+                gather_split_1d_tensor(inputs[0].data, ctx.tp_group).reshape(ctx.input_0_shape),
             )
 
         # Store the current states.
@@ -930,7 +936,7 @@ def _fsdp_gather_tensors(
                 assert s is not None, "Internal TE error."
                 target = t._data if isinstance(t, Float8Tensor) else t
                 safely_set_viewless_tensor_data(
-                    target, gather_split_1d_tensor(target.data, fsdp_group).view(s)
+                    target, gather_split_1d_tensor(target.data, fsdp_group).reshape(s)
                 )
 
 

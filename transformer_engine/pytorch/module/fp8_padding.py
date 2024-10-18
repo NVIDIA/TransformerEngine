@@ -36,7 +36,7 @@ class _Fp8Padding(torch.autograd.Function):
         total_row = sum(padded_m_splits)
         out = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
 
-        multi_padding_fused(inp.view(-1, in_features), m_splits, padded_m_splits, out)
+        multi_padding_fused(inp.reshape(-1, in_features), m_splits, padded_m_splits, out)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
@@ -54,7 +54,7 @@ class _Fp8Padding(torch.autograd.Function):
             grad_output = grad_output.contiguous()
 
             grad_output_mats = torch.split(
-                grad_output.view(-1, grad_output.shape[-1]), ctx.padded_m_splits
+                grad_output.reshape(-1, grad_output.shape[-1]), ctx.padded_m_splits
             )
             grad_input = torch.cat(
                 [

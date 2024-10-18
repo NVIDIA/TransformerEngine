@@ -241,9 +241,9 @@ class _ViewFunc(torch.autograd.Function):
         if isinstance(tensor, Float8Tensor):
             return Float8Tensor.make_like(
                 tensor,
-                data=tensor._data.view(*shape),
+                data=tensor._data.reshape(*shape),
             )
-        return tensor.view(*shape)
+        return tensor.reshape(*shape)
 
     @staticmethod
     def backward(
@@ -255,10 +255,10 @@ class _ViewFunc(torch.autograd.Function):
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
                 grad,
-                data=grad._data.view(ctx.shape),
+                data=grad._data.reshape(ctx.shape),
             )
             return dgrad, None
-        return grad.view(ctx.shape), None
+        return grad.reshape(ctx.shape), None
 
 
 class _ReshapeFunc(torch.autograd.Function):
@@ -285,9 +285,9 @@ class _ReshapeFunc(torch.autograd.Function):
         if isinstance(tensor, Float8Tensor):
             return Float8Tensor.make_like(
                 tensor,
-                data=tensor._data.reshape(*shape),
+                data=tensor._data.view(*shape),
             )
-        return tensor.reshape(*shape)
+        return tensor.view(*shape)
 
     @staticmethod
     def backward(
@@ -299,10 +299,10 @@ class _ReshapeFunc(torch.autograd.Function):
         if isinstance(grad, Float8Tensor):
             dgrad = Float8Tensor.make_like(
                 grad,
-                data=grad._data.reshape(ctx.shape),
+                data=grad._data.view(ctx.shape),
             )
             return dgrad, None
-        return grad.reshape(ctx.shape), None
+        return grad.view(ctx.shape), None
 
 
 class Float8Tensor(QuantizedTensor):
@@ -425,7 +425,7 @@ class Float8Tensor(QuantizedTensor):
                 forward=self._fp8_meta_forward,
             )
             fp8_scale_inv = self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index]
-            fp8_scale_inv = fp8_scale_inv.detach().view(1).clone()
+            fp8_scale_inv = fp8_scale_inv.detach().reshape(1).clone()
         if fp8_scale_inv is None:
             raise ValueError(
                 "Attempted to initialize Float8Tensor without specifying scale-inverse"
@@ -502,11 +502,11 @@ class Float8Tensor(QuantizedTensor):
         if not data.is_contiguous():
             data = data.contiguous()
         if data.dim() != 2:
-            data = data.view(1, -1)
+            data = data.reshape(1, -1)
 
         # Cast from FP8
         out = cast_from_fp8(
-            data.view(1, -1),
+            data.reshape(1, -1),
             None,  # fp8_meta_tensor
             None,  # fp8_tensor
             self._fp8_dtype,
@@ -516,7 +516,7 @@ class Float8Tensor(QuantizedTensor):
 
         # Make sure output is in expected format
         if out.size() != self.size():
-            out = out.view(self.size())
+            out = out.reshape(self.size())
         return out
 
     def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
@@ -647,8 +647,8 @@ class Float8Tensor(QuantizedTensor):
         if dst._transpose is None:
             dst_data = dst._data
             if src.dim() != 2:
-                src = src.view(1, -1)
-                dst_data = dst_data.view(1, -1)
+                src = src.reshape(1, -1)
+                dst_data = dst_data.reshape(1, -1)
             cast_to_fp8(
                 src,
                 fp8_meta,
@@ -661,7 +661,7 @@ class Float8Tensor(QuantizedTensor):
             )
         else:
             fp8_cast_transpose_fused(
-                src.view(-1, src.size(-1)),
+                src.reshape(-1, src.size(-1)),
                 fp8_meta,
                 dst._fp8_meta_index,
                 dst._fp8_dtype,

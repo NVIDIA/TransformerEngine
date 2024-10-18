@@ -677,7 +677,7 @@ class TransformerLayer(torch.nn.Module):
 
         # For AMP
         if torch.is_autocast_enabled():
-            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_gpu_dtype())
+            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_dtype("cuda"))
 
         # Self attention.
         self_attention_outputs = self.self_attention(
