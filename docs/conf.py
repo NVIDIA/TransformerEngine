@@ -47,23 +47,6 @@ else:
     version = str(_raw_version)
 release = _raw_version
 
-# hack: version is used for html creation, so put the version picker
-# link here as well:
-option_on = " selected"
-option_off = ""
-release_opt = option_on
-option_nr = 0
-version = (
-    version
-    + """<br/>
-Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
-    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>
-    <option value="https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html">Older releases</option>
-</select>""".format(
-        option_nr, release_opt
-    )
-)
-
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
@@ -98,7 +81,12 @@ html_css_files = [
     "css/nvidia_footer.css",
 ]
 
-html_theme_options = {"collapse_navigation": False, "logo_only": False}
+html_theme_options = {
+    "collapse_navigation": False,
+    "logo_only": False,
+    "version_selector": False,
+    "language_selector": False,
+}
 
 napoleon_custom_sections = [
     ("Parallelism parameters", "params_style"),

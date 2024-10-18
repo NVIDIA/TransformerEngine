@@ -1,0 +1,21 @@
+diff --git a/sphinx_rtd_theme/layout.html b/sphinx_rtd_theme/layout.html
+index e6a38b1..fa6dae0 100644
+--- a/sphinx_rtd_theme/layout.html
++++ b/sphinx_rtd_theme/layout.html
+@@ -124,6 +124,16 @@
+             {%- endif %}
+           </a>
+
++          {# Show TE version and version selector #}
++          <div class="version">
++            {{ nav_version }}
++            <br>
++            Version select: <select onChange="window.location.href = this.value" onFocus="this.selectedIndex = {0}">
++              <option value="https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/index.html"{1}>Current release</option>
++              <option value="https://docs.nvidia.com/deeplearning/transformer-engine/documentation-archive.html">Older releases</option>
++            </select>
++          </div>
++
+           {%- if READTHEDOCS or DEBUG %}
+             {%- if theme_version_selector or theme_language_selector %}
+               <div class="switch-menus">
