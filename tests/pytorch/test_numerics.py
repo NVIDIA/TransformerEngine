@@ -1602,10 +1602,12 @@ def test_gpt_cuda_graph(dtype, bs, model):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    block = TransformerLayer(
+    block_args = (
         config.hidden_size,
         4 * config.hidden_size,
         config.num_attention_heads,
+    )
+    block_kwargs = dict(
         layernorm_epsilon=config.eps,
         init_method=init_method,
         output_layer_init_method=output_layer_init_method,
@@ -1617,7 +1619,11 @@ def test_gpt_cuda_graph(dtype, bs, model):
         output_layernorm=False,
         device="cuda",
     )
-    graphed_block = copy.deepcopy(block)
+    block = TransformerLayer(*block_args, **block_kwargs)
+    graphed_block = TransformerLayer(*block_args, **block_kwargs)
+    with torch.no_grad():
+        for param1, param2 in zip(block.parameters(), graphed_block.parameters()):
+            param2.copy_(param1)
 
     out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
     graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
