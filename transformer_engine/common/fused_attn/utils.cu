@@ -351,7 +351,8 @@ __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d, int32_t *cu_
 }
 
 // convert cu_seqlens to actual_seqlens
-__global__ void cu_seqlens_to_actual_seqlens(size_t actual_b, size_t max_b, int32_t const *const q_cu_seqlens,
+__global__ void cu_seqlens_to_actual_seqlens(size_t actual_b, size_t max_b,
+                                             int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -365,9 +366,9 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t actual_b, size_t max_b, int3
 }
 
 // convert cu_seqlens_padded to offsets
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t actual_b, size_t max_b, size_t h,
-                                             size_t hg, size_t d_qk, size_t d_v,
-                                             int32_t *cu_seqlens_q_padded,
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t actual_b,
+                                             size_t max_b, size_t h, size_t hg, size_t d_qk,
+                                             size_t d_v, int32_t *cu_seqlens_q_padded,
                                              int32_t *cu_seqlens_kv_padded, int64_t *offsets_q,
                                              int64_t *offsets_k, int64_t *offsets_v,
                                              int64_t *offsets_o, int64_t *offsets_s) {
