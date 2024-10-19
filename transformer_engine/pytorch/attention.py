@@ -1082,9 +1082,8 @@ def get_swa_mask(
         For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
         For other masks, `None`.
     """
-    # perform basic checks and change mask type
-    if window_size is not None and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        attn_mask_type = "arbitrary"
+    # perform basic checks
+    change_type = window_size is not None and (window_size[0] != -1 or window_size[1] not in [-1, 0])
     if window_size is None:
         window_size = (-1, -1)
     if "causal" in attn_mask_type:
@@ -1135,6 +1134,10 @@ def get_swa_mask(
         attention_mask = torch.logical_or(swa_mask, attention_mask)
     else:
         attention_mask = swa_mask
+
+    # change mask type
+    if change_type:
+        attn_mask_type = "arbitrary"
 
     return attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv
 
