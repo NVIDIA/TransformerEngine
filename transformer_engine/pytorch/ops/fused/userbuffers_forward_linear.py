@@ -50,11 +50,7 @@ class UserbuffersForwardLinear(FusedOperation):
     ) -> None:
 
         # Basic operations that comprise this fused operation
-        op_idxs = dict(
-            linear=0,
-            bias=None,
-            reduce_scatter=None,
-        )
+        op_idxs = {"linear": 0, "bias": None, "reduce_scatter": None}
         ops = [linear]
         if bias is not None:
             op_idxs["bias"] = len(ops)
@@ -369,14 +365,14 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Perform GEMM
         if with_fp8_compute:
-            kwargs = dict(
-                out=y,
-                bias=b,
-                use_bias=(b is not None),
-                use_split_accumulator=False,
-                ub_algo=ub_algo,
-                ub=ub_comm,
-            )
+            kwargs = {
+                "out": y,
+                "bias": b,
+                "use_bias": (b is not None),
+                "use_split_accumulator": False,
+                "ub_algo": ub_algo,
+                "ub": ub_comm,
+            }
             if with_ub_all_gather:
                 kwargs["extra_output_tensor"] = x_local._data
             if with_ub_reduce_scatter:
@@ -384,12 +380,12 @@ class UserbuffersForwardLinear(FusedOperation):
             if with_fp8_output:
                 fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(y)
                 kwargs.update(
-                    dict(
-                        out=y._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=y._fp8_dtype,
-                    )
+                    {
+                        "out": y._data,
+                        "out_index": fp8_meta_index,
+                        "fp8_meta_tensor": fp8_meta,
+                        "D_dtype": y._fp8_dtype,
+                    }
                 )
             fp8_gemm(
                 w._data,
@@ -405,13 +401,13 @@ class UserbuffersForwardLinear(FusedOperation):
                 **kwargs,
             )
         else:
-            kwargs = dict(
-                out=y,
-                bias=b,
-                use_bias=(b is not None),
-                ub_algo=ub_algo,
-                ub=ub_comm,
-            )
+            kwargs = {
+                "out": y,
+                "bias": b,
+                "use_bias": (b is not None),
+                "ub_algo": ub_algo,
+                "ub": ub_comm,
+            }
             if with_ub_all_gather:
                 kwargs["extra_output_tensor"] = x_local
             if with_ub_reduce_scatter:
@@ -422,10 +418,7 @@ class UserbuffersForwardLinear(FusedOperation):
         out = reshape(y_local, output_dims)
 
         # Return cast tensors
-        extra_outputs = dict(
-            input=x_local,
-            weight=w,
-        )
+        extra_outputs = {"input": x_local, "weight": w}
         return out, extra_outputs
 
     def fuser_forward(

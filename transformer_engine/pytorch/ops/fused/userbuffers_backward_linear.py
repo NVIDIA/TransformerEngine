@@ -50,11 +50,7 @@ class UserbuffersBackwardLinear(FusedOperation):
     ) -> None:
 
         # Basic operations that comprise this fused operation
-        op_idxs = dict(
-            linear=None,
-            bias=None,
-            reduce_scatter=None,
-        )
+        op_idxs = {"linear": None, "bias": None, "reduce_scatter": None}
         ops = []
         if reduce_scatter is not None:
             op_idxs["reduce_scatter"] = len(ops)
@@ -495,10 +491,7 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         # Perform dgrad GEMM
         if with_fp8_compute:
-            kwargs = dict(
-                out=dx,
-                use_split_accumulator=True,
-            )
+            kwargs = {"out": dx, "use_split_accumulator": True}
             if with_ub_all_gather_dy:
                 kwargs["ub_algo"] = ub_algo_dy
                 kwargs["ub"] = ub_comm_dy
@@ -512,12 +505,12 @@ class UserbuffersBackwardLinear(FusedOperation):
             if with_fp8_grad_input:
                 fp8_meta, fp8_meta_index = get_fp8_meta_from_fp8_tensor(dx)
                 kwargs.update(
-                    dict(
-                        out=dx._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=dx._fp8_dtype,
-                    )
+                    {
+                        "out": dx._data,
+                        "out_index": fp8_meta_index,
+                        "fp8_meta_tensor": fp8_meta,
+                        "D_dtype": dx._fp8_dtype,
+                    }
                 )
             fp8_gemm(
                 w.transpose_2d(),
@@ -533,11 +526,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 **kwargs,
             )
         else:
-            kwargs = dict(
-                grad=True,
-                layout="NN",
-                out=dx,
-            )
+            kwargs = {"grad": True, "layout": "NN", "out": dx}
             if with_ub_all_gather_dy:
                 kwargs["ub_algo"] = ub_algo_dy
                 kwargs["ub"] = ub_comm_dy
@@ -555,11 +544,11 @@ class UserbuffersBackwardLinear(FusedOperation):
         if not weight_requires_grad:
             pass
         elif with_fp8_compute:
-            kwargs = dict(
-                accumulate=accumulate_into_grad_weight,
-                out=grad_weight,
-                use_split_accumulator=True,
-            )
+            kwargs = {
+                "accumulate": accumulate_into_grad_weight,
+                "out": grad_weight,
+                "use_split_accumulator": True,
+            }
             if with_ub_reduce_scatter_dx:
                 kwargs["ub_algo"] = ub_algo_dx
                 kwargs["ub"] = ub_comm_dx
@@ -577,13 +566,13 @@ class UserbuffersBackwardLinear(FusedOperation):
                 **kwargs,
             )
         else:
-            kwargs = dict(
-                accumulate=accumulate_into_grad_weight,
-                layout="NT",
-                grad=True,
-                use_bias=bias_requires_grad,
-                out=grad_weight,
-            )
+            kwargs = {
+                "accumulate": accumulate_into_grad_weight,
+                "layout": "NT",
+                "grad": True,
+                "use_bias": bias_requires_grad,
+                "out": grad_weight,
+            }
             if with_ub_reduce_scatter_dx:
                 kwargs["ub_algo"] = ub_algo_dx
                 kwargs["ub"] = ub_comm_dx
