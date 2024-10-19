@@ -351,28 +351,28 @@ __global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d, int32_t *cu_
 }
 
 // convert cu_seqlens to actual_seqlens
-__global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu_seqlens,
+__global__ void cu_seqlens_to_actual_seqlens(size_t actual_b, size_t max_b, int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b) {
+  if (tid < actual_b) {
     q_seqlens[tid] = q_cu_seqlens[tid + 1] - q_cu_seqlens[tid];
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
-  } else {
+  } else if (tid < max_b) {
     q_seqlens[tid] = 0;
     kv_seqlens[tid] = 0;
   }
 }
 
 // convert cu_seqlens_padded to offsets
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t actual_b, size_t max_b, size_t h,
                                              size_t hg, size_t d_qk, size_t d_v,
                                              int32_t *cu_seqlens_q_padded,
                                              int32_t *cu_seqlens_kv_padded, int64_t *offsets_q,
                                              int64_t *offsets_k, int64_t *offsets_v,
                                              int64_t *offsets_o, int64_t *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b + 1) {
+  if (tid < actual_b + 1) {
     offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
     offsets_s[tid] = h * cu_seqlens_q_padded[tid];
     switch (layout_group) {
@@ -394,25 +394,25 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
         offsets_v[tid] = offsets_k[tid];
         break;
     }
-  } else {
-    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[b];
-    offsets_s[tid] = h * cu_seqlens_q_padded[b];
+  } else if (tid < max_b + 1) {
+    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[actual_b];
+    offsets_s[tid] = h * cu_seqlens_q_padded[actual_b];
     switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[b];
-        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[b];
-        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[b];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[actual_b];
+        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[actual_b];
+        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[actual_b];
         break;
       case NVTE_QKV_Layout_Group::NVTE_3HD:
       case NVTE_QKV_Layout_Group::NVTE_H3D:
-        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[b];
+        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[actual_b];
         offsets_k[tid] = offsets_q[tid];
         offsets_v[tid] = offsets_q[tid];
         break;
       case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
       case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[b];
-        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[b];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[actual_b];
+        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[actual_b];
         offsets_v[tid] = offsets_k[tid];
         break;
     }

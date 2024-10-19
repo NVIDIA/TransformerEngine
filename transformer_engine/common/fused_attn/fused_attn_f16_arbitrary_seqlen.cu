@@ -365,7 +365,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
       void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          orig_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
       variant_pack[seq_q] = devActualSeqlenQ;
@@ -383,7 +383,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
           static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
           static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
@@ -791,7 +791,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
       void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-          orig_b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
+          orig_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
           static_cast<int32_t *>(devActualSeqlenKV));
       variant_pack[seq_q] = devActualSeqlenQ;
@@ -809,7 +809,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
       NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
-          layout_group, orig_b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
+          layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
           static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
           static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
