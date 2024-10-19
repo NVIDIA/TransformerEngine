@@ -412,10 +412,10 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
                                const bool transpose_output_memory);
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs);
+                                  const at::Tensor &freqs, const int cp_size, const int cp_rank);
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs);
+                                   const at::Tensor &freqs, const int cp_size, const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous
@@ -433,14 +433,14 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
                                 int half_idx);
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
-                                    const at::Tensor &cu_seqlens, int total_tokens);
+                                    const at::Tensor &cu_seqlens, bool lse_packed);
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
-                                    int total_tokens);
+                                    bool lse_packed);
 
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
-                        bool only_second_half);
+                        bool only_second_half, bool lse_packed);
 
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
                          const at::Tensor &cu_seqlens, const std::string &first_half,

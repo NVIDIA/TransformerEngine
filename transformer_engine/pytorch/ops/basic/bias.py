@@ -16,6 +16,7 @@ from ..op import BasicOperation, OperationContext
 from .._common import (
     canonicalize_device,
     canonicalize_dtype,
+    convert_tensor,
     is_float8_tensor,
     reshape,
 )
@@ -66,12 +67,6 @@ class Bias(BasicOperation):
             raise ValueError(f"Only CUDA devices are supported (got {device})")
         self.device: torch.device = device
 
-        # Bias tensor datatype
-        dtype = canonicalize_dtype(dtype)
-        if dtype not in (torch.float32, torch.float16, torch.bfloat16):
-            raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
-
         # Tensor parallel configuration
         tensor_parallel_size = 1
         local_size = size
@@ -95,7 +90,7 @@ class Bias(BasicOperation):
         bias = torch.empty(
             local_size,
             device="meta",
-            dtype=dtype,
+            dtype=canonicalize_dtype(dtype),
         )
         bias = torch.nn.Parameter(bias)
         self.bias: torch.nn.Parameter
@@ -110,7 +105,8 @@ class Bias(BasicOperation):
         bias = self.bias
         if bias.device.type != self.device.type:
             bias = torch.empty_like(bias, device=self.device)
-        bias = bias.to(device=self.device, dtype=self.dtype)
+        else:
+            bias = bias.to(device=self.device)
 
         # Initialize values
         bias.zero_()
@@ -133,14 +129,22 @@ class Bias(BasicOperation):
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
+        # Get autocast dtype if needed
+        dtype = None
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+        else:
+            dtype = self.bias.dtype
+
         # Apply bias
-        x = input_
-        b = self.bias.reshape([1] * (x.dim() - 1) + [self.local_size])
+        x = convert_tensor(input_, dtype=dtype)
+        b = reshape(self.bias, [1] * (x.dim() - 1) + [self.local_size])
         y = x + b
 
         # Save state for backward pass
         ctx.bias_requires_grad = self.bias.requires_grad
         ctx.with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
+        ctx.dtype = dtype
         ctx.prev_op = prev_op
 
         return y
@@ -186,7 +190,7 @@ class Bias(BasicOperation):
                 dy,
                 (-1, output_dims[-1]),
                 device=self.device,
-                dtype=self.dtype,
+                dtype=ctx.dtype,
             )
 
             # Call fused kernel for bgrad and casting dgrad to FP8
@@ -212,7 +216,7 @@ class Bias(BasicOperation):
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=fp8_scale_inv,
-                dtype=self.dtype,
+                dtype=ctx.dtype,
             )
             dx._transpose = dx_data_transpose
             dx._transpose_invalid = False

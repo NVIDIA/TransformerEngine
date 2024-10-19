@@ -119,7 +119,6 @@ class BasicLinear(BasicOperation):
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
         # Tensor parallel configuration
         self.tensor_parallel_mode: Optional[str]
@@ -278,7 +277,8 @@ class BasicLinear(BasicOperation):
         weight = self.weight
         if weight.device.type != "cuda" or is_float8_tensor(weight):
             weight = torch.empty_like(weight, device=self.device)
-        weight = weight.to(device=self.device, dtype=self.dtype)
+        else:
+            weight = weight.to(device=self.device)
 
         # Initialize values
         init_context = contextlib.nullcontext
@@ -562,12 +562,12 @@ class BasicLinear(BasicOperation):
         _wait_async(x_async)
         x_async = None
         if with_fp8_compute:
-            kwargs = dict(
-                accumulate=accumulate_into_out,
-                out=y,
-                bias=b,
-                use_bias=(b is not None),
-            )
+            kwargs = {
+                "accumulate": accumulate_into_out,
+                "out": y,
+                "bias": b,
+                "use_bias": (b is not None),
+            }
             if with_fp8_output:
                 if y._fp8_meta is None:
                     # Hackily create FP8TensorMeta if needed
@@ -584,12 +584,12 @@ class BasicLinear(BasicOperation):
                     fp8_meta = y._fp8_meta[fp8_meta_key]
                     fp8_meta_index = y._fp8_meta_index
                 kwargs.update(
-                    dict(
-                        out=y._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=y._fp8_dtype,
-                    )
+                    {
+                        "out": y._data,
+                        "out_index": fp8_meta_index,
+                        "fp8_meta_tensor": fp8_meta,
+                        "D_dtype": y._fp8_dtype,
+                    }
                 )
             fp8_gemm(
                 w._data,
@@ -936,10 +936,7 @@ class BasicLinear(BasicOperation):
             _wait_async(dy_async)
             dy_async = None
             if with_fp8_compute:
-                kwargs = dict(
-                    accumulate=accumulate_into_grad_input,
-                    out=dx,
-                )
+                kwargs = {"accumulate": accumulate_into_grad_input, "out": dx}
                 if with_fp8_grad_input:
                     if dx._fp8_meta is None:
                         # Hackily create FP8TensorMeta if needed
@@ -958,12 +955,12 @@ class BasicLinear(BasicOperation):
                         fp8_meta = dx._fp8_meta[fp8_meta_key]
                         fp8_meta_index = dx._fp8_meta_index
                     kwargs.update(
-                        dict(
-                            out=dx._data,
-                            out_index=fp8_meta_index,
-                            fp8_meta_tensor=fp8_meta,
-                            D_dtype=dx._fp8_dtype,
-                        )
+                        {
+                            "out": dx._data,
+                            "out_index": fp8_meta_index,
+                            "fp8_meta_tensor": fp8_meta,
+                            "D_dtype": dx._fp8_dtype,
+                        }
                     )
                 fp8_gemm(
                     w.transpose_2d(),
@@ -1082,12 +1079,17 @@ class BasicLinear(BasicOperation):
             if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
                 grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
 
+        # Get autocast dtype if needed
+        dtype = None
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+
         # Linear forward
         output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
             device=self.device,
-            dtype=self.dtype,
+            dtype=dtype,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
@@ -1103,6 +1105,7 @@ class BasicLinear(BasicOperation):
         ctx.weight_fp8_meta = weight_fp8_meta
         ctx.grad_output_fp8_meta = grad_output_fp8_meta
         ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        ctx.dtype = dtype
         ctx.input_dims = input_.size()
         ctx.input_requires_grad = input_.requires_grad
         ctx.weight_requires_grad = self.weight.requires_grad
@@ -1143,7 +1146,7 @@ class BasicLinear(BasicOperation):
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             device=self.device,
-            dtype=self.dtype,
+            dtype=ctx.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,
