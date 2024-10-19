@@ -7990,7 +7990,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
                     max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
                     batch_size = query_layer.shape[1]
-                if qkv_format == "bshd":
+                else:
                     max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
                     max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
                     batch_size = query_layer.shape[0]
