@@ -10,5 +10,5 @@ from transformer_engine.transformer_engine_jax import get_device_compute_capabil
 @lru_cache
 def is_bf16_supported():
     """Return if BF16 has hardware supported"""
-    gpu_arch = get_device_compute_capability(-1)
+    gpu_arch = get_device_compute_capability(0)
     return gpu_arch >= 80
