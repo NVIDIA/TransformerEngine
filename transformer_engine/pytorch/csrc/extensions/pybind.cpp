@@ -12,7 +12,26 @@
 
 #include "../comm_gemm_overlap.h"
 #include "../extensions.h"
+#include "object.h"
 #include "pytorch/csrc/common.h"
+
+namespace transformer_engine::pytorch {
+
+PyTypeObject *Float8TensorPythonClass = nullptr;
+PyTypeObject *Float8QParamsClass = nullptr;
+
+void init_extension() {
+  if (Float8TensorPythonClass) return;
+  auto float8tensor_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
+  auto qparams_module = py::module_::import("transformer_engine.pytorch.quantization_params");
+  Float8QParamsClass = reinterpret_cast<PyTypeObject*>(PyObject_GetAttrString(qparams_module.ptr(),
+                                                                              "Float8Params"));
+  Float8TensorPythonClass = reinterpret_cast<PyTypeObject*>(PyObject_GetAttrString(float8tensor_module.ptr(), "Float8Tensor"));
+  NVTE_CHECK(Float8TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch extension.");
+}
+
+}  // namespace transformer_engine::pytorch
 
 namespace pybind11::detail {
 
@@ -24,6 +43,8 @@ struct type_caster<transformer_engine::Float8Tensor> {
 
   bool load(handle src, bool) {
     std::cout << "Loading Float8Tensor!" << std::endl;
+    transformer_engine::pytorch::init_extension();
+    if (Py_TYPE(src.ptr()) != transformer_engine::pytorch::Float8TensorPythonClass) return false;
     auto py_data = src.attr("_data");
     value.data = py_data.cast<at::Tensor>();
     auto py_transpose = src.attr("_transpose");
@@ -89,6 +110,7 @@ using GemmFunc = std::vector<at::Tensor> (*)(InputType, bool, InputType, bool, M
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_test", test);
   m.def("cast_test2", test2);
+  m.def("generic_cast", transformer_engine::pytorch::cast);
   m.def("te_gemm2", static_cast<GemmFunc<transformer_engine::Float8Tensor>>(&te_gemm2),
         "CublasLt GEMM");
   m.def("te_gemm2", static_cast<GemmFunc<at::Tensor>>(&te_gemm2), "CublasLt GEMM");

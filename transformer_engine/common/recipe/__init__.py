@@ -49,9 +49,15 @@ class _OverrideLinearPrecision(NamedTuple):
     dgrad: bool = False
     wgrad: bool = False
 
+@dataclass
+class Recipe:
+    """
+    Abstract base recipe class.
+    """
+    pass
 
 @dataclass()
-class DelayedScaling:
+class DelayedScaling(Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.

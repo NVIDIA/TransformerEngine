@@ -10,6 +10,16 @@ from typing import Optional, Tuple
 import torch
 from torch.utils._pytree import tree_map
 
+from ..quantization_params import QuantizationParams
+
+class QuantizationParamsProxy:
+    def __init__(self):
+        pass
+
+    def get_quantization_params(self) -> QuantizationParams:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement get_quantization_params function"
+        )
 
 class _DequantizeFunc(torch.autograd.Function):
     """Autograd function to convert quantized tensor to standard tensor"""
@@ -70,6 +80,18 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement quantize_ function"
         )
 
+    @classmethod
+    def quantize(cls,
+                 tensor: torch.Tensor,
+                 params: QuantizationParams,
+                 *,
+                 proxy: Optional[QuantizationParamsProxy] = None,
+                 rowwise_usage: bool = True,
+                 columnwise_usage: bool = True) -> QuantizedTensor:
+        raise NotImplementedError(
+            f"{cls.__name__} class does not implement quantize function"
+        )
+
     def detach(self) -> QuantizedTensor:
         """Create new quantized tensor with same data
 
@@ -79,6 +101,16 @@ class QuantizedTensor(torch.Tensor):
         """
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement detach function"
+        )
+
+    def update_usage(self, rowwise=True, columnwise=True):
+        """Indicate to the tensor how it is going to be used.
+        This enables optimizations to memory usage in some cases
+        where forward and backward passes use the tensor in
+        different directions.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
     def __repr__(self) -> str:

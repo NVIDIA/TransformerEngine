@@ -21,7 +21,6 @@ import transformer_engine_torch as tex
 from ._common import _ParameterInitMeta
 from ..export import is_in_onnx_export_mode
 from ..fp8 import (
-    get_default_fp8_recipe,
     get_fp8_te_dtype,
     FP8GlobalStateManager,
 )
@@ -38,6 +37,8 @@ from ..cpp_extensions import (
 )
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
+from ..quantization_meta import QMeta
+from transformer_engine.common.recipe import Recipe
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -396,7 +397,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta = {}
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
-        self.fp8_meta["recipe"] = get_default_fp8_recipe()
         self.fp8_meta_tensors_initialized = False
         self.tp_group = None
         self.tp_size = 1
@@ -482,37 +482,28 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             self.fp8_meta[meta_key].amax_history
                         )
 
-    def set_meta_tensor(self, fwd: bool) -> None:
+    def set_meta_tensor(self,
+                        fwd: bool,
+                        recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
         if self.fp8_meta_tensors_initialized:
             # Handle changed amax history size.
-            self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
+            self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
             return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
         num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
 
-        self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
-        self.fp8_meta[fp8_meta_tensor_key].scale = torch.ones(
-            num_fp8_tensors, dtype=torch.float32, device="cuda"
-        )
-        self.fp8_meta[fp8_meta_tensor_key].scale_inv = torch.ones(
-            num_fp8_tensors, dtype=torch.float32, device="cuda"
-        )
-        self.fp8_meta[fp8_meta_tensor_key].amax_history = torch.zeros(
-            self.fp8_meta["recipe"].amax_history_len,
-            num_fp8_tensors,
-            dtype=torch.float32,
-            device="cuda",
-        )
+        self.fp8_meta[fp8_meta_tensor_key] = QMeta(recipe, num_fp8_tensors)
 
-    def init_fp8_meta_tensors(self) -> None:
+    def init_fp8_meta_tensors(self,
+                              recipe: Recipe) -> None:
         """Init scales and amaxes."""
-        self.set_meta_tensor(True)
-        self.set_meta_tensor(False)
+        self.set_meta_tensor(True, recipe)
+        self.set_meta_tensor(False, recipe)
         self.fp8_meta_tensors_initialized = True
 
     def get_fp8_meta_tensors(self) -> None:
@@ -607,7 +598,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
         # Initialize before loading.
-        self.init_fp8_meta_tensors()
+        self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
         self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
         self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
         self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
@@ -667,9 +658,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
+        if (self.fp8_parameters or self.fp8):
+            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+
+
         if self.fp8_parameters and not self.fp8_initialized:
             self.fp8_meta["num_gemms"] = num_gemms
-            self.init_fp8_meta_tensors()
+            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
@@ -679,8 +674,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             ):
                 return
 
-            # Set FP8, recipe, and other FP8 metadata
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            # Set FP8 and other FP8 metadata
             self.fp8_meta["num_gemms"] = num_gemms
             self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
@@ -689,7 +683,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            self.init_fp8_meta_tensors()
+            self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
             self.fp8_initialized = True
         else:
             # If fp8 isn't enabled, turn off and return.

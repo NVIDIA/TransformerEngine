@@ -10,7 +10,7 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import DelayedScaling, Format
+from transformer_engine.common.recipe import DelayedScaling, Format, Recipe
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -33,7 +33,7 @@ def check_fp8_support() -> Tuple[bool, str]:
     return True, ""
 
 
-def get_default_fp8_recipe() -> DelayedScaling:
+def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     return DelayedScaling()
 
@@ -486,7 +486,8 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_model_init(enabled: bool = True) -> None:
+def fp8_model_init(enabled: bool = True,
+                   recipe: Optional[Recipe] = None) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -510,15 +511,20 @@ def fp8_model_init(enabled: bool = True) -> None:
                precision copies of weights are already present in the optimizer.
              * inference, where only the FP8 copies of the parameters are used.
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
+    recipe: transformer_engine.common.recipe.Recipe, default = `None`
+            Recipe used to create the parameters. If left to None, it uses the default FP8 recipe.
 
              This functionality is *EXPERIMENTAL*.
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+    _fp8_recipe = FP8GlobalStateManager.FP8_RECIPE
     FP8GlobalStateManager.FP8_PARAMETERS = enabled
+    FP8GlobalStateManager.FP8_RECIPE = get_default_fp8_recipe() if recipe is None else recipe
     try:
         yield
     finally:
         FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
+        FP8GlobalStateManager.FP8_RECIPE = _fp8_recipe
 
 
 @contextmanager

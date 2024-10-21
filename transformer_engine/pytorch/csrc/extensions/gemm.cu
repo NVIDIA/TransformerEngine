@@ -6,6 +6,7 @@
 
 #include <optional>
 
+#include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
 #include "extensions.h"
@@ -54,34 +55,58 @@ std::vector<at::Tensor> te_gemm2_helper(
   A = A.contiguous();
   B = B.contiguous();
 
+  // TODO: check shapes for FP8 execution
+  const auto& A_shape = A.sizes();
+  NVTE_CHECK(A_shape.size() == 2, 
+             "The A tensor in matmul must have 2 dimensions (got :" +
+             std::to_string(A_shape.size()) + ").");
+
+  const auto& B_shape = B.sizes();
+  // Compute the product of dimensions except for the last one
+  int64_t prod = 1;
+  for (size_t i = 0; i < B_shape.size() - 1; ++i) {
+    prod *= B_shape[i];
+  }
+
+  std::vector<int64_t> D_shape;
+  for (size_t i = 0; i < B_shape.size() - 1; ++i) {
+    D_shape.push_back(B_shape[i]);
+  }
+  D_shape.push_back(A_shape[0]);
   if (!D.has_value()) {
     auto type = GetATenDType(D_type);
     auto opts = at::TensorOptions().dtype(type).device(A.options().device());
-    *D = at::empty({B.size(0), A.size(0)}, opts);
+    *D = at::empty(D_shape, opts);
+  } else {
+    NVTE_CHECK(D_shape == D->sizes(),
+               "Wrong shape of the provided matmul output. Expected " +
+               std::to_string(D_shape) + " and got " +
+               std::to_string(D->sizes()) + ".");
   }
 
   auto te_A = makeTransformerEngineTensor(
       A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_dtype,
       nullptr, nullptr, get_data_ptr(A_scale_inv));
   auto te_B = makeTransformerEngineTensor(
-      B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_dtype,
+      B.data_ptr(), {static_cast<size_t>(prod), static_cast<size_t>(B.size(-1))}, B_dtype,
       nullptr, nullptr, get_data_ptr(B_scale_inv));
   auto te_D = makeTransformerEngineTensor(
-      D->data_ptr(), {static_cast<size_t>(D->size(0)), static_cast<size_t>(D->size(1))}, D_type,
+      D->data_ptr(), {static_cast<size_t>(prod), static_cast<size_t>(D->size(-1))}, D_type,
       get_data_ptr(D_amax), get_data_ptr(D_scale), nullptr);
   auto te_bias = makeTransformerEngineTensor(get_data_ptr(bias), {get_size(bias, 0)}, bias_type);
 
-  at::Tensor pre_gelu_out;
+  MaybeTensor pre_gelu_out = std::nullopt;
+  DType gelu_type = bias_type;
   if (gelu) {
     auto dtype = GetATenDType(bias_type);
     auto opts = A.options().dtype(dtype);
-    pre_gelu_out = at::empty_like(*D, opts);
+    *pre_gelu_out = at::empty_like(*D, opts);
   }
-  const auto gelu_shape = gelu ? std::vector<size_t>{static_cast<size_t>(pre_gelu_out.size(0)),
-                                                     static_cast<size_t>(pre_gelu_out.size(1))}
+  const auto gelu_shape = gelu ? std::vector<size_t>{static_cast<size_t>(prod),
+                                                     static_cast<size_t>(D->size(-1))}
                                : std::vector<size_t>{0};
-  auto te_pre_gelu_out = makeTransformerEngineTensor(
-      pre_gelu_out.data_ptr(), gelu_shape, GetTransformerEngineDType(pre_gelu_out.scalar_type()));
+  auto te_pre_gelu_out =
+      makeTransformerEngineTensor(get_data_ptr(pre_gelu_out), gelu_shape, gelu_type);
   auto te_workspace =
       makeTransformerEngineTensor(workspace.data_ptr(), {workspaceSize}, DType::kByte);
 
@@ -89,7 +114,7 @@ std::vector<at::Tensor> te_gemm2_helper(
                    transa, transb, grad, te_workspace.data(), accumulate, use_split_accumulator,
                    num_math_sms, at::cuda::getCurrentCUDAStream());
 
-  return {*D, pre_gelu_out};
+  return {*D, pre_gelu_out.value_or(at::Tensor())};
 }
 
 std::vector<at::Tensor> te_gemm2(transformer_engine::Float8Tensor A, bool transa,

@@ -9,7 +9,6 @@ import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
-from ..tensor import Float8Tensor
 
 
 __all__ = [
@@ -28,40 +27,31 @@ def _empty_tensor() -> torch.Tensor:
 
 
 def general_gemm(
-    A: Union[torch.Tensor, Float8Tensor],
-    B: Union[torch.Tensor, Float8Tensor],
+    A: torch.Tensor,
+    B: torch.Tensor,
     workspace: torch.Tensor,
+    out_dtype: tex.DType,
     gelu: bool = False,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_split_accumulator: bool = False,
-    D_dtype: Optional[tex.DType] = None,
     ub_algo: tex.UbufOverlapAlgo = None,
     ub: Union[tex.UbufCommOverlap, tex.UbufP2PCommOverlap] = None,
-    extra_output_tensor: Optional[torch.Tensor] = None,
+    ub_buffer: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """GEMM supporting fp8 inputs."""
 
     empty_tensor = _empty_tensor()
-    if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
+    if out_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
         raise ValueError("FP8 output not supported")
-    # assert_dim_for_fp8_exec(A)
-    # assert_dim_for_fp8_exec(B)
-
     if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias.dtype
-    # if gelu:
-    #     gelu_input = torch.empty_like(out, dtype=bias_dtype)
-    # else:
-    #     gelu_input = empty_tensor
     bias_dtype = TE_DType[bias_dtype]
-
-    out_dtype = TE_DType[A.dtype] if D_dtype is None else D_dtype
 
     args = (
         A,

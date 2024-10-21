@@ -5,6 +5,41 @@
  ************************************************************************/
 
 #include "extensions.h"
+#include "pybind.h"
+#include "object.h"
+
+namespace transformer_engine::pytorch {
+
+namespace detail {
+
+bool IsFloat8QParamsType(PyObject *obj) {
+  return Py_TYPE(obj) == Float8QParamsClass;
+}
+
+}  // namespace detail
+
+py::handle cast(const at::Tensor& tensor, py::handle quantization_params) {
+  using namespace pybind11::literals;
+  init_extension();
+  if (detail::IsFloat8QParamsType(quantization_params.ptr())) {
+    auto py_scale = quantization_params.attr("scale");
+    auto py_amax = quantization_params.attr("amax");
+    auto py_scale_inv = quantization_params.attr("scale_inv");
+    DType type = quantization_params.attr("dtype").cast<DType>();
+    const at::Tensor& scale = py_scale.cast<at::Tensor>();
+    auto data = cast_to_fp8(tensor,
+                            py_scale.cast<at::Tensor>(),
+                            py_amax.cast<at::Tensor>(),
+                            py_scale_inv.cast<at::Tensor>(),
+                            type);
+    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
+    auto ret = Float8TensorClass("data"_a=data, "fp8_scale_inv"_a=py_scale_inv, "fp8_dtype"_a=type);
+    return ret.release();
+  }
+  NVTE_ERROR("Invalid type of the quantization params");
+}
+
+}  // transformer_engine::pytorch
 
 at::Tensor cast_to_fp8(const at::Tensor& input, const at::Tensor& scale, at::Tensor amax,
                        at::Tensor scale_inv, transformer_engine::DType otype,
