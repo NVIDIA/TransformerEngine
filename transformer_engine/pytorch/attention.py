@@ -1107,7 +1107,6 @@ def get_swa_mask(
             attention_mask = torch.logical_or(
                 attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
             )
-        batch_size = attention_mask.shape[0]
         m = attention_mask.logical_not()
         actual_seqlens_q = m[:, 0, :, 0].sum(dim=1)
         actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
@@ -1116,6 +1115,8 @@ def get_swa_mask(
     mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
         1, 1, max_seqlen_q, 1
     ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    swa_left = None
+    swa_right = None
     if attn_mask_type in ["no_mask", "causal_bottom_right", "arbitrary"]:
         swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
         swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
@@ -1123,6 +1124,7 @@ def get_swa_mask(
         swa_left = mask - window_size[0]
         swa_right = mask + window_size[1]
     elif attn_mask_type in ["padding", "padding_causal_bottom_right"]:
+        batch_size = attention_mask.shape[0]
         swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q - window_size[0]
         ).view(batch_size, 1, 1, 1)
