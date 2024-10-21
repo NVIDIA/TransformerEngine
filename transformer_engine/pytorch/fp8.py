@@ -277,7 +277,9 @@ class FP8GlobalStateManager:
     @classmethod
     def get_fp8_recipe(cls) -> DelayedScaling:
         """Return the fp8 recipe"""
-        return cls.FP8_RECIPE
+        if cls.FP8_RECIPE is not None:
+            return cls.FP8_RECIPE
+        return get_default_fp8_recipe()
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
