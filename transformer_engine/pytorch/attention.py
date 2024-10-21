@@ -8985,8 +8985,8 @@ class MultiheadAttention(torch.nn.Module):
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
                 k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
 
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, cu_seqlens=cu_seqlens_q, fused=True)
+            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, cu_seqlens=cu_seqlens_kv, fused=True)
 
         # ===========================
         # Core attention computation
