@@ -2216,9 +2216,24 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
 
-        if qkv_format == "thd" or not causal:
-            tex.fused_out_correction_(
-                out,
+        # print(qkv_format,cu_seqlens_q_padded)
+        print(qkv_format, out.shape, out.view(-1, *out.shape[-3:]).shape)
+        if qkv_format == "sbhd":
+            tex.fused_out_correction(
+                out.view(-1, *out.shape[-3:]),
+                out_per_step,
+                softmax_lse,
+                softmax_lse_per_step,
+                cu_seqlens_q_padded,
+                qkv_format,
+                cp_size,
+                rank,
+                causal,
+                softmax_lse_in_packed_format,
+            )
+        elif qkv_format == "bshd":
+            tex.fused_out_correction(
+                out.view(out.shape[-4], -1, *out.shape[-2:]),
                 out_per_step,
                 softmax_lse,
                 softmax_lse_per_step,
@@ -2230,11 +2245,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 softmax_lse_in_packed_format,
             )
         else:
-            tex.fused_out_correction_lse_(
+            tex.fused_out_correction(
                 out,
                 out_per_step,
                 softmax_lse,
-                softmax_lse_,
                 softmax_lse_per_step,
                 cu_seqlens_q_padded,
                 qkv_format,

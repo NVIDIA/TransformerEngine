@@ -134,16 +134,10 @@ std::vector<at::Tensor> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-void fused_out_correction_lse_(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
-                               const at::Tensor &lse, const at::Tensor *lse_,
-                               const std::vector<at::Tensor> &lse_per_step,
-                               const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
-                               int rank, bool causal, bool softmax_lse_in_packed_format);
-
-void fused_out_correction_(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
-                           const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
-                           const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
-                           int rank, bool causal, bool softmax_lse_in_packed_format);
+void fused_out_correction(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
+                          const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
+                          const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
+                          int rank, bool causal, bool softmax_lse_in_packed_format);
 
 /***************************************************************************************************
  * GEMM

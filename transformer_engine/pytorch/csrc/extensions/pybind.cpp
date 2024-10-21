@@ -37,10 +37,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &scaled_aligned_causal_masked_softmax_backward,
         "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fused_out_correction_lse_", &fused_out_correction_lse_,
-        "fused out correction after qkv calculation with lse_",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_out_correction_", &fused_out_correction_,
+
+  m.def("fused_out_correction", &fused_out_correction,
         "fused out correction after qkv calculation without lse_",
         py::call_guard<py::gil_scoped_release>());
 
