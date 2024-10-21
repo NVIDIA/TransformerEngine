@@ -1083,14 +1083,16 @@ def get_swa_mask(
         For other masks, `None`.
     """
     # perform basic checks
-    change_type = window_size is not None and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+    change_type = window_size is not None and (
+        window_size[0] != -1 or window_size[1] not in [-1, 0]
+    )
     if window_size is None:
         window_size = (-1, -1)
     if "causal" in attn_mask_type:
         window_size = (window_size[0], 0)
     window_size = (
-            max_seqlen_kv if window_size[0] == -1 else window_size[0],
-            max_seqlen_q if window_size[1] == -1 else window_size[1]
+        max_seqlen_kv if window_size[0] == -1 else window_size[0],
+        max_seqlen_q if window_size[1] == -1 else window_size[1],
     )
 
     # apply padding mask
@@ -1113,9 +1115,7 @@ def get_swa_mask(
     # apply SWA mask
     mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
         1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-        1, 1, 1, max_seqlen_kv
-    )
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
     if attn_mask_type in ["no_mask", "causal_bottom_right", "arbitrary"]:
         swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
         swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
@@ -1123,13 +1123,15 @@ def get_swa_mask(
         swa_left = mask - window_size[0]
         swa_right = mask + window_size[1]
     elif attn_mask_type in ["padding", "padding_causal_bottom_right"]:
-        swa_left = mask.expand(
-            batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q - window_size[0]).view(batch_size, 1, 1, 1)
-        swa_right = mask.expand(
-            batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q + window_size[1]).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not(torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right <0, 1, 0))
+        swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
+            actual_seqlens_kv - actual_seqlens_q - window_size[0]
+        ).view(batch_size, 1, 1, 1)
+        swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
+            actual_seqlens_kv - actual_seqlens_q + window_size[1]
+        ).view(batch_size, 1, 1, 1)
+    swa_mask = torch.logical_not(
+        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
+    )
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
     else:
