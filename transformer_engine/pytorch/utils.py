@@ -312,9 +312,11 @@ TORCH_MINOR = int(torch.__version__.split(".")[1])
 if TORCH_MAJOR == 2 and TORCH_MINOR >= 4:
 
     def torch_get_autocast_gpu_dtype() -> torch.dtype:
+        """Get PyTorch autocast GPU dtype."""
         return torch.get_autocast_dtype("cuda")
 
 else:
 
     def torch_get_autocast_gpu_dtype() -> torch.dtype:
+        """Get PyTorch autocast GPU dtype."""
         return torch.get_autocast_gpu_dtype()
