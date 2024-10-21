@@ -43,10 +43,12 @@ from ..cpp_extensions import (
     gemm,
     fp8_cast_transpose_fused,
     cast_to_fp8,
+    empty_cached,
+    empty_like_cached,
 )
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing, cached_empty_like, cached_empty
+from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
 
@@ -451,7 +453,7 @@ class _Linear(torch.autograd.Function):
                 dgrad_size = list(grad_output.size())
                 dgrad_size[1] = weight.size(1)
 
-                empty_func = cached_empty if is_graph_capturing() else torch.empty
+                empty_func = tex.empty_cached if is_graph_capturing() else torch.empty
                 dgrad = empty_func(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
         
                 if ctx.fp8:
@@ -606,7 +608,7 @@ class _Linear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    empty_func = cached_empty if is_graph_capturing() else torch.empty
+                    empty_func = empty_cached if is_graph_capturing() else torch.empty
                     wgrad = empty_func(
                         weight.main_grad.shape,
                         dtype=weight.dtype,

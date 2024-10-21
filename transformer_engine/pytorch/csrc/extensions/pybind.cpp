@@ -17,10 +17,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_unpermute_bwd", moe_unpermute_bwd);
 
 
-  m.def("empty_like_cached", (at::Tensor (*)(at::Tensor)) &empty_like_cached, "CudaGraph Cache",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("empty_cached", (at::Tensor (*)(at::IntArrayRef, at::ScalarType, at::Device)) &empty_cached, "CudaGraph Cache",
-        py::call_guard<py::gil_scoped_release>());
+  m.def("empty_like_cached", (at::Tensor (*)
+        (const at::Tensor&, ::std::optional<at::ScalarType>, 
+        ::std::optional<at::Layout>, ::std::optional<at::Device>, ::std::optional<bool>, 
+        ::std::optional<at::MemoryFormat>)) 
+        &empty_like_cached, "CudaGraph Cache", py::call_guard<py::gil_scoped_release>(),
+        py::arg("input"), py::arg("dtype")=py::none(), py::arg("layout")=py::none(), 
+        py::arg("device")=py::none(), py::arg("pin_memory") = false, 
+        py::arg("memory_format")=py::none());
+
+  m.def("empty_cached", (at::Tensor (*)
+        (at::IntArrayRef, ::std::optional<at::ScalarType>, 
+        ::std::optional<at::Layout>, ::std::optional<at::Device>, ::std::optional<bool>, 
+        ::std::optional<at::MemoryFormat>)) 
+        &empty_cached, "CudaGraph Cache", py::call_guard<py::gil_scoped_release>(),
+        py::arg("size"), py::arg("dtype")=py::none(), py::arg("layout")=py::none(), 
+        py::arg("device")=py::none(), py::arg("pin_memory") = false, 
+        py::arg("memory_format")=py::none());
+
+
   m.def("set_capture_start", &set_capture_start, "CudaGraph Cache",
         py::call_guard<py::gil_scoped_release>());
   m.def("set_capture_end", &set_capture_end, "CudaGraph Cache",

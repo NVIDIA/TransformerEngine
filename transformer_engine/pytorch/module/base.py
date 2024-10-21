@@ -766,7 +766,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if ctx.ub_overlap_ag:
                 grad_output_c = ctx.ub_obj_gradout.get_ubuf_output(0)
             else:
-                grad_output_c = torch.empty_like(grad_output_mat, dtype=torch.uint8)
+                from ..graph import is_graph_capturing
+                empty_func = cached_empty_like if is_graph_capturing() else torch.empty_like
+                grad_output_c = empty_func(grad_output_mat, dtype=torch.uint8)
             if not isinstance(grad_output_mat, Float8Tensor):
                 cast_to_fp8(
                     grad_output_mat,
@@ -806,11 +808,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output_c = grad_output_mat
                     grad_output_t = grad_output_c.transpose_2d()
                 else:
+                    from ..graph import is_graph_capturing
                     grad_output_c, grad_output_t = fp8_cast_transpose_fused(
                         grad_output_mat,
                         ctx.fp8_meta["scaling_bwd"],
                         tex.FP8BwdTensors.GRAD_OUTPUT1,
                         fp8_dtype_backward,
+                        graph_cache=is_graph_capturing(),
                     )
             else:
                 grad_output_t = None

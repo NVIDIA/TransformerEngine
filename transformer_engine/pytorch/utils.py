@@ -28,6 +28,10 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
     """
     from .float8_tensor import Float8Tensor
 
+    from .graph import is_graph_capturing
+    if is_graph_capturing():
+        return
+
     for t in tensors:
         if t is not None:
             if isinstance(t, Float8Tensor):

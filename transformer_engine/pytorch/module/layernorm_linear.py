@@ -43,7 +43,7 @@ from ..distributed import (
 )
 from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
-from ..graph import is_graph_capturing, cached_empty
+from ..graph import is_graph_capturing
 from ._common import _apply_normalization, _noop_cat
 from ..float8_tensor import Float8Tensor
 from ..export import is_in_onnx_export_mode
@@ -475,7 +475,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ub_obj_dgrad = get_ub(ctx.ub_name + "_dgrad")
                 dgrad = ub_obj_dgrad.get_ubuf_output(1)  # AllGather output
             else:              
-                empty_func = cached_empty if is_graph_capturing() else torch.empty
+                empty_func = tex.empty_cached if is_graph_capturing() else torch.empty
                 dgrad = empty_func(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
             if ctx.ub_bulk_dgrad:
@@ -589,7 +589,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         else:
                             dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+                        ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward, is_graph_capturing())
                         wgrad, _ = tex.fp8_gemm(
                             ln_out_total_t,
                             ln_out_scale_inv,
@@ -715,7 +715,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    empty_func = cached_empty if is_graph_capturing() else torch.empty
+                    empty_func = tex.empty_cached if is_graph_capturing() else torch.empty
                     wgrad = empty_func(
                         weight.main_grad.shape,
                         dtype=weight.dtype,

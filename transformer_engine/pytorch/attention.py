@@ -25,6 +25,7 @@ from transformer_engine.pytorch.utils import get_cudnn_version
 from transformer_engine.pytorch.cpp_extensions import (
     cast_to_fp8,
     cast_from_fp8,
+    empty_cached
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd_qkvpacked,
@@ -70,8 +71,7 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
-from transformer_engine.pytorch.graph import is_graph_capturing, cached_empty_like, cached_empty
-
+from transformer_engine.pytorch.graph import is_graph_capturing
 
 _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 _flash_attn_version_required = PkgVersion("2.0.6")
@@ -3716,7 +3716,7 @@ class _SplitAlongDim(torch.autograd.Function):
             total_shape = list(grad_outputs[0].shape)
             total_shape[split_dim] = sum([g.shape[split_dim] for g in grad_outputs])
 
-            grad_input = cached_empty(
+            grad_input = empty_cached(
                 total_shape,
                 dtype=grad_outputs[0].dtype,
                 device=grad_outputs[0].device,

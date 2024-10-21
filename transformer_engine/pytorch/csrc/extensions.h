@@ -205,7 +205,7 @@ std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_tr
     std::vector<int> scale_indices, std::vector<int> amax_indices,
     std::vector<int> scale_inv_indices, transformer_engine::DType otype);
 
-at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);
+at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype, bool graph_cache=false);
 
 void fp8_transpose_noalloc(at::Tensor input, at::Tensor output, transformer_engine::DType otype);
 
@@ -475,9 +475,18 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
 
+at::Tensor empty_like_cached(const at::Tensor &self, ::std::optional<at::ScalarType> dtype, 
+                            ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, 
+                            ::std::optional<bool> pin_memory, 
+                            ::std::optional<at::MemoryFormat> memory_format);
 at::Tensor empty_like_cached(const at::Tensor &self , at::TensorOptions options={}, ::std::optional<at::MemoryFormat> memory_format=std::nullopt);
+
+at::Tensor empty_cached(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, 
+                            ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, 
+                            ::std::optional<bool> pin_memory, 
+                            ::std::optional<at::MemoryFormat> memory_format);
 at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options={}, ::std::optional<at::MemoryFormat> memory_format=std::nullopt);
-at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, at::Device device);
+
 
 void set_capture_start();
 void set_capture_end();

@@ -323,13 +323,13 @@ std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_tr
   return std::make_tuple(std::move(cast_output_list), std::move(transposed_output_list));
 }
 
-at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype) {
+at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype, bool graph_cache) {
   using namespace transformer_engine;
 
   size_t M = static_cast<size_t>(input.size(0));
   size_t N = static_cast<size_t>(input.size(1));
 
-  auto output = allocateTorchTensor(input.size(1), input.size(0), DType::kByte);
+  auto output = allocateTorchTensor(input.size(1), input.size(0), DType::kByte, graph_cache);
   if (M == 0 || N == 0) return output;
 
   auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, otype);

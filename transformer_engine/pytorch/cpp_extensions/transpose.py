@@ -10,6 +10,7 @@ import torch
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ._common import canonicalize_fp8_scales, empty_tensor
+from .graph_cache import empty_cached, empty_like_cached
 
 
 __all__ = [
@@ -32,15 +33,17 @@ def fp8_cast_transpose_fused(
     amax: Optional[torch.Tensor] = None,
     scale_inv: Optional[torch.Tensor] = None,
     noop_flag: Optional[torch.Tensor] = None,
+    graph_cache: Optional[bool] = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Cast + Transpose with FP8 output"""
 
     # Allocate outputs if needed
     if transpose_out is None:
-        transpose_out = torch.empty(inp.shape[1], inp.shape[0], device="cuda", dtype=torch.uint8)
+        empty_func = empty_cached if graph_cache else torch.empty
+        transpose_out = empty_func(inp.shape[1], inp.shape[0], device=torch.cuda.current_device(), dtype=torch.uint8)
     if cast_out is None:
-        cast_out = torch.empty_like(inp, dtype=torch.uint8)
-
+        empty_like_func = empty_like_cached if graph_cache else torch.empty_like
+        cast_out = empty_like_func(inp, device=torch.cuda.current_device(), dtype=torch.uint8)
     # Get FP8 scaling factors
     fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
         scale=scale,

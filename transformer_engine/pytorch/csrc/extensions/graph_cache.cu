@@ -42,12 +42,18 @@ bool is_graph_capturing(){
     return graph_cache.graph_capturing;
 }
 
-at::Tensor empty_like_cached(const at::Tensor &self, at::TensorOptions options, ::std::optional<at::MemoryFormat> memory_format){
+
+
+at::Tensor empty_like_cached(const at::Tensor &self, ::std::optional<at::ScalarType> dtype, 
+                            ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, 
+                            ::std::optional<bool> pin_memory, 
+                            ::std::optional<at::MemoryFormat> memory_format){
+
     if (!graph_cache.graph_locked){
-        at::Tensor copy = at::empty_like(self, options, memory_format);
+        at::Tensor copy = at::empty_like(self, dtype, layout, device, pin_memory, memory_format);
         graph_cache.insert(copy);
 
-        std::cout << self.device() << " | EMPTY_LIKE ALLOCATE with shape" << self.sizes() 
+        std::cout << self.device() << "--- EMPTY_LIKE ALLOCATE1 with shape" << self.sizes() 
             << "into index" << graph_cache.cache.size() -1 << std::endl;
 
         return copy;
@@ -60,6 +66,33 @@ at::Tensor empty_like_cached(const at::Tensor &self, at::TensorOptions options, 
             << " options: " << ret.options() << std::endl;
 
         TORCH_CHECK(ret.sizes() == self.sizes(), "cudagraph cache: size mismatch");
+        // TORCH_CHECK(ret.dtype() == self.dtype(), "cudagraph cache: dtype mismatch");
+        // TORCH_CHECK(ret.device() == self.device(), "cudagraph cache: device mismatch");
+
+        return ret;
+    }
+
+}
+
+at::Tensor empty_like_cached(const at::Tensor &self, at::TensorOptions options, 
+                            ::std::optional<at::MemoryFormat> memory_format){
+    if (!graph_cache.graph_locked){
+        at::Tensor copy = at::empty_like(self, options, memory_format);
+        graph_cache.insert(copy);
+
+        std::cout << self.device() << " | EMPTY_LIKE ALLOCATE1 with shape" << self.sizes() 
+            << "into index" << graph_cache.cache.size() -1 << std::endl;
+
+        return copy;
+    }
+    else{
+        at::Tensor ret = graph_cache.retrieve();
+        std::cout << ret.device() << " | EMPTY_LIKE RETRIEVE1 from index"
+            << " from index: " << graph_cache.cache_index -1
+            << " shape: " << ret.sizes()
+            << " options: " << ret.options() << std::endl;
+
+        TORCH_CHECK(ret.sizes() == self.sizes(), "cudagraph cache: size mismatch");
         TORCH_CHECK(ret.dtype() == self.dtype(), "cudagraph cache: dtype mismatch");
         TORCH_CHECK(ret.device() == self.device(), "cudagraph cache: device mismatch");
 
@@ -67,11 +100,35 @@ at::Tensor empty_like_cached(const at::Tensor &self, at::TensorOptions options, 
     }
 }
 
-at::Tensor empty_cached(at::IntArrayRef size, at::ScalarType dtype, at::Device device){
-    auto options = at::TensorOptions()
-        .dtype(dtype)
-        .device(device);
-    return empty_cached(size, options);
+at::Tensor empty_cached(at::IntArrayRef size, ::std::optional<at::ScalarType> dtype, 
+                            ::std::optional<at::Layout> layout, ::std::optional<at::Device> device, 
+                            ::std::optional<bool> pin_memory, 
+                            ::std::optional<at::MemoryFormat> memory_format){
+    if (!graph_cache.graph_locked){
+        at::Tensor copy = at::empty(size, dtype, layout, device, pin_memory, memory_format);
+        graph_cache.insert(copy);
+
+        std::cout << "---EMPTY_CACHE ALLOCATE0 into index "
+            << graph_cache.cache.size() -1 << "; "
+            << copy.options() << std::endl;
+
+        return copy;
+    }
+    else{
+        at::Tensor ret = graph_cache.retrieve();
+
+        std::cout << ret.device() << "---EMPTY_CACHE RETRIEVE1 from index " 
+            << graph_cache.cache_index - 1
+            << " returned options: " << ret.options() << ret.sizes()
+            << " requeste options: " << size << std::endl;
+
+        TORCH_CHECK(ret.sizes() == size, "cudagraph cache: size mismatch");
+        // TORCH_CHECK(ret.dtype() == options.dtype(), "cudagraph cache: dtype mismatch");
+        // TORCH_CHECK(ret.device() == options.device(), "cudagraph cache: device mismatch");
+
+        return ret;
+
+    }
 }
 
 at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options, ::std::optional<at::MemoryFormat> memory_format){
@@ -79,7 +136,7 @@ at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options, ::std::
         at::Tensor copy = at::empty(size, options, memory_format);
         graph_cache.insert(copy);
 
-        std::cout << options.device() << " | EMPTY_CACHE ALLOCATE from index "
+        std::cout << options.device() << " | EMPTY_CACHE1 ALLOCATE from index "
             << "from index: " << graph_cache.cache.size() -1
             << " shape: " <<size
             << " options: " << options << std::endl;
@@ -89,7 +146,7 @@ at::Tensor empty_cached(at::IntArrayRef size, at::TensorOptions options, ::std::
     else{
         at::Tensor ret = graph_cache.retrieve();
 
-        std::cout << options.device() << " | EMPTY_CACHE RETRIEVE from index " 
+        std::cout << options.device() << " | EMPTY_CACHE RETRIEVE1 from index " 
             << graph_cache.cache_index - 1
             << " returned options: " << ret.options()
             << " requeste options: " << options << std::endl;

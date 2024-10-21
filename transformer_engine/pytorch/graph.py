@@ -31,24 +31,6 @@ _T = TypeVar("_T")
 SingleOrTuple = Union[_T, Tuple[_T, ...]]
 
 
-def cached_empty_like(tensor, key):
-    copy = tex.empty_like_cached(tensor)
-    wrapper = torch.Tensor()
-    wrapper.data = copy
-    wrapper.requires_grad = tensor.requires_grad
-    
-    return wrapper
-
-def cached_empty(shape, dtype, device, requires_grad=False):
-    if isinstance(shape, torch.Size):
-        shape = tuple(shape)
-    if isinstance(device, int):
-        device = torch.device(device)
-
-    copy = tex.empty_cached(shape, dtype, device)
-    copy.requires_grad = requires_grad
-    return copy
-
 def set_capture_start() -> None:
     """Record beginning of `make_graphed_callables`."""
     global _IS_GRAPH_CAPTURING
@@ -238,7 +220,6 @@ def _make_graphed_callables(
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
             for idx in range(num_warmup_iters):
-                print(f"{torch.cuda.current_device()} WARMUP ITER {idx}")
 
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 grad_inputs = torch.autograd.grad(
