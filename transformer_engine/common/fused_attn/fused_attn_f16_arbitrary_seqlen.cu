@@ -317,7 +317,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
     // We do this by adding padding at the end of each separate allocation.
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
-    const size_t actual_seqlen_workspace_size = alignTo<16>(2 * b * sizeof(int32_t));
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     const size_t seqlen_offsets_workspace_size = 4 * num_bytes_per_ragged_offset;
@@ -345,7 +346,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
@@ -707,7 +708,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     // n.b. Care should be taken to align each of the added worksapce tensors to their type.
     // We do this by adding padding at the end of each separate allocation.
     auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
-    const size_t actual_seqlen_workspace_size = alignTo<16>(2 * b * sizeof(int32_t));
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
     const size_t num_bytes_per_ragged_offset =
         alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     const size_t seqlen_offsets_workspace_size = 4 * num_bytes_per_ragged_offset;
@@ -748,7 +750,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
