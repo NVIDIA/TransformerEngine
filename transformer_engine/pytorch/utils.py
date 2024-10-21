@@ -305,3 +305,16 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
             index2 = torch.cuda.current_device()
         return index1 == index2
     return device1 == device2
+
+
+TORCH_MAJOR = int(torch.__version__.split(".")[0])
+TORCH_MINOR = int(torch.__version__.split(".")[1])
+if TORCH_MAJOR == 2 and TORCH_MINOR >= 4:
+
+    def torch_get_autocast_gpu_dtype() -> torch.dtype:
+        return torch.get_autocast_dtype("cuda")
+
+else:
+
+    def torch_get_autocast_gpu_dtype() -> torch.dtype:
+        return torch.get_autocast_gpu_dtype()

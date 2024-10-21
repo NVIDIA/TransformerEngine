@@ -245,26 +245,53 @@ def in_fp8_activation_recompute_phase() -> bool:
     return _FP8_ACTIVATION_RECOMPUTE_PHASE
 
 
-def _get_active_autocast_contexts():
-    """
-    Returns new CPU and GPU torch.amp.autocast(..) contexts that match the active autocast state
-    at the time of this function's execution.
-    """
-    autocast_cached = torch.is_autocast_cache_enabled()
+TORCH_MAJOR = int(torch.__version__.split(".")[0])
+TORCH_MINOR = int(torch.__version__.split(".")[1])
+if TORCH_MAJOR == 2 and TORCH_MINOR >= 4:
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-    )
+    def _get_active_autocast_contexts():
+        """
+        Returns new CPU and GPU torch.amp.autocast(..) contexts that match the active autocast state
+        at the time of this function's execution.
+        """
+        autocast_cached = torch.is_autocast_cache_enabled()
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-    )
+        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
+        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_ctx = torch.amp.autocast(
+            "cuda", gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
 
-    return gpu_autocast_ctx, cpu_autocast_ctx
+        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+        cpu_autocast_ctx = torch.amp.autocast(
+            "cpu", cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
+
+        return gpu_autocast_ctx, cpu_autocast_ctx
+
+else:
+
+    def _get_active_autocast_contexts():
+        """
+        Returns new CPU and GPU torch.amp.autocast(..) contexts that match the active autocast state
+        at the time of this function's execution.
+        """
+        autocast_cached = torch.is_autocast_cache_enabled()
+
+        gpu_autocast_enabled = torch.is_autocast_enabled()
+        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
+            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
+
+        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
+        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+        cpu_autocast_ctx = torch.cpu.amp.autocast(
+            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
+
+        return gpu_autocast_ctx, cpu_autocast_ctx
 
 
 class _CheckpointFunction(torch.autograd.Function):

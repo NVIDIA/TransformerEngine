@@ -13,7 +13,7 @@ from torch.nn import init
 
 from .. import cpp_extensions as tex
 from ..jit import no_torch_dynamo
-from ..utils import cast_if_needed
+from ..utils import cast_if_needed, torch_get_autocast_gpu_dtype
 
 
 __all__ = ["RMSNorm"]
@@ -190,7 +190,7 @@ class RMSNorm(torch.nn.Module):
         # Note: This will soon be deprecated with
         # https://github.com/NVIDIA/TransformerEngine/pull/1033
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch_get_autocast_gpu_dtype()
         elif self.activation_dtype != inp.dtype:
             dtype = inp.dtype
             for name, param in self.named_parameters():

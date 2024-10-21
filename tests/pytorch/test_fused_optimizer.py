@@ -14,6 +14,7 @@ from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.jit import gpu_autocast_ctx
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -333,7 +334,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -342,7 +343,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 
@@ -384,7 +385,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -393,7 +394,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 
@@ -442,7 +443,7 @@ class AdamTest:
             gt_ = gt.clone()
 
             # Reference
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model(x)
                 loss = ((gt - y) ** 2).mean()
 
@@ -451,7 +452,7 @@ class AdamTest:
             scaler.update()
 
             # DUT
-            with torch.cuda.amp.autocast(enabled=True):
+            with gpu_autocast_ctx(enabled=True):
                 y = self.model_(x)
                 loss_ = ((gt_ - y) ** 2).mean()
 
