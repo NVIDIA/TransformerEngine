@@ -130,7 +130,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)) &&
-        ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0))) {
+        ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0)) &&
+        !requires_64bit_ragged_offset) {
       flag_m512 = true;
     }
     if (  // architecture
@@ -195,7 +196,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               max_seqlen_q == max_seqlen_kv)) &&
             dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_SBHD)))))) {
+             qkv_format == NVTE_QKV_Format::NVTE_SBHD))))) &&
+        // check 64-bit ragged offset support
+        (supported_ragged_offset_size)) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {
@@ -215,9 +218,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
            flag_arb)) {
         backend = static_cast<NVTE_Fused_Attn_Backend>(env_backend);
       }
-    }
-    if (!supported_ragged_offset_size) {
-      backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
     }
     if (cudnn_runtime_version < 8901 &&
         backend == NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen) {
