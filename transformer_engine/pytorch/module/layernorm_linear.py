@@ -36,6 +36,7 @@ from ..distributed import (
     allreduce,
     reduce_scatter_along_first_dim,
     gather_along_first_dim,
+    in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
     _fsdp_gather_tensors,
 )
@@ -94,6 +95,7 @@ class _LayerNormLinear(torch.autograd.Function):
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
     ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
@@ -153,6 +155,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Column Parallel Linear
         ln_out_gathered = False
+        ub_algo = None
         if ub_overlap_ag:
             ln_out_total = ub_obj_lnout.get_ubuf_output(1)
             if not return_layernorm_output:
@@ -359,10 +362,10 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.normalization = normalization
             ctx.reduce_and_update_bwd_fp8_tensors = False
             if ctx.fp8 and requires_grad(inp, ln_weight, ln_bias, weight, bias):
-                ctx.reduce_and_update_bwd_fp8_tensors = (
-                    ctx.reduce_and_update_bwd_fp8_tensors
-                    or FP8GlobalStateManager.is_first_fp8_module()
-                )
+                _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
+                ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
+                if in_fp8_activation_recompute_phase():
+                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
 
         # Row Parallel Linear
         if parallel_mode == "row" and sequence_parallel:
@@ -385,6 +388,7 @@ class _LayerNormLinear(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs: Tuple[torch.Tensor, ...]
     ) -> Tuple[Union[torch.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         if isinstance(grad_outputs[0], Float8Tensor):
             ctx.fp8_meta["scaling_bwd"].scale_inv[tex.FP8BwdTensors.GRAD_OUTPUT1] = grad_outputs[
                 0
@@ -479,6 +483,7 @@ class _LayerNormLinear(torch.autograd.Function):
             else:
                 dgrad = torch.empty(dgrad_size, dtype=ctx.activation_dtype, device=weight.device)
 
+            rs_out = None
             if ctx.ub_bulk_dgrad:
                 ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
                 ub_obj = ub_obj_lnout
@@ -576,6 +581,7 @@ class _LayerNormLinear(torch.autograd.Function):
             elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                 dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
+            wgrad = None
             if weight.requires_grad:
                 if ctx.fp8:
                     # WGRAD
@@ -678,6 +684,8 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.return_layernorm_output and not ctx.return_layernorm_output_gathered:
                 dgrad = dgrad + grad_outputs[1].view_as(dgrad)
 
+            dgamma = None
+            dbeta = None
             if ctx.normalization == "LayerNorm":
                 dgrad, dgamma, dbeta = tex.layernorm_bwd(
                     dgrad,
@@ -1057,7 +1065,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if with_fp8_params:
             self.init_fp8_metadata()
 
-        self.reset_parameters(defer_init=(device == "meta"))
+        self.reset_parameters(defer_init=device == "meta")
 
         # For RPL, bias has to be added after TP collectives
         # So it cannot be fused with the GEMM

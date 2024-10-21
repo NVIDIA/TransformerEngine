@@ -190,24 +190,37 @@ def is_fused_attn_kernel_available(
     kv_max_seqlen,
     head_dim,
     window_size: Optional[Tuple[int, int]] = None,
+    is_context_parallel: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
     """
-    return tex.FusedAttnHelper(
-        q_dtype,
-        kv_dtype,
-        qkv_layout.value,
-        attn_bias_type.value,
-        attn_mask_type.value,
-        dropout_probability,
-        q_num_heads,
-        kv_num_heads,
-        q_max_seqlen,
-        kv_max_seqlen,
-        head_dim,
-        (-1, -1) if window_size is None else window_size,
-    ).is_fused_attn_kernel_available()
+
+    def make_helper(attn_mask_type):
+        return tex.FusedAttnHelper(
+            q_dtype,
+            kv_dtype,
+            qkv_layout.value,
+            attn_bias_type.value,
+            attn_mask_type.value,
+            dropout_probability,
+            q_num_heads,
+            kv_num_heads,
+            q_max_seqlen,
+            kv_max_seqlen,
+            head_dim,
+            (-1, -1) if window_size is None else window_size,
+        )
+
+    if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
+        return False
+
+    # For context parallel need to check additional masking types
+    if is_context_parallel and attn_mask_type == AttnMaskType.CAUSAL_MASK:
+        if not make_helper(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK).is_fused_attn_kernel_available():
+            return False
+
+    return True
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
