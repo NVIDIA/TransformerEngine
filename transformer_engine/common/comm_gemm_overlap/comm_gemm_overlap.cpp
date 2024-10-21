@@ -13,6 +13,7 @@
 
 #include "common/common.h"
 #include "common/util/cuda_driver.h"
+#include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
@@ -27,18 +28,6 @@ namespace transformer_engine {
 /***************************************************************************************************
  * Comm+GEMM Overlap Common Core
  **************************************************************************************************/
-
-bool device_supports_multicast() {
-  int dev, supports_multicast;
-  CUdevice cudev;
-
-  NVTE_CHECK_CUDA(cudaGetDevice(&dev));
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, dev);
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &supports_multicast,
-                              CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
-
-  return static_cast<bool>(supports_multicast);
-}
 
 bool ubuf_built_with_mpi() {
 #ifdef NVTE_UB_WITH_MPI
@@ -82,9 +71,8 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   _tp_id = _rank % _tp_size;
 
   // Set the number of SMs for GEMM with margin
-  cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, 0);
-  _math_sms = (set_sm_margin) ? prop.multiProcessorCount - num_comm_sm : prop.multiProcessorCount;
+  int sm_count = transformer_engine::cuda::sm_count();
+  _math_sms = (set_sm_margin) ? sm_count - num_comm_sm : sm_count;
   _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
   _atomic_gemm = atomic_gemm;

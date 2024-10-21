@@ -12,6 +12,8 @@
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include "cuda_runtime.h"
+
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                               \
   pybind11::enum_<transformer_engine::DType>(m, "DType")                                      \
       .value("kByte", transformer_engine::DType::kByte)                                       \
@@ -69,8 +71,8 @@
       .value("ATOMIC_GEMM_RS", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS)           \
       .value("ATOMIC_GEMM_AG_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_AG_P2P)   \
       .value("ATOMIC_GEMM_RS_P2P", transformer_engine::CommOverlapAlgo::ATOMIC_GEMM_RS_P2P);  \
-  m.def("device_supports_multicast", &transformer_engine::device_supports_multicast,          \
-        py::call_guard<py::gil_scoped_release>());                                            \
+  m.def("device_supports_multicast", &transformer_engine::cuda::supports_multicast,           \
+        py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                 \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                      \
         py::call_guard<py::gil_scoped_release>());
 
