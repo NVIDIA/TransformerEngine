@@ -33,330 +33,158 @@ Compute always in FP32
 */
 
 namespace transformer_engine {
+namespace normalization {
 
-// Create registries and provide runtime versions of config hash functions.
-FwdTunedRegistry LN_FWD_TUNED_FUNCS;
-BwdTunedRegistry LN_BWD_TUNED_FUNCS;
-FwdGeneralRegistry LN_FWD_GENERAL_FUNCS;
-BwdGeneralRegistry LN_BWD_GENERAL_FUNCS;
-
-FwdTunedRegistry RMS_FWD_TUNED_FUNCS;
-BwdTunedRegistry RMS_BWD_TUNED_FUNCS;
-FwdGeneralRegistry RMS_FWD_GENERAL_FUNCS;
-BwdGeneralRegistry RMS_BWD_GENERAL_FUNCS;
-
-uint32_t get_type_id(DType dtype) {
-  if (dtype == DType::kFloat16) {
-    return TypeId<fp16>::Value;
-  } else if (dtype == DType::kBFloat16) {
-    return TypeId<bf16>::Value;
-  } else if (dtype == DType::kFloat32) {
-    return TypeId<fp32>::Value;
-  } else if (dtype == DType::kFloat8E4M3) {
-    return TypeId<fp8e4m3>::Value;
-  } else {
-    NVTE_ERROR("Type not supported.");
-  }
+constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+                           DType itype, DType otype, DType ctype, uint64_t batch_size,
+                           uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned) {
+  uint64_t type_key = static_cast<uint32_t>(wtype) | (static_cast<uint32_t>(itype) << 2) |
+                      (static_cast<uint32_t>(otype) << 4) | (static_cast<uint32_t>(ctype) << 6) |
+                      (uint32_t(NormType) << 8) | (uint32_t(NormStage)) << 9 |
+                      (uint32_t(zero_centered_gamma) << 10);
+  // We have 25 bits to hash batch_size or hidden_size. Undefined behavior when these sizes > 2^25
+  uint64_t key = hidden_size |  (batch_size << 25) | (uint64_t(is_tuned) << 50) | (type_key << 51);
+  return key;
 }
 
-uint64_t get_key(DType wtype, DType itype, DType otype, DType ctype, uint64_t hidden_size) {
-  uint64_t type_key = get_type_id(wtype) | (get_type_id(itype) << 2) | (get_type_id(otype) << 4) |
-                      (get_type_id(ctype) << 6);
-  uint64_t launcher_key = (type_key << 32) | hidden_size;
-  return launcher_key;
+template <typename KernelParamsType>
+TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
+    NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
+    DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
+    const bool zero_centered_gamma, const bool is_tuned) {
+  _is_layernorm = (NormType == NVTE_Norm_Type::LayerNorm);
+
+  _launch_params.multiprocessorCount = sm_count;
+
+  auto& kernel_params = _launch_params.params;
+  kernel_params.rows = batch_size;
+  kernel_params.cols = hidden_size;
+  kernel_params.zero_centered_gamma = zero_centered_gamma;
+  if constexpr (std::is_same_v<KernelParamsType, ForwardKernelParams>) {
+    kernel_params.fp8_out = is_fp8_dtype(otype);
+  }
+  // TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
+  uint64_t key =
+      get_key(NormType, NormStage, wtype, itype, otype, ctype, 0, hidden_size, false, is_tuned);
+  _kernel = KernelRegistry::getKernel(key);
+
+  this->_build();
 }
 
-uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
-                 DType otype, DType ctype, uint64_t batch_size, uint64_t hidden_size,
-                 bool zero_centered_gamma) {
-  uint64_t type_key = get_type_id(wtype) | (get_type_id(itype) << 2) | (get_type_id(otype) << 4) |
-                      (get_type_id(ctype) << 6 | uint32_t(NormType) << 8 |
-                       uint32_t(NormStage) << 9 | uint32_t(zero_centered_gamma) << 10);
-  // We have 26 bits to hash batch_size or hidden_size. Undefined behavior when these sizes > 2^26
-  uint64_t launcher_key = hidden_size | (batch_size << 26) | (type_key << 52);
-  return launcher_key;
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-FwdFunction& get_fwd_launcher(DType wtype, DType itype, DType otype, DType ctype,
-                              const FwdParams& params) {
-  if constexpr (!IF_TE_FWD_NORMS<NormEnum>()) NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
-
-  auto& FWD_TUNED_FUNCS = GET_REGISTRY<NormEnum, true>();
-  auto& FWD_GENERAL_FUNCS = GET_REGISTRY<NormEnum, false>();
-
-  // Look for tuned kernel
-  auto tuned_key = get_key(wtype, itype, otype, ctype, params.cols);
-  auto is_aligned = [](const void* ptr) -> bool {
-    // Assume vectorized memory accesses are <=16B
-    return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
-  };
-  if (params.rows % 4 == 0 && is_aligned(params.x) && is_aligned(params.rs) &&
-      is_aligned(params.gamma) && is_aligned(params.z) && FWD_TUNED_FUNCS.count(tuned_key) > 0) {
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE) {
-      if (is_aligned(params.mu) && is_aligned(params.beta)) return FWD_TUNED_FUNCS.at(tuned_key);
-    } else
-      return FWD_TUNED_FUNCS.at(tuned_key);
-  }
-
-  // Pick general kernel
-  auto general_key = get_key(wtype, itype, otype, ctype, 0);
-  if (FWD_GENERAL_FUNCS.count(general_key) == 0) {
-    NVTE_ERROR("FWD: Unsupported types.");
-  }
-  auto& general_func_map = FWD_GENERAL_FUNCS.at(general_key);
-  auto func_iter = general_func_map.lower_bound(params.cols);
-  if (func_iter == general_func_map.end()) {
-    // Hidden size is too big, need to use multi-CTA
-    return general_func_map.rbegin()->second;
-  } else {
-    return func_iter->second;
-  }
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-BwdFunction& get_bwd_launcher(DType wtype, DType itype, DType otype, DType ctype,
-                              const BwdParams& params) {
-  if constexpr (!IF_TE_BWD_NORMS<NormEnum>()) NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
-
-  auto& BWD_TUNED_FUNCS = GET_REGISTRY<NormEnum, true>();
-  auto& BWD_GENERAL_FUNCS = GET_REGISTRY<NormEnum, false>();
-
-  // Look for tuned kernel
-  auto tuned_key = get_key(wtype, itype, otype, ctype, params.cols);
-  auto is_aligned = [](const void* ptr) -> bool {
-    // Assume vectorized memory accesses are <=16B
-    return reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
-  };
-  if (params.rows % 4 == 0 && is_aligned(params.x) && is_aligned(params.rs) &&
-      is_aligned(params.gamma) && is_aligned(params.dz) && is_aligned(params.dx) &&
-      is_aligned(params.dgamma) && is_aligned(params.dgamma_part) &&
-      BWD_TUNED_FUNCS.count(tuned_key) > 0) {
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE) {
-      if (is_aligned(params.mu) && is_aligned(params.dbeta) && is_aligned(params.dbeta_part))
-        return BWD_TUNED_FUNCS.at(tuned_key);
-
-    } else
-      return BWD_TUNED_FUNCS.at(tuned_key);
-  }
-
-  // Pick general kernel
-  auto general_key = get_key(wtype, itype, otype, ctype, 0);
-  if (BWD_GENERAL_FUNCS.count(general_key) == 0) {
-    NVTE_ERROR("BWD: Unsupported types.");
-  }
-  auto& general_func_map = BWD_GENERAL_FUNCS.at(general_key);
-  auto func_iter = general_func_map.lower_bound(params.cols);
-  if (func_iter == general_func_map.end()) {
-    // Hidden size is too big, need to use multi-CTA
-    return general_func_map.rbegin()->second;
-  } else {
-    return func_iter->second;
-  }
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-NormFwdTe<NormEnum>::NormFwdTe() {
-  if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE) {
-    NVTE_ERROR("NormFwdTe default constructor is only for its inherited classes!");
-  }
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-NormFwdTe<NormEnum>::NormFwdTe(const Tensor& x, const Tensor& gamma, const Tensor& beta,
-                               const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma,
-                               cudaStream_t stream, const int multiprocessorCount,
-                               Tensor* workspace, Tensor* barrier, const bool zero_centered_gamma) {
-  if constexpr (!IF_TE_FWD_NORMS<NormEnum>()) {
-    NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
-  }
-  _launch_params.multiprocessorCount = multiprocessorCount;
+template <>
+void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, void* gamma_dptr,
+                                                       void* beta_dptr, void* mean_dptr,
+                                                       void* eps_dptr, void* rsigma_dptr,
+                                                       void* workspace_dptr, cudaStream_t stream) {
   _launch_params.stream = stream;
 
-  // Set the kernel runtime parameters.
-  auto& params = _launch_params.params;
-  params.rows = x.data.shape[0];
-  params.cols = x.data.shape[1];
-  params.x = x.data.dptr;
-  params.rs = rsigma->data.dptr;
-  params.gamma = gamma.data.dptr;
-  params.z = z->data.dptr;
-  params.epsilon = epsilon;
-  params.amax = z->amax.dptr;
-  params.amax_byte_size = product(z->amax.shape) * typeToSize(z->amax.dtype);
-  params.scale = z->scale.dptr;
-  params.scale_inv = z->scale_inv.dptr;
-  params.scale_byte_size = product(z->scale.shape) * typeToSize(z->scale.dtype);
-  params.fp8_out = is_fp8_dtype(z->data.dtype);
-  params.zero_centered_gamma = zero_centered_gamma;
-  if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE) {
-    params.mu = mu->data.dptr;
-    params.beta = beta.data.dptr;
+  auto& kernel_params = _launch_params.params;
+  kernel_params.workspace = workspace_dptr;
+  kernel_params.x = x_dptr;
+  kernel_params.rs = rsigma_dptr;
+  kernel_params.gamma = gamma_dptr;
+  kernel_params.z = z->data.dptr;
+  kernel_params.epsilon = *reinterpret_cast<float*>(eps_dptr);
+  kernel_params.amax = z->amax.dptr;
+  kernel_params.scale = z->scale.dptr;
+  kernel_params.scale_inv = z->scale_inv.dptr;
+
+  if (_is_layernorm) {
+    kernel_params.mu = mean_dptr;
+    kernel_params.beta = beta_dptr;
   }
 
-  // Request the kernel launcher.
-  _launcher = get_fwd_launcher<NormEnum>(gamma.data.dtype,  // wtype
-                                         x.data.dtype,      // itype,
-                                         z->data.dtype,     // otype,
-                                         DType::kFloat32,   // ctype,
-                                         params);
-  if (params.fp8_out) set_amax();
+  if (z->amax.dptr) {
+    auto amax_byte_size = product(z->amax.shape) * typeToSize(z->amax.dtype);
+    cudaMemsetAsync(kernel_params.amax, 0, amax_byte_size, _launch_params.stream);
+  }
+  _set_workspace();
+  _kernel(_launch_params, false);
 }
 
-/*** BWD TE ***/
-template <NVTE_NORM_TYPE NormEnum>
-NormBwdTe<NormEnum>::NormBwdTe(const Tensor& dz, const Tensor& x, const Tensor& mu,
-                               const Tensor& rsigma, const Tensor& gamma, Tensor* dx,
-                               Tensor* dgamma, Tensor* dbeta, Tensor* dgamma_part,
-                               Tensor* dbeta_part, cudaStream_t stream,
-                               const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
-                               const bool zero_centered_gamma)
-    : NormFwdTe<NormEnum>::NormFwdTe() {
-  if constexpr (!IF_TE_BWD_NORMS<NormEnum>()) NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
+template <>
+void TeNormalizationPlan<BackwardKernelParams>::execute(Tensor* z, void* x_dptr, void* gamma_dptr,
+                                                        void* beta_dptr, void* mean_dptr,
+                                                        void* eps_dptr, void* rsigma_dptr,
+                                                        void* workspace_dptr, cudaStream_t stream) {
+  NVTE_ERROR("Backward normalization should not call the forward execute function!");
+}
 
-  auto& _launch_params = NormFwdTe<NormEnum>::_launch_params;
+template <typename KernelParamsType>
+void TeNormalizationPlan<KernelParamsType>::_build() {
+  _kernel(_launch_params, true);
+  _launch_params.alignWorkspace();
+}
+
+template <typename KernelParamsType>
+std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
+  // +1 bytes to ensure workspace_dptr != nullptr
+  auto total_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm) + 1;
+  return {total_size};
+}
+
+template <typename KernelParamsType>
+void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
+  if (_launch_params.getTotalWorkspaceBytes() > 0){
+    auto workspace_dptr = reinterpret_cast<byte*>(_launch_params.params.workspace);
+
+    if (_launch_params.barrier_bytes > 0) {
+      _launch_params.params.barrier =
+        reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
+      cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
+                      _launch_params.stream);
+    }
+    if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
+      _launch_params.params.dgamma_part =
+        workspace_dptr + _launch_params.workspace_bytes + _launch_params.barrier_bytes;
+      if (_is_layernorm) {
+        _launch_params.params.dbeta_part =
+      reinterpret_cast<byte*>(_launch_params.params.dgamma_part) + _launch_params.dgamma_part_bytes;
+      }
+    }
+  }
+}
+
+template <>
+void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
+                                                       void* mean_dptr, void* rsigma_dptr,
+                                                       void* dx_dptr, void* dz_dptr,
+                                                       void* dbeta_dptr, void* dgamma_dptr,
+                                                       void* workspace_dptr, cudaStream_t stream) {
+  NVTE_ERROR("Forward normalization should not call the backward execute function!");
+}
+
+template <>
+void TeNormalizationPlan<BackwardKernelParams>::execute(void* x_dptr, void* gamma_dptr,
+                                                        void* mean_dptr, void* rsigma_dptr,
+                                                        void* dx_dptr, void* dz_dptr,
+                                                        void* dbeta_dptr, void* dgamma_dptr,
+                                                        void* workspace_dptr, cudaStream_t stream) {
   _launch_params.stream = stream;
-  _launch_params.multiprocessorCount = multiprocessorCount;
 
-  // Set the kernel runtime parameters.
-  auto& params = _launch_params.params;
-  params.rows = x.data.shape[0];
-  params.cols = x.data.shape[1];
-  params.x = x.data.dptr;
-  params.rs = rsigma.data.dptr;
-  params.gamma = gamma.data.dptr;
-  params.dz = dz.data.dptr;
-  params.dx = dx->data.dptr;
-  params.dgamma = dgamma->data.dptr;
-  params.dgamma_part = dgamma_part->data.dptr;
-  params.zero_centered_gamma = zero_centered_gamma;
+  auto& kernel_params = _launch_params.params;
+  kernel_params.workspace = workspace_dptr;
+  kernel_params.x = x_dptr;
+  kernel_params.gamma = gamma_dptr;
+  kernel_params.rs = rsigma_dptr;
+  kernel_params.dx = dx_dptr;
+  kernel_params.dz = dz_dptr;
+  kernel_params.dgamma = dgamma_dptr;
 
-  if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE) {
-    params.mu = mu.data.dptr;
-    params.dbeta = dbeta->data.dptr;
-    params.dbeta_part = dbeta_part->data.dptr;
+  if (_is_layernorm) {
+    kernel_params.mu = mean_dptr;
+    kernel_params.dbeta = dbeta_dptr;
   }
 
-  NormFwdTe<NormEnum>::_launcher = get_bwd_launcher<NormEnum>(gamma.data.dtype,  // wtype,
-                                                              x.data.dtype,      // itype,
-                                                              gamma.data.dtype,  // otype,
-                                                              DType::kFloat32,   // ctype,
-                                                              params);
+  _set_workspace();
+  _kernel(_launch_params, false);
 }
 
-template <NVTE_NORM_TYPE NormEnum>
-void NormFwdTe<NormEnum>::initialize() {
-  // Query the kernel-specific launch parameters.
-  _launcher(_launch_params, true);
-  if (_launch_params.workspace_bytes == 0) {
-    _launch_params.workspace_bytes = 1;
-  }
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-void NormFwdTe<NormEnum>::set_workspace_and_barrier(void* workspace_ptr, void* barrier_ptr) {
-  NVTE_CHECK(_launch_params.workspace_bytes);
-  _launch_params.params.workspace = workspace_ptr;
-
-  if (_launch_params.barrier_size > 0) {
-    _launch_params.params.barrier = reinterpret_cast<int*>(barrier_ptr);
-    cudaMemsetAsync(_launch_params.params.barrier, 0,
-                    _launch_params.barrier_size * typeToSize(DType::kFloat32),
-                    _launch_params.stream);
-  }
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-void NormFwdTe<NormEnum>::set_amax() {
-  cudaMemsetAsync(_launch_params.params.amax, 0, _launch_params.params.amax_byte_size,
-                  _launch_params.stream);
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-void NormFwdTe<NormEnum>::execute() {
-  _launcher(_launch_params, false);
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-std::vector<size_t> NormFwdTe<NormEnum>::get_workspace_shape() {
-  return {_launch_params.workspace_bytes};
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-std::vector<size_t> NormFwdTe<NormEnum>::get_barrier_shape() {
-  return {_launch_params.barrier_size};
-}
-
-template <NVTE_NORM_TYPE NormEnum>
-std::vector<size_t> NormBwdTe<NormEnum>::get_dgamma_shape() {
-  if constexpr (!IF_TE_BWD_NORMS<NormEnum>()) NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
-  return {static_cast<size_t>(NormBwdTe<NormEnum>::_launch_params.params.ctas_per_col),
-          static_cast<size_t>(NormBwdTe<NormEnum>::_launch_params.params.cols)};
-}
-
-template <NVTE_NORM_TYPE NormEnum, typename NormType>
-void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier, Tensor* dgamma_part,
-                    Tensor* dbeta_part) {
-  Norm.initialize();
-
-  // Populate shape and dtypes for FW to allocate memory
-  if (workspace->data.dptr == nullptr) {
-    if constexpr (IF_TE_BWD_NORMS<NormEnum>()) {
-      NVTE_CHECK(dgamma_part->data.dptr == nullptr);
-      dgamma_part->data.dtype = DType::kFloat32;
-      dgamma_part->data.shape = Norm.get_dgamma_shape();
-    }
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE) {
-      NVTE_CHECK(dbeta_part->data.dptr == nullptr);
-      dbeta_part->data.dtype = DType::kFloat32;
-      dbeta_part->data.shape = Norm.get_dgamma_shape();
-    }
-    barrier->data.dtype = DType::kInt32;
-    barrier->data.shape = Norm.get_barrier_shape();
-    workspace->data.dtype = DType::kByte;
-    workspace->data.shape = Norm.get_workspace_shape();
-
-    return;
-  } else {
-    if constexpr (IF_TE_BWD_NORMS<NormEnum>()) {
-      NVTE_CHECK(dgamma_part->data.dtype == DType::kFloat32);
-      NVTE_CHECK(dgamma_part->data.shape == Norm.get_dgamma_shape());
-    }
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE) {
-      NVTE_CHECK(dbeta_part->data.dptr != nullptr);
-      NVTE_CHECK(dbeta_part->data.dtype == DType::kFloat32);
-      NVTE_CHECK(dbeta_part->data.shape == Norm.get_dgamma_shape());
-    }
-    NVTE_CHECK(barrier->data.dtype == DType::kInt32);
-    NVTE_CHECK(barrier->data.shape == Norm.get_barrier_shape());
-    NVTE_CHECK(workspace->data.dtype == DType::kByte);
-    NVTE_CHECK(workspace->data.shape == Norm.get_workspace_shape());
-  }
-
-  auto barrier_ptr = barrier != nullptr ? barrier->data.dptr : nullptr;
-  Norm.set_workspace_and_barrier(workspace->data.dptr, barrier_ptr);
-
-  Norm.execute();
-}
-
-template class NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE>;
-template class NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE>;
-template class NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE>;
-template class NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE>;
-
-template void norms_launcher<NVTE_NORM_TYPE::LN_FWD_TE, NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE>>(
-    NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE>&, Tensor*, Tensor*, Tensor*, Tensor*);
-template void norms_launcher<NVTE_NORM_TYPE::LN_BWD_TE, NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE>>(
-    NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE>&, Tensor*, Tensor*, Tensor*, Tensor*);
-template void norms_launcher<NVTE_NORM_TYPE::RMS_FWD_TE, NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE>>(
-    NormFwdTe<NVTE_NORM_TYPE::RMS_FWD_TE>&, Tensor*, Tensor*, Tensor*, Tensor*);
-template void norms_launcher<NVTE_NORM_TYPE::RMS_BWD_TE, NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE>>(
-    NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE>&, Tensor*, Tensor*, Tensor*, Tensor*);
-
-NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
-                                     DType wtype, DType itype, DType otype, DType ctype,
-                                     const size_t batch_size, const size_t hidden_size,
-                                     const bool zero_centered_gamma, const size_t sm_count)
+CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+                                               DType wtype, DType itype, DType otype, DType ctype,
+                                               const size_t batch_size, const size_t hidden_size,
+                                               const size_t sm_count,
+                                               const bool zero_centered_gamma)
     : _fp8_out(is_fp8_dtype(otype)), _zero_centered(zero_centered_gamma) {
   static_assert(CUDNN_FRONTEND_VERSION >= 10601,
                 "CUDNN_FRONTEND_VERSION should be at least 1.6.1!");
@@ -495,10 +323,10 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
     _dgamma->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
   }
   // Build the graph
-  this->build();
+  this->_build();
 }
 
-void NormalizationPlan::build() {
+void CudnnNormalizationPlan::_build() {
   NVTE_CHECK(_graph.validate().is_good());
   NVTE_CHECK(_graph.build_operation_graph(_handle).is_good());
   NVTE_CHECK(_graph
@@ -510,13 +338,13 @@ void NormalizationPlan::build() {
       _graph.build_plans(_handle, cudnn_frontend::BuildPlanPolicy_t::HEURISTICS_CHOICE).is_good());
 }
 
-std::vector<size_t> NormalizationPlan::getWorkspaceShape() const {
+std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
   return {static_cast<size_t>(_graph.get_workspace_size())};
 }
 
-void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
-                                void* mean_dptr, void* eps_dptr, void* rsigma_dptr,
-                                void* workspace_dptr, cudaStream_t stream) {
+void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
+                                     void* mean_dptr, void* eps_dptr, void* rsigma_dptr,
+                                     void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
   _variant_pack = {{_x, x_dptr}, {_rsigma, rsigma_dptr}, {_eps, eps_dptr}};
 
@@ -541,9 +369,10 @@ void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void*
   if (_fp8_out) update_tensor_scale_inv(z, stream);
 }
 
-void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
-                                void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
-                                void* workspace_dptr, cudaStream_t stream) {
+void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
+                                     void* rsigma_dptr, void* dx_dptr, void* dz_dptr,
+                                     void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+                                     cudaStream_t stream) {
   // Binding data pointers to graph tensors
   _variant_pack = {
       {_x, x_dptr}, {_rsigma, rsigma_dptr}, {_dz, dz_dptr}, {_dgamma, dgamma_dptr}, {_dx, dx_dptr}};
@@ -562,22 +391,37 @@ void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 }
 
-NormalizationPlan* NormalizationPlanRegistry::getNormalizationPlan(
-    NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    const size_t batch_size, const size_t hidden_size, const bool zero_centered_gamma,
-    const size_t sm_count) {
+NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
+    NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+    DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
+    const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned) {
   const DType ctype = DType::kFloat32;
+  bool is_tuned = is_aligned && (batch_size % 4 == 0);
   auto key = get_key(NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size,
-                     zero_centered_gamma);
+                     zero_centered_gamma, is_tuned);
 
   auto it = normalizationPlanMap.find(key);
   if (it != normalizationPlanMap.end()) {
     return it->second.get();
   }
-  auto plan =
-      std::make_unique<NormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
-                                          batch_size, hidden_size, zero_centered_gamma, sm_count);
+
+  std::unique_ptr<NormalizationPlanBase> plan;
+  if (NormBackend == NVTE_Norm_Backend::Cudnn) {
+    plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
+                                                    batch_size, hidden_size, sm_count,
+                                                    zero_centered_gamma);
+  } else if (NormStage == NVTE_Norm_Stage::Forward) {
+    plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned);
+  } else {
+    plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned);
+  }
   normalizationPlanMap.insert({key, std::move(plan)});
   return normalizationPlanMap[key].get();
 }
+
+}  //  namespace normalization
 }  // namespace transformer_engine

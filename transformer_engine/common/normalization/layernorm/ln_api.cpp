@@ -17,12 +17,15 @@
 
 namespace transformer_engine {
 
+using namespace normalization;
+
 void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const Tensor& gamma,  // hidden_size
                    const Tensor& beta,   // hidden_size
-                   const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
-                   const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
-                   const bool zero_centered_gamma) {
+                   const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, 
+                   Tensor* workspace, 
+                   const int multiprocessorCount, const bool zero_centered_gamma,
+                   cudaStream_t stream){
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
   NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
@@ -47,42 +50,44 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
-  // TODO: add check for GPU ARCH
-
+  NVTE_Norm_Backend norm_backend;
+  bool is_aligned = true;
   if (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN")) {
-    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
-        NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
-        gamma.data.dtype,  // wtype
-        x.data.dtype,      // itype
-        z->data.dtype,     // otype
-        x.data.shape[0],   // batch_size
-        x.data.shape[1],   // hidden_size
-        zero_centered_gamma, multiprocessorCount);
-
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = plan->getWorkspaceShape();
-      workspace->data.dtype = DType::kByte;
-      return;
-    } else {
-      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-      plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
-                    reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
-                    workspace->data.dptr, stream);
-    }
+    // TODO: add check for GPU ARCH
+    norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
-    NormFwdTe<NVTE_NORM_TYPE::LN_FWD_TE> NormFwd(x, gamma, beta, epsilon, z, mu, rsigma, stream,
-                                                 multiprocessorCount, workspace, barrier,
-                                                 zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::LN_FWD_TE>(NormFwd, workspace, barrier);
+    norm_backend = NVTE_Norm_Backend::Te;
+    is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
+                                mu->data.dptr, rsigma->data.dptr);
+  }
+  auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+      norm_backend, NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
+      gamma.data.dtype,  // wtype
+      x.data.dtype,      // itype
+      z->data.dtype,     // otype
+      x.data.shape[0],   // batch_size
+      x.data.shape[1],   // hidden_size
+      multiprocessorCount, zero_centered_gamma, is_aligned);
+
+  if (workspace->data.dptr == nullptr) {
+    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+    plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
+                  reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
+                  workspace->data.dptr, stream);
   }
   return;
 }
 
 void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Tensor& rsigma,
                    const Tensor& gamma, Tensor* dx, Tensor* dgamma, Tensor* dbeta,
-                   Tensor* dgamma_part, Tensor* dbeta_part, cudaStream_t stream,
-                   const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
-                   const bool zero_centered_gamma) {
+                   Tensor* workspace,
+                   const int multiprocessorCount, 
+                   const bool zero_centered_gamma,
+                   cudaStream_t stream){
   using namespace transformer_engine;
   NVTE_CHECK(dz.data.dtype == gamma.data.dtype);
   NVTE_CHECK(mu.data.dtype == DType::kFloat32);
@@ -116,32 +121,35 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
     CheckOutputTensor(*dbeta, "dbeta");
   }
 
+  NVTE_Norm_Backend norm_backend;
+  bool is_aligned = true;
   if (std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN")) {
-    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
-        NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Backward,
-        gamma.data.dtype,  // wtype
-        x.data.dtype,      // itype
-        gamma.data.dtype,  // otype
-        x.data.shape[0],   // batch_size
-        x.data.shape[1],   // hidden_size
-        zero_centered_gamma, multiprocessorCount);
-
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = plan->getWorkspaceShape();
-      workspace->data.dtype = DType::kByte;
-      return;
-    } else {
-      NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-      plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
-                    dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr,
-                    stream);
-    }
+    // TODO: add check for GPU ARCH
+    norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
-    NormBwdTe<NVTE_NORM_TYPE::LN_BWD_TE> BwdNorm(
-        dz, x, mu, rsigma, gamma, dx, dgamma, dbeta, dgamma_part, dbeta_part, stream,
-        multiprocessorCount, workspace, barrier, zero_centered_gamma);
-    norms_launcher<NVTE_NORM_TYPE::LN_BWD_TE>(BwdNorm, workspace, barrier, dgamma_part, dbeta_part);
+    norm_backend = NVTE_Norm_Backend::Te;
+    is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr,
+                                dx->data.dptr, dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr);
   }
+  auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+      norm_backend, NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Backward,
+      gamma.data.dtype,  // wtype
+      x.data.dtype,      // itype
+      gamma.data.dtype,  // otype
+      x.data.shape[0],   // batch_size
+      x.data.shape[1],   // hidden_size
+      multiprocessorCount, zero_centered_gamma, is_aligned);
+
+  if (workspace->data.dptr == nullptr) {
+    workspace->data.shape = plan->getWorkspaceShape();
+    workspace->data.dtype = DType::kByte;
+    return;
+  } else {
+    NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+    plan->execute(x.data.dptr, gamma.data.dptr, mu.data.dptr, rsigma.data.dptr, dx->data.dptr,
+                  dz.data.dptr, dbeta->data.dptr, dgamma->data.dptr, workspace->data.dptr, stream);
+  }
+  return;
 }
 }  // namespace transformer_engine
 
@@ -149,15 +157,17 @@ void nvte_layernorm_fwd(const NVTETensor x,      // BxSxhidden_size
                         const NVTETensor gamma,  // hidden_size
                         const NVTETensor beta,   // hidden_size
                         const float epsilon, NVTETensor z, NVTETensor mu, NVTETensor rsigma,
-                        cudaStream_t stream, const int multiprocessorCount, NVTETensor workspace,
-                        NVTETensor barrier) {
+                        NVTETensor workspace,
+                        const int multiprocessorCount, 
+                        const bool zero_centered_gamma,
+                        cudaStream_t stream) {
   NVTE_API_CALL(nvte_layernorm_fwd);
   using namespace transformer_engine;
   layernorm_fwd(*reinterpret_cast<const Tensor*>(x), *reinterpret_cast<const Tensor*>(gamma),
                 *reinterpret_cast<const Tensor*>(beta), epsilon, reinterpret_cast<Tensor*>(z),
-                reinterpret_cast<Tensor*>(mu), reinterpret_cast<Tensor*>(rsigma), stream,
-                multiprocessorCount, reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier), false);
+                reinterpret_cast<Tensor*>(mu), reinterpret_cast<Tensor*>(rsigma), 
+                reinterpret_cast<Tensor*>(workspace),
+                multiprocessorCount, zero_centered_gamma, stream);
 }
 
 void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
@@ -165,50 +175,19 @@ void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
                         const NVTETensor mu,      // BxS, FP32!
                         const NVTETensor rsigma,  // BxS, FP32!
                         const NVTETensor gamma,   // hidden_size
-                        NVTETensor dx, NVTETensor dgamma, NVTETensor dbeta, NVTETensor dgamma_part,
-                        NVTETensor dbeta_part, cudaStream_t stream, const int multiprocessorCount,
-                        NVTETensor workspace, NVTETensor barrier) {
+                        NVTETensor dx, NVTETensor dgamma, NVTETensor dbeta, 
+                        NVTETensor workspace,
+                        const int multiprocessorCount,
+                        const bool zero_centered_gamma,
+                        cudaStream_t stream){
   NVTE_API_CALL(nvte_layernorm_bwd);
   using namespace transformer_engine;
   layernorm_bwd(*reinterpret_cast<const Tensor*>(dz), *reinterpret_cast<const Tensor*>(x),
                 *reinterpret_cast<const Tensor*>(mu), *reinterpret_cast<const Tensor*>(rsigma),
                 *reinterpret_cast<const Tensor*>(gamma), reinterpret_cast<Tensor*>(dx),
                 reinterpret_cast<Tensor*>(dgamma), reinterpret_cast<Tensor*>(dbeta),
-                reinterpret_cast<Tensor*>(dgamma_part), reinterpret_cast<Tensor*>(dbeta_part),
-                stream, multiprocessorCount, reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier), false);
-}
-
-void nvte_layernorm1p_fwd(const NVTETensor x,      // BxSxhidden_size
-                          const NVTETensor gamma,  // hidden_size
-                          const NVTETensor beta,   // hidden_size
-                          const float epsilon, NVTETensor z, NVTETensor mu, NVTETensor rsigma,
-                          cudaStream_t stream, const int multiprocessorCount, NVTETensor workspace,
-                          NVTETensor barrier) {
-  NVTE_API_CALL(nvte_layernorm1p_fwd);
-  using namespace transformer_engine;
-  layernorm_fwd(*reinterpret_cast<const Tensor*>(x), *reinterpret_cast<const Tensor*>(gamma),
-                *reinterpret_cast<const Tensor*>(beta), epsilon, reinterpret_cast<Tensor*>(z),
-                reinterpret_cast<Tensor*>(mu), reinterpret_cast<Tensor*>(rsigma), stream,
-                multiprocessorCount, reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier), true);
-}
-
-void nvte_layernorm1p_bwd(const NVTETensor dz,      // BxSxhidden_size
-                          const NVTETensor x,       // BxSxhidden_size
-                          const NVTETensor mu,      // BxS, FP32!
-                          const NVTETensor rsigma,  // BxS, FP32!
-                          const NVTETensor gamma,   // hidden_size
-                          NVTETensor dx, NVTETensor dgamma, NVTETensor dbeta,
-                          NVTETensor dgamma_part, NVTETensor dbeta_part, cudaStream_t stream,
-                          const int multiprocessorCount, NVTETensor workspace, NVTETensor barrier) {
-  NVTE_API_CALL(nvte_layernorm1p_bwd);
-  using namespace transformer_engine;
-  layernorm_bwd(*reinterpret_cast<const Tensor*>(dz), *reinterpret_cast<const Tensor*>(x),
-                *reinterpret_cast<const Tensor*>(mu), *reinterpret_cast<const Tensor*>(rsigma),
-                *reinterpret_cast<const Tensor*>(gamma), reinterpret_cast<Tensor*>(dx),
-                reinterpret_cast<Tensor*>(dgamma), reinterpret_cast<Tensor*>(dbeta),
-                reinterpret_cast<Tensor*>(dgamma_part), reinterpret_cast<Tensor*>(dbeta_part),
-                stream, multiprocessorCount, reinterpret_cast<Tensor*>(workspace),
-                reinterpret_cast<Tensor*>(barrier), true);
+                reinterpret_cast<Tensor*>(workspace),
+                multiprocessorCount, 
+                zero_centered_gamma,
+                stream);
 }

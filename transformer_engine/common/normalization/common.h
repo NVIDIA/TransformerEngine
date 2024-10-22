@@ -25,21 +25,32 @@
 
 namespace transformer_engine {
 
+namespace normalization {
+
 namespace fe = cudnn_frontend;
 
-template <typename Params>
+template <typename KernelParamsType>
 struct LaunchParams {
-  size_t workspace_bytes;
-  size_t barrier_size;
-
+  size_t workspace_bytes = 0;
+  size_t barrier_bytes = 0;
+  size_t dgamma_part_bytes = 0;
   int multiprocessorCount;
   cudaStream_t stream;
 
-  Params params;
+  KernelParamsType params;
+
+  size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const{
+    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes); 
+  }
+  void alignWorkspace(size_t alignment = 16){
+    workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
+    barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
+    dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
+  }
 };
 
-struct ParamsBase {
-  ParamsBase()
+struct KernelParamsBase {
+  KernelParamsBase()
       : ctas_per_col(0),
         rows(0),
         cols(0),
@@ -76,8 +87,9 @@ struct ParamsBase {
   bool zero_centered_gamma;
 };
 
-struct FwdParams : public ParamsBase {
-  FwdParams() : ParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
+struct ForwardKernelParams : public KernelParamsBase {
+  ForwardKernelParams()
+      : KernelParamsBase(), z(nullptr), beta(nullptr), epsilon(0.f), fp8_out(false) {}
 
   // Output of LN FWD.
   void* z;
@@ -99,9 +111,9 @@ struct FwdParams : public ParamsBase {
   bool fp8_out;
 };
 
-struct BwdParams : public ParamsBase {
-  BwdParams()
-      : ParamsBase(),
+struct BackwardKernelParams : public KernelParamsBase {
+  BackwardKernelParams()
+      : KernelParamsBase(),
         dz(nullptr),
         dbeta_part(nullptr),
         dgamma_part(nullptr),
@@ -123,246 +135,129 @@ struct BwdParams : public ParamsBase {
   void* dgamma;
 };
 
-enum NVTE_NORM_TYPE {
-  LN_FWD_TE,
-  LN_BWD_TE,
-  LN_FWD_CUDNN,
-  LN_BWD_CUDNN,
-  RMS_FWD_TE,
-  RMS_BWD_TE,
-  RMS_FWD_CUDNN,
-  RMS_BWD_CUDNN,
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_TE_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE || NormEnum == NVTE_NORM_TYPE::LN_BWD_TE ||
-          NormEnum == NVTE_NORM_TYPE::RMS_FWD_TE || NormEnum == NVTE_NORM_TYPE::RMS_BWD_TE);
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_TE_FWD_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE || NormEnum == NVTE_NORM_TYPE::RMS_FWD_TE);
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-constexpr bool IF_TE_BWD_NORMS() {
-  return (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE || NormEnum == NVTE_NORM_TYPE::RMS_BWD_TE);
-};
-
-using FwdFunction = std::function<void(LaunchParams<FwdParams>&, const bool)>;
-using BwdFunction = std::function<void(LaunchParams<BwdParams>&, const bool)>;
-using FunctionKey = uint64_t;
-using FwdTunedRegistry = std::unordered_map<FunctionKey, FwdFunction>;
-using BwdTunedRegistry = std::unordered_map<FunctionKey, BwdFunction>;
-using FwdGeneralRegistry = std::unordered_map<FunctionKey, std::map<uint64_t, FwdFunction>>;
-using BwdGeneralRegistry = std::unordered_map<FunctionKey, std::map<uint64_t, BwdFunction>>;
-
-template <NVTE_NORM_TYPE NormEnum, typename Enable = void>
-struct LauncherType;
-
-template <NVTE_NORM_TYPE NormEnum>
-struct LauncherType<NormEnum, typename std::enable_if<IF_TE_NORMS<NormEnum>()>::type> {
-  using ParamsType = std::conditional_t<IF_TE_FWD_NORMS<NormEnum>(), LaunchParams<FwdParams>,
-                                        LaunchParams<BwdParams>>;
-  using FunctionType = std::conditional_t<IF_TE_FWD_NORMS<NormEnum>(), FwdFunction, BwdFunction>;
-};
-
-extern FwdTunedRegistry LN_FWD_TUNED_FUNCS;
-extern BwdTunedRegistry LN_BWD_TUNED_FUNCS;
-extern FwdGeneralRegistry LN_FWD_GENERAL_FUNCS;
-extern BwdGeneralRegistry LN_BWD_GENERAL_FUNCS;
-
-extern FwdTunedRegistry RMS_FWD_TUNED_FUNCS;
-extern BwdTunedRegistry RMS_BWD_TUNED_FUNCS;
-extern FwdGeneralRegistry RMS_FWD_GENERAL_FUNCS;
-extern BwdGeneralRegistry RMS_BWD_GENERAL_FUNCS;
-
-template <NVTE_NORM_TYPE NormEnum, bool IF_TUNED, typename Enable = void>
-struct RegistryType {};
-
-template <NVTE_NORM_TYPE NormEnum, bool IF_TUNED>
-struct RegistryType<NormEnum, IF_TUNED, typename std::enable_if<IF_TE_NORMS<NormEnum>()>::type> {
-  using type = std::conditional_t<
-      IF_TUNED, std::conditional_t<IF_TE_FWD_NORMS<NormEnum>(), FwdTunedRegistry, BwdTunedRegistry>,
-      std::conditional_t<IF_TE_FWD_NORMS<NormEnum>(), FwdGeneralRegistry, BwdGeneralRegistry>>;
-};
-
-template <NVTE_NORM_TYPE NormEnum, bool IF_TUNED>
-constexpr typename RegistryType<NormEnum, IF_TUNED>::type& GET_REGISTRY() {
-  if constexpr (!IF_TE_NORMS<NormEnum>()) NVTE_ERROR("Unexpected NVTE_NORM_TYPE!");
-  if constexpr (IF_TUNED) {
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE)
-      return LN_FWD_TUNED_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE)
-      return LN_BWD_TUNED_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::RMS_FWD_TE)
-      return RMS_FWD_TUNED_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::RMS_BWD_TE)
-      return RMS_BWD_TUNED_FUNCS;
-  } else {
-    if constexpr (NormEnum == NVTE_NORM_TYPE::LN_FWD_TE)
-      return LN_FWD_GENERAL_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::LN_BWD_TE)
-      return LN_BWD_GENERAL_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::RMS_FWD_TE)
-      return RMS_FWD_GENERAL_FUNCS;
-    else if constexpr (NormEnum == NVTE_NORM_TYPE::RMS_BWD_TE)
-      return RMS_BWD_GENERAL_FUNCS;
-  }
-};
-
-template <typename T>
-struct TypeId {};
-
-template <>
-struct TypeId<fp16> {
-  constexpr static uint32_t Value = 0;
-};
-
-template <>
-struct TypeId<bf16> {
-  constexpr static uint32_t Value = 1;
-};
-
-template <>
-struct TypeId<fp32> {
-  constexpr static uint32_t Value = 2;
-};
-
-template <>
-struct TypeId<fp8e4m3> {
-  constexpr static uint32_t Value = 3;
-};
-
-template <typename T, int S>
-struct Type2Key {
-  constexpr static uint32_t Value = TypeId<T>::Value << S;
-};
-
-template <typename T>
-struct WeightType2Key : public Type2Key<T, 0> {};
-
-template <typename T>
-struct InputType2Key : public Type2Key<T, 2> {};
-
-template <typename T>
-struct OutputType2Key : public Type2Key<T, 4> {};
-
-template <typename T>
-struct ComputeType2Key : public Type2Key<T, 6> {};
-
-template <typename W, typename I, typename O, typename C>
-struct Types2Key {
-  constexpr static uint32_t Value = WeightType2Key<W>::Value | InputType2Key<I>::Value |
-                                    OutputType2Key<O>::Value | ComputeType2Key<C>::Value;
-  constexpr static inline uint64_t get(const uint64_t hidden_size) {
-    constexpr uint64_t type_key = Value;
-    return (type_key << 32) | hidden_size;
-  }
-};
-
-template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE,
-          NVTE_NORM_TYPE NormEnum, bool IF_TUNED, typename Enable = void>
-struct NormRegistrar {};
-
-template <typename W, typename I, typename O, typename C, uint64_t HIDDEN_SIZE,
-          NVTE_NORM_TYPE NormEnum, bool IF_TUNED>
-struct NormRegistrar<W, I, O, C, HIDDEN_SIZE, NormEnum, IF_TUNED,
-                     typename std::enable_if<IF_TE_NORMS<NormEnum>()>::type> {
-  explicit NormRegistrar(typename LauncherType<NormEnum>::FunctionType f) {
-    auto& registry = GET_REGISTRY<NormEnum, IF_TUNED>();
-    if constexpr (IF_TUNED) {
-      uint64_t key = Types2Key<W, I, O, C>::get(HIDDEN_SIZE);
-      registry.insert({key, f});
-    } else {
-      uint64_t key = Types2Key<W, I, O, C>::get(0);
-      registry[key].insert({HIDDEN_SIZE, f});
-    }
-  }
-};
-
-class NormBase {
- public:
-  virtual void initialize() = 0;
-
-  virtual void execute() = 0;
-
-  virtual void set_workspace_and_barrier(void* workspace_ptr, void* barrier_ptr) {};
-
-  virtual std::vector<size_t> get_workspace_shape() { return {0}; };
-
-  virtual std::vector<size_t> get_barrier_shape() { return {0}; };
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-class NormFwdTe : public NormBase {
- public:
-  NormFwdTe();
-
-  NormFwdTe(const Tensor& x, const Tensor& gamma, const Tensor& beta, const float epsilon,
-            Tensor* z, Tensor* mu, Tensor* rsigma, cudaStream_t stream,
-            const int multiprocessorCount, Tensor* workspace, Tensor* barrier,
-            const bool zero_centered_gamma);
-
-  void initialize() override;
-
-  void set_workspace_and_barrier(void* workspace_ptr, void* barrier_ptr) override;
-
-  void set_amax();
-
-  void execute() override;
-
-  std::vector<size_t> get_workspace_shape() override;
-
-  std::vector<size_t> get_barrier_shape() override;
-
-  typename LauncherType<NormEnum>::ParamsType _launch_params;
-
-  typename LauncherType<NormEnum>::FunctionType _launcher;
-};
-
-template <NVTE_NORM_TYPE NormEnum>
-class NormBwdTe : public NormFwdTe<NormEnum> {
- public:
-  NormBwdTe(const Tensor& dz, const Tensor& x, const Tensor& mu, const Tensor& rsigma,
-            const Tensor& gamma, Tensor* dx, Tensor* dgamma, Tensor* dbeta, Tensor* dgamma_part,
-            Tensor* dbeta_part, cudaStream_t stream, const int multiprocessorCount,
-            Tensor* workspace, Tensor* barrier, const bool zero_centered_gamma);
-
-  std::vector<size_t> get_dgamma_shape();
-};
-
-template <NVTE_NORM_TYPE NormEnum, typename NormType>
-void norms_launcher(NormType& Norm, Tensor* workspace, Tensor* barrier,
-                    Tensor* dgamma_part = nullptr, Tensor* dbeta_part = nullptr);
-
-// cuDNN norms
-void ComputeScaleInv(void* scale, void* scale_inv);
-
+enum class NVTE_Norm_Backend { Te, Cudnn };
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
-// Derived classes for each normalization type
-class NormalizationPlan {
+constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+                           DType itype, DType otype, DType ctype, uint64_t batch_size,
+                           uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned);
+
+template <typename KernelParamsType>
+class TeNormalizationRegistry {
+ private:
+  using Function = std::function<void(LaunchParams<KernelParamsType>&, const bool)>;
+  std::unordered_map<uint64_t, Function> tuned_function_map;
+  std::unordered_map<uint64_t, std::map<int64_t, Function>> general_function_map;
+
+  TeNormalizationRegistry() = default;
+
+  static TeNormalizationRegistry& getInstance() {
+    static TeNormalizationRegistry registry;
+    return registry;
+  }
+
+  static bool _is_tuned(const int64_t key) {return (key & (1ull << 50));};
+  static uint64_t _get_hidden_size(const uint64_t key) {return (key & ((1ull << 25) - 1));};
+  static uint64_t _get_general_key(const uint64_t key) {return ((key >> 51) << 51);};
+
  public:
-  NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
-                    DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                    const bool zero_centered_gamma, const size_t sm_count);
+  static int registerFunction(uint64_t key, 
+                              void (*func)(LaunchParams<KernelParamsType>&, const bool)) {
+    if (_is_tuned(key)) getInstance().tuned_function_map.emplace(key, Function(func));
+    else 
+      getInstance().general_function_map[_get_general_key(key)].emplace(_get_hidden_size(key), Function(func));
+    return 0;
+  }
 
-  void build();
+  static Function getKernel(uint64_t key) {
+    auto& instance = getInstance();
+    if (_is_tuned(key)){
+      auto it = instance.tuned_function_map.find(key);
+      if (it != instance.tuned_function_map.end()) return it->second;
+    } 
+    auto general_key = _get_general_key(key);
+    if (instance.general_function_map.count(general_key) == 0) {
+      NVTE_ERROR("Unavailable kernel for this normalization config.");
+    }
+    auto& general_func_map = instance.general_function_map.at(general_key);
+    auto func_iter = general_func_map.lower_bound(_get_hidden_size(key));
+    if (func_iter == general_func_map.end()) {
+      return general_func_map.rbegin()->second; // Hidden size is too big, need to use multi-CTA
+    } else { return func_iter->second; }
+  }
 
-  std::vector<size_t> getWorkspaceShape() const;
+  TeNormalizationRegistry(const TeNormalizationRegistry&) = delete;
+  TeNormalizationRegistry& operator=(const TeNormalizationRegistry&) = delete;
+  TeNormalizationRegistry(TeNormalizationRegistry&&) = delete;
+  TeNormalizationRegistry& operator=(TeNormalizationRegistry&&) = delete;
+};
 
-  // FWD
-  void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
-               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream);
-  // BWD
-  void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
-               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream);
+
+class NormalizationPlanBase {
+ public:
+  virtual ~NormalizationPlanBase() = default;
+  virtual std::vector<size_t> getWorkspaceShape() const = 0;
+
+  virtual void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+                       void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
+                       cudaStream_t stream) = 0;
+
+  virtual void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
+                       void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
+                       void* workspace_dptr, cudaStream_t stream) = 0;
 
  private:
+  virtual void _build() = 0;
+};
+
+template <typename KernelParamsType>
+class TeNormalizationPlan : public NormalizationPlanBase {
+ public:
+  TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                      DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
+                      const size_t sm_count, const bool zero_centered_gamma, const bool is_tuned);
+  std::vector<size_t> getWorkspaceShape() const override;
+
+  void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
+               cudaStream_t stream) override;
+
+  void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+               cudaStream_t stream) override;
+
+ private:
+  void _set_workspace();
+  void _build();
+
+  using KernelRegistry = TeNormalizationRegistry<KernelParamsType>;
+  LaunchParams<KernelParamsType> _launch_params;
+  std::function<void(LaunchParams<KernelParamsType>&, const bool)> _kernel;
+
+  bool _is_layernorm;
+};
+
+class CudnnNormalizationPlan : public NormalizationPlanBase {
+ public:
+  CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+                         DType itype, DType otype, DType ctype, const size_t batch_size,
+                         const size_t hidden_size, const size_t sm_count,
+                         const bool zero_centered_gamma);
+
+  std::vector<size_t> getWorkspaceShape() const override;
+
+  void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
+               cudaStream_t stream) override;
+
+  void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+               cudaStream_t stream) override;
+
+ private:
+  void _build() override;
+
   const bool _zero_centered, _fp8_out;
   std::unique_ptr<char[]> _scalar_dptr;
   // FWD
@@ -384,19 +279,85 @@ class NormalizationPlanRegistry {
     return instance;
   };
 
-  NormalizationPlan* getNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
-                                          DType wtype, DType itype, DType otype,
-                                          const size_t batch_size, const size_t hidden_size,
-                                          const bool zero_centered_gamma, const size_t sm_count);
+  NormalizationPlanBase* getNormalizationPlan(NVTE_Norm_Backend NormBackend,
+                                              NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+                                              DType wtype, DType itype, DType otype,
+                                              const size_t batch_size, const size_t hidden_size,
+                                              const size_t sm_count, const bool zero_centered_gamma,
+                                              const bool is_aligned);
 
  private:
   NormalizationPlanRegistry() {}
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlan>> normalizationPlanMap;
+  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlanBase>> normalizationPlanMap;
 };
 
+using byte = uint8_t;
+using int32 = int32_t;
+using fp32 = float;
+using fp16 = half;
+using bf16 = nv_bfloat16;
+using fp8e4m3 = __nv_fp8_e4m3;
+using fp8e5m2 = __nv_fp8_e5m2;
+
+template <typename T>
+struct TypeToDType;
+
+template <>
+struct TypeToDType<fp32> {
+  static constexpr DType value = DType::kFloat32;
+};
+template <>
+struct TypeToDType<fp16> {
+  static constexpr DType value = DType::kFloat16;
+};
+template <>
+struct TypeToDType<bf16> {
+  static constexpr DType value = DType::kBFloat16;
+};
+template <>
+struct TypeToDType<fp8e4m3> {
+  static constexpr DType value = DType::kFloat8E4M3;
+};
+template <>
+struct TypeToDType<fp8e5m2> {
+  static constexpr DType value = DType::kFloat8E5M2;
+};
+template <>
+struct TypeToDType<int32> {
+  static constexpr DType value = DType::kInt32;
+};
+template <>
+struct TypeToDType<byte> {
+  static constexpr DType value = DType::kByte;
+};
+
+#define IS_TUNED(x) (strcmp(#x, "tuned") == 0 ? 1 : 0)
+
+// TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
+#define REGISTER_NORM_BASE(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE, OTYPE,                    \
+                           CTYPE, FUNC_NAME)                                                                        \
+  static int                                                                                                        \
+      register_##NORM_TYPE##_##NORM_STAGE##_##LAUNCH_TYPE##_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE = \
+          TeNormalizationRegistry<NORM_STAGE##KernelParams>::registerFunction(                                      \
+              (get_key(NVTE_Norm_Type::NORM_TYPE, NVTE_Norm_Stage::NORM_STAGE,                                      \
+                       (TypeToDType<WTYPE>::value), (TypeToDType<ITYPE>::value),                                    \
+                       (TypeToDType<OTYPE>::value), (TypeToDType<CTYPE>::value), 0, HIDDEN_SIZE,                    \
+                       0, IS_TUNED(LAUNCH_TYPE))),                                                                  \
+              FUNC_NAME)
+
+// For FP8 only
+void ComputeScaleInv(void* scale, void* scale_inv);
+
+// Alignment check
+template <size_t Alignment = 16, typename... Args>
+bool is_ptr_aligned(const Args*... ptrs) {
+  return ((reinterpret_cast<uintptr_t>(ptrs) % Alignment == 0) && ...);
+}
+
+}  // namespace normalization
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_H_
+#endif
