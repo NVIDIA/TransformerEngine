@@ -2216,8 +2216,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
 
-        # print(qkv_format,cu_seqlens_q_padded)
-        print(qkv_format, out.shape, out.view(-1, *out.shape[-3:]).shape)
         if qkv_format == "sbhd":
             tex.fused_out_correction(
                 out.view(-1, *out.shape[-3:]),
