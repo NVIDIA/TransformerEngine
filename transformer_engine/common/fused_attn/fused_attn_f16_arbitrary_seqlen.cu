@@ -392,7 +392,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
-          devOffsetsV, devOffsetsO);
+          devOffsetsV, devOffsetsO, devOffsetsS);
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
@@ -547,252 +547,252 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                        .set_stride({1, 1, 1, 1})
                                        .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                           .set_name("offset_stats")
-                                           .set_dim({b + 1, 1, 1, 1})
-                                           .set_stride({1, 1, 1, 1})
-                                           .set_data_type(fe::DataType_t::INT64));
+                                       .set_name("offset_stats")
+                                       .set_dim({b + 1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
                                        .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
-                                       std::vector<int64_t> q_stride(4);
-                                       std::vector<int64_t> k_stride(4);
-                                       std::vector<int64_t> v_stride(4);
-                                       std::vector<int64_t> o_stride(4);
-                                       generateMatrixStrides(b, h, s_q, s_kv, d_qk, q_stride.data(),
-                                                             layout,
-                                                             NVTE_QKV_Matrix::NVTE_Q_Matrix);
-                                       generateMatrixStrides(b, hg, s_q, s_kv, d_qk,
-                                                             k_stride.data(), layout,
-                                                             NVTE_QKV_Matrix::NVTE_K_Matrix);
-                                       generateMatrixStrides(b, hg, s_q, s_kv, d_v, v_stride.data(),
-                                                             layout,
-                                                             NVTE_QKV_Matrix::NVTE_V_Matrix);
-                                       generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(),
-                                                             layout,
-                                                             NVTE_QKV_Matrix::NVTE_O_Matrix);
 
-                                       if (is_ragged) {
-                                         q = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("Q")
-                                                                   .set_dim({b, h, s_q, d_qk})
-                                                                   .set_stride(q_stride)
-                                                                   .set_ragged_offset(offset_q));
-                                         k = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("K")
-                                                                   .set_dim({b, hg, s_kv, d_qk})
-                                                                   .set_stride(k_stride)
-                                                                   .set_ragged_offset(offset_k));
-                                         v = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("V")
-                                                                   .set_dim({b, hg, s_kv, d_v})
-                                                                   .set_stride(v_stride)
-                                                                   .set_ragged_offset(offset_v));
-                                         o = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("O")
-                                                                   .set_dim({b, h, s_q, d_v})
-                                                                   .set_stride(o_stride)
-                                                                   .set_ragged_offset(offset_o));
-                                         dO = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                    .set_name("dO")
-                                                                    .set_dim({b, h, s_q, d_v})
-                                                                    .set_stride(o_stride)
-                                                                    .set_ragged_offset(offset_o));
-                                         stats = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("stats")
-                                                 .set_dim({b, h, s_q, 1})
-                                                 .set_stride({h * s_q, 1, h, 1})
-                                                 .set_data_type(fe::DataType_t::FLOAT)
-                                                 .set_ragged_offset(offset_stats));
-                                       } else {
-                                         q = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("Q")
-                                                                   .set_dim({b, h, s_q, d_qk})
-                                                                   .set_stride(q_stride));
-                                         k = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("K")
-                                                                   .set_dim({b, hg, s_kv, d_qk})
-                                                                   .set_stride(k_stride));
-                                         v = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("V")
-                                                                   .set_dim({b, hg, s_kv, d_v})
-                                                                   .set_stride(v_stride));
-                                         o = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                   .set_name("O")
-                                                                   .set_dim({b, h, s_q, d_v})
-                                                                   .set_stride(o_stride));
-                                         dO = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                                                    .set_name("dO")
-                                                                    .set_dim({b, h, s_q, d_v})
-                                                                    .set_stride(o_stride));
-                                         stats = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("stats")
-                                                 .set_dim({b, h, s_q, 1})
-                                                 .set_stride({h * s_q, s_q, 1, 1})
-                                                 .set_data_type(fe::DataType_t::FLOAT));
-                                       }
+      std::vector<int64_t> q_stride(4);
+      std::vector<int64_t> k_stride(4);
+      std::vector<int64_t> v_stride(4);
+      std::vector<int64_t> o_stride(4);
+      generateMatrixStrides(b, h, s_q, s_kv, d_qk, q_stride.data(),
+                            layout,
+                            NVTE_QKV_Matrix::NVTE_Q_Matrix);
+      generateMatrixStrides(b, hg, s_q, s_kv, d_qk,
+                            k_stride.data(), layout,
+                            NVTE_QKV_Matrix::NVTE_K_Matrix);
+      generateMatrixStrides(b, hg, s_q, s_kv, d_v, v_stride.data(),
+                            layout,
+                            NVTE_QKV_Matrix::NVTE_V_Matrix);
+      generateMatrixStrides(b, h, s_q, s_kv, d_v, o_stride.data(),
+                            layout,
+                            NVTE_QKV_Matrix::NVTE_O_Matrix);
 
-                                       attn_scale = mha_graph->tensor(
-                                           fe::graph::Tensor_attributes()
-                                               .set_name("attn_scale")
-                                               .set_dim({1, 1, 1, 1})
-                                               .set_stride({1, 1, 1, 1})
-                                               .set_is_pass_by_value(true)
-                                               .set_data_type(fe::DataType_t::FLOAT));
+      if (is_ragged) {
+        q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("Q")
+                                  .set_dim({b, h, s_q, d_qk})
+                                  .set_stride(q_stride)
+                                  .set_ragged_offset(offset_q));
+        k = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("K")
+                                  .set_dim({b, hg, s_kv, d_qk})
+                                  .set_stride(k_stride)
+                                  .set_ragged_offset(offset_k));
+        v = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("V")
+                                  .set_dim({b, hg, s_kv, d_v})
+                                  .set_stride(v_stride)
+                                  .set_ragged_offset(offset_v));
+        o = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("O")
+                                  .set_dim({b, h, s_q, d_v})
+                                  .set_stride(o_stride)
+                                  .set_ragged_offset(offset_o));
+        dO = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                   .set_name("dO")
+                                   .set_dim({b, h, s_q, d_v})
+                                   .set_stride(o_stride)
+                                   .set_ragged_offset(offset_o));
+        stats = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("stats")
+                .set_dim({b, h, s_q, 1})
+                .set_stride({h * s_q, 1, h, 1})
+                .set_data_type(fe::DataType_t::FLOAT)
+                .set_ragged_offset(offset_stats));
+      } else {
+        q = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("Q")
+                                  .set_dim({b, h, s_q, d_qk})
+                                  .set_stride(q_stride));
+        k = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("K")
+                                  .set_dim({b, hg, s_kv, d_qk})
+                                  .set_stride(k_stride));
+        v = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("V")
+                                  .set_dim({b, hg, s_kv, d_v})
+                                  .set_stride(v_stride));
+        o = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                  .set_name("O")
+                                  .set_dim({b, h, s_q, d_v})
+                                  .set_stride(o_stride));
+        dO = mha_graph->tensor(fe::graph::Tensor_attributes()
+                                   .set_name("dO")
+                                   .set_dim({b, h, s_q, d_v})
+                                   .set_stride(o_stride));
+        stats = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("stats")
+                .set_dim({b, h, s_q, 1})
+                .set_stride({h * s_q, s_q, 1, 1})
+                .set_data_type(fe::DataType_t::FLOAT));
+      }
 
-                                       fe::graph::SDPA_backward_attributes sdpa_backward_options;
-                                       sdpa_backward_options =
-                                           fe::graph::SDPA_backward_attributes()
-                                               .set_name("flash_attention_backward")
-                                               .set_causal_mask(is_causal)
-                                               .set_causal_mask_bottom_right(is_bottom_right)
-                                               .set_attn_scale(attn_scale);
+      attn_scale = mha_graph->tensor(
+          fe::graph::Tensor_attributes()
+              .set_name("attn_scale")
+              .set_dim({1, 1, 1, 1})
+              .set_stride({1, 1, 1, 1})
+              .set_is_pass_by_value(true)
+              .set_data_type(fe::DataType_t::FLOAT));
 
-                                       if (is_ragged) {
-                                         sdpa_backward_options.set_max_total_seq_len_q(s_q);
-                                       }
+      fe::graph::SDPA_backward_attributes sdpa_backward_options;
+      sdpa_backward_options =
+          fe::graph::SDPA_backward_attributes()
+              .set_name("flash_attention_backward")
+              .set_causal_mask(is_causal)
+              .set_causal_mask_bottom_right(is_bottom_right)
+              .set_attn_scale(attn_scale);
 
-                                       if (cudnn_runtime_version >= 90200 &&
-                                           window_size_left != -1) {
-                                         sdpa_backward_options.set_sliding_window_length(
-                                             window_size_left + 1);
-                                       }
+      if (is_ragged) {
+        sdpa_backward_options.set_max_total_seq_len_q(s_q);
+      }
 
-                                       if (cudnn_runtime_version >= 90000) {
-                                         sdpa_backward_options.set_deterministic_algorithm(
-                                             deterministic);
-                                       }
+      if (cudnn_runtime_version >= 90200 &&
+          window_size_left != -1) {
+        sdpa_backward_options.set_sliding_window_length(
+            window_size_left + 1);
+      }
 
-                                       sdpa_backward_options.set_alibi_mask(is_alibi);
+      if (cudnn_runtime_version >= 90000) {
+        sdpa_backward_options.set_deterministic_algorithm(
+            deterministic);
+      }
 
-                                       if (is_bias) {
-                                         bias = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("bias")
-                                                 .set_dim({bias_b, bias_h, s_q, s_kv})
-                                                 .set_stride(
-                                                     {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-                                         dBias = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("dBias")
-                                                 .set_dim({bias_b, bias_h, s_q, s_kv})
-                                                 .set_stride(
-                                                     {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
-                                         sdpa_backward_options.set_bias(bias);
-                                         // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
-                                         // are not supported for dbias calculation but they are
-                                         // supported for forward bias calculation
-                                         if ((bias_b == 1) && (bias_h == h)) {
-                                           sdpa_backward_options.set_dbias(dBias);
-                                         }
-                                       }
+      sdpa_backward_options.set_alibi_mask(is_alibi);
 
-                                       if (is_padding) {
-                                         seq_q = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("seq_q")
-                                                 .set_dim({b, 1, 1, 1})
-                                                 .set_stride({1, 1, 1, 1})
-                                                 .set_data_type(fe::DataType_t::INT32));
-                                         seq_kv = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("seq_kv")
-                                                 .set_dim({b, 1, 1, 1})
-                                                 .set_stride({1, 1, 1, 1})
-                                                 .set_data_type(fe::DataType_t::INT32));
-                                         sdpa_backward_options.set_padding_mask(is_padding)
-                                             .set_seq_len_q(seq_q)
-                                             .set_seq_len_kv(seq_kv);
-                                       }
+      if (is_bias) {
+        bias = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("bias")
+                .set_dim({bias_b, bias_h, s_q, s_kv})
+                .set_stride(
+                    {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+        dBias = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("dBias")
+                .set_dim({bias_b, bias_h, s_q, s_kv})
+                .set_stride(
+                    {bias_h * s_q * s_kv, s_q * s_kv, s_kv, 1}));
+        sdpa_backward_options.set_bias(bias);
+        // shapes [1, 1, s, s], [b, 1, s, s], [b, h, s, s]
+        // are not supported for dbias calculation but they are
+        // supported for forward bias calculation
+        if ((bias_b == 1) && (bias_h == h)) {
+          sdpa_backward_options.set_dbias(dBias);
+        }
+      }
 
-                                       if (is_dropout) {
-                                         dropout_seed = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("Seed")
-                                                 .set_dim({1, 1, 1, 1})
-                                                 .set_stride({1, 1, 1, 1})
-                                                 .set_data_type(fe::DataType_t::INT64));
-                                         dropout_offset = mha_graph->tensor(
-                                             fe::graph::Tensor_attributes()
-                                                 .set_name("Offset")
-                                                 .set_dim({1, 1, 1, 1})
-                                                 .set_stride({1, 1, 1, 1})
-                                                 .set_data_type(fe::DataType_t::INT64));
-                                         sdpa_backward_options.set_dropout(
-                                             dropout_probability, dropout_seed, dropout_offset);
-                                       }
+      if (is_padding) {
+        seq_q = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("seq_q")
+                .set_dim({b, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::INT32));
+        seq_kv = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("seq_kv")
+                .set_dim({b, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::INT32));
+        sdpa_backward_options.set_padding_mask(is_padding)
+            .set_seq_len_q(seq_q)
+            .set_seq_len_kv(seq_kv);
+      }
 
-                                       auto [dQ, dK, dV] = mha_graph->sdpa_backward(
-                                           q, k, v, o, dO, stats, sdpa_backward_options);
+      if (is_dropout) {
+        dropout_seed = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("Seed")
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::INT64));
+        dropout_offset = mha_graph->tensor(
+            fe::graph::Tensor_attributes()
+                .set_name("Offset")
+                .set_dim({1, 1, 1, 1})
+                .set_stride({1, 1, 1, 1})
+                .set_data_type(fe::DataType_t::INT64));
+        sdpa_backward_options.set_dropout(
+            dropout_probability, dropout_seed, dropout_offset);
+      }
 
-                                       if (is_ragged) {
-                                         dQ->set_output(true)
-                                             .set_dim({b, h, s_q, d_qk})
-                                             .set_stride(q_stride)
-                                             .set_ragged_offset(offset_q);
-                                         dK->set_output(true)
-                                             .set_dim({b, hg, s_kv, d_qk})
-                                             .set_stride(k_stride)
-                                             .set_ragged_offset(offset_k);
-                                         dV->set_output(true)
-                                             .set_dim({b, hg, s_kv, d_v})
-                                             .set_stride(v_stride)
-                                             .set_ragged_offset(offset_v);
-                                       } else {
-                                         dQ->set_output(true)
-                                             .set_dim({b, h, s_q, d_qk})
-                                             .set_stride(q_stride);
-                                         dK->set_output(true)
-                                             .set_dim({b, hg, s_kv, d_qk})
-                                             .set_stride(k_stride);
-                                         dV->set_output(true)
-                                             .set_dim({b, hg, s_kv, d_v})
-                                             .set_stride(v_stride);
-                                       }
+      auto [dQ, dK, dV] = mha_graph->sdpa_backward(
+          q, k, v, o, dO, stats, sdpa_backward_options);
 
-                                       std::tuple<
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // q
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // k
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // v
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // o
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // dO
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // stats
-                                           std::shared_ptr<
-                                               fe::graph::Tensor_attributes>,  // attn_scale
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // dQ
-                                           std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
-                                           std::shared_ptr<fe::graph::Tensor_attributes>>  // dV
-                                           key_tensors_tuple = std::make_tuple(
-                                               q, k, v, o, dO, stats, attn_scale, dQ, dK, dV);
-                                       auto bias_tuple = is_bias
-                                                             ? std::make_tuple(bias, dBias)
-                                                             : std::make_tuple(nullptr, nullptr);
-                                       auto padding_tuple = is_padding
-                                                                ? std::make_tuple(seq_q, seq_kv)
-                                                                : std::make_tuple(nullptr, nullptr);
-                                       auto offset_tuple =
-                                           is_ragged ? std::make_tuple(offset_q, offset_k, offset_v,
-                                                                       offset_o, offset_stats)
-                                                     : std::make_tuple(nullptr, nullptr, nullptr,
-                                                                       nullptr, nullptr);
-                                       auto dropout_tuple =
-                                           is_dropout
-                                               ? std::make_tuple(dropout_seed, dropout_offset)
-                                               : std::make_tuple(nullptr, nullptr);
+      if (is_ragged) {
+        dQ->set_output(true)
+            .set_dim({b, h, s_q, d_qk})
+            .set_stride(q_stride)
+            .set_ragged_offset(offset_q);
+        dK->set_output(true)
+            .set_dim({b, hg, s_kv, d_qk})
+            .set_stride(k_stride)
+            .set_ragged_offset(offset_k);
+        dV->set_output(true)
+            .set_dim({b, hg, s_kv, d_v})
+            .set_stride(v_stride)
+            .set_ragged_offset(offset_v);
+      } else {
+        dQ->set_output(true)
+            .set_dim({b, h, s_q, d_qk})
+            .set_stride(q_stride);
+        dK->set_output(true)
+            .set_dim({b, hg, s_kv, d_qk})
+            .set_stride(k_stride);
+        dV->set_output(true)
+            .set_dim({b, hg, s_kv, d_v})
+            .set_stride(v_stride);
+      }
 
-                                       NVTE_CHECK_CUDNN_FE(mha_graph->validate());
-                                       NVTE_CHECK_CUDNN_FE(
-                                           mha_graph->build_operation_graph(handle));
-                                       NVTE_CHECK_CUDNN_FE(
-                                           mha_graph->create_execution_plans({fe::HeurMode_t::A}));
-                                       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
-                                       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
+      std::tuple<
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // q
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // k
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // v
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // o
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // dO
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // stats
+          std::shared_ptr<
+              fe::graph::Tensor_attributes>,  // attn_scale
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // dQ
+          std::shared_ptr<fe::graph::Tensor_attributes>,  // dK
+          std::shared_ptr<fe::graph::Tensor_attributes>>  // dV
+          key_tensors_tuple = std::make_tuple(
+              q, k, v, o, dO, stats, attn_scale, dQ, dK, dV);
+      auto bias_tuple = is_bias
+                            ? std::make_tuple(bias, dBias)
+                            : std::make_tuple(nullptr, nullptr);
+      auto padding_tuple = is_padding
+                               ? std::make_tuple(seq_q, seq_kv)
+                               : std::make_tuple(nullptr, nullptr);
+      auto offset_tuple =
+          is_ragged ? std::make_tuple(offset_q, offset_k, offset_v,
+                                      offset_o, offset_stats)
+                    : std::make_tuple(nullptr, nullptr, nullptr,
+                                      nullptr, nullptr);
+      auto dropout_tuple =
+          is_dropout
+              ? std::make_tuple(dropout_seed, dropout_offset)
+              : std::make_tuple(nullptr, nullptr);
 
-                                       auto return_tuple = std::tuple_cat(
-                                           std::make_tuple(mha_graph), key_tensors_tuple,
-                                           bias_tuple, padding_tuple, offset_tuple, dropout_tuple);
-                                       cache.insert({descriptor, return_tuple});
+      NVTE_CHECK_CUDNN_FE(mha_graph->validate());
+      NVTE_CHECK_CUDNN_FE(
+          mha_graph->build_operation_graph(handle));
+      NVTE_CHECK_CUDNN_FE(
+          mha_graph->create_execution_plans({fe::HeurMode_t::A}));
+      NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
+      NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-                                       return return_tuple;
+      auto return_tuple = std::tuple_cat(
+          std::make_tuple(mha_graph), key_tensors_tuple,
+          bias_tuple, padding_tuple, offset_tuple, dropout_tuple);
+      cache.insert({descriptor, return_tuple});
+
+      return return_tuple;
     };
 
     auto [mha_graph, q, k, v, o, dO, stats, attn_scale, dQ, dK, dV, bias, dBias, seq_q, seq_kv,
@@ -867,7 +867,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
           static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
-          devOffsetsV, devOffsetsO);
+          devOffsetsV, devOffsetsO, devOffsetsS);
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;

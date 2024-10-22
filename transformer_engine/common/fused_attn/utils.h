@@ -133,7 +133,7 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
                                              int64_t d_v, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
-                                             void *offsets_v, void *offsets_o);
+                                             void *offsets_v, void *offsets_o, void *offsets_s);
 
 DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_attn_heads,
                               int64_t num_gqa_groups, int64_t max_seqlen_q, int64_t max_seqlen_kv,
