@@ -58,6 +58,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     void *devPtrSeqOffsetsKV, cudnn_frontend::DataType_t tensorType, void *workspace,
     size_t *workspace_size, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
+
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
@@ -83,7 +84,8 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     s_q = max_t_q;
     s_kv = max_t_kv;
   }
-  auto cudnn_runtime_version = cudnnGetVersion();
+  const auto cudnn_runtime_version = cudnnGetVersion();
+  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -155,27 +157,27 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                        .set_name("offset_q")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_k")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_v")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_o")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                           .set_name("offset_stats")
-                                           .set_dim({b + 1, 1, 1, 1})
-                                           .set_stride({1, 1, 1, 1})
-                                           .set_data_type(fe::DataType_t::INT64));
+                                       .set_name("offset_stats")
+                                       .set_dim({b + 1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
 
       std::vector<int64_t> q_stride(4);
       std::vector<int64_t> k_stride(4);
@@ -335,10 +337,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_fprop_cache, descriptor);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
+    // n.b. Care should be taken to align each of the added worksapce tensors to their type.
+    // We do this by adding padding at the end of each separate allocation.
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+    const size_t seqlen_offsets_workspace_size = 5 * num_bytes_per_ragged_offset;
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -363,7 +370,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           orig_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
@@ -377,16 +384,15 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
-      NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + num_bytes_per_ragged_offset;
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + num_bytes_per_ragged_offset;
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + num_bytes_per_ragged_offset;
+      const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
-          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
-          static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
-          static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
+          static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
+          devOffsetsV, devOffsetsO);
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
@@ -417,6 +423,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     cudnn_frontend::DataType_t tensorType, void *workspace, size_t *workspace_size,
     cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
+
   bool is_bias = (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS);
   bool is_alibi = (bias_type == NVTE_Bias_Type::NVTE_ALIBI);
   bool is_causal = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
@@ -431,7 +438,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
-  auto cudnn_runtime_version = cudnnGetVersion();
+  const auto cudnn_runtime_version = cudnnGetVersion();
   const int device_id = cuda::current_device();
   const int sm_arch_ = cuda::sm_arch(device_id);
   // keep original batch size because cu_seqlens are created with [b+1] shape
@@ -443,6 +450,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
     s_q = max_t_q;
     s_kv = max_t_kv;
   }
+
+  // We choose between 32-bit and 64-bit offsets depending on need.
+  // This allows us to support older cuDNN runtimes gracefully.
+  const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   try {
     FADescriptor_v1 descriptor{b,
@@ -519,27 +530,28 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                        .set_name("offset_q")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_k = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_k")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_v = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_v")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_o = mha_graph->tensor(fe::graph::Tensor_attributes()
                                        .set_name("offset_o")
                                        .set_dim({b + 1, 1, 1, 1})
                                        .set_stride({1, 1, 1, 1})
-                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       offset_stats = mha_graph->tensor(fe::graph::Tensor_attributes()
-                                           .set_name("offset_stats")
-                                           .set_dim({b + 1, 1, 1, 1})
-                                           .set_stride({1, 1, 1, 1})
-                                           .set_data_type(fe::DataType_t::INT64));
+                                       .set_name("offset_stats")
+                                       .set_dim({b + 1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(fe::DataType_t::INT64));
+                                       .set_data_type(get_cudnn_fe_dtype(ragged_offset_type)));
       std::vector<int64_t> q_stride(4);
       std::vector<int64_t> k_stride(4);
       std::vector<int64_t> v_stride(4);
@@ -747,11 +759,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
           offset_q, offset_k, offset_v, offset_o, offset_stats, dropout_seed, dropout_offset] =
         get_graph(sdpa_f16_bprop_cache, descriptor);
 
-    auto plan_workspace_size = mha_graph->get_workspace_size();
-
     // Exit to request upper level API to allocate memory if needed
-    size_t actual_seqlen_workspace_size = 2 * b * sizeof(int32_t);
-    size_t seqlen_offsets_workspace_size = 5 * (b + 1) * sizeof(int64_t);
+    // n.b. Care should be taken to align each of the added worksapce tensors to their type.
+    // We do this by adding padding at the end of each separate allocation.
+    auto plan_workspace_size = alignTo<16>(mha_graph->get_workspace_size());
+    const size_t num_bytes_per_seqlen = alignTo<16>(b * sizeof(int32_t));
+    const size_t actual_seqlen_workspace_size = 2 * num_bytes_per_seqlen;
+    const size_t num_bytes_per_ragged_offset =
+        alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
+    const size_t seqlen_offsets_workspace_size = 5 * num_bytes_per_ragged_offset;
     if (workspace == nullptr) {
       *workspace_size =
           plan_workspace_size + actual_seqlen_workspace_size + seqlen_offsets_workspace_size;
@@ -789,7 +805,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       constexpr size_t nthreads_per_block = 128;
       const size_t grid = (b + nthreads_per_block - 1) / nthreads_per_block;
       void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
-      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
+      void *devActualSeqlenKV = static_cast<int8_t *>(devActualSeqlenQ) + num_bytes_per_seqlen;
       cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
           orig_b, b, static_cast<const int32_t *>(devPtrCuSeqlensQ),
           static_cast<const int32_t *>(devPtrCuSeqlensKV), static_cast<int32_t *>(devActualSeqlenQ),
@@ -803,16 +819,15 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       const size_t grid = (b + nthreads_per_block) / nthreads_per_block;
       void *devOffsetsQ =
           static_cast<int8_t *>(workspace) + plan_workspace_size + actual_seqlen_workspace_size;
-      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + (b + 1) * sizeof(int64_t);
-      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + (b + 1) * sizeof(int64_t);
-      NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
+      void *devOffsetsK = static_cast<int8_t *>(devOffsetsQ) + num_bytes_per_ragged_offset;
+      void *devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
+      void *devOffsetsO = static_cast<int8_t *>(devOffsetsV) + num_bytes_per_ragged_offset;
+      void *devOffsetsS = static_cast<int8_t *>(devOffsetsO) + num_bytes_per_ragged_offset;
+      const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
           layout_group, orig_b, b, h, hg, d_qk, d_v, static_cast<int32_t *>(devPtrSeqOffsetsQ),
-          static_cast<int32_t *>(devPtrSeqOffsetsKV), static_cast<int64_t *>(devOffsetsQ),
-          static_cast<int64_t *>(devOffsetsK), static_cast<int64_t *>(devOffsetsV),
-          static_cast<int64_t *>(devOffsetsO), static_cast<int64_t *>(devOffsetsS));
+          static_cast<int32_t *>(devPtrSeqOffsetsKV), ragged_offset_type, devOffsetsQ, devOffsetsK,
+          devOffsetsV, devOffsetsO);
       variant_pack[offset_q] = devOffsetsQ;
       variant_pack[offset_k] = devOffsetsK;
       variant_pack[offset_v] = devOffsetsV;
