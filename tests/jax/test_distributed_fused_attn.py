@@ -124,8 +124,10 @@ class TestDistributedSelfAttn:
             seqlen,
             seqlen,
             hidden,
+            None,  # no window
+            False,  # not context parallel
         ):
-            pytest.skip(f"No FusedAttn backwend found")
+            pytest.skip(f"No FusedAttn backend found")
 
         def target_func(qkv, bias, mask):
             return jnp.mean(
@@ -257,8 +259,10 @@ class TestDistributedCrossAttn:
             seqlen,
             seqlen,
             hidden,
+            None,  # no window
+            False,  # not context parallel
         ):
-            pytest.skip(f"No FusedAttn backwend found")
+            pytest.skip(f"No FusedAttn backend found")
 
         def target_func(q, kv, mask):
             return jnp.mean(
@@ -403,7 +407,24 @@ class TestDistributedContexParallelSelfAttn:
         _, seqlen, num_head, hidden = data_shape
         num_kv_heads = num_head // kv_groups
 
-        # make sure the mesh evently divides cp and tp axis
+        if not is_fused_attn_kernel_available(
+            dtype,
+            dtype,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
+            dropout_prob,
+            num_head,
+            num_kv_heads,
+            seqlen,
+            seqlen,
+            hidden,
+            None,  # no window
+            cp_size > 1,
+        ):
+            pytest.skip(f"No FusedAttn backend found")
+
+        # make sure the mesh even divides cp and tp axis
         if num_head % kv_groups != 0 or (num_head // kv_groups) % tp_size != 0:
             pytest.skip(f"Skipping {kv_groups=} not multiple of {data_shape=} or {tp_size=}")
 
