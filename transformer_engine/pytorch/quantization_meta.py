@@ -11,8 +11,8 @@ import torch
 
 import transformer_engine_torch as tex
 
-from fp8 import get_fp8_te_dtype
-from tensor import QuantizedTensor, Float8Tensor
+from .fp8 import get_fp8_te_dtype
+from .tensor import QuantizedTensor, Float8Tensor
 
 from .quantization_params import Float8Params
 
@@ -24,7 +24,6 @@ class QMeta:
         if isinstance(recipe, DelayedScaling):
             self.recipe_type = DelayedScaling
             self.scale = torch.ones(num_tensors, dtype=torch.float32, device="cuda")
-            self.scale_inv = torch.ones(num_tensors, dtype=torch.float32, device="cuda")
             self.amax_history = torch.zeros(
                 recipe.amax_history_len,
                 num_tensors,
@@ -60,6 +59,14 @@ class QMeta:
         if self.recipe_type == DelayedScaling:
             return Float8Params(scale=self.scale[index],
                                 amax=self.amax_history[0][index],
-                                scale_inv=self.scale_inv[index],
                                 dtype=self.fp8_type)
+        raise NotImplementedError("Not implemented yet!")
+
+    def calibrate(self,
+                  tensor: torch.Tensor,
+                  index: int):
+        if self.recipe_type == DelayedScaling:
+            amin, amax = tensor.aminmax()
+            self.amax_history[0][index] = torch.max(-amin, amax).float()
+            return
         raise NotImplementedError("Not implemented yet!")

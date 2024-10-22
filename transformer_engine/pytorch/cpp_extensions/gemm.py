@@ -6,6 +6,7 @@
 import functools
 from typing import Optional, Tuple, Union, List
 import torch
+from ..quantization_params import QuantizationParams
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
@@ -30,7 +31,8 @@ def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
     workspace: torch.Tensor,
-    out_dtype: tex.DType,
+    out_dtype: torch.dtype,
+    quantization_params: Optional[QuantizationParams] = None,
     gelu: bool = False,
     accumulate: bool = False,
     out: Optional[torch.Tensor] = None,
@@ -43,8 +45,7 @@ def general_gemm(
     """GEMM supporting fp8 inputs."""
 
     empty_tensor = _empty_tensor()
-    if out_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
-        raise ValueError("FP8 output not supported")
+    assert quantization_params is None, "FP8 output not supported yet"
     if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
@@ -59,9 +60,8 @@ def general_gemm(
         B,
         False,  # transb
         out,
-        None,  # if out_index is None else fp8_meta_tensor.scale[out_index],
+        quantization_params,
         out_dtype,
-        None,  # if out_index is None else fp8_meta_tensor.amax_history[0][out_index],
         bias,
         bias_dtype,
         gelu,

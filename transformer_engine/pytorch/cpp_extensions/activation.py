@@ -9,7 +9,7 @@ import torch
 
 import transformer_engine_torch as tex
 
-from quantization_params import Float8Params
+from ..quantization_params import QuantizationParams
 from ._common import canonicalize_fp8_scales
 
 __all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
@@ -17,19 +17,14 @@ __all__ = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 
 def gelu(
     inp: torch.Tensor,
-    qparams: Float8Params,
+    qparams: QuantizationParams,
 ) -> torch.Tensor:
     """GeLU with FP8 output"""
 
     # Launch kernel
-    return torch.ops.tex_ts.gelu_ts(
+    return tex.gelu(
         inp,
-        qparams.scale,
-        qparams.amax,
-        qparams.scale_inv,
-        0,
-        qparams.dtype,
-    )
+        qparams)
 
 
 def relu(

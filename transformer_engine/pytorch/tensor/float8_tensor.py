@@ -8,18 +8,18 @@ from typing import Any, Dict, Optional, Tuple
 import warnings
 
 import torch
+from torch._prims_common import is_contiguous
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
 from ..constants import TE_DType as torch_to_transformer_engine_dtype
 from ..cpp_extensions.transpose import fp8_cast_transpose_fused
 from ..cpp_extensions.cast import (
-    cast_from_fp8,
     cast_to_fp8,
 )
 from ..fp8 import FP8GlobalStateManager
 from ..utils import devices_match
-from ..quantization_params import QuantizationParams
+from ..quantization_params import Float8Params, QuantizationParams
 from .quantized_tensor import QuantizationParamsProxy, QuantizedTensor
 
 aten = torch.ops.aten
@@ -39,7 +39,6 @@ class Float8ParamsProxy(QuantizationParamsProxy):
         return Float8Params(
                     self.meta.scale[self.index],
                     self.meta.amax[0][self.index],
-                    self.meta.scale_inv[self.index],
                     self.dtype)
 
 def _make_fp8_attr_property_funcs(name: str) -> Any:
@@ -120,56 +119,24 @@ class _ToFloat8Func(torch.autograd.Function):
     def forward(
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: torch.Tensor,
-        scale: torch.Tensor,
-        amax: torch.Tensor,
-        scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
+        qparams: Float8Params,
         rowwise_usage: bool = True,
         columnwise_usage: bool = True,
-        *,
         proxy: Optional[Float8ParamsProxy] = None,
     ) -> Float8Tensor:
 
         # Tensor attributes
-        dtype = tensor.dtype
-        if dtype not in (torch.float32, torch.bfloat16, torch.float16):
-            dtype = torch.float32
-        device = tensor.device
-        if device.type != "cuda":
-            device = torch.device("cuda")
+        if not tensor.is_cuda:
+            tensor = tensor.cuda()
 
-        # FP8 data buffer
-        data = torch.empty(tensor.size(), dtype=torch.uint8, device=device)
+        if isinstance(tensor, QuantizedTensor):
+            tensor = tensor.dequantize()
 
-        # Check scale
-        if not devices_match(scale.device, device) or scale.dtype != dtype:
-            scale = scale.to(device=device, dtype=torch.float32)
-
-        # Check scale-inverse
-        if not devices_match(scale_inv.device, device) or scale_inv.dtype != dtype:
-            scale_inv = scale_inv.to(device=device, dtype=torch.float32)
-
-        # Transpose cache
-        data_transpose = None
-        if columnwise_usage:
-            data_transpose = torch.empty(
-                (data.size(-1), data.numel() // data.size(-1)),
-                dtype=torch.uint8,
-                device=tensor.device,
-            )
-
-        # Construct FP8 tensor
-        out = Float8Tensor(
-            data=data,
-            fp8_scale_inv=scale_inv,
-            fp8_dtype=fp8_dtype,
-            dtype=dtype,
-            data_transpose=data_transpose,
-            proxy=proxy,
-        )
-
-        # Cast to FP8 tensor
-        out.quantize_(tensor, scale=scale, amax=amax)
+        out = tex.generic_cast(tensor,
+                               qparams,
+                               rowwise_usage,
+                               columnwise_usage,
+                               proxy)
 
         return out
 
@@ -205,9 +172,7 @@ class _IdentityFunc(torch.autograd.Function):
         # Construct new tensor if constructor kwargs are provided
         default_kwargs = dict(
             data=tensor._data,
-            fp8_meta=tensor._fp8_meta,
-            fp8_meta_forward=tensor._fp8_meta_forward,
-            fp8_meta_index=tensor._fp8_meta_index,
+            proxy=tensor._proxy,
             fp8_dtype=tensor._fp8_dtype,
             fp8_scale_inv=tensor._scale_inv,
             dtype=tensor.dtype,
@@ -233,7 +198,7 @@ class _ViewFunc(torch.autograd.Function):
     def forward(
         ctx,
         tensor: torch.Tensor,
-        shape: Tuple[int] = None,
+        shape: Optional[Tuple[int]] = None,
     ) -> torch.Tensor:
 
         # Return input tensor if shape is not provided
@@ -243,6 +208,8 @@ class _ViewFunc(torch.autograd.Function):
 
         # Construct new tensor if shape is provided
         if isinstance(tensor, Float8Tensor):
+            if tensor._data is None:
+                return tensor
             return Float8Tensor.make_like(
                 tensor,
                 data=tensor._data.view(*shape),
@@ -256,6 +223,8 @@ class _ViewFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
 
         if isinstance(grad, Float8Tensor):
+            if grad._data is None:
+                return grad, None
             dgrad = Float8Tensor.make_like(
                 grad,
                 data=grad._data.view(ctx.shape),
@@ -275,7 +244,7 @@ class _ReshapeFunc(torch.autograd.Function):
     def forward(
         ctx,
         tensor: torch.Tensor,
-        shape: Tuple[int] = None,
+        shape: Optional[Tuple[int]] = None,
     ) -> torch.Tensor:
 
         # Return input tensor if shape is not provided
@@ -285,6 +254,8 @@ class _ReshapeFunc(torch.autograd.Function):
 
         # Construct new tensor if shape is provided
         if isinstance(tensor, Float8Tensor):
+            if tensor._data is None:
+                return tensor
             return Float8Tensor.make_like(
                 tensor,
                 data=tensor._data.reshape(*shape),
@@ -298,6 +269,8 @@ class _ReshapeFunc(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
 
         if isinstance(grad, Float8Tensor):
+            if grad._data is None:
+                return grad, None
             dgrad = Float8Tensor.make_like(
                 grad,
                 data=grad._data.reshape(ctx.shape),
@@ -321,15 +294,8 @@ class Float8Tensor(QuantizedTensor):
     fp8_attrs: dict, optional
                FP8 metadata, primarily managed by Float8Tensor. If
                provided, all other FP8 configuration is ignored.
-    fp8_meta: dict, optional
+    proxy: FP8ParamsProxy, optional
               FP8 metadata object, primarily managed by TE modules.
-    fp8_meta_forward: bool, default = `True`
-                      Whether to access the FP8 metadata for the
-                      forward pass. Ignored if fp8_meta is not
-                      provided.
-    fp8_meta_index: int, optional
-                    Index to access in FP8 meta tensors. Required if
-                    fp8_meta is provided and otherwise ignored.
     fp8_dtype: transformer_engine_torch.DType, default = kFloat8E4M3
                FP8 format.
     fp8_scale_inv: torch.Tensor
@@ -365,16 +331,6 @@ class Float8Tensor(QuantizedTensor):
         proxy: Optional[Float8ParamsProxy] = None,
         fp8_attrs: Optional[Dict[str, Any]] = None,
     ):
-        # Check that data buffer is valid
-        if data.element_size() != 1:
-            raise ValueError(
-                f"Float8Tensor requires data buffer with 8-bit dtype (got dtype={data.dtype})"
-            )
-        if data.requires_grad:
-            raise ValueError("Float8Tensor requires non-differentiable data buffer")
-        if not data.is_cuda:
-            data = data.cuda()
-
         # Initialize tensor object
         self = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -401,27 +357,9 @@ class Float8Tensor(QuantizedTensor):
         self._proxy = proxy
 
         # FP8 dtype
-        assert fp8_dtype in (
-            TE_DType.kFloat8E4M3,
-            TE_DType.kFloat8E5M2,
-        ), f"Unsupported fp8_dtype {fp8_dtype}."
         self._fp8_dtype = fp8_dtype
 
         # FP8 scale-inverse
-        if fp8_scale_inv.numel() != 1:
-            raise ValueError(
-                "Attempted to initialize Float8Tensor with invalid scale-inverse tensor"
-            )
-        if fp8_scale_inv.dim() != 1:
-            fp8_scale_inv = fp8_scale_inv.reshape(1)
-        if (
-            not devices_match(fp8_scale_inv.device, self._data.device)
-            or fp8_scale_inv.dtype != torch.float32
-        ):
-            fp8_scale_inv = fp8_scale_inv.to(
-                device=self._data.device,
-                dtype=torch.float32,
-            )
         self._scale_inv = fp8_scale_inv
 
         # FP8 transpose cache
@@ -474,27 +412,14 @@ class Float8Tensor(QuantizedTensor):
         # Make sure FP8 data is in expected format
         data = self._data
         assert data is not None
-        if data.device.type != "cuda":
-            data = data.cuda()
-        if not data.is_contiguous():
-            data = data.contiguous()
-        if data.dim() != 2:
-            data = data.view(1, -1)
 
         # Cast from FP8
-        out = cast_from_fp8(
-            data.view(1, -1),
-            None,  # fp8_meta_tensor
-            None,  # fp8_tensor
-            self._fp8_dtype,
-            dtype,
-            scale_inv=self._scale_inv,
+        return tex.cast_from_fp8(data,
+                                 self._scale_inv,
+                                 self._fp8_dtype,
+                                 dtype,
+                                 0
         )
-
-        # Make sure output is in expected format
-        if out.size() != self.size():
-            out = out.view(self.size())
-        return out
 
     def from_float8(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -509,8 +434,6 @@ class Float8Tensor(QuantizedTensor):
         self,
         tensor: torch.Tensor,
         *,
-        scale: Optional[torch.Tensor] = None,
-        amax: Optional[torch.Tensor] = None,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> Float8Tensor:
         """Update FP8 data
@@ -675,13 +598,10 @@ class Float8Tensor(QuantizedTensor):
             f"Invalid quantization params type: {type(params)}"
         return _ToFloat8Func.apply(
             tensor,
-            params.scale,
-            params.amax,
-            params.scale_inv,
-            params.dtype,
+            params,
             rowwise_usage,
             columnwise_usage,
-            proxy=proxy,
+            proxy,
         )
 
     def detach(self) -> Float8Tensor:
@@ -691,23 +611,34 @@ class Float8Tensor(QuantizedTensor):
             fp8_attrs=self._fp8_attrs,
         )
 
-    def update_usage(self, rowwise=True, columnwise=True):
-        if rowwise:
+    def _create_transpose(self):
+        data = self._data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        self._transpose = tex.fp8_transpose(self._data, self._fp8_dtype, out=self._transpose)
+        self._transpose_invalid = False
+
+    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+        assert rowwise_usage or columnwise_usage, \
+               "Could not disable all usages of the tensor"
+        if rowwise_usage:
             assert self._data is not None, \
                    "Rowwise usage of the tensor was already disabled"
         else:
-            if not columnwise or (self._transpose is not None and
-                                  not self._transpose_invalid):
-                self._data = None
-        if columnwise:
-            assert (self._transpose is not None and
-                    not self._transpose_invalid) or self._data is not None, \
-                   "The tensor does not hold any data anymore"
+            if self._transpose is None or self._transpose_invalid:
+                self._create_transpose()
+            self._data = None
+        if columnwise_usage:
+            if self._transpose is None or self._transpose_invalid:
+                assert self._data is not None, \
+                       "The tensor does not hold any data anymore"
+                self._create_transpose()
         else:
             self._transpose = None
             self._transpose_invalid = True
 
     def clone(self) -> Float8Tensor:
+        assert self._data is not None
         data = self._data.detach().clone()
         data_transpose = None
         if self._transpose is not None:
@@ -742,129 +673,6 @@ class Float8Tensor(QuantizedTensor):
             self,
             {"data": self._data.detach().contiguous(memory_format=memory_format)},
         )
-
-    def transpose_2d(
-        self,
-        *,
-        force_compute: bool = False,
-        fill_cache: bool = False,
-        noop_flag: Optional[torch.Tensor] = None,
-        cache: Optional[bool] = None,
-    ) -> torch.Tensor:
-        """
-        2D transpose with caching support.
-
-        Parameters
-        ----------
-        force_compute: bool, default = `False`
-                       Force computation of transpose. Otherwise use
-                       cached values, if possible.
-        fill_cache: bool, default = `False`
-                    Cache output tensor for future function calls.
-        noop_flag: torch.Tensor, optional
-                   float32 flag indicating whether to avoid updating
-                   cached values, if possible.
-        cache: bool, deprecated
-
-        """
-
-        # Handle deprecated cache kwarg
-        if cache is not None:
-            msg = (
-                "cache kwarg for Float8Tensor.transpose_2d is deprecated, "
-                "please use force_compute and fill_cache instead"
-            )
-            warnings.warn(msg, DeprecationWarning)
-            if cache:
-                force_compute = False
-                fill_cache = True
-            else:
-                force_compute = True
-                fill_cache = False
-
-        # Need to compute transpose if cache is invalid
-        need_compute = (
-            force_compute
-            or (self._transpose is None)
-            or self._transpose_invalid
-            or (noop_flag is not None)
-        )
-
-        # Return cached transpose if possible
-        if not need_compute:
-            assert self._transpose is not None
-            return self._transpose
-
-        # Allocate output if needed
-        data = self._data.contiguous().reshape(-1, self.size(-1))
-        out: Optional[torch.Tensor] = self._transpose
-        if out is None:
-            out = torch.empty(
-                (data.size(1), data.size(0)),
-                dtype=torch.uint8,
-                device=data.device,
-            )
-            noop_flag = None
-        else:
-            self._transpose_invalid = False
-
-        # Apply transpose kernel
-        fp8_dtype = self._fp8_dtype
-        if noop_flag is None:
-            tex.fp8_transpose_noalloc(data, out, fp8_dtype)
-        else:
-            noop_flag = noop_flag.to(dtype=torch.float32, device=data.device)
-            tex.fp8_transpose_noalloc_noop(data, out, noop_flag, fp8_dtype)
-
-        # Fill cache if needed
-        if fill_cache:
-            self._transpose = out
-            self._transpose_invalid = False
-
-        return out
-
-    @torch.no_grad()
-    def cast_transpose_(
-        self,
-        tensor: torch.Tensor,
-        noop_flag: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Cast from tensor and populate transpose cache
-
-        Tensor is reshaped as a 2D matrix.
-
-        Parameters
-        ----------
-        tensor: torch.Tensor
-                Tensor to copy from. Must have same dimensions as
-                destination tensor.
-        noop_flag: torch.Tensor, optional
-                   float32 flag indicating whether to avoid updating
-                   destination tensor.
-
-        """
-        if self._transpose is None:
-            self._transpose = torch.empty(
-                (self.size(-1), self.numel() // self.size(-1)),
-                dtype=torch.uint8,
-                device=self.device,
-            )
-        self.quantize_(tensor, noop_flag=noop_flag)
-
-    @torch.no_grad()
-    def reset_fp8_meta_scale_inv(self) -> None:
-        """Replace FP8 meta tensor scale-inverse with cached value
-
-        The FP8 meta tensor scale_inv entry corresponding to this
-        tensor is replaced with the scale_inv value used to construct
-        the tensor.
-
-        """
-        assert self._fp8_meta is not None, "FP8 meta tensors not found."
-        fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(
-            forward=self._fp8_meta_forward,
-        )
-        self._fp8_meta[fp8_meta_key].scale_inv[self._fp8_meta_index].copy_(self._scale_inv[0])
 
     def to_dtype(self, dtype: torch.dtype) -> Float8Tensor:
         """Create `Float8Tensor` with given nominal dtype
@@ -960,10 +768,6 @@ class Float8Tensor(QuantizedTensor):
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
 
-        # Check whether grad is required
-        if self.requires_grad != tensor.requires_grad:
-            self.requires_grad_(requires_grad=tensor.requires_grad)
-
         # Just copy FP8 data if other tensor is Float8Tensor
         if isinstance(tensor, Float8Tensor):
             if (  # pylint: disable=too-many-boolean-expressions
@@ -987,42 +791,20 @@ class Float8Tensor(QuantizedTensor):
                 super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
             self._data = tensor._data
             self._fp8_attrs = tensor._fp8_attrs
+            if self.requires_grad != tensor.requires_grad:
+                self.requires_grad_(requires_grad=tensor.requires_grad)
             return
 
-        # Reallocate FP8 data if needed
-        if (
-            self.size() != tensor.size()
-            or self.stride() != tensor.stride()
-            or self.dtype != tensor.dtype
-            or self.layout != tensor.layout
-            or not devices_match(self.device, new_device)
-        ):
-            self._data = torch.empty_like(
-                tensor,
-                dtype=torch.uint8,
-                device=new_device,
-            )
-            dummy_tensor = torch.Tensor._make_wrapper_subclass(
-                Float8Tensor,
-                self._data.size(),
-                strides=self._data.stride(),
-                storage_offset=self._data.storage_offset(),
-                dtype=tensor.dtype,
-                layout=self._data.layout,
-                requires_grad=tensor.requires_grad,
-                device=self._data.device,
-            )
-            super(Float8Tensor, type(self)).data.__set__(self, dummy_tensor)
-            if self._transpose is not None:
-                self._transpose = torch.empty(
-                    (self._data.size(-1), self._data.numel() // self._data.size(-1)),
-                    dtype=torch.uint8,
-                    device=self.device,
-                )
-            self._transpose_invalid = True
+        assert self._proxy is not None, "Can't quantize without a proxy"
 
-        # Copy values from other tensor
-        self.quantize_(tensor)
+        self.data = Float8Tensor.quantize(tensor,
+                                          self._proxy.get_quantization_params(),
+                                          rowwise_usage=self._data is not None,
+                                          columnwise_usage=self._transpose is not None,
+                                          proxy=self._proxy)
+
+        if self.requires_grad != tensor.requires_grad:
+            self.requires_grad_(requires_grad=tensor.requires_grad)
 
     # Cast to FP8 when setting Float8Tensor.data
     data = property(_get_data, _set_data)

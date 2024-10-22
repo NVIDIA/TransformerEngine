@@ -96,47 +96,39 @@ class _Linear(torch.autograd.Function):
         # Cast input to expected dtype
         inputmat = cast_if_needed(inp, activation_dtype)
 
-        if not fp8 or fp8_meta["recipe"].override_linear_precision.wgrad:
-            inputmat_no_fp8 = inputmat
+        inputmat_no_fp8 = inputmat
+
+        backward_needs_input = (
+            is_grad_enabled
+            and weight.requires_grad
+        )
+        own_quantized_input = not isinstance(inputmat, QuantizedTensor)
 
         if fp8:
-            if not isinstance(inputmat, QuantizedTensor):
-                backward_needs_input = (
-                    not fp8_meta["recipe"].override_linear_precision.wgrad
-                    and is_grad_enabled
-                    and weight.requires_grad
-                    and not sequence_parallel
-                )
+            if own_quantized_input:
                 meta = fp8_meta["scaling_fwd"]
+                backward_needs_fp8_input = (backward_needs_input and 
+                                            not fp8_meta["recipe"].override_linear_precision.wgrad)
                 inputmat = meta.quantize(inputmat, tex.FP8FwdTensors.GEMM1_INPUT,
-                                         columnwise = backward_needs_input)
+                                         columnwise = backward_needs_fp8_input)
 
         # Column Parallel Linear
         if parallel_mode == "column" and sequence_parallel:
-            inputmat_total, _ = gather_along_first_dim(inputmat, tp_group)
+            inputmat_total, _ = gather_along_first_dim(inputmat, tp_group, columnwise=False)
         else:
             inputmat_total = inputmat
 
         # Initialize FP8 weights if needed
         weight_fp8 = weight
         if fp8:
-            if isinstance(weight, Float8Tensor):
-                # Make sure transpose cache is valid, if present
-                # Note: Transpose cache may have been invalidated
-                # externally, e.g. by optimizer.
-                # TODO: Do we actually need this?
-                if weight._transpose is not None:
-                    weight.transpose_2d(
-                        fill_cache=True,
-                        noop_flag=skip_fp8_weight_update,
-                    )
-            else:
+            if not isinstance(weight, QuantizedTensor):
                 # FP8 cast to workspace buffer
                 update_workspace = is_first_microbatch is None or is_first_microbatch
                 weight_fp8 = module.get_fp8_workspace(
                     tensor=weight,
-                    fp8_meta_forward=True,
-                    fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+                    quantization_params=fp8_meta["scaling_fwd"].get_quantization_params(
+                        tex.FP8FwdTensors.GEMM1_WEIGHT
+                    ),
                     cache_name=(None if is_first_microbatch is None else "weight"),
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
@@ -151,16 +143,8 @@ class _Linear(torch.autograd.Function):
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
         if not fp8 and fp8_calibration:
-            # amax of input
-            amin, amax = inputmat_total.aminmax()
-            fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_INPUT] = torch.max(
-                -amin, amax
-            ).float()
-            # amax of weight
-            amin, amax = weight.aminmax()
-            fp8_meta["scaling_fwd"].amax_history[0][tex.FP8FwdTensors.GEMM1_WEIGHT] = torch.max(
-                -amin, amax
-            ).float()
+            fp8_meta["scaling_fwd"].calibrate(inputmat_total, tex.FP8FwdTensors.GEMM1_INPUT)
+            fp8_meta["scaling_fwd"].calibrate(weight, tex.FP8FwdTensors.GEMM1_WEIGHT)
 
         if fp8_output:
             meta_tensor = fp8_meta["scaling_fwd"]
@@ -202,20 +186,20 @@ class _Linear(torch.autograd.Function):
 
         if is_grad_enabled:
             saved_inputmat = None
-            if weight.requires_grad:
-                if fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad:
+            if backward_needs_input:
+                if own_quantized_input and isinstance(inputmat, QuantizedTensor):
                     inputmat.update_usage(rowwise=False)
+                if fp8 and not fp8_meta["recipe"].override_linear_precision.wgrad:
                     saved_inputmat = inputmat
                 else:
                     saved_inputmat = inputmat_no_fp8
 
-                if cpu_offloading:
-                    if fp8 and weight_fp8 is not None:
-                        weight_fp8.weight_offloading = True
-                    weight.weight_offloading = True
+            if cpu_offloading:
+                weight_fp8.weight_offloading = True
+                weight.weight_offloading = True
 
-                    if saved_inputmat is not None:
-                        saved_inputmat.activation_offloading = True
+                if saved_inputmat is not None:
+                    saved_inputmat.activation_offloading = True
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights

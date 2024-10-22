@@ -7,6 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <optional>
 #include "common.h"
 
 /***************************************************************************************************
@@ -235,9 +236,7 @@ std::tuple<std::vector<at::Tensor>, std::vector<at::Tensor>> fused_multi_cast_tr
     std::vector<int> scale_indices, std::vector<int> amax_indices,
     std::vector<int> scale_inv_indices, transformer_engine::DType otype);
 
-at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype);
-
-void fp8_transpose_noalloc(at::Tensor input, at::Tensor output, transformer_engine::DType otype);
+at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype, std::optional<at::Tensor> output = std::nullopt);
 
 void fp8_transpose_noalloc_noop(at::Tensor input, at::Tensor output, at::Tensor noop,
                                 transformer_engine::DType otype);
@@ -366,7 +365,11 @@ at::Tensor rmsnorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight, fl
 
 namespace transformer_engine::pytorch {
 
-py::handle cast(const at::Tensor& tensor, py::handle quantization_params);
+py::handle cast(const at::Tensor& tensor,
+                py::handle quantization_params,
+                bool rowwise_usage,
+                bool columnwise_usage,
+                py::handle proxy);
 
 }  // namespace transformer_engine::pytorch
 

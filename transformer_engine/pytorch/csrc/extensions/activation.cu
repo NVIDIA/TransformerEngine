@@ -6,7 +6,8 @@
 
 #include "extensions.h"
 
-at::Tensor gelu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
+at::Tensor gelu(at::Tensor input,
+                at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
                 transformer_engine::DType otype) {
   using namespace transformer_engine;
 

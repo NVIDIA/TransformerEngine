@@ -13,6 +13,7 @@
 #include "../comm_gemm_overlap.h"
 #include "../extensions.h"
 #include "object.h"
+#include "pybind11/cast.h"
 #include "pytorch/csrc/common.h"
 
 namespace transformer_engine::pytorch {
@@ -229,8 +230,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V",
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fp8_transpose_noalloc", &fp8_transpose_noalloc, "Transpose with FP8 I/O",
+        py::arg("input"), py::arg("dtype"),
+        py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
   m.def("fp8_transpose_noalloc_noop", &fp8_transpose_noalloc_noop,
         "Transpose with FP8 I/O with noop option.", py::call_guard<py::gil_scoped_release>());

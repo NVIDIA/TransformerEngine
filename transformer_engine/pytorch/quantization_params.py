@@ -14,17 +14,14 @@ class QuantizationParams:
 class Float8Params(QuantizationParams):
     scale: torch.Tensor
     amax: torch.Tensor
-    scale_inv: torch.Tensor
     dtype: TE_DType
 
     def __init__(self,
                  scale: torch.Tensor,
                  amax: torch.Tensor,
-                 scale_inv: torch.Tensor,
                  dtype: TE_DType):
         super().__init__()
         self.scale = scale
         self.amax = amax
-        self.scale_inv = scale_inv
         self.dtype = dtype
 
