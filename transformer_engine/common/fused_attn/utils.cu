@@ -369,8 +369,9 @@ __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
 
 // convert cu_seqlens_padded to offsets
 template <class OFFSETS_T>
-__device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
-                                                  int64_t max_b, int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
+__device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_group,
+                                                  int64_t actual_b, int64_t max_b, int64_t h,
+                                                  int64_t hg, int64_t d_qk, int64_t d_v,
                                                   const int32_t *cu_seqlens_q_padded,
                                                   const int32_t *cu_seqlens_kv_padded,
                                                   OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
@@ -424,8 +425,8 @@ __device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_g
 }
 
 __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
-                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
-                                             const int32_t *cu_seqlens_q_padded,
+                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
+                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
                                              void *offsets_v, void *offsets_o) {
