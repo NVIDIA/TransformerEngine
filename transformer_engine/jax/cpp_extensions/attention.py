@@ -279,7 +279,12 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             if get_cudnn_version() >= (9, 6, 0):
                 softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
             else:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
+                softmax_shape = (
+                    *batch_shape,
+                    attn_heads,
+                    q_max_seqlen,
+                    config.max_segments_per_seq,
+                )
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f"Unsupported {backend=}")
