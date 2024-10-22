@@ -369,14 +369,11 @@ __global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
 
 // convert cu_seqlens_padded to offsets
 template <class OFFSETS_T>
-__device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_group,
-                                                  int64_t actual_b, int64_t max_b, int64_t h,
-                                                  int64_t hg, int64_t d_qk, int64_t d_v,
-                                                  const int32_t *cu_seqlens_q_padded,
-                                                  const int32_t *cu_seqlens_kv_padded,
-                                                  OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
-                                                  OFFSETS_T *offsets_v, OFFSETS_T *offsets_o,
-						  OFFSETS_T *offsets_s) {
+__device__ void cu_seqlens_padded_to_offsets_impl(
+    NVTE_QKV_Layout_Group layout_group, int64_t actual_b, int64_t max_b, int64_t h, int64_t hg,
+    int64_t d_qk, int64_t d_v, const int32_t *cu_seqlens_q_padded,
+    const int32_t *cu_seqlens_kv_padded, OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
+    OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < actual_b + 1) {
     offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
@@ -436,14 +433,14 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
         layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int32_t *>(offsets_q), reinterpret_cast<int32_t *>(offsets_k),
         reinterpret_cast<int32_t *>(offsets_v), reinterpret_cast<int32_t *>(offsets_o),
-	reinterpret_cast<int32_t *>(offsets_s));
+        reinterpret_cast<int32_t *>(offsets_s));
   } else {
     assert(offset_dtype == DType::kInt64 && "expect int64");
     cu_seqlens_padded_to_offsets_impl<int64_t>(
         layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int64_t *>(offsets_q), reinterpret_cast<int64_t *>(offsets_k),
         reinterpret_cast<int64_t *>(offsets_v), reinterpret_cast<int64_t *>(offsets_o),
-	reinterpret_cast<int64_t *>(offsets_s));
+        reinterpret_cast<int64_t *>(offsets_s));
   }
 }
 
