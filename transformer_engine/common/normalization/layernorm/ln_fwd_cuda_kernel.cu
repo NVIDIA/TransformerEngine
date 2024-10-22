@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "ln_fwd_kernels.cuh"
-#include "ln_kernel_traits.h"
 #include "../common.h"
+#include "../kernel_traits.h"
+#include "ln_fwd_kernels.cuh"
 
 using namespace transformer_engine::normalization;
 

@@ -6,7 +6,8 @@
 
 #include "../common.h"
 #include "rmsnorm_bwd_kernels.cuh"
-#include "rmsnorm_kernel_traits.h"
+/* #include "rmsnorm_kernel_traits.h" */
+#include "../kernel_traits.h"
 
 using namespace transformer_engine::rmsnorm;
 
@@ -16,8 +17,8 @@ template <typename weight_t, typename input_t, typename output_t, typename compu
 void launch_tuned_(LaunchParams<BwdParams> &launch_params,
                    const bool configure_params) {  // NOLINT(*)
   using Kernel_traits =
-      rmsnorm::Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
-                             CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
+      normalization::Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
+                                   CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
   auto kernel = &rmsnorm_bwd_tuned_kernel<Kernel_traits>;
 
   if (configure_params) {
@@ -58,10 +59,10 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params,
                                 stream);
   }
 
-  using Kernel_traits_f =
-      Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t, output_t, compute_t, index_t,
-                             32 * 32,  // THREADS_PER_CTA
-                             BYTES_PER_LDG_FINAL>;
+  using Kernel_traits_f = normalization::Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t,
+                                                                output_t, compute_t, index_t,
+                                                                32 * 32,  // THREADS_PER_CTA
+                                                                BYTES_PER_LDG_FINAL>;
 
   auto kernel_f = &rmsnorm::rmsnorm_bwd_finalize_tuned_kernel<Kernel_traits_f>;
   kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(
@@ -76,8 +77,9 @@ void launch_general_(LaunchParams<BwdParams> &launch_params,
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
   // Instantiate kernel
-  using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
-                                      1, WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
+  using Kernel_traits =
+      normalization::Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE, 1,
+                                   WARPS_M, WARPS_N, BYTES_PER_LDG_MAIN>;
   auto kernel = &rmsnorm_bwd_general_kernel<Kernel_traits>;
 
   // Configure kernel params

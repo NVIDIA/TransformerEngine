@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "ln_bwd_kernels.cuh"
-#include "ln_kernel_traits.h"
 #include "../common.h"
+#include "../kernel_traits.h"
+#include "ln_bwd_kernels.cuh"
 
 using namespace transformer_engine::normalization;
 
@@ -58,9 +58,9 @@ void launch_tuned_(LaunchParams<BwdParams> &launch_params,
   }
 
   using Kernel_traits_f = normalization::Kernel_traits_finalize<HIDDEN_SIZE, weight_t, input_t,
-                                                             output_t, compute_t, index_t,
-                                                             32 * 32,  // THREADS_PER_CTA
-                                                             BYTES_PER_LDG_FINAL>;
+                                                                output_t, compute_t, index_t,
+                                                                32 * 32,  // THREADS_PER_CTA
+                                                                BYTES_PER_LDG_FINAL>;
 
   auto kernel_f = &normalization::ln_bwd_finalize_tuned_kernel<Kernel_traits_f>;
   kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(

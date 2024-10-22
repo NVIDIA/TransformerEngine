@@ -6,7 +6,8 @@
 
 #include "../common.h"
 #include "rmsnorm_fwd_kernels.cuh"
-#include "rmsnorm_kernel_traits.h"
+/* #include "rmsnorm_kernel_traits.h" */
+#include "../kernel_traits.h"
 
 using namespace transformer_engine::rmsnorm;
 
@@ -15,8 +16,9 @@ template <typename weight_t, typename input_t, typename output_t, typename compu
           int BYTES_PER_LDG>
 void launch_tuned_(LaunchParams<FwdParams> &launch_params,
                    const bool configure_params) {  // NOLINT(*)
-  using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
-                                      CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG>;
+  using Kernel_traits =
+      normalization::Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
+                                   CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG>;
   auto kernel = &rmsnorm_fwd_tuned_kernel<Kernel_traits>;
 
   if (configure_params) {
@@ -61,8 +63,9 @@ template <typename weight_t, typename input_t, typename output_t, typename compu
           typename index_t, int HIDDEN_SIZE, int WARPS_M, int WARPS_N, int BYTES_PER_LDG>
 void launch_general_(LaunchParams<FwdParams> &launch_params,
                      const bool configure_params) {  // NOLINT(*)
-  using Kernel_traits = Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE,
-                                      1, WARPS_M, WARPS_N, BYTES_PER_LDG>;
+  using Kernel_traits =
+      normalization::Kernel_traits<weight_t, input_t, output_t, compute_t, index_t, HIDDEN_SIZE, 1,
+                                   WARPS_M, WARPS_N, BYTES_PER_LDG>;
   auto kernel = &rmsnorm_fwd_general_kernel<Kernel_traits>;
   auto ceil_div = [](int x, int y) -> int { return (x + y - 1) / y; };
 
