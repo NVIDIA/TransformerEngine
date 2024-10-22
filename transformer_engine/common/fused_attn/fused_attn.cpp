@@ -80,7 +80,18 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const int sm_arch_ = cuda::sm_arch(device_id);
   NVTE_CHECK(q_dtype == kv_dtype, "Q and KV must have the same data type.");
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
+
+  // For ragged offsets we only support 32-bit prior to cuDNN 9.5
+  // Only used when THD format is requested.
+  const bool requires_64bit_ragged_offset =
+      (qkv_format == NVTE_THD && fused_attn::get_ragged_offset_dtype(
+                                     layout_group, num_attn_heads, num_gqa_groups, max_seqlen_q,
+                                     max_seqlen_kv, head_dim_qk, head_dim_v) == DType::kInt64);
+  const bool supported_ragged_offset_size =
+      (!requires_64bit_ragged_offset || cudnn_runtime_version >= 90500);
+
   if (((q_dtype == NVTEDType::kNVTEFloat8E4M3) || (q_dtype == NVTEDType::kNVTEFloat8E5M2)) &&
       (sm_arch_ >= 90) && (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) &&
       (((cudnn_runtime_version >= 8900) && (qkv_layout == NVTE_QKV_Layout::NVTE_T3HD) &&
@@ -91,7 +102,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
          (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) &&
         ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-         (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK))))) {
+         (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)))) &&
+      !requires_64bit_ragged_offset) {
     if (cudnn_runtime_version >= 8900) {
       backend = NVTE_Fused_Attn_Backend::NVTE_FP8;
     } else {
@@ -118,7 +130,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_layout == NVTE_QKV_Layout::NVTE_BS3HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BS2HD) ||
          (qkv_layout == NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD)) &&
-        ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0))) {
+        ((window_size_left == -1) && (window_size_right == -1 || window_size_right == 0)) &&
+        !requires_64bit_ragged_offset) {
       flag_m512 = true;
     }
     if (  // architecture
@@ -183,7 +196,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
               max_seqlen_q == max_seqlen_kv)) &&
             dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_SBHD)))))) {
+             qkv_format == NVTE_QKV_Format::NVTE_SBHD))))) &&
+        // check 64-bit ragged offset support
+        (supported_ragged_offset_size)) {
       flag_arb = true;
     }
     if (((max_seqlen_q > 512) || (max_seqlen_kv > 512)) && (flag_arb == true)) {
