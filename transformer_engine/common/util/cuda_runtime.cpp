@@ -82,6 +82,9 @@ int sm_count(int device_id) {
 }
 
 bool supports_multicast(int device_id) {
+#if CUDART_VERSION >= 12010
+  // NOTE: This needs to be guarded at compile time because the
+  //       CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED enum is not defined in earlier CUDA versions.
   static std::vector<bool> cache(num_devices(), false);
   static std::vector<std::once_flag> flags(num_devices());
   if (device_id < 0) {
@@ -89,23 +92,18 @@ bool supports_multicast(int device_id) {
   }
   NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
   auto init = [&]() {
-    int cuda_runtime_version;
-    NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&cuda_runtime_version));
-    if (cuda_runtime_version >= 12010) {
-      // On CUDA 12.1+, we can directly query driver for the multicast support property
-      CUdevice cudev;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
-      int result;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
-                                  CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
-      cache[device_id] = static_cast<bool>(result);
-    } else {
-      // Otherwise, we can assume CUDA Multicast is supported with CUDA 12.0+ and SM arch 9.0+
-      cache[device_id] = (cuda_runtime_version >= 12000 && sm_arch() > 90);
-    }
+    CUdevice cudev;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &cudev, device_id);
+    int result;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &result,
+                                CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, cudev);
+    cache[device_id] = static_cast<bool>(result);
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
+#else
+  return false;
+#endif
 }
 
 const std::string &include_directory(bool required) {
