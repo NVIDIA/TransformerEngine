@@ -24,8 +24,8 @@
 #define ExtComm const char *
 #endif
 
-#define ExtAllgatherOp std::function<void(void *, size_t, void *, size_t, ExtComm)>
-#define ExtBarrierOp std::function<void(ExtComm)>
+using ExtAllgatherOp = std::function<void(void *, size_t, void *, size_t, ExtComm)>;
+using ExtBarrierOp = std::function<void(ExtComm)>;
 
 #define NVTE_MAX_REGIONS 16
 #define NVTE_MAX_SMS 32
