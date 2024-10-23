@@ -205,8 +205,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 #define NBUF 2
 
 #if CUDART_VERSION >= 12010
-  if (!transformer_engine::getenv<bool>("UB_SKIPMC")
-      && transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
+  if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
+      transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
     // multicast init only for TP ops (____2 operations)
     size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
     (*comm)->mc_offset = 0;
