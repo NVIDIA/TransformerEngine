@@ -20,7 +20,9 @@
 #include <utility>
 
 #include "common/util/cuda_driver.h"
+#include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
+#include "common/util/system.h"
 #include "ipcsocket.h"
 #include "userbuffers.h"
 
@@ -201,8 +203,11 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->asyncblocks = 16;
 
 #define NBUF 2
-  if ((*comm)->sm_arch >= 9 && (*comm)->ar2_nvsize > 1 &&
-      !getenv("UB_SKIPMC")) {  // multicast init only for TP ops (____2 operations)
+
+#if CUDART_VERSION >= 12010
+  if (!transformer_engine::getenv<bool>("UB_SKIPMC")
+      && transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
+    // multicast init only for TP ops (____2 operations)
     size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 1;
@@ -278,11 +283,14 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     (*comm)->_barrier((*comm)->comm_world);
     if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
+#endif
     if (!(*comm)->myrank) printf("MC NOT initialized and used\n");
     (*comm)->mc_maxsize = 0;
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 0;
+#if CUDART_VERSION >= 12010
   }
+#endif
 
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
@@ -462,6 +470,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
 
+#if CUDART_VERSION >= 12010
   if (comm->use_mc && alloc) {
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
     int myrank = comm->nvrank;
@@ -577,6 +586,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     }
 
   } else {
+#endif
     if (alloc) {
       NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
       NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
@@ -607,7 +617,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     free(tmp);
+#if CUDART_VERSION >= 12010
   }
+#endif
   comm->mem_size[hndl] = aligned_size;
 
   comm->mem_ptr[hndl] = *gpubuff;
