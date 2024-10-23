@@ -109,10 +109,12 @@ class _ToFloat8Func(torch.autograd.Function):
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
+        data: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
+        data_transpose: Optional[torch.Tensor] = None,
     ) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -125,7 +127,8 @@ class _ToFloat8Func(torch.autograd.Function):
             device = torch.device("cuda")
 
         # FP8 data buffer
-        data = torch.empty(tensor.size(), dtype=torch.uint8, device=device)
+        if data is None:
+            data = torch.empty(tensor.size(), dtype=torch.uint8, device=device)
 
         # Check scale
         if scale is None and fp8_meta is None:
@@ -140,8 +143,7 @@ class _ToFloat8Func(torch.autograd.Function):
             scale_inv = scale_inv.to(device=device, dtype=torch.float32)
 
         # Transpose cache
-        data_transpose = None
-        if with_transpose_cache:
+        if data_transpose is None and with_transpose_cache:
             data_transpose = torch.empty(
                 (data.size(-1), data.numel() // data.size(-1)),
                 dtype=torch.uint8,
@@ -172,7 +174,7 @@ class _ToFloat8Func(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
-        return grad, None, None, None, None, None, None, None
+        return grad, None, None, None, None, None, None, None, None, None
 
 
 class _IdentityFunc(torch.autograd.Function):
@@ -688,10 +690,12 @@ class Float8Tensor(QuantizedTensor):
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
+        data: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
+        data_transpose: Optional[torch.Tensor] = None,
     ):
         """Construct Float8Tensor from plain PyTorch tensor"""
         return _ToFloat8Func.apply(
@@ -700,10 +704,12 @@ class Float8Tensor(QuantizedTensor):
             fp8_meta_forward,
             fp8_meta_index,
             fp8_dtype,
+            data,
             scale,
             amax,
             scale_inv,
             with_transpose_cache,
+            data_transpose,
         )
 
     def detach(self) -> Float8Tensor:
