@@ -1233,10 +1233,10 @@ struct TensorList {
 
 template <typename dtype, int tile_size, bool causal, bool softmax_lse_in_packed_format,
           QKVFormat format, int max_tensors>
-__global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tensors> tensors,
-                                                float *lse, int *cu_seqlens, int batch,
-                                                int num_heads, int dim_per_head, int lse_seqlen,
-                                                int cp_size, int rank, int start) {
+__global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> tensors, float *lse,
+                                            int *cu_seqlens, int batch, int num_heads,
+                                            int dim_per_head, int lse_seqlen, int cp_size, int rank,
+                                            int start) {
   extern __shared__ int cu_seqlens_s[];
   int full_num;
   int num_total_tokens;
@@ -1247,7 +1247,6 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
         cu_seqlens_s[i] = cu_seqlens[i];
         cu_seqlens_s[i + batch + 1] = cu_seqlens_s[i] / 2;
       }
-
     } else {
       for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
         cu_seqlens_s[i] = cu_seqlens[i];
@@ -1255,13 +1254,12 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
     }
     __syncthreads();
     num_total_tokens = cu_seqlens_s[batch];
-  } else {
+  } else if constexpr (format == QKVFormat::SBHD) {
     num_total_tokens = lse_seqlen * batch;
   }
 
   if constexpr (causal) {
     full_num = min(start + tensors.start_tensor_this_launch, max(rank + 1, start));
-
   } else {
     full_num = start + tensors.start_tensor_this_launch;
   }
@@ -1272,7 +1270,6 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
   int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
 
   size_t idx_out, idx_lse, idx_per_step_out;
-
   int seq_id_half = -1;
   int token_id_half;
   float lse_temp_half;
@@ -1282,7 +1279,6 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
   for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
     int head_id = blockIdx.y;
     int seq_id;
-
     if constexpr (format == QKVFormat::THD) {
       seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
       if constexpr (softmax_lse_in_packed_format) {
@@ -1301,7 +1297,7 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
         int col = token_id - cu_seqlens_s[seq_id];
         idx_lse = row * lse_seqlen + col;
       }
-    } else {
+    } else if constexpr (format == QKVFormat::SBHD) {
       int s = token_id / batch;
       seq_id = token_id - s * batch;
       idx_lse = seq_id * lse_seqlen * num_heads + head_id * lse_seqlen + s;
@@ -1323,7 +1319,7 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
               break;
             }
           }
-        } else {
+        } else if constexpr (format == QKVFormat::BSHD) {
           int block_num = token_id / (lse_seqlen / 2);
           if (block_num & 1) {
             seq_id_half = block_num / 2;
@@ -1333,9 +1329,9 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
         if (seq_id_half != -1) {
           token_id_half = token_id - cu_seqlens_s[seq_id_half + 1 + batch + 1];
           if constexpr (softmax_lse_in_packed_format) {
-            if (format == QKVFormat::THD) {
+            if constexpr (format == QKVFormat::THD) {
               idx_per_step_lse_half = head_id * lse_seqlen / 2 + token_id_half;
-            } else {
+            } else if constexpr (format == QKVFormat::BSHD) {
               idx_per_step_lse_half = head_id * lse_seqlen * batch / 2 + token_id_half;
             }
           } else {
@@ -1349,7 +1345,7 @@ __global__ void fused_out_correction_kernel_thd(dtype *out, TensorList<max_tenso
         }
       }
 
-      else {
+      else if constexpr (format == QKVFormat::SBHD) {
         seq_id_half = -1;
         if (token_id >= lse_seqlen * batch / 2) {
           int lse_seqlen_half = lse_seqlen / 2;
@@ -1420,7 +1416,6 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
     num_heads = out.size(2);
     dim_per_head = out.size(3);
     total_tokens = lse_seqlen * batch;
-
   } else if (qkv_format == "thd") {
     total_tokens = out.size(0);
     num_heads = out.size(1);
@@ -1451,42 +1446,42 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
     }
     if (qkv_format == "sbhd") {
       if (causal) {
-        fused_out_correction_kernel_thd<dtype, tile, true, softmax_lse_in_packed_format,
-                                        QKVFormat::SBHD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, true, softmax_lse_in_packed_format,
+                                    QKVFormat::SBHD, max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1) * 2, at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       } else {
-        fused_out_correction_kernel_thd<dtype, tile, false, softmax_lse_in_packed_format,
-                                        QKVFormat::SBHD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, false, softmax_lse_in_packed_format,
+                                    QKVFormat::SBHD, max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       }
     } else if (qkv_format == "bshd") {
       if (causal) {
-        fused_out_correction_kernel_thd<dtype, tile, true, softmax_lse_in_packed_format,
-                                        QKVFormat::BSHD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, true, softmax_lse_in_packed_format,
+                                    QKVFormat::BSHD, max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1) * 2, at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       } else {
-        fused_out_correction_kernel_thd<dtype, tile, false, softmax_lse_in_packed_format,
-                                        QKVFormat::BSHD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, false, softmax_lse_in_packed_format,
+                                    QKVFormat::BSHD, max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       }
     } else {
       if (causal) {
-        fused_out_correction_kernel_thd<dtype, tile, true, softmax_lse_in_packed_format,
-                                        QKVFormat::THD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, true, softmax_lse_in_packed_format, QKVFormat::THD,
+                                    max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1) * 2, at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       } else {
-        fused_out_correction_kernel_thd<dtype, tile, false, softmax_lse_in_packed_format,
-                                        QKVFormat::THD, max_tensors>
+        fused_out_correction_kernel<dtype, tile, false, softmax_lse_in_packed_format,
+                                    QKVFormat::THD, max_tensors>
             <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
