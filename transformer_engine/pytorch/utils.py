@@ -313,5 +313,4 @@ def torch_get_autocast_gpu_dtype() -> torch.dtype:
     TORCH_MINOR = int(torch.__version__.split(".")[1])
     if TORCH_MAJOR == 2 and TORCH_MINOR >= 4:
         return torch.get_autocast_dtype("cuda")
-    else:
-        return torch.get_autocast_gpu_dtype()
+    return torch.get_autocast_gpu_dtype()
