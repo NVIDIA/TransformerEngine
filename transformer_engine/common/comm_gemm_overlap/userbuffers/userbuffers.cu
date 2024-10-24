@@ -392,14 +392,14 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   if (threadIdx.x == 0 && lastSM) *reduceidptr = reduce_id;
 }  // fp16 reduce-scatter kernel (out of place)
 
-#if __CUDA_ARCH__ >= 900
+#if __CUDA_ARCH__ >= 900 && CUDART_VERSION >= 12010
 // All MC kernels here
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        float4 *mc_ptr) {
+                                        float4 *mc_ptr, const uint64_t ub_timeout) {
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
 
@@ -417,7 +417,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&(myptr[targetgpu]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (clock64() - s > ub_timeout) {
         UB_PRINT("Reduce-scatter: SM %d [%d]: expecting %d got %d", blockIdx.x, threadIdx.x,
                  reduce_id, *flag);
         break;
@@ -484,7 +484,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (clock64() - s > 2ull * ub_timeout) {
         UB_PRINT("Allgather: SM %d [%d]: expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                  *flag);
         break;
@@ -741,7 +741,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        float4 *mc_ptr) {}
+                                        float4 *mc_ptr, const uint64_t ub_timeout) {}
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc_rs_oop(const int op, const int flagoffset,
