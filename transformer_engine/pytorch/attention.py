@@ -134,7 +134,7 @@ flash_attn_cuda_bwd = None
 try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
             """ "pip install flash-attn".""",
@@ -158,7 +158,7 @@ else:
         _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
         _flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
-    elif get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+    elif torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
@@ -183,7 +183,7 @@ _flash_attn_3_installation_steps = """\
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
-    if get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             _flash_attn_3_installation_steps,
