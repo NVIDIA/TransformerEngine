@@ -150,12 +150,12 @@ CommOverlapBase::~CommOverlapBase() {
 ** Bulk GEMM + COMM
 ** This function assumes the communication input is pre-copied to _ubuf
 */
-void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                   bool transb, const TensorWrapper &D, const TensorWrapper &bias,
-                                   const TensorWrapper &pre_gelu_out,
-                                   const TensorWrapper &workspace, bool grad, bool accumulate,
+void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper &B,
+                                   bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                   TensorWrapper &pre_gelu_out,
+                                   TensorWrapper &workspace, bool grad, bool accumulate,
                                    bool use_split_accumulator, CommOverlapType comm_type,
-                                   const TensorWrapper &rs_output, cudaStream_t stream_main) {
+                                   TensorWrapper &rs_output, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -198,10 +198,10 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
 ** Split FPROP GEMM + ReduceScatter
 */
 void CommOverlapBase::atomic_gemm_overlap_rs(
-    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-    const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-    bool gemm_overlap, const TensorWrapper &rs_output, cudaStream_t stream_main) {
+    TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+    TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+    TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
+    bool gemm_overlap, TensorWrapper &rs_output, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -296,12 +296,12 @@ void CommOverlapBase::atomic_gemm_overlap_rs(
 /*
 ** Split FPROP GEMM + ReduceScatter
 */
-void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                                       bool transb, const TensorWrapper &D,
-                                       const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-                                       const TensorWrapper &workspace, bool grad, bool accumulate,
+void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrapper &B,
+                                       bool transb, TensorWrapper &D,
+                                       TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                                       TensorWrapper &workspace, bool grad, bool accumulate,
                                        bool use_split_accumulator, bool gemm_overlap,
-                                       const TensorWrapper &rs_output, cudaStream_t stream_main) {
+                                       TensorWrapper &rs_output, cudaStream_t stream_main) {
   // Get GEMM dimensions
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
@@ -533,10 +533,10 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
 *phases.
 */
 void CommOverlapP2PBase::atomic_gemm_overlap_ag(
-    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-    const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-    const TensorWrapper &B_copy, cudaStream_t stream_main) {
+    TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+    TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+    TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
+    TensorWrapper &B_copy, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -637,13 +637,13 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
 ** in each rank to be in the contiguous memory space after all ring exchange
 *phases.
 */
-void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
-                                          const TensorWrapper &B, bool transb,
-                                          const TensorWrapper &D, const TensorWrapper &bias,
-                                          const TensorWrapper &pre_gelu_out,
-                                          const TensorWrapper &workspace, bool grad,
+void CommOverlapP2PBase::split_overlap_ag(TensorWrapper &A, bool transa,
+                                          TensorWrapper &B, bool transb,
+                                          TensorWrapper &D, TensorWrapper &bias,
+                                          TensorWrapper &pre_gelu_out,
+                                          TensorWrapper &workspace, bool grad,
                                           bool accumulate, bool use_split_accumulator,
-                                          const TensorWrapper &B_copy, cudaStream_t stream_main) {
+                                          TensorWrapper &B_copy, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -817,10 +817,10 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 ** Split ReduceScatter + GEMM using P2P communication
 */
 void CommOverlapP2PBase::atomic_gemm_overlap_rs(
-    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-    const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-    const TensorWrapper &rs_output, cudaStream_t stream_main) {
+    TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+    TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+    TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
+    TensorWrapper &rs_output, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -885,10 +885,10 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
 ** Split ReduceScatter + GEMM using P2P communication
 */
 void CommOverlapP2PBase::split_overlap_rs(
-    const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-    const TensorWrapper &D, const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
-    const TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
-    const TensorWrapper &rs_output, cudaStream_t stream_main) {
+    TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+    TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+    TensorWrapper &workspace, bool grad, bool accumulate, bool use_split_accumulator,
+    TensorWrapper &rs_output, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;

@@ -37,7 +37,7 @@ enum class CommOverlapAlgo {
 };
 
 class CommOverlapCore {
- public:
+ protected:
   static inline communicator *_ub_comm{nullptr};
   static inline bool _comm_created{false};
 
@@ -49,10 +49,10 @@ class CommOverlapCore {
   int _num_comm_sm;
   int _cga_size;
   int _use_ce;
+  int _ub_reg;
   bool _atomic_gemm{false};
   bool _is_p2p{false};
 
-  int _ub_reg;
   TensorWrapper _ubuf;
   TensorWrapper _counter;
   float *_ubuf_scale_inv;
@@ -61,6 +61,7 @@ class CommOverlapCore {
   std::vector<cudaStream_t> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm;
 
+ public:
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                   int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
@@ -81,51 +82,52 @@ class CommOverlapCore {
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
- public:
+ protected:
   int _rs_kernel_type;
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
 
+ public:
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
                   int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
                   int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
 
-  ~CommOverlapBase();
+  virtual ~CommOverlapBase();
 
   /*
   ** Bulk GEMM + COMM
   ** This function assumes the communication input is pre-copied to _ubuf
   */
-  void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                    const TensorWrapper &D, const TensorWrapper &bias,
-                    const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace, bool grad,
+  void bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+                    TensorWrapper &D, TensorWrapper &bias,
+                    TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                     bool accumulate, bool use_split_accumulator, CommOverlapType comm_type,
-                    const TensorWrapper &rs_output, cudaStream_t stream_main);
+                    TensorWrapper &rs_output, cudaStream_t stream_main);
 
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
-                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void atomic_gemm_overlap_rs(TensorWrapper &A, bool transa, TensorWrapper &B,
+                              bool transb, TensorWrapper &D, TensorWrapper &bias,
+                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                               bool grad, bool accumulate, bool use_split_accumulator,
-                              bool gemm_overlap, const TensorWrapper &rs_output,
+                              bool gemm_overlap, TensorWrapper &rs_output,
                               cudaStream_t stream_main);
 
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                        const TensorWrapper &D, const TensorWrapper &bias,
-                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void split_overlap_rs(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias,
+                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                         bool grad, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
-                        const TensorWrapper &rs_output, cudaStream_t stream_main);
+                        TensorWrapper &rs_output, cudaStream_t stream_main);
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {
- public:
+ protected:
   bool _is_reduce_scatter{false};
   bool _use_multiatomic_ag{false};
 
@@ -142,6 +144,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
 
+ public:
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
@@ -149,7 +152,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      int comm_cga_size = 1, int num_comm_sm = 1, bool set_sm_margin = false,
                      bool use_ce = true, bool atomic_gemm = false, bool aggregate = false);
 
-  ~CommOverlapP2PBase();
+  virtual ~CommOverlapP2PBase();
 
   /*
   ** Split AllGather + AtomicGEMM using P2P communication
@@ -158,11 +161,11 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
-                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void atomic_gemm_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B,
+                              bool transb, TensorWrapper &D, TensorWrapper &bias,
+                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                               bool grad, bool accumulate, bool use_split_accumulator,
-                              const TensorWrapper &B_copy, cudaStream_t stream_main);
+                              TensorWrapper &B_copy, cudaStream_t stream_main);
 
   /*
   ** Split AllGather + GEMM using P2P communication
@@ -171,29 +174,29 @@ class CommOverlapP2PBase : public CommOverlapCore {
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                        const TensorWrapper &D, const TensorWrapper &bias,
-                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void split_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias,
+                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                         bool grad, bool accumulate, bool use_split_accumulator,
-                        const TensorWrapper &B_copy, cudaStream_t stream_main);
+                        TensorWrapper &B_copy, cudaStream_t stream_main);
 
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
-                              bool transb, const TensorWrapper &D, const TensorWrapper &bias,
-                              const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void atomic_gemm_overlap_rs(TensorWrapper &A, bool transa, TensorWrapper &B,
+                              bool transb, TensorWrapper &D, TensorWrapper &bias,
+                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                               bool grad, bool accumulate, bool use_split_accumulator,
-                              const TensorWrapper &rs_output, cudaStream_t stream_main);
+                              TensorWrapper &rs_output, cudaStream_t stream_main);
 
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
-                        const TensorWrapper &D, const TensorWrapper &bias,
-                        const TensorWrapper &pre_gelu_out, const TensorWrapper &workspace,
+  void split_overlap_rs(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias,
+                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                         bool grad, bool accumulate, bool use_split_accumulator,
-                        const TensorWrapper &rs_output, cudaStream_t stream_main);
+                        TensorWrapper &rs_output, cudaStream_t stream_main);
 };  // CommOverlapP2PBase
 
 }  // namespace transformer_engine
