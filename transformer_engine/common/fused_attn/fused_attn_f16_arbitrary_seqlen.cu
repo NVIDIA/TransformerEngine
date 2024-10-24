@@ -314,8 +314,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias) : std::make_tuple(nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_qkvo_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o) : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
-      auto offset_s_tuple = (is_ragged && cudnn_runtime_version >= 90600) ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
+      auto offset_qkvo_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o)
+                                         : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
+      auto offset_s_tuple = (is_ragged && cudnn_runtime_version >= 90600)
+                                ? std::make_tuple(offset_stats)
+                                : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
@@ -325,8 +328,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-      auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple,
-                                         bias_tuple, padding_tuple, offset_qkvo_tuple, offset_s_tuple, dropout_tuple);
+      auto return_tuple =
+          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple,
+                         padding_tuple, offset_qkvo_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -751,8 +755,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_qkvo_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o) : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
-      auto offset_s_tuple = (is_ragged && cudnn_runtime_version >= 90600) ? std::make_tuple(offset_stats) : std::make_tuple(nullptr);
+      auto offset_qkvo_tuple = is_ragged ? std::make_tuple(offset_q, offset_k, offset_v, offset_o)
+                                         : std::make_tuple(nullptr, nullptr, nullptr, nullptr);
+      auto offset_s_tuple = (is_ragged && cudnn_runtime_version >= 90600)
+                                ? std::make_tuple(offset_stats)
+                                : std::make_tuple(nullptr);
       auto dropout_tuple = is_dropout ? std::make_tuple(dropout_seed, dropout_offset)
                                       : std::make_tuple(nullptr, nullptr);
 
@@ -762,8 +769,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-      auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple,
-                                         padding_tuple, offset_qkvo_tuple, offset_s_tuple, dropout_tuple);
+      auto return_tuple =
+          std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, bias_tuple, padding_tuple,
+                         offset_qkvo_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
