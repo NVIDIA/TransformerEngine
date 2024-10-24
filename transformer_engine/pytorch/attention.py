@@ -158,7 +158,9 @@ else:
         _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
         _flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
-    elif torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+    elif (
+        torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
+    ):
         fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
