@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "rmsnorm.h"
+#include "../layer_norm/norms.h"
 #include "rmsnorm_bwd_kernels.cuh"
 #include "rmsnorm_kernel_traits.h"
 
@@ -132,27 +132,27 @@ void launch_general_(LaunchParams<BwdParams> &launch_params,
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define REGISTER_BWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW,   \
-                                    WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE) \
-  void rmsnorm_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(              \
-      LaunchParams<BwdParams> &launch_params, const bool configure_params) {                 \
-    launch_tuned_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M,  \
-                  WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE>(launch_params,             \
-                                                                  configure_params);         \
-  }                                                                                          \
-  static BwdTunedRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                          \
-      reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                       \
+#define REGISTER_BWD_TUNED_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW,        \
+                                    WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE)      \
+  void rmsnorm_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                   \
+      LaunchParams<BwdParams> &launch_params, const bool configure_params) {                      \
+    launch_tuned_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M,       \
+                  WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE>(launch_params,                  \
+                                                                  configure_params);              \
+  }                                                                                               \
+  static NormRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE, NVTE_NORM_TYPE::RMS_BWD_TE, true> \
+      reg_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                            \
           rmsnorm_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
 
-#define REGISTER_BWD_GENERAL_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, \
-                                      BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE)                     \
-  void rmsnorm_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                \
-      LaunchParams<BwdParams> &launch_params, const bool configure_params) {                     \
-    launch_general_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, WARPS_M, WARPS_N,         \
-                    BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);     \
-  }                                                                                              \
-  static BwdGeneralRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE>                            \
-      reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                         \
+#define REGISTER_BWD_GENERAL_LAUNCHER(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N,   \
+                                      BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE)                       \
+  void rmsnorm_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                  \
+      LaunchParams<BwdParams> &launch_params, const bool configure_params) {                       \
+    launch_general_<WTYPE, ITYPE, OTYPE, CTYPE, uint32_t, HIDDEN_SIZE, WARPS_M, WARPS_N,           \
+                    BYTES_PER_LDG, BYTES_PER_LDG_FINALIZE>(launch_params, configure_params);       \
+  }                                                                                                \
+  static NormRegistrar<WTYPE, ITYPE, OTYPE, CTYPE, HIDDEN_SIZE, NVTE_NORM_TYPE::RMS_BWD_TE, false> \
+      reg_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE(                           \
           rmsnorm_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
