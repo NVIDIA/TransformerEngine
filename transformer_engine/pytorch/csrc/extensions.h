@@ -527,8 +527,8 @@ class CommOverlapHelper : torch::CustomClassHolder {
   CommOverlapHelper();
 
   CommOverlapHelper(c10d::ProcessGroup *world_group,
-                    std::optional<c10d::ProcessGroup *> intra_node_group_holder,
-                    std::optional<c10d::ProcessGroup *> inter_node_group_holde);
+                    std::optional<c10d::ProcessGroup *> intra_node_group,
+                    std::optional<c10d::ProcessGroup *> inter_node_group);
 
   ~CommOverlapHelper();
 

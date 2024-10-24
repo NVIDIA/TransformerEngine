@@ -104,111 +104,26 @@ def initialize_ub(
     dtype : torch.dtype = torch.bfloat16
             non-FP8 data type of the communication buffer when `use_fp8 = False`
     ub_cfgs: dict = None
-             Configuration dictionary containing a Userbuffers options for each GEMM layer in a
-             te.TransformerLayer. Layers that are not configured by the user fall back on the
-             default options below:
+             Configuration dictionary with the structure
+             ```
              {
-                 "qkv_fprop": {
-                     "method": "ring_exchange",
-                     "is_reduce_scatter": False,
-                     "num_sm": 1,
-                     "cga_size": 1,
-                     "set_sm_margin": False,
-                     "num_splits": tp_size,
-                     "aggregate": False,
-                     "atomic_gemm": False,
-                     "use_ce": True,
-                     "fp8_buf": True,
-                 },
-                 "qkv_dgrad": {
-                     "method": "bulk",
-                     "is_reduce_scatter": False,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "fp8_buf": True,
-                 },
-                 "qkv_wgrad": {
-                     "method": "bulk",
-                     "is_reduce_scatter": True,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "fp8_buf": True,
-                 },
-                 "proj_fprop": {
-                     "method": "pipeline",
-                     "is_reduce_scatter": True,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "num_splits": 4,
-                     "atomic_gemm": False,
-                     "fp8_buf": False,
-                 },
-                 "proj_dgrad": {
-                     "method": "ring_exchange",
-                     "is_reduce_scatter": False,
-                     "num_sm": 1,
-                     "cga_size": 1,
-                     "set_sm_margin": False,
-                     "num_splits": tp_size,
-                     "aggregate": False,
-                     "atomic_gemm": False,
-                     "use_ce": True,
-                     "fp8_buf": True,
-                 },
-                 "fc1_fprop": {
-                     "method": "ring_exchange",
-                     "is_reduce_scatter": False,
-                     "num_sm": 1,
-                     "cga_size": 1,
-                     "set_sm_margin": False,
-                     "num_splits": tp_size,
-                     "aggregate": False,
-                     "atomic_gemm": False,
-                     "use_ce": True,
-                     "fp8_buf": True,
-                 },
-                 "fc1_dgrad": {
-                     "method": "bulk",
-                     "is_reduce_scatter": False,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "fp8_buf": True,
-                 },
-                 "fc1_wgrad": {
-                     "method": "bulk",
-                     "is_reduce_scatter": True,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "fp8_buf": False,
-                 },
-                 "fc2_fprop": {
-                     "method": "pipeline",
-                     "is_reduce_scatter": True,
-                     "num_sm": 16,
-                     "cga_size": 2,
-                     "set_sm_margin": True,
-                     "num_splits": 4,
-                     "atomic_gemm": False,
-                     "fp8_buf": False,
-                 },
-                 "fc2_dgrad": {
-                     "method": "ring_exchange",
-                     "is_reduce_scatter": False,
-                     "num_sm": 1,
-                     "cga_size": 1,
-                     "set_sm_margin": False,
-                     "num_splits": tp_size,
-                     "aggregate": False,
-                     "atomic_gemm": False,
-                     "use_ce": True,
-                     "fp8_buf": True,
-                 },
+                <gemm_name> : {
+                    "method": <"ring_exchange" or "pipeline">,
+                    "is_reduce_scatter": bool,
+                    "num_sm": int,
+                    "cga_size": int,
+                    "set_sm_margin": bool,
+                    "num_splits": int,
+                    "aggregate": bool,
+                    "atomic_gemm": bool,
+                    "use_ce": bool,
+                    "fp8_buf": bool,
+                }
              }
+             ```
+             for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
+             "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
+             "fc2_fprop", "fc2_dgrad"]`.
     bootstrap_backend : str = None
                         `torch.distributed` communication backend for the all-gather, broadcast and
                         barrier collectives during Userbuffers initialization. Not all backends are
