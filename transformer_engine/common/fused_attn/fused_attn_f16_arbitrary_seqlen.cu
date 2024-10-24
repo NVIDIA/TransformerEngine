@@ -73,10 +73,11 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                      (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
+  const auto cudnn_runtime_version = cudnnGetVersion();
 
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
-  if (is_ragged) {
+  if (is_ragged && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
     // replace batch size and maximum sequence lengths with maximum token counts
     // for query and key/value so the graph is static within each quantization bucket
@@ -84,7 +85,6 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
     s_q = max_t_q;
     s_kv = max_t_kv;
   }
-  const auto cudnn_runtime_version = cudnnGetVersion();
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   try {
@@ -458,7 +458,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const int sm_arch_ = cuda::sm_arch(device_id);
   // keep original batch size because cu_seqlens are created with [b+1] shape
   int64_t actual_b = b;
-  if (is_ragged) {
+  if (is_ragged && cudnn_runtime_version >= 90600) {
     NVTE_CHECK(is_padding, "Ragged QKV input requires padding or padding_causal mask!");
     // replace batch size and maximum sequence lengths with maximum token counts
     // for query and key/value so the graph is static within each quantization bucket
@@ -658,7 +658,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                   .set_causal_mask_bottom_right(is_bottom_right)
                                   .set_attn_scale(attn_scale);
 
-      if (is_ragged) {
+      if (is_ragged && cudnn_runtime_version >= 90600) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
       }
 
