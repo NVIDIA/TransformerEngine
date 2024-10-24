@@ -242,73 +242,16 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def _reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat, inverse: bool):
-    match tensor_format:
-        case QKVFormat.SBHD:
-            seq_dim = 0
-        case QKVFormat.BSHD:
-            seq_dim = 1
-        case _:
-            raise ValueError(f"{tensor_format=} is not supported for causal load balancing.")
-
-    if cp_size == 1:
-        return tensor
-
-    if cp_size % 2 != 0:
-        raise ValueError(f"{cp_size=} must be a multiple of 2.")
-
-    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
-    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
-        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
-
-    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D]
-    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
-    ori_tensor_shape = tensor.shape
-    tensor = tensor.reshape(
-        (
-            *ori_tensor_shape[:seq_dim],
-            2 * cp_size,
-            ori_tensor_shape[seq_dim] // (2 * cp_size),
-            *ori_tensor_shape[seq_dim + 1 :],
-        )
-    )
-
-    parts = []
-    if not inverse:
-        for cp_rank in range(cp_size):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-    else:
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 4 * cp_rank
-            index = jnp.array([base, base + 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 2 * cp_size - 1 - 4 * cp_rank
-            index = jnp.array([base, base - 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-
-    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
-    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
-    combined = jnp.stack(parts, axis=seq_dim)
-
-    return combined.reshape(ori_tensor_shape)
-
-
 def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
     """Reorders a tensor for load balancing the compute of causal attention."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, False)
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
 
 
 def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
     """Inverse operation of `reorder_causal_load_balancing`."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, True)
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
 def fused_attn(
