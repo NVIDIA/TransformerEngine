@@ -1152,7 +1152,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
 
-        skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        if FP8GlobalStateManager.fp8_graph_capturing():
+            skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
+        else:
+            skip_fp8_weight_update = None
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 

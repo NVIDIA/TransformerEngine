@@ -720,16 +720,22 @@ class CudaRNGStatesTracker:
     """
 
     def __init__(self):
-        # Map from a string name to the cuda rng state.
-        self.states_ = {}
-        # Seeds are just for book keeping and ensure no seed is set twice.
-        self.seeds_ = set()
+        self.reset()
+
+    def is_initialized(self):
+        """Checks if the internal RNG state has been set wirth set_states()."""
+        return self._is_initialized
 
     def reset(self):
-        """
-        Set to the initial state (no tracker).
-        """
+        """Set to the initial state (no tracker)."""
+
+        # Track if initialized.
+        self._is_initialized = False
+
+        # Map from a string name to the cuda rng state.
         self.states_ = {}
+
+        # Seeds are just for book keeping and ensure no seed is set twice.
         self.seeds_ = set()
 
     def get_states(self) -> Dict[str, torch.Tensor]:
@@ -750,6 +756,7 @@ class CudaRNGStatesTracker:
         states: Dict[str, torch.Tensor]
                A mapping from string names to RNG states.
         """
+        self._is_initialized = True
         self.states_ = states
 
     def add(self, name: str, seed: int) -> None:
@@ -761,6 +768,7 @@ class CudaRNGStatesTracker:
         seed: int
              PyTorch seed for the RNG state.
         """
+        self._is_initialized = True
         # Check seed is not already used.
         if seed in self.seeds_:
             raise RuntimeError(f"seed {seed} already exists")
