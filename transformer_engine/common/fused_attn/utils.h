@@ -11,7 +11,6 @@
 #include <cudnn_frontend.h>
 #include <cudnn_frontend_utils.h>
 
-#include <cmath>
 #include <cstdint>
 #include <mutex>
 

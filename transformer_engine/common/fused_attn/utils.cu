@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <algorithm>
+#include <cmath>
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
@@ -375,48 +376,29 @@ __device__ void cu_seqlens_padded_to_offsets_impl(
     const int32_t *cu_seqlens_kv_padded, OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
     OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < actual_b + 1) {
-    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
-    offsets_s[tid] = h * cu_seqlens_q_padded[tid];
-    switch (layout_group) {
-      case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[tid];
-        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[tid];
-        break;
-      case NVTE_QKV_Layout_Group::NVTE_3HD:
-      case NVTE_QKV_Layout_Group::NVTE_H3D:
-        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = offsets_q[tid];
-        offsets_v[tid] = offsets_q[tid];
-        break;
-      case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
-      case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[tid];
-        offsets_v[tid] = offsets_k[tid];
-        break;
+  auto cu_seqlens_id = min(tid, actual_b);
+  if (tid <= max_b) {
+    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[cu_seqlens_id];
+    if (offsets_s != nullptr) {
+      offsets_s[tid] = h * cu_seqlens_q_padded[cu_seqlens_id];
     }
-  } else if (tid < max_b + 1) {
-    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[actual_b];
-    offsets_s[tid] = h * cu_seqlens_q_padded[actual_b];
     switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[actual_b];
-        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[actual_b];
-        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[actual_b];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[cu_seqlens_id];
         break;
       case NVTE_QKV_Layout_Group::NVTE_3HD:
       case NVTE_QKV_Layout_Group::NVTE_H3D:
-        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[actual_b];
-        offsets_k[tid] = offsets_q[tid];
-        offsets_v[tid] = offsets_q[tid];
+        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = offsets_q[cu_seqlens_id];
+        offsets_v[tid] = offsets_q[cu_seqlens_id];
         break;
       case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
       case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[actual_b];
-        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[actual_b];
-        offsets_v[tid] = offsets_k[tid];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+        offsets_v[tid] = offsets_k[cu_seqlens_id];
         break;
     }
   }
