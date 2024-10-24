@@ -162,7 +162,7 @@ def is_ffi_enabled():
     """
     Helper function checking if XLA Custom Call with FFI is enabled
     """
-    is_supported = jax_version_meet_requirement("0.4.31")
+    is_supported = jax_version_meet_requirement("0.4.35")
     # New APIs with FFI are enabled by default
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
     assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
