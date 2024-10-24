@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <algorithm>
+#include <cmath>
 
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
@@ -353,66 +354,75 @@ __global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *
 }
 
 // convert cu_seqlens to actual_seqlens
-__global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu_seqlens,
+__global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
+                                             int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b) {
+  if (tid < actual_b) {
     q_seqlens[tid] = q_cu_seqlens[tid + 1] - q_cu_seqlens[tid];
     kv_seqlens[tid] = kv_cu_seqlens[tid + 1] - kv_cu_seqlens[tid];
+  } else if (tid < max_b) {
+    q_seqlens[tid] = 0;
+    kv_seqlens[tid] = 0;
   }
 }
 
 // convert cu_seqlens_padded to offsets
 template <class OFFSETS_T>
-__device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_group, int64_t b,
-                                                  int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
-                                                  const int32_t *cu_seqlens_q_padded,
-                                                  const int32_t *cu_seqlens_kv_padded,
-                                                  OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
-                                                  OFFSETS_T *offsets_v, OFFSETS_T *offsets_o) {
+__device__ void cu_seqlens_padded_to_offsets_impl(
+    NVTE_QKV_Layout_Group layout_group, int64_t actual_b, int64_t max_b, int64_t h, int64_t hg,
+    int64_t d_qk, int64_t d_v, const int32_t *cu_seqlens_q_padded,
+    const int32_t *cu_seqlens_kv_padded, OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
+    OFFSETS_T *offsets_v, OFFSETS_T *offsets_o, OFFSETS_T *offsets_s) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-  if (tid < b + 1) {
-    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
+  auto cu_seqlens_id = min(tid, actual_b);
+  if (tid <= max_b) {
+    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[cu_seqlens_id];
+    if (offsets_s != nullptr) {
+      offsets_s[tid] = h * cu_seqlens_q_padded[cu_seqlens_id];
+    }
     switch (layout_group) {
       case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[tid];
-        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[tid];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[cu_seqlens_id];
         break;
       case NVTE_QKV_Layout_Group::NVTE_3HD:
       case NVTE_QKV_Layout_Group::NVTE_H3D:
-        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = offsets_q[tid];
-        offsets_v[tid] = offsets_q[tid];
+        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = offsets_q[cu_seqlens_id];
+        offsets_v[tid] = offsets_q[cu_seqlens_id];
         break;
       case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
       case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[tid];
-        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[tid];
-        offsets_v[tid] = offsets_k[tid];
+        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+        offsets_v[tid] = offsets_k[cu_seqlens_id];
         break;
     }
   }
 }
 
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t b,
-                                             int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
-                                             const int32_t *cu_seqlens_q_padded,
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
+                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
+                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
-                                             void *offsets_v, void *offsets_o) {
+                                             void *offsets_v, void *offsets_o, void *offsets_s) {
   if (offset_dtype == DType::kInt32) {
     cu_seqlens_padded_to_offsets_impl<int32_t>(
-        layout_group, b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int32_t *>(offsets_q), reinterpret_cast<int32_t *>(offsets_k),
-        reinterpret_cast<int32_t *>(offsets_v), reinterpret_cast<int32_t *>(offsets_o));
+        reinterpret_cast<int32_t *>(offsets_v), reinterpret_cast<int32_t *>(offsets_o),
+        reinterpret_cast<int32_t *>(offsets_s));
   } else {
     assert(offset_dtype == DType::kInt64 && "expect int64");
     cu_seqlens_padded_to_offsets_impl<int64_t>(
-        layout_group, b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        layout_group, actual_b, max_b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
         reinterpret_cast<int64_t *>(offsets_q), reinterpret_cast<int64_t *>(offsets_k),
-        reinterpret_cast<int64_t *>(offsets_v), reinterpret_cast<int64_t *>(offsets_o));
+        reinterpret_cast<int64_t *>(offsets_v), reinterpret_cast<int64_t *>(offsets_o),
+        reinterpret_cast<int64_t *>(offsets_s));
   }
 }
 
@@ -448,6 +458,40 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
   }
 
   return DType::kInt32;
+}
+
+// quantize batch size
+size_t get_max_batch_size(size_t batch_size) {
+  size_t max_b = batch_size;
+  size_t log2_b = ceil(log2(batch_size));
+  // batch size is expected to be 10s-100s
+  // b = 1, ..., 32   -> max_b = 32
+  // b = 33, ..., 512 -> max_b = next power of 2
+  // otherwise        -> max_b = b
+  if (log2_b <= 5) {
+    max_b = 32;
+  } else if (log2_b <= 9) {
+    max_b = pow(2, log2_b);
+  }
+  return max_b;
+}
+
+// quantize token count
+size_t get_max_tokens(size_t num_tokens) {
+  // token count is expected to be 1k's-100k's
+  // t = 0, ..., 1024   -> max_t = 1024
+  // t = 1025, ..., 32k -> max_t = next power of 2
+  // t = 32k+1, ...     -> max_t = increment by 32k
+  size_t log2_t = ceil(log2(num_tokens));
+  size_t max_t = 0;
+  if (log2_t <= 10) {
+    max_t = 1024;
+  } else if (log2_t <= 15) {
+    max_t = pow(2, log2_t);
+  } else {
+    max_t = (num_tokens + 32767) / 32768 * 32768;
+  }
+  return max_t;
 }
 
 }  // namespace fused_attn
