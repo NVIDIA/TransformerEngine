@@ -147,6 +147,31 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
     NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
     bool deterministic, int64_t window_size_left, int64_t window_size_right);
 
+struct CustomCallGemmDescriptor {
+  size_t batch;
+  size_t m;
+  size_t k;
+  size_t n;
+  size_t workspace_size;
+  DType operand_dtype;
+  DType bias_dtype;
+  DType out_dtype;
+  bool lhs_trans;
+  bool rhs_trans;
+  bool fuse_gelu;
+  bool fuse_bias;
+  bool grad;
+  bool accumulate;
+  bool use_split_accumulator;
+};
+
+pybind11::bytes PackCustomCallGemmDescriptor(size_t batch, size_t m, size_t n, size_t k,
+                                             size_t workspace_size, DType operand_dtype,
+                                             DType out_dtype, DType bias_dtype, bool lhs_trans,
+                                             bool rhs_trans, bool fuse_gelu, bool fuse_bias,
+                                             bool grad, bool accumulate,
+                                             bool use_split_accumulator);
+
 // Transpose
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
@@ -307,6 +332,20 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
+
+// GEMM
+
+void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+                   Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
+                   Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
+                   Result_Type out_amax_updated, Result_Type out_scale_updated,
+                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type workspace,
+                   bool lhs_trans, bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
+                   bool accumulate, bool use_split_accumulator);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine

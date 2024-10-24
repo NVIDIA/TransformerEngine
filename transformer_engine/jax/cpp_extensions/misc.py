@@ -81,6 +81,13 @@ def jax_dtype_to_te_dtype(jax_dtype):
     return converter.get(jax_dtype)
 
 
+def jax_dtype_is_fp8(dtype):
+    """
+    Check if the given jax.numpy.dtype is an FP8 dtype.
+    """
+    return dtypes.canonicalize_dtype(dtype) in [jnp.float8_e4m3fn, jnp.float8_e5m2]
+
+
 def get_padded_spec(arg_info):
     """
     Get padded spec for partitioning from arguments' information

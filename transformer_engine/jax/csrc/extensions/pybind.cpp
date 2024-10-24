@@ -51,6 +51,7 @@ pybind11::dict Registrations() {
       EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackward);
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
+  dict["te_gemm"] = EncapsulateFunction(Gemm);
 
   // Transpose
   dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
@@ -101,6 +102,7 @@ pybind11::dict Registrations() {
   fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
   dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
 
+  dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
   return dict;
 }
 
@@ -114,10 +116,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("pack_norm_descriptor", &PackCustomCallNormDescriptor);
   m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
   m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
+  m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
-  m.def("get_device_compute_capability", &GetDeviceComputeCapability);
+  m.def("get_device_compute_capability", &GetDeviceComputeCapability, pybind11::arg("gpu_id") = -1);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
   m.def("get_dact_dbias_ct_workspace_sizes", &GetDActDBiasCastTransposeWorkspaceSizes);
   m.def("get_dbias_ct_workspace_sizes", &GetDBiasCastTransposeWorkspaceSizes);

@@ -80,5 +80,16 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
                                     deterministic, window_size_left, window_size_right});
 }
 
+pybind11::bytes PackCustomCallGemmDescriptor(size_t batch, size_t m, size_t n, size_t k,
+                                             size_t workspace_size, DType operand_dtype,
+                                             DType bias_dtype, DType out_dtype, bool lhs_trans,
+                                             bool rhs_trans, bool fuse_gelu, bool fuse_bias,
+                                             bool grad, bool accumulate,
+                                             bool use_split_accumulator) {
+  return PackOpaque(CustomCallGemmDescriptor{batch, m, n, k, workspace_size, operand_dtype,
+                                             bias_dtype, out_dtype, lhs_trans, rhs_trans, fuse_gelu,
+                                             fuse_bias, grad, accumulate, use_split_accumulator});
+}
+
 }  // namespace jax
 }  // namespace transformer_engine

@@ -334,6 +334,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         input_name_post_fix = f"_i_{postfix}"
         weight_name_post_fix = f"_w_{postfix}"
         grad_name_post_fix = f"_g_{postfix}"
+        output_name_post_fix = f"_o_{postfix}"
 
         def generate_a_set(target_postfix):
             amax = nn_partitioning.variable_with_axes(
@@ -359,10 +360,10 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         input_amax, input_scale = generate_a_set(input_name_post_fix)
         weight_amax, weight_scale = generate_a_set(weight_name_post_fix)
         grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
+        output_amax, output_scale = generate_a_set(output_name_post_fix)
 
-        return FP8MetaPackage(
-            input_amax, input_scale, weight_amax, weight_scale, grad_amax, grad_scale
-        )
+        return FP8MetaPackage(input_amax, input_scale, weight_amax, weight_scale, grad_amax,
+                              grad_scale, output_amax, output_scale)
 
 
 class DenseGeneral(TransformerEngineBase):
