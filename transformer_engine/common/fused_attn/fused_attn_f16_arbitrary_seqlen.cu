@@ -921,11 +921,12 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
   }
 
   if (Aux_CTX_Tensors->size == 0) {
+    const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
@@ -943,7 +944,7 @@ void fused_attn_arbitrary_seqlen_fwd_qkvpacked(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen, 1};
@@ -1136,11 +1137,12 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
   }
 
   if (Aux_CTX_Tensors->size == 0) {
+    const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1158,7 +1160,7 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1349,11 +1351,12 @@ void fused_attn_arbitrary_seqlen_fwd(
   }
 
   if (Aux_CTX_Tensors->size == 0) {
+    const auto cudnn_runtime_version = cudnnGetVersion();
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
       Aux_CTX_Tensors->size = 3;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
@@ -1371,7 +1374,7 @@ void fused_attn_arbitrary_seqlen_fwd(
       Aux_CTX_Tensors->size = 2;
       Tensor *output_S = reinterpret_cast<Tensor *>(Aux_CTX_Tensors->tensors[0]);
       output_S->data.dptr = nullptr;
-      if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+      if (qkv_format == NVTE_QKV_Format::NVTE_THD && cudnn_runtime_version >= 90600) {
         output_S->data.shape = {max_tokens_q, num_attn_heads, 1};
       } else {
         output_S->data.shape = {batch, num_attn_heads, max_seqlen_q, 1};
