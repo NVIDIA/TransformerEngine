@@ -4,6 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include <algorithm>
+
 #include "../common.h"
 #include "transformer_engine/fused_attn.h"
 #include "utils.h"
@@ -337,7 +339,7 @@ cudnn_frontend::Operation ternary_pw_op_create(cudnn_frontend::Tensor const &xDe
 }
 
 // convert cu_seqlens_q to qkv/o_ragged_offset and actual_seqlens_q
-__global__ void cu_seqlens_to_offsets(size_t b, size_t h, size_t d, int32_t *cu_seqlens_q,
+__global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *cu_seqlens_q,
                                       int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
                                       int32_t *o_ragged_offset) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -362,12 +364,13 @@ __global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu
 }
 
 // convert cu_seqlens_padded to offsets
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, size_t b, size_t h,
-                                             size_t hg, size_t d_qk, size_t d_v,
-                                             int32_t *cu_seqlens_q_padded,
-                                             int32_t *cu_seqlens_kv_padded, int32_t *offsets_q,
-                                             int32_t *offsets_k, int32_t *offsets_v,
-                                             int32_t *offsets_o) {
+template <class OFFSETS_T>
+__device__ void cu_seqlens_padded_to_offsets_impl(NVTE_QKV_Layout_Group layout_group, int64_t b,
+                                                  int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
+                                                  const int32_t *cu_seqlens_q_padded,
+                                                  const int32_t *cu_seqlens_kv_padded,
+                                                  OFFSETS_T *offsets_q, OFFSETS_T *offsets_k,
+                                                  OFFSETS_T *offsets_v, OFFSETS_T *offsets_o) {
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   if (tid < b + 1) {
     offsets_o[tid] = h * d_v * cu_seqlens_q_padded[tid];
@@ -391,6 +394,60 @@ __global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group,
         break;
     }
   }
+}
+
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t b,
+                                             int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
+                                             const int32_t *cu_seqlens_q_padded,
+                                             const int32_t *cu_seqlens_kv_padded,
+                                             DType offset_dtype, void *offsets_q, void *offsets_k,
+                                             void *offsets_v, void *offsets_o) {
+  if (offset_dtype == DType::kInt32) {
+    cu_seqlens_padded_to_offsets_impl<int32_t>(
+        layout_group, b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        reinterpret_cast<int32_t *>(offsets_q), reinterpret_cast<int32_t *>(offsets_k),
+        reinterpret_cast<int32_t *>(offsets_v), reinterpret_cast<int32_t *>(offsets_o));
+  } else {
+    assert(offset_dtype == DType::kInt64 && "expect int64");
+    cu_seqlens_padded_to_offsets_impl<int64_t>(
+        layout_group, b, h, hg, d_qk, d_v, cu_seqlens_q_padded, cu_seqlens_kv_padded,
+        reinterpret_cast<int64_t *>(offsets_q), reinterpret_cast<int64_t *>(offsets_k),
+        reinterpret_cast<int64_t *>(offsets_v), reinterpret_cast<int64_t *>(offsets_o));
+  }
+}
+
+DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_attn_heads,
+                              int64_t num_gqa_groups, int64_t max_seqlen_q, int64_t max_seqlen_kv,
+                              int64_t head_dim_qk, int64_t head_dim_v) {
+  std::array<int64_t, 4> offsets_qkvo{};
+  switch (layout_group) {
+    case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
+      offsets_qkvo[0] = num_attn_heads * head_dim_qk * max_seqlen_q;
+      offsets_qkvo[1] = num_gqa_groups * head_dim_qk * max_seqlen_kv;
+      offsets_qkvo[2] = num_gqa_groups * head_dim_v * max_seqlen_kv;
+      break;
+    case NVTE_QKV_Layout_Group::NVTE_3HD:
+    case NVTE_QKV_Layout_Group::NVTE_H3D:
+      offsets_qkvo[0] = 3 * num_attn_heads * head_dim_qk * max_seqlen_q;
+      offsets_qkvo[1] = offsets_qkvo[0];
+      offsets_qkvo[2] = offsets_qkvo[0];
+      break;
+    case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
+    case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
+      offsets_qkvo[0] = num_attn_heads * head_dim_qk * max_seqlen_q;
+      offsets_qkvo[1] = 2 * num_gqa_groups * head_dim_qk * max_seqlen_kv;
+      offsets_qkvo[2] = offsets_qkvo[1];
+      break;
+  }
+
+  offsets_qkvo[3] = num_attn_heads * head_dim_qk * max_seqlen_q;
+
+  size_t max_offset = *std::max_element(offsets_qkvo.begin(), offsets_qkvo.end());
+  if (max_offset > std::numeric_limits<int32_t>::max()) {
+    return DType::kInt64;
+  }
+
+  return DType::kInt32;
 }
 
 }  // namespace fused_attn
