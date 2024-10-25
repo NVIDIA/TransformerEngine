@@ -68,6 +68,9 @@ pybind11::dict Registrations() {
   dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
   dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
   dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
+  dict["te_rmsnorm_forward_ffi"] = EncapsulateFunction(RMSNormForwardHandler);
+  dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFunction(RMSNormForwardFP8Handler);
+  dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
 
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);

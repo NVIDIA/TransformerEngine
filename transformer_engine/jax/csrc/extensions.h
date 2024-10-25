@@ -214,9 +214,15 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormBackwardHandler);
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardHandler);
+
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardFP8Handler);
+
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormBackwardHandler);
 
 // Quantization
 

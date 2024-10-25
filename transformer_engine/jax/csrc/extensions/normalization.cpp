@@ -549,6 +549,76 @@ void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, 
                        sm_margin, stream);
 }
 
+Error_Type RMSNormForwardFP8FFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type gamma_buf,
+                                Buffer_Type amax_buf, Buffer_Type scale_buf,
+                                Buffer_Type scale_inv_buf, Result_Type output_buf,
+                                Result_Type rsigma_buf, Result_Type amax_out_buf,
+                                Result_Type wkspace_buf, Result_Type barrier_buf,
+                                bool zero_centered_gamma, double eps_, int64_t sm_margin_) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+  auto barrier_dtype = convert_ffi_datatype_to_te_dtype(barrier_buf->element_type());
+
+  auto *input = x_buf.untyped_data();
+  auto *weight = gamma_buf.untyped_data();
+  auto *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  auto *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+  auto *scale_inv = reinterpret_cast<float *>(scale_inv_buf.untyped_data());
+  auto *output = output_buf->untyped_data();
+  auto *rsigma = rsigma_buf->untyped_data();
+  auto *amax_out = amax_out_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+  auto *barrier = barrier_buf->untyped_data();
+  NVTE_CHECK(amax_out == amax,
+             "amax not bound to amax_out in TE/JAX RMSNormForwardFP8FFI primitive");
+
+  void *bias = nullptr;
+  void *mu = nullptr;
+
+  auto x_dims = x_buf.dimensions();
+  auto gamma_dims = gamma_buf.dimensions();
+  auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  auto wkspace_dims = wkspace_buf->dimensions();
+  auto barrier_dims = barrier_buf->dimensions();
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
+
+  float eps = static_cast<float>(eps_);
+  int sm_margin = static_cast<int>(sm_margin_);
+  auto out_dtype = DType::kFloat8E4M3;
+
+  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
+                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
+                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
+                       sm_margin, stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(RMSNormForwardFP8Handler, RMSNormForwardFP8FFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // amax_out
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Ret<Buffer_Type>()      // barrier
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("eps")
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
+
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
   auto *weight = buffers[1];
@@ -582,6 +652,67 @@ void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, siz
                        wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
                        sm_margin, stream);
 }
+
+Error_Type RMSNormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type gamma_buf,
+                             Result_Type output_buf, Result_Type rsigma_buf,
+                             Result_Type wkspace_buf, Result_Type barrier_buf,
+                             bool zero_centered_gamma, double eps_, int64_t sm_margin_) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto out_dtype = in_dtype;
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+  auto barrier_dtype = convert_ffi_datatype_to_te_dtype(barrier_buf->element_type());
+
+  auto *input = x_buf.untyped_data();
+  auto *weight = gamma_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
+  auto *rsigma = rsigma_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+  auto *barrier = barrier_buf->untyped_data();
+
+  void *bias = nullptr;
+  void *mu = nullptr;
+  float *amax = nullptr;
+  float *scale = nullptr;
+  float *scale_inv = nullptr;
+
+  auto x_dims = x_buf.dimensions();
+  auto gamma_dims = gamma_buf.dimensions();
+  auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  auto wkspace_dims = wkspace_buf->dimensions();
+  auto barrier_dims = barrier_buf->dimensions();
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
+
+  float eps = static_cast<float>(eps_);
+  int sm_margin = static_cast<int>(sm_margin_);
+
+  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
+                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
+                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
+                       sm_margin, stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(RMSNormForwardHandler, RMSNormForwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Ret<Buffer_Type>()      // barrier
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("eps")
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
 
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *ograd = buffers[0];
@@ -622,6 +753,81 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
                         rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
                         dbeta_part_dtype, sm_margin, stream);
 }
+
+Error_Type RMSNormBackwardFFI(cudaStream_t stream, Buffer_Type dz_buf, Buffer_Type x_buf,
+                              Buffer_Type rsigma_buf, Buffer_Type gamma_buf, Result_Type xgrad_buf,
+                              Result_Type wgrad_buf, Result_Type wkspace_buf,
+                              Result_Type barrier_buf, Result_Type dgamma_part_buf,
+                              bool zero_centered_gamma, double eps_, int64_t sm_margin_) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+  auto barrier_dtype = convert_ffi_datatype_to_te_dtype(barrier_buf->element_type());
+  auto dgamma_part_dtype = convert_ffi_datatype_to_te_dtype(dgamma_part_buf->element_type());
+  auto dbeta_part_dtype = DType::kByte;
+
+  auto *ograd = dz_buf.untyped_data();
+  auto *rsigma = rsigma_buf.untyped_data();
+  auto *input = x_buf.untyped_data();
+  auto *weight = gamma_buf.untyped_data();
+  auto *xgrad = xgrad_buf->untyped_data();
+  auto *wgrad = wgrad_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+  auto *barrier = barrier_buf->untyped_data();
+  auto *dgamma_part = dgamma_part_buf->untyped_data();
+
+  auto x_dims = x_buf.dimensions();
+  auto gamma_dims = gamma_buf.dimensions();
+  auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  auto wkspace_dims = wkspace_buf->dimensions();
+  auto barrier_dims = barrier_buf->dimensions();
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
+
+  auto dgamma_part_dims = dgamma_part_buf->dimensions();
+  std::vector<size_t> dgamma_parts_dims_vector(dgamma_part_dims.begin(), dgamma_part_dims.end());
+  Shape dgamma_part_shape;
+  dgamma_part_shape.from_vector(dgamma_parts_dims_vector);
+  Shape dbeta_part_shape;
+  dbeta_part_shape.from_vector({0, 0});
+
+  void *mu = nullptr;
+  void *dbeta = nullptr;
+  void *dbeta_part = nullptr;
+
+  float eps = static_cast<float>(eps_);
+  int sm_margin = static_cast<int>(sm_margin_);
+
+  LayerNormBackwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, dgamma_part_shape,
+                        dbeta_part_shape, zero_centered_gamma, eps, input, in_dtype, weight,
+                        w_dtype, ograd, workspace, wkspace_dtype, barrier, barrier_dtype, mu,
+                        rsigma, xgrad, wgrad, dbeta, dgamma_part, dgamma_part_dtype, dbeta_part,
+                        dbeta_part_dtype, sm_margin, stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(RMSNormBackwardHandler, RMSNormBackwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // dz
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // rsigma
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Ret<Buffer_Type>()      // xgrad
+                                  .Ret<Buffer_Type>()      // wgrad
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Ret<Buffer_Type>()      // barrier
+                                  .Ret<Buffer_Type>()      // dgamma_part
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("eps")
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
