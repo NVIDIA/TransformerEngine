@@ -5,6 +5,7 @@
 """NVFuser functions and JIT utilities"""
 import os
 from typing import Callable, Optional, Tuple
+from functools import partial
 
 import torch
 
@@ -32,6 +33,11 @@ if torch.__version__ >= "2":
     else:
         # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
         no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
+
+if torch.__version__ >= "2.4":
+    gpu_autocast_ctx = partial(torch.amp.autocast, device_type="cuda")
+else:
+    gpu_autocast_ctx = torch.cuda.amp.autocast
 
 
 def set_jit_fusion_options() -> None:
@@ -110,7 +116,7 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
 
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         if bias is not None and bias.numel() != 0:
             return bias_gelu_fused_(inp, bias)
         return gelu_fused_(inp)
@@ -120,7 +126,7 @@ def bgrad_dgelu_fused(
     grad_output: torch.Tensor, inp: torch.Tensor, bias: torch.Tensor
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """Disable native AMP for `bgrad_dgelu_fused_`"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         if bias is not None and bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
         return None, dgelu_fused_(grad_output, inp)
@@ -161,7 +167,7 @@ def bias_dropout_add_fused_train(
 ) -> torch.Tensor:
     """Disable native AMP and enable grad for BDA"""
     with torch.enable_grad():
-        with torch.cuda.amp.autocast(enabled=False):
+        with gpu_autocast_ctx(enabled=False):
             return bias_dropout_add_fused_train_(x, bias, residual, prob)
 
 
@@ -177,7 +183,7 @@ def bias_dropout_add_fused_inference(
     x: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor, prob: float
 ) -> torch.Tensor:
     """Disable native AMP for BDA"""
-    with torch.cuda.amp.autocast(enabled=False):
+    with gpu_autocast_ctx(enabled=False):
         return bias_dropout_add_fused_inference_(x, bias, residual, prob)
 
 

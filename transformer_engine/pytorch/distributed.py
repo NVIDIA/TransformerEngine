@@ -252,17 +252,38 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-    )
+    TORCH_MAJOR = int(torch.__version__.split(".")[0])
+    TORCH_MINOR = int(torch.__version__.split(".")[1])
+    if TORCH_MAJOR == 2 and TORCH_MINOR >= 4:
+        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
+        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_ctx = torch.amp.autocast(
+            "cuda",
+            enabled=gpu_autocast_enabled,
+            dtype=gpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-    )
+        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+        cpu_autocast_ctx = torch.amp.autocast(
+            "cpu",
+            enabled=cpu_autocast_enabled,
+            dtype=cpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
+    else:
+        gpu_autocast_enabled = torch.is_autocast_enabled()
+        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
+            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
+
+        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
+        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+        cpu_autocast_ctx = torch.cpu.amp.autocast(
+            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
