@@ -337,6 +337,70 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
                        sm_margin, stream);
 }
 
+Error_Type LayerNormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type gamma_buf,
+                               Buffer_Type beta_buf, Result_Type output_buf, Result_Type mu_buf,
+                               Result_Type rsigma_buf, Result_Type wkspace_buf, 
+                               Result_Type barrier_buf, bool zero_centered_gamma, double eps_,
+                               int64_t sm_margin_) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
+  auto out_dtype = in_dtype;
+  auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
+  auto wkspace_dtype = convert_ffi_datatype_to_te_dtype(wkspace_buf->element_type());
+  auto barrier_dtype = convert_ffi_datatype_to_te_dtype(barrier_buf->element_type());
+
+  auto *input = x_buf.untyped_data();
+  auto *weight = gamma_buf.untyped_data();
+  auto *bias = beta_buf.untyped_data();
+  auto *output = output_buf->untyped_data();
+  auto *mu = mu_buf->untyped_data();
+  auto *rsigma = rsigma_buf->untyped_data();
+  auto *workspace = wkspace_buf->untyped_data();
+  auto *barrier = barrier_buf->untyped_data();
+
+  float *amax = nullptr;
+  float *scale = nullptr;
+  float *scale_inv = nullptr;
+
+  auto x_dims = x_buf.dimensions();
+  auto gamma_dims = gamma_buf.dimensions();
+  auto x_size = std::accumulate(x_dims.begin(), x_dims.end(), 1, std::multiplies<>());
+  auto gamma_size = std::accumulate(gamma_dims.begin(), gamma_dims.end(), 1, std::multiplies<>());
+  auto hidden_size = gamma_size;
+  auto batch_size = x_size / gamma_size;
+
+  auto wkspace_dims = wkspace_buf->dimensions();
+  auto barrier_dims = barrier_buf->dimensions();
+  auto wkspace_size =
+      std::accumulate(wkspace_dims.begin(), wkspace_dims.end(), 1, std::multiplies<>());
+  auto barrier_size =
+      std::accumulate(barrier_dims.begin(), barrier_dims.end(), 1, std::multiplies<>());
+
+  float eps = static_cast<float>(eps_);
+  int sm_margin = static_cast<int>(sm_margin_);
+
+  LayerNormForwardImpl(batch_size, hidden_size, wkspace_size, barrier_size, zero_centered_gamma,
+                       eps, input, in_dtype, weight, w_dtype, bias, output, out_dtype, workspace,
+                       wkspace_dtype, barrier, barrier_dtype, mu, rsigma, amax, scale, scale_inv,
+                       sm_margin, stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(LayerNormForwardHandler, LayerNormForwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // x
+                                  .Arg<Buffer_Type>()      // gamma
+                                  .Arg<Buffer_Type>()      // beta
+                                  .Ret<Buffer_Type>()      // output
+                                  .Ret<Buffer_Type>()      // mu
+                                  .Ret<Buffer_Type>()      // rsigma
+                                  .Ret<Buffer_Type>()      // wkspace
+                                  .Ret<Buffer_Type>()      // barrier
+                                  .Attr<bool>("zero_centered_gamma")
+                                  .Attr<double>("eps")
+                                  .Attr<int64_t>("sm_margin"),
+                              FFI_CudaGraph_Traits);
+
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   const auto &desc = *UnpackOpaque<CustomCallNormDescriptor>(opaque, opaque_len);
 

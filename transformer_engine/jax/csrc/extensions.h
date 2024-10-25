@@ -196,6 +196,8 @@ pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidd
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardHandler);
+
 void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
                          size_t opaque_len);
 
