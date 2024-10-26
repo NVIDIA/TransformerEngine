@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 
 import torch
