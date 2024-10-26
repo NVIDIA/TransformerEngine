@@ -131,10 +131,13 @@ class LayerNormFwdPrimitive(BasePrimitive):
             name = "te_layernorm_forward_ffi"
             sm_margin = get_forward_sm_margin()
             out = ffi.ffi_lowering(name)(
-                ctx, x, gamma, beta,
+                ctx,
+                x,
+                gamma,
+                beta,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             # Output shape is same as the input shape, but the output type is same as the weight type.
@@ -154,8 +157,12 @@ class LayerNormFwdPrimitive(BasePrimitive):
                 ir.RankedTensorType.get(out_shape, output_type),
                 ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
                 ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
-                ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-                ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+                ir.RankedTensorType.get(
+                    wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
+                ),
+                ir.RankedTensorType.get(
+                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
+                ),
             ]
             operands = [x, gamma, beta]
             operand_shapes = [x_shape, g_shape, b_shape]
@@ -434,10 +441,15 @@ class LayerNormBwdPrimitive(BasePrimitive):
             name = "te_layernorm_backward_ffi"
             sm_margin = get_backward_sm_margin()
             out = ffi.ffi_lowering(name)(
-                ctx, dz, x, mu, rsigma, gamma,
+                ctx,
+                dz,
+                x,
+                mu,
+                rsigma,
+                gamma,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             dz_shape = ir.RankedTensorType(dz.type).shape
@@ -654,12 +666,14 @@ class RmsNormFwdPrimitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_rmsnorm_forward_ffi"
             sm_margin = get_forward_sm_margin()
-            zero_centered_gamma = False     # RMSNorm doesn't support zero_centered_gamma
+            zero_centered_gamma = False  # RMSNorm doesn't support zero_centered_gamma
             out = ffi.ffi_lowering(name)(
-                ctx, x, gamma,
+                ctx,
+                x,
+                gamma,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             x_aval, gamma_aval = ctx.avals_in
@@ -679,8 +693,12 @@ class RmsNormFwdPrimitive(BasePrimitive):
             out_types = [
                 ir.RankedTensorType.get(out_shape, x_type.element_type),
                 ir.RankedTensorType.get(batch_shape, rsigma_element_type),
-                ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-                ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+                ir.RankedTensorType.get(
+                    wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
+                ),
+                ir.RankedTensorType.get(
+                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
+                ),
             ]
             operands = [x, gamma]
             operand_shapes = [x_shape, g_shape]
@@ -855,12 +873,16 @@ class RmsNormBwdPrimitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_rmsnorm_backward_ffi"
             sm_margin = get_backward_sm_margin()
-            zero_centered_gamma = False     # RMSNorm doesn't support zero_centered_gamma
+            zero_centered_gamma = False  # RMSNorm doesn't support zero_centered_gamma
             out = ffi.ffi_lowering(name)(
-                ctx, dz, x, rsigma, gamma,
+                ctx,
+                dz,
+                x,
+                rsigma,
+                gamma,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             _, x_aval, _, gamma_aval = ctx.avals_in
@@ -879,8 +901,12 @@ class RmsNormBwdPrimitive(BasePrimitive):
             out_types = [
                 ir.RankedTensorType.get(x_shape, x_type.element_type),
                 ir.RankedTensorType.get(g_shape, g_type.element_type),
-                ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-                ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+                ir.RankedTensorType.get(
+                    wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
+                ),
+                ir.RankedTensorType.get(
+                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
+                ),
                 ir.RankedTensorType.get(
                     dgamma_part_aval.shape, jax_dtype_to_ir_dtype(dgamma_part_aval.dtype)
                 ),
@@ -1106,10 +1132,16 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
             name = "te_layernorm_forward_fp8_ffi"
             sm_margin = get_forward_sm_margin()
             out = ffi.ffi_lowering(name, operand_output_aliases={3: 3})(
-                ctx, x, gamma, beta, amax, scale, scale_inv,
+                ctx,
+                x,
+                gamma,
+                beta,
+                amax,
+                scale,
+                scale_inv,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
@@ -1133,8 +1165,12 @@ class LayerNormFwdFp8Primitive(BasePrimitive):
                 ir.RankedTensorType.get(batch_shape, ir_mu_dtype),
                 ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
                 ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-                ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-                ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+                ir.RankedTensorType.get(
+                    wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
+                ),
+                ir.RankedTensorType.get(
+                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
+                ),
             ]
             operands = [x, gamma, beta, amax, scale, scale_inv]
             operand_shapes = [
@@ -1402,12 +1438,17 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_rmsnorm_forward_fp8_ffi"
             sm_margin = get_forward_sm_margin()
-            zero_centered_gamma = False     # RMSNorm doesn't support zero_centered_gamma
+            zero_centered_gamma = False  # RMSNorm doesn't support zero_centered_gamma
             out = ffi.ffi_lowering(name, operand_output_aliases={2: 2})(
-                ctx, x, gamma, amax, scale, scale_inv,
+                ctx,
+                x,
+                gamma,
+                amax,
+                scale,
+                scale_inv,
                 zero_centered_gamma=zero_centered_gamma,
                 eps=epsilon,
-                sm_margin=sm_margin
+                sm_margin=sm_margin,
             )
         else:
             x_aval, gamma_aval, amax_aval, scale_aval, scale_inv_aval = ctx.avals_in
@@ -1441,8 +1482,12 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
                 ir.RankedTensorType.get(out_shape, ir_out_dtype),
                 ir.RankedTensorType.get(batch_shape, ir_rsigma_dtype),
                 ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-                ir.RankedTensorType.get(wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)),
-                ir.RankedTensorType.get(barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)),
+                ir.RankedTensorType.get(
+                    wkspace_aval.shape, jax_dtype_to_ir_dtype(wkspace_aval.dtype)
+                ),
+                ir.RankedTensorType.get(
+                    barrier_aval.shape, jax_dtype_to_ir_dtype(barrier_aval.dtype)
+                ),
             ]
             operands = [x, gamma, amax, scale, scale_inv]
             operand_shapes = [x_shape, g_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
@@ -1469,8 +1514,8 @@ class RmsNormFwdFp8Primitive(BasePrimitive):
             )
 
             out = custom_caller(
-            RmsNormFwdFp8Primitive.name, args, opaque, False, operand_output_aliases={2: 2}
-        )
+                RmsNormFwdFp8Primitive.name, args, opaque, False, operand_output_aliases={2: 2}
+            )
 
         return out
 
