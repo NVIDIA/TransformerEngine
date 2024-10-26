@@ -417,6 +417,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._fast_get_param: Callable[str, torch.nn.Parameter]
         self._fast_get_param = self.__dict__["_parameters"].get
 
+    def _get_param(self, name) -> torch.nn.Parameter:
+        """Access parameter with fast accessor, if possible"""
+        out = self._fast_get_param(name)
+        if out is None:
+            out = getattr(self, name)
+        return out
+
     # Names of attributes that can be set quickly (see __setattr__
     # method)
     _fast_setattr_names: Set[str] = {
