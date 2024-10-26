@@ -1491,10 +1491,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch, num_gemms=2) as inp:
 
             # Get weight tensors
-            fc1_weight = self._get_param("fc1_weight")
-            fc1_bias = self._get_param("fc1_bias")
-            fc2_weight = self._get_param("fc2_weight")
-            fc2_bias = self._get_param("fc2_bias")
+            fc1_weight = self.fc1_weight
+            fc1_bias = self.fc1_bias
+            fc2_weight = self.fc2_weight
+            fc2_bias = self.fc2_bias
             if not self.fp8:
                 if isinstance(fc1_weight, Float8Tensor):
                     fc1_weight = fc1_weight.from_float8()
@@ -1555,8 +1555,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self._get_param("layer_norm_weight"),
-                self._get_param("layer_norm_bias"),
+                self.layer_norm_weight,
+                self.layer_norm_bias,
                 fc1_weight,
                 fc1_weight_fp8,
                 fc1_bias,

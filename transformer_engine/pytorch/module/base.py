@@ -408,22 +408,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
 
-        # Fast getter for parameters
-        # Note: torch.nn.Module does not store parameters like normal
-        # attrs, but rather in a dict. When attempting to access, the
-        # module will raise an AttributeError in __getattribute__ and
-        # call a custom __getattr__. This is unnecessary overhead if
-        # we know we are accessing a parameter.
-        self._fast_get_param: Callable[str, torch.nn.Parameter]
-        self._fast_get_param = self.__dict__["_parameters"].get
-
-    def _get_param(self, name) -> torch.nn.Parameter:
-        """Access parameter with fast accessor, if possible"""
-        out = self._fast_get_param(name)
-        if out is None:
-            out = getattr(self, name)
-        return out
-
     # Names of attributes that can be set quickly (see __setattr__
     # method)
     _fast_setattr_names: Set[str] = {
