@@ -133,7 +133,6 @@ class TestDistributedSelfAttn:
             seqlen,
             hidden,
             None,  # no window
-            False,  # not context parallel
         ):
             pytest.skip(f"No FusedAttn backend found")
 
@@ -268,7 +267,6 @@ class TestDistributedCrossAttn:
             seqlen,
             hidden,
             None,  # no window
-            False,  # not context parallel
         ):
             pytest.skip(f"No FusedAttn backend found")
 
@@ -438,7 +436,6 @@ class TestDistributedContextParallelSelfAttn:
             seqlen,
             hidden,
             None,  # no window
-            cp_size > 1,
         ):
             pytest.skip(f"No FusedAttn backend found")
 

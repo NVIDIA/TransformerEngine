@@ -262,6 +262,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    context_parallel_causal_load_balanced: bool = False
+    context_parallel_axis: str = ""
 
     @nn.compact
     def __call__(
@@ -308,6 +310,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
+                context_parallel_axis=self.context_parallel_axis,
             )
         elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
             """kvpacked format, treat
@@ -331,6 +335,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
+                context_parallel_axis=self.context_parallel_axis,
             )
         elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
             if self.transpose_batch_sequence:
@@ -349,6 +355,8 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
+                context_parallel_axis=self.context_parallel_axis,
             )
         else:
             raise ValueError(f"Unsupported {self.qkv_layout=}.")
@@ -463,6 +471,9 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. The default value is no sliding window.
+    context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+    context_parallel_axis (str): The name of the context parallel axis.
 
     Optimization parameters
     -----------------------
@@ -483,6 +494,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    context_parallel_causal_load_balanced: bool = False
+    context_parallel_axis: str = ""
 
     @nn.compact
     def __call__(
@@ -614,6 +627,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
                 window_size=self.window_size,
+                context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
+                context_parallel_axis=self.context_parallel_axis,
             )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
 
         return x

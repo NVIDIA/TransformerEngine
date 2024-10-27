@@ -190,7 +190,6 @@ def is_fused_attn_kernel_available(
     kv_max_seqlen,
     head_dim,
     window_size: Optional[Tuple[int, int]] = None,
-    is_context_parallel: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
@@ -214,11 +213,6 @@ def is_fused_attn_kernel_available(
 
     if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
         return False
-
-    # For context parallel need to check additional masking types
-    if is_context_parallel and attn_mask_type == AttnMaskType.CAUSAL_MASK:
-        if not make_helper(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK).is_fused_attn_kernel_available():
-            return False
 
     return True
 
