@@ -122,21 +122,24 @@ __global__ void cu_seqlens_to_offsets(int64_t b, int64_t h, int64_t d, int32_t *
                                       int32_t *actual_seqlens_q, int32_t *qkv_ragged_offset,
                                       int32_t *o_ragged_offset);
 
-__global__ void cu_seqlens_to_actual_seqlens(size_t b, int32_t const *const q_cu_seqlens,
+__global__ void cu_seqlens_to_actual_seqlens(int64_t actual_b, int64_t max_b,
+                                             int32_t const *const q_cu_seqlens,
                                              int32_t const *const kv_cu_seqlens, int32_t *q_seqlens,
                                              int32_t *kv_seqlens);
 
-__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t b,
-                                             int64_t h, int64_t hg, int64_t d_qk, int64_t d_v,
-                                             const int32_t *cu_seqlens_q_padded,
+__global__ void cu_seqlens_padded_to_offsets(NVTE_QKV_Layout_Group layout_group, int64_t actual_b,
+                                             int64_t max_b, int64_t h, int64_t hg, int64_t d_qk,
+                                             int64_t d_v, const int32_t *cu_seqlens_q_padded,
                                              const int32_t *cu_seqlens_kv_padded,
                                              DType offset_dtype, void *offsets_q, void *offsets_k,
-                                             void *offsets_v, void *offsets_o);
+                                             void *offsets_v, void *offsets_o, void *offsets_s);
 
 DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_attn_heads,
                               int64_t num_gqa_groups, int64_t max_seqlen_q, int64_t max_seqlen_kv,
                               int64_t head_dim_qk, int64_t head_dim_v);
 
+size_t get_max_batch_size(size_t batch_size);
+size_t get_max_tokens(size_t num_tokens);
 }  // namespace fused_attn
 
 cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);

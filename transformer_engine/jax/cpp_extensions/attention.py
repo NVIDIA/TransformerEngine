@@ -277,7 +277,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
             softmax_dtype = q_dtype
         elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
-            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, config.max_segments_per_seq)
+            # cuDNN 9.6 reduces the required softmax shape
+            if get_cudnn_version() >= (9, 6, 0):
+                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+            else:
+                softmax_shape = (
+                    *batch_shape,
+                    attn_heads,
+                    q_max_seqlen,
+                    config.max_segments_per_seq,
+                )
             softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
         else:
             raise ValueError(f"Unsupported {backend=}")
