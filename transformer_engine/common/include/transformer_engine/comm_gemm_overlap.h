@@ -19,8 +19,11 @@
 
 namespace transformer_engine {
 
-bool device_supports_multicast();
-
+/* \brief Check if Userbufers bootstraps with direct calls to MPI collectives.
+ *        This can turned on by building Transformer Engine with the `NVTE_UB_WITH_MPI=1` option.
+ *
+ * \return True if Userbuffers is built with MPI
+ */
 bool ubuf_built_with_mpi();
 
 enum class CommOverlapType { RS = 0, AG = 1 };
