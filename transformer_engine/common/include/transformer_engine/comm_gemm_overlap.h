@@ -154,10 +154,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   /*
   ** Split AllGather + AtomicGEMM using P2P communication
-  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
-  *needed to have AG outputs
-  ** in each rank to be in the contiguous memory space after all ring exchange
-  *phases.
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
   */
   void atomic_gemm_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
                               TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
@@ -167,10 +165,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   /*
   ** Split AllGather + GEMM using P2P communication
-  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
-  *needed to have AG outputs
-  ** in each rank to be in the contiguous memory space after all ring exchange
-  *phases.
+  ** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+  ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
   */
   void split_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B, bool transb,
                         TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,

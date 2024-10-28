@@ -466,6 +466,7 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       num_comm_sm, set_sm_margin, use_ce, atomic_gemm) {
+  _is_p2p = true;
   _is_reduce_scatter = comm_type == CommOverlapType::RS;
   _aggregate = aggregate;
 
@@ -528,10 +529,8 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication
-** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
-*needed to have AG outputs
-** in each rank to be in the contiguous memory space after all ring exchange
-*phases.
+** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
 void CommOverlapP2PBase::atomic_gemm_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B,
                                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
@@ -634,10 +633,8 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(TensorWrapper &A, bool transa, T
 
 /*
 ** Split AllGather + GEMM using P2P communication
-** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is
-*needed to have AG outputs
-** in each rank to be in the contiguous memory space after all ring exchange
-*phases.
+** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
 void CommOverlapP2PBase::split_overlap_ag(TensorWrapper &A, bool transa, TensorWrapper &B,
                                           bool transb, TensorWrapper &D, TensorWrapper &bias,
