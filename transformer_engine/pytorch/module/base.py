@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -407,15 +407,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
-
-        # Fast getter for parameters
-        # Note: torch.nn.Module does not store parameters like normal
-        # attrs, but rather in a dict. When attempting to access, the
-        # module will raise an AttributeError in __getattribute__ and
-        # call a custom __getattr__. This is unnecessary overhead if
-        # we know we are accessing a parameter.
-        self._fast_get_param: Callable[str, torch.nn.Parameter]
-        self._fast_get_param = self.__dict__["_parameters"].get
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
