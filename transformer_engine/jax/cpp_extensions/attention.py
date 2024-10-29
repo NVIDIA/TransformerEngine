@@ -379,7 +379,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
-        if is_ffi_enabled():
+        if is_ffi_enabled() and bool(os.getenv("NVTE_JAX_FUSED_ATTN_WITH_FFI", "0")) :
             name = "te_fused_attn_forward_ffi"
             out = ffi.ffi_lowering(name)(
                 ctx,
