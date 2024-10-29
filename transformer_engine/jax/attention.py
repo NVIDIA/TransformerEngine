@@ -43,6 +43,8 @@ class AttnMaskType(Enum):
     PADDING_MASK = NVTE_Mask_Type.NVTE_PADDING_MASK
     CAUSAL_MASK = NVTE_Mask_Type.NVTE_CAUSAL_MASK
     PADDING_CAUSAL_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_MASK
+    CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK
+    PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
 
 class QKVLayout(Enum):
@@ -84,6 +86,66 @@ def get_qkv_format(qkv_layout):
     return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
 
 
+def make_swa_mask(
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+    window_size: Optional[Tuple[int, int]] = None,
+    attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
+    dtype: jax.typing.DTypeLike = jnp.float32,
+):
+    """
+    Generate sliding window mask. `True` or `1` means keep the element.
+
+    For `CAUSAL_BOTTOM_RIGHT_MASK` and `PADDING_CAUSAL_BOTTOM_RIGHT_MASK` mask type,
+    the sliding window diagonal is aligned to the bottom right corner, and for other
+    mask types, the top left corner.
+
+    Parameters
+    ----------
+    max_seqlen_q: int
+        Maximum sequence length for queries.
+    max_seqlen_kv: int
+        Maximum sequence length for keys and values.
+    window_size: Optional[Tuple[int, int]] = None
+        Sliding window size for local attention, where query at position i attends to keys
+        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+        + window_size[1]] inclusive. Negative number in window size means infinity window.
+        `None` means no sliding window.
+    attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
+    dtype: jax.typing.DTypeLike, default=jnp.float32
+        The mask data type.
+    Returns
+    ----------
+    swa_mask: jax.numpy.tensor
+        Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
+        that will get attention, value 0 are the masked out positions.
+    """
+    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
+    if window_size is None:
+        return swa_mask
+    bottom_right_masks = [
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+    ]
+    left_window, right_window = window_size
+    if attn_mask_type in bottom_right_masks:
+        if left_window < 0:
+            left_window = max_seqlen_kv
+        if right_window < 0:
+            right_window = max_seqlen_kv
+        bottom_right_shift = max_seqlen_kv - max_seqlen_q
+        swa_mask = jnp.triu(swa_mask, k=-left_window + bottom_right_shift)
+        swa_mask = jnp.tril(swa_mask, k=right_window + bottom_right_shift)
+    else:
+        if left_window < 0:
+            left_window = max_seqlen_q
+        if right_window < 0:
+            right_window = max_seqlen_q
+        swa_mask = jnp.triu(swa_mask, k=-left_window)
+        swa_mask = jnp.tril(swa_mask, k=right_window)
+    return swa_mask
+
+
 def canonicalize_attn_mask_type(attn_mask_type: str):
     """Convert string attn_mask_type to AttnMaskType
     TE-JAX currently fall back to the padding version kernels for the libraries integration.
@@ -97,11 +159,21 @@ def canonicalize_attn_mask_type(attn_mask_type: str):
             return AttnMaskType.PADDING_MASK
         case "causal":
             return AttnMaskType.CAUSAL_MASK
+        case "causal_bottom_right" | "bottom_right_causal":
+            return AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK
         case "padding_causal" | "causal_padding":
             return AttnMaskType.PADDING_CAUSAL_MASK
+        case (
+            "padding_causal_bottom_right"
+            | "causal_padding_bottom_right"
+            | "bottom_right_causal_padding"
+            | "bottom_right_padding_causal"
+        ):
+            return AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK
     raise ValueError(
-        f"Unsupported {attn_mask_type=}, supported attn_mask_type="
-        "{'no_mask', 'padding', 'causal', 'padding_causal', 'causal_padding'}"
+        f"Unsupported {attn_mask_type=}, supported attn_mask_type={{'no_mask', 'padding', 'causal',"
+        " 'padding_causal', 'causal_padding', 'causal_bottom_right',"
+        " 'padding_causal_bottom_right'}"
     )
 
 
@@ -117,23 +189,38 @@ def is_fused_attn_kernel_available(
     q_max_seqlen,
     kv_max_seqlen,
     head_dim,
+    window_size: Optional[Tuple[int, int]] = None,
+    is_context_parallel: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
     """
-    return tex.FusedAttnHelper(
-        q_dtype,
-        kv_dtype,
-        qkv_layout.value,
-        attn_bias_type.value,
-        attn_mask_type.value,
-        dropout_probability,
-        q_num_heads,
-        kv_num_heads,
-        q_max_seqlen,
-        kv_max_seqlen,
-        head_dim,
-    ).is_fused_attn_kernel_available()
+
+    def make_helper(attn_mask_type):
+        return tex.FusedAttnHelper(
+            q_dtype,
+            kv_dtype,
+            qkv_layout.value,
+            attn_bias_type.value,
+            attn_mask_type.value,
+            dropout_probability,
+            q_num_heads,
+            kv_num_heads,
+            q_max_seqlen,
+            kv_max_seqlen,
+            head_dim,
+            (-1, -1) if window_size is None else window_size,
+        )
+
+    if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
+        return False
+
+    # For context parallel need to check additional masking types
+    if is_context_parallel and attn_mask_type == AttnMaskType.CAUSAL_MASK:
+        if not make_helper(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK).is_fused_attn_kernel_available():
+            return False
+
+    return True
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
@@ -155,6 +242,18 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
+def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+    """Reorders a tensor for load balancing the compute of causal attention."""
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
+
+
+def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+    """Inverse operation of `reorder_causal_load_balancing`."""
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -166,6 +265,9 @@ def fused_attn(
     scaling_factor: float,
     dropout_probability: float,
     is_training: bool,
+    window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
 ):
     """
     Perform non-THD (non-packed) cuDNN fused attention.
@@ -192,6 +294,10 @@ def fused_attn(
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
+        window_size (Optional[Tuple[int, int]]): Sliding window size.
+        context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+        context_parallel_axis (str): The name of the context parallel axis.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
     """
@@ -213,7 +319,11 @@ def fused_attn(
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
-    if attn_mask_type in [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]:
+    if attn_mask_type in [
+        AttnMaskType.NO_MASK,
+        AttnMaskType.CAUSAL_MASK,
+        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+    ]:
         batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
         q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
         kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
@@ -242,6 +352,9 @@ def fused_attn(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=1,
+        window_size=window_size,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
 
     return output
@@ -262,6 +375,9 @@ def fused_attn_thd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int = 1,
+    window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
 ):
     """
     (Experimental) Perform THD (packed) cuDNN fused attention.
@@ -300,6 +416,11 @@ def fused_attn_thd(
             Indicating the maximum number of segments inside a sequence. This parameter is to
             constrain the limit usage and need to be static during the e2e training. The XLA compile
             time and memory consumption is proportional to `max_segments_per_seq`.
+        window_size (Optional[Tuple[int, int]]):
+            Sliding window size.
+        context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+        context_parallel_axis (str): The name of the context parallel axis.
     Returns:
         (jnp.ndarray): The output tensor from the fused attention.
 
@@ -354,12 +475,15 @@ def fused_attn_thd(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
 
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -375,6 +499,9 @@ def _fused_attn(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]],
+    context_parallel_causal_load_balanced: bool,
+    context_parallel_axis: str,
 ):
     output, _ = _fused_attn_fwd_rule(
         qkv,
@@ -391,6 +518,9 @@ def _fused_attn(
         dropout_probability,
         is_training,
         max_segments_per_seq,
+        window_size,
+        context_parallel_causal_load_balanced,
+        context_parallel_axis,
     )
     return output
 
@@ -410,6 +540,9 @@ def _fused_attn_fwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    window_size,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
 ):
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
@@ -426,6 +559,9 @@ def _fused_attn_fwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
     output = checkpoint_name(output, "context")
     softmax_aux = checkpoint_name(softmax_aux, "context")
@@ -451,6 +587,9 @@ def _fused_attn_bwd_rule(
     dropout_probability,
     is_training,
     max_segments_per_seq,
+    window_size,
+    context_parallel_causal_load_balanced,
+    context_parallel_axis,
     ctx,
     dz,
 ):
@@ -483,6 +622,9 @@ def _fused_attn_bwd_rule(
         dropout_probability=dropout_probability,
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None

@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Utility functions for Transformer Engine modules"""
+from __future__ import annotations
 import functools
 import math
 from typing import Any, Callable, Optional, Tuple
@@ -217,8 +218,12 @@ def safely_set_viewless_tensor_data(tensor: torch.Tensor, new_data_tensor: torch
 
 def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Cast tensor to dtype"""
+    if tensor is None:
+        return None
+    if tensor.dtype == dtype:
+        return tensor
     with torch.enable_grad():
-        return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
+        return tensor.to(dtype=dtype)
 
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
@@ -251,3 +256,52 @@ def get_cudnn_version() -> Tuple[int, int, int]:
     major, encoded_version = divmod(encoded_version, major_version_magnitude)
     minor, patch = divmod(encoded_version, 100)
     return (major, minor, patch)
+
+
+def canonicalize_device(device: Optional[torch.device | str]) -> torch.device:
+    """Canonicalize PyTorch device
+
+    If `None`, then returns the default CUDA device.
+
+    """
+    if device is None:
+        # Use default CUDA device
+        device = torch.get_default_device()
+        if device.type != "cuda":
+            device = torch.device("cuda", torch.cuda.current_device())
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    return device
+
+
+def canonicalize_dtype(dtype: Optional[torch.dtype]) -> torch.dtype:
+    """Canonicalize PyTorch datatype
+
+    If `None`, then returns the default PyTorch datatype.
+
+    """
+    if dtype is None:
+        # Use default dtype
+        dtype = torch.get_default_dtype()
+    return dtype
+
+
+def devices_match(device1: torch.device, device2: torch.device) -> bool:
+    """Whether two devices are the same"""
+    device1 = torch.device(device1)
+    device2 = torch.device(device2)
+    if device1.type != device2.type:
+        return False
+    if device1.type == "cuda":
+        index1 = device1.index
+        index2 = device2.index
+        if index1 == index2:
+            return True
+        if index1 is None:
+            index1 = torch.cuda.current_device()
+        if index2 is None:
+            index2 = torch.cuda.current_device()
+        return index1 == index2
+    return device1 == device2

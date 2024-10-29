@@ -119,7 +119,6 @@ class BasicLinear(BasicOperation):
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
-        self.dtype: torch.dtype = canonicalize_dtype(dtype)
 
         # Tensor parallel configuration
         self.tensor_parallel_mode: Optional[str]
@@ -278,7 +277,8 @@ class BasicLinear(BasicOperation):
         weight = self.weight
         if weight.device.type != "cuda" or is_float8_tensor(weight):
             weight = torch.empty_like(weight, device=self.device)
-        weight = weight.to(device=self.device, dtype=self.dtype)
+        else:
+            weight = weight.to(device=self.device)
 
         # Initialize values
         init_context = contextlib.nullcontext
@@ -289,10 +289,18 @@ class BasicLinear(BasicOperation):
 
         # Cast to FP8 if needed
         if self._with_fp8_parameters:
+            dummy_amax = torch.empty(
+                (1, 1),
+                dtype=torch.float32,
+                device=self.device,
+            )  # Dummy buffer to avoid overwriting amax history
             weight = Float8Tensor.to_float8(
                 weight,
                 fp8_meta=self.get_fp8_meta("param"),
+                fp8_meta_forward=True,
                 fp8_meta_index=0,
+                amax=dummy_amax,
+                with_transpose_cache=torch.is_grad_enabled(),
             )
 
         # Save updated parameter
@@ -467,25 +475,19 @@ class BasicLinear(BasicOperation):
                 input_fp8_meta["recipe"],
                 fprop_tensor=True,
             )
-            x_fp8 = Float8Tensor(
-                data=torch.empty_like(x_local, dtype=torch.uint8),
+            with_transpose_cache = weight.requires_grad
+            if tensor_parallel_mode == "column" and sequence_parallel:
+                with_transpose_cache = False
+            x_local = Float8Tensor.to_float8(
+                x_local,
                 fp8_meta=input_fp8_meta,
                 fp8_meta_forward=True,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
+                with_transpose_cache=with_transpose_cache,
             )
-            with_cast_transpose = weight.requires_grad
-            if tensor_parallel_mode == "column" and sequence_parallel:
-                with_cast_transpose = False
-            if with_cast_transpose:
-                x_fp8.cast_transpose_(x_local)
-            else:
-                x_fp8.copy_(x_local)
-            x_local = x_fp8
         elif not with_fp8_compute and is_float8_tensor(x_local):
-            x_local = x_local.from_float8()
+            x_local = x_local.dequantize()
         x = x_local
         x_async = None
         if tensor_parallel_mode == "column" and sequence_parallel:
@@ -510,11 +512,12 @@ class BasicLinear(BasicOperation):
             w = Float8Tensor.to_float8(
                 w,
                 fp8_meta=weight_fp8_meta,
+                fp8_meta_forward=True,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
             )
         elif not with_fp8_compute and is_float8_tensor(w):
-            w = w.from_float8()
+            w = w.dequantize()
 
         # Check bias tensor
         b = None
@@ -559,12 +562,12 @@ class BasicLinear(BasicOperation):
         _wait_async(x_async)
         x_async = None
         if with_fp8_compute:
-            kwargs = dict(
-                accumulate=accumulate_into_out,
-                out=y,
-                bias=b,
-                use_bias=(b is not None),
-            )
+            kwargs = {
+                "accumulate": accumulate_into_out,
+                "out": y,
+                "bias": b,
+                "use_bias": (b is not None),
+            }
             if with_fp8_output:
                 if y._fp8_meta is None:
                     # Hackily create FP8TensorMeta if needed
@@ -581,12 +584,12 @@ class BasicLinear(BasicOperation):
                     fp8_meta = y._fp8_meta[fp8_meta_key]
                     fp8_meta_index = y._fp8_meta_index
                 kwargs.update(
-                    dict(
-                        out=y._data,
-                        out_index=fp8_meta_index,
-                        fp8_meta_tensor=fp8_meta,
-                        D_dtype=y._fp8_dtype,
-                    )
+                    {
+                        "out": y._data,
+                        "out_index": fp8_meta_index,
+                        "fp8_meta_tensor": fp8_meta,
+                        "D_dtype": y._fp8_dtype,
+                    }
                 )
             fp8_gemm(
                 w._data,
@@ -815,25 +818,19 @@ class BasicLinear(BasicOperation):
                 grad_output_fp8_meta["recipe"],
                 fprop_tensor=False,
             )
-            dy_fp8 = Float8Tensor(
-                data=torch.empty_like(dy, dtype=torch.uint8),
+            with_transpose_cache = weight_requires_grad
+            if tensor_parallel_mode == "row" and sequence_parallel:
+                with_transpose_cache = False
+            dy = Float8Tensor.to_float8(
+                dy,
                 fp8_meta=grad_output_fp8_meta,
                 fp8_meta_forward=False,
                 fp8_meta_index=0,
                 fp8_dtype=fp8_dtype,
-                fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                dtype=dtype,
+                with_transpose_cache=with_transpose_cache,
             )
-            with_cast_transpose = weight_requires_grad
-            if tensor_parallel_mode == "row" and sequence_parallel:
-                with_cast_transpose = False
-            if with_cast_transpose:
-                dy_fp8.cast_transpose_(dy)
-            else:
-                dy_fp8.copy_(dy)
-            dy = dy_fp8
         elif not with_fp8_compute and is_float8_tensor(dy):
-            dy = dy.from_float8()
+            dy = dy.dequantize()
         if tensor_parallel_mode == "row" and sequence_parallel:
             dy, dy_async = gather_along_first_dim(
                 dy,
@@ -853,26 +850,24 @@ class BasicLinear(BasicOperation):
                 device=device,
                 dtype=dtype,
             )
+            x_is_sharded = tensor_parallel_mode == "column" and sequence_parallel
             if with_fp8_compute and not is_float8_tensor(x_local):
                 fp8_dtype = get_fp8_te_dtype(
                     input_fp8_meta["recipe"],
                     fprop_tensor=True,
                 )
-                x_fp8 = Float8Tensor(
-                    data=torch.empty_like(x_local, dtype=torch.uint8),
+                x_local = Float8Tensor.to_float8(
+                    x_local,
                     fp8_meta=input_fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
-                    fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                    dtype=dtype,
+                    with_transpose_cache=(not x_is_sharded),
                 )
-                x_fp8.cast_transpose_(x_local)
-                x_local = x_fp8
             elif not with_fp8_compute and is_float8_tensor(x_local):
                 x_local = x_local.from_float8()
             x = x_local
-            if tensor_parallel_mode == "column" and sequence_parallel:
+            if x_is_sharded:
                 x, x_async = gather_along_first_dim(
                     x_local,
                     tensor_parallel_group,
@@ -898,19 +893,16 @@ class BasicLinear(BasicOperation):
                     weight_fp8_meta["recipe"],
                     fprop_tensor=True,
                 )
-                w_fp8 = Float8Tensor(
-                    data=torch.empty_like(w, dtype=torch.uint8),
+                w = Float8Tensor.to_float8(
+                    w,
                     fp8_meta=weight_fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=0,
                     fp8_dtype=fp8_dtype,
-                    fp8_scale_inv=torch.empty([1], dtype=torch.float32, device=device),
-                    dtype=dtype,
+                    with_transpose_cache=True,
                 )
-                w_fp8.cast_transpose_(w)
-                w = w_fp8
             elif not with_fp8_compute and is_float8_tensor(w):
-                w = w.from_float8()
+                w = w.dequantize()
 
             # Construct grad input tensor
             if grad_input is not None:
@@ -944,10 +936,7 @@ class BasicLinear(BasicOperation):
             _wait_async(dy_async)
             dy_async = None
             if with_fp8_compute:
-                kwargs = dict(
-                    accumulate=accumulate_into_grad_input,
-                    out=dx,
-                )
+                kwargs = {"accumulate": accumulate_into_grad_input, "out": dx}
                 if with_fp8_grad_input:
                     if dx._fp8_meta is None:
                         # Hackily create FP8TensorMeta if needed
@@ -966,12 +955,12 @@ class BasicLinear(BasicOperation):
                         fp8_meta = dx._fp8_meta[fp8_meta_key]
                         fp8_meta_index = dx._fp8_meta_index
                     kwargs.update(
-                        dict(
-                            out=dx._data,
-                            out_index=fp8_meta_index,
-                            fp8_meta_tensor=fp8_meta,
-                            D_dtype=dx._fp8_dtype,
-                        )
+                        {
+                            "out": dx._data,
+                            "out_index": fp8_meta_index,
+                            "fp8_meta_tensor": fp8_meta,
+                            "D_dtype": dx._fp8_dtype,
+                        }
                     )
                 fp8_gemm(
                     w.transpose_2d(),
@@ -1090,12 +1079,17 @@ class BasicLinear(BasicOperation):
             if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
                 grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
 
+        # Get autocast dtype if needed
+        dtype = None
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+
         # Linear forward
         output, x_local, _ = BasicLinear._functional_forward(
             input=input_,
             weight=self.weight,
             device=self.device,
-            dtype=self.dtype,
+            dtype=dtype,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
@@ -1111,6 +1105,7 @@ class BasicLinear(BasicOperation):
         ctx.weight_fp8_meta = weight_fp8_meta
         ctx.grad_output_fp8_meta = grad_output_fp8_meta
         ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        ctx.dtype = dtype
         ctx.input_dims = input_.size()
         ctx.input_requires_grad = input_.requires_grad
         ctx.weight_requires_grad = self.weight.requires_grad
@@ -1151,7 +1146,7 @@ class BasicLinear(BasicOperation):
             input_requires_grad=ctx.input_requires_grad,
             weight_requires_grad=ctx.weight_requires_grad,
             device=self.device,
-            dtype=self.dtype,
+            dtype=ctx.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,

@@ -135,6 +135,8 @@ struct CustomCallFusedAttnDescriptor {
   DType wkspace_dtype;
   bool is_training;
   bool deterministic;
+  int64_t window_size_left;
+  int64_t window_size_right;
 };
 
 pybind11::bytes PackCustomCallFusedAttnDescriptor(
@@ -143,11 +145,13 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
     size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
     float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
     NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
-    bool deterministic);
+    bool deterministic, int64_t window_size_left, int64_t window_size_right);
 
 // Transpose
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -169,6 +173,8 @@ void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t op
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
@@ -193,12 +199,16 @@ void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, s
 void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
                          size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardFP8Handler);
+
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
                                                    bool is_layer_norm, bool zero_centered_gamma,
                                                    float eps, int sm_margin);
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormBackwardHandler);
 
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -209,6 +219,8 @@ void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, si
 // Quantization
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
 
 void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -239,23 +251,27 @@ NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_Mask_Type mask_type, float dropout_probability,
                                             size_t q_num_heads, size_t kv_num_heads,
                                             size_t q_max_seqlen, size_t kv_max_seqlen,
-                                            size_t head_dim);
+                                            size_t head_dim, int64_t window_size_left,
+                                            int64_t window_size_right);
 
 pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
-    size_t max_segments_per_seq);
+    size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
-    bool deterministic, size_t max_segments_per_seq);
+    bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
+    int64_t window_size_right);
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 

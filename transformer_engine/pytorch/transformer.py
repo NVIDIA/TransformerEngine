@@ -173,7 +173,7 @@ class TransformerLayer(torch.nn.Module):
           Type of activation used in MLP block.
           Options are: 'gelu', 'relu', 'reglu', 'geglu', 'swiglu', 'qgelu' and 'srelu'.
     device : Union[torch.device, str], default = "cuda"
-          The device on which the parameters of the model will allocated. It is the user's
+          The device on which the parameters of the model will be allocated. It is the user's
           responsibility to ensure all parameters are moved to the GPU before running the
           forward pass.
     attn_input_format: {'sbhd', 'bshd'}, default = 'sbhd'
@@ -484,7 +484,7 @@ class TransformerLayer(torch.nn.Module):
 
     def set_context_parallel_group(
         self,
-        cp_group: Union[dist_group_type, None],
+        cp_group: Union[dist_group_type, List[dist_group_type], None],
         cp_global_ranks: List[int],
         cp_stream: torch.cuda.Stream,
         cp_comm_type: str = "p2p",
@@ -495,15 +495,27 @@ class TransformerLayer(torch.nn.Module):
 
         Parameters
         ----------
-        cp_group : ProcessGroup
+        cp_group : Union[ProcessGroup, List[ProcessGroup]]
                   context parallel process group.
+                  ProcessGroup is for cp_comm_type of "p2p", "all_gather", and "a2a".
+                  List[ProcessGroup] is for cp_comm_type of "a2a+p2p", where cp_group[0]
+                  and cp_group[1] are for a2a and p2p communications respectively.
         cp_global_ranks : List[int]
                          list of global ranks in the context group.
         cp_stream : torch.cuda.Stream
                    cuda stream for context parallel execution.
-        cp_comm_type : str
+        cp_comm_type : str, default = `p2p`
                       inter-gpu communication type for context parallelism.
-                      Can be "p2p" or "all_gather".
+                      Can be "p2p" or "all_gather" or "a2a", or "a2a+p2p".
+                      "p2p": Exchange KV chunks with P2P communications in ring topology.
+                             P2P is async and can be overlapped with attention compute.
+                      "all_gather": All-gather to get full sequence of KV before attention.
+                                    The all-gather is not async, and cannot be overlapped.
+                      "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP
+                             group, and gather to get full sequence of QKV.
+                      "a2a+p2p": hierarchical CP implementation. First applying a2a to QKV
+                      across each CP sub-group (e.g., via NVLink), then exchanging KV with
+                      p2p between sub-groups (e.g., via IBLink).
         """
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
@@ -745,7 +757,7 @@ class TransformerLayer(torch.nn.Module):
         return output
 
     def _bias_dropout_add(self, hidden_state, bias, residual, drop_path=None):
-        if drop_path is None and bias.numel() != 0:
+        if drop_path is None and bias is not None and bias.numel() != 0:
             if self.bias_dropout_fusion:
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train
@@ -757,7 +769,7 @@ class TransformerLayer(torch.nn.Module):
             with self.bias_dropout_add_exec_handler():
                 output = bias_dropout_add_func(hidden_state, bias, residual, self.hidden_dropout)
         else:
-            if bias.numel() != 0:
+            if bias is not None and bias.numel() != 0:
                 hidden_state = hidden_state + bias
             out = torch.nn.functional.dropout(
                 hidden_state, p=self.hidden_dropout, training=self.training

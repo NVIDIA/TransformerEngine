@@ -52,9 +52,15 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
 
+  dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
   dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
+  dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
+  dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
+  dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
+  dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
+  dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   return dict;
 }
 
@@ -100,7 +106,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)
       .value("NVTE_CAUSAL_MASK", NVTE_Mask_Type::NVTE_CAUSAL_MASK)
-      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK);
+      .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)
+      .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)
+      .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",
+             NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
 
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())
       .value("NVTE_BS3HD", NVTE_QKV_Layout::NVTE_BS3HD)

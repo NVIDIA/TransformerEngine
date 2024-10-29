@@ -88,10 +88,7 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
     test = ref.to(device=test_device, dtype=test_dtype)
     if test_is_fp8:
-        test = Float8Tensor.to_float8(test)
-        test._transpose = test._data.reshape(-1, test.size(-1)).transpose(0, 1)
-        test._transpose = test._transpose.contiguous()
-        test._transpose_invalid = False
+        test = Float8Tensor.to_float8(test, with_transpose_cache=True)
     elif test.data_ptr() == ref.data_ptr():
         test = test.clone()
     ref.copy_(test)
@@ -309,6 +306,128 @@ class TestFuser:
             torch.testing.assert_close(w_scale, torch.full_like(w_scale, w_scale_ref))
             torch.testing.assert_close(x_scale, torch.full_like(x_scale, x_scale_ref))
             torch.testing.assert_close(dy_scale, torch.full_like(dy_scale, dy_scale_ref))
+
+    @pytest.mark.parametrize("init_dtype", _dtypes)
+    @pytest.mark.parametrize("final_dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_weight", (False, True))
+    def test_dtype_cast(
+        self,
+        *,
+        size: int = 16,
+        init_dtype: torch.dtype,
+        final_dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_weight: bool,
+    ) -> None:
+        """Check dtype cast functions"""
+
+        # Skip invalid configurations
+        if fp8_weight:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Random data
+        dtype = torch.float32
+        if torch.float16 in (init_dtype, final_dtype):
+            dtype = torch.float16
+        if torch.bfloat16 in (init_dtype, final_dtype):
+            dtype = torch.bfloat16
+        w_ref, w_test = make_reference_and_test_tensors(
+            (size, size),
+            test_dtype=dtype,
+            test_device=device,
+            test_is_fp8=fp8_weight,
+        )
+
+        # Construct operation
+        with te.fp8_model_init(enabled=fp8_weight):
+            op = te_ops.Linear(size, size, bias=False, device=device, dtype=init_dtype)
+        with torch.no_grad():
+            op.weight.copy_(w_test)
+            del w_test
+
+        # Cast operation dtype
+        if final_dtype == torch.float32:
+            op.float()
+        elif final_dtype == torch.float16:
+            op.half()
+        elif final_dtype == torch.bfloat16:
+            op.bfloat16()
+
+        # Check weights
+        assert isinstance(op.weight, Float8Tensor) == fp8_weight
+        assert op.weight.dtype == final_dtype
+        w_test = op.weight.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(w_test, w_ref, rtol=0, atol=0)
+
+        # Check forward and backward pass
+        x = torch.zeros(
+            (size, size),
+            dtype=init_dtype,
+            device=device,
+            requires_grad=True,
+        )
+        y = op(x)
+        y.backward(torch.zeros_like(y))
+        assert y.dtype == final_dtype
+        assert x.grad.dtype == init_dtype
+        assert op.weight.grad.dtype == final_dtype
+
+    @pytest.mark.parametrize("model_dtype", _dtypes)
+    @pytest.mark.parametrize("autocast_dtype", _dtypes)
+    @pytest.mark.parametrize("fp8_compute", (False, True))
+    def test_pyt_autocast(
+        self,
+        *,
+        size: int = 16,
+        model_dtype: torch.dtype,
+        autocast_dtype: torch.dtype,
+        device: torch.device = "cuda",
+        fp8_weight: bool = False,
+        fp8_compute: bool,
+    ) -> None:
+        """Test with PyTorch autocast"""
+        device = torch.device(device)
+
+        # Skip invalid configurations
+        if fp8_weight or fp8_compute:
+            if not fp8_available:
+                pytest.skip(reason_for_no_fp8)
+            if torch.device(device).type != "cuda":
+                pytest.skip("FP8 is only supported on CUDA devices")
+
+        # Construct operation
+        with te.fp8_model_init(enabled=fp8_weight):
+            op = te_ops.Linear(size, size, bias=False, device=device, dtype=model_dtype)
+
+        # Check forward and backward pass
+        x = torch.zeros(
+            (size, size),
+            dtype=model_dtype,
+            device=device,
+            requires_grad=True,
+        )
+        with te.fp8_autocast(enabled=fp8_compute):
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                y = op(x)
+        y.backward(torch.zeros_like(y))
+        assert y.dtype == autocast_dtype
+        assert x.grad.dtype == model_dtype
+        assert op.weight.grad.dtype == model_dtype
+
+        # Check forward and backward pass (swapped context order)
+        if fp8_compute:
+            x.grad = None
+            op.weight.grad = None
+            with torch.autocast(device_type=device.type, dtype=autocast_dtype):
+                with te.fp8_autocast(enabled=fp8_compute):
+                    y = op(x)
+            y.backward(torch.zeros_like(y))
+            assert y.dtype == autocast_dtype
+            assert x.grad.dtype == model_dtype
+            assert op.weight.grad.dtype == model_dtype
 
 
 class TestBasicOps:

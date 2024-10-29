@@ -20,9 +20,8 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
     RotaryPositionEmbedding,
     get_attention_backend,
-    _flash_attn_2_plus,
     _flash_attn_2_3_plus,
-    _flash_attn_3_plus,
+    _flash_attn_3_is_installed,
     check_set_window_size,
     AttentionParams,
     _attention_backends,
@@ -233,9 +232,9 @@ def test_dot_product_attention(
     """Test DotProductAttention module"""
 
     # Get configs
-    tols = dict(atol=5e-3, rtol=5e-3)
+    tols = dict(atol=1e-3, rtol=1e-3)
     if dtype == torch.bfloat16:
-        tols = dict(atol=2.5e-2, rtol=2.5e-2)
+        tols = dict(atol=1.5e-2, rtol=1.5e-2)
     config = model_configs[model]
     is_mla = config.head_dim_qk != config.head_dim_v
     if qkv_layout is None:
@@ -249,7 +248,7 @@ def test_dot_product_attention(
     # Test backend availability
     window_size = (-1, -1)
     if swa:
-        window_size = tuple(torch.randint(0, config.max_seqlen_kv, [2], dtype=torch.int32).tolist())
+        window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
@@ -620,14 +619,14 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
+    "layout_0_1": ModelConfig(3, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
+    "layout_0_2": ModelConfig(8, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
     "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
     "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
     "layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
     "layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_4": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_3": ModelConfig(1, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_4": ModelConfig(8, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
     "layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
     "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
@@ -645,6 +644,9 @@ model_configs_layout_thd = {
 @pytest.mark.parametrize("qkv_layout", qkv_layouts_thd)
 def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     """Test DotProductAttention module with different QKV layouts"""
+    config = model_configs[model]
+    if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+        pytest.skip("qkv_layout not applicable for MQA/GQA")
     pad_between_seqs = True
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
@@ -1035,7 +1037,7 @@ def test_transformer_layer(
 
     # Get configs
     config = model_configs[model]
-    tols = dict(atol=5e-1, rtol=5e-2)
+    tols = dict(atol=5e-2, rtol=5e-2)
     workspace_opt = True
 
     # Test backend availability
@@ -1319,6 +1321,8 @@ def _error(a, b, name_a, name_b, atol, rtol, rmse_tol):
     logging.debug(name_a + " min {:.6f} max {:.6f}".format(a.min().item(), a.max().item()))
     logging.debug(name_b + " min {:.6f} max {:.6f}".format(b.min().item(), b.max().item()))
     try:
+        if a.dtype != b.dtype:
+            a = a.to(b.dtype)
         torch.testing.assert_close(a, b, atol=atol, rtol=rtol)
     except Exception as e:
         logging.debug(e)
@@ -1351,7 +1355,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         if RoPE:
             pytest.skip("Flash Attention doesn't support FP8 MHA with RoPE.")
         os.environ["NVTE_FLASH_ATTN"] = "1"
@@ -1379,7 +1383,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1532,7 +1536,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1559,7 +1563,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.1
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_plus and not is_training:
+    if _flash_attn_3_is_installed and not is_training:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1851,13 +1855,6 @@ def _run_ref_mha_f16(dtype, config, backend):
     _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
 
     def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
-        """Get cuda rng tracker."""
-        return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    _DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    _DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-
-    def get_dummy_cuda_rng_tracker():
         """Get cuda rng tracker."""
         return _DUMMY_CUDA_RNG_STATE_TRACKER
 

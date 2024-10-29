@@ -11,7 +11,12 @@ from ..constants import TE_DType
 from ..utils import assert_dim_for_fp8_exec
 
 
-__all__ = ["gemm", "fp8_gemm", "grouped_gemm", "fp8_grouped_gemm"]
+__all__ = [
+    "gemm",
+    "fp8_gemm",
+    "grouped_gemm",
+    "fp8_grouped_gemm",
+]
 
 
 @functools.lru_cache(maxsize=None)
@@ -40,8 +45,8 @@ def fp8_gemm(
     use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
-    ub_algo: tex.UbufOverlapAlgo = None,
-    ub: Union[tex.UbufCommOverlap, tex.UbufP2PCommOverlap] = None,
+    ub_algo: tex.CommOverlapAlgo = None,
+    ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     extra_output_tensor: torch.Tensor = None,
 ) -> torch.Tensor:
     """TN layout GEMM with fp8 inputs."""
@@ -102,7 +107,7 @@ def fp8_gemm(
     fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
         assert ub is not None, "ub object is None!"
-        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+        if ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
@@ -110,11 +115,11 @@ def fp8_gemm(
             args = tuple(
                 args
                 + (
-                    1,
+                    tex.CommOverlapType.AG,
                     extra_output_tensor,
                 )
             )
-        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+        elif ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
@@ -122,23 +127,23 @@ def fp8_gemm(
             args = tuple(
                 args
                 + (
-                    0,
+                    tex.CommOverlapType.RS,
                     extra_output_tensor,
                 )
             )
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
             fn = ub.split_overlap_ag_p2p
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
             args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
+        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P:
             fn = ub.atomic_gemm_overlap_ag_p2p
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
             args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
             assert (
                 extra_output_tensor is not None
@@ -150,13 +155,13 @@ def fp8_gemm(
                     extra_output_tensor,
                 )
             )
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
             fn = ub.split_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
             ), "SPLIT_PIPELINED_RS_P2P requires extra output tensor"
             args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS:
+        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_RS:
             fn = ub.atomic_gemm_overlap_rs
             assert extra_output_tensor is not None, "ATOMIC_GEMM_RS requires extra output tensor"
             args = tuple(
@@ -166,16 +171,13 @@ def fp8_gemm(
                     extra_output_tensor,
                 )
             )
-        elif ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P:
+        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P:
             fn = ub.atomic_gemm_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
             ), "ATOMIC_GEMM_RS_P2P requires extra output tensor"
             args = tuple(args + (extra_output_tensor,))
-    if ub_algo is not None and ub_algo == tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P:
-        out = fn(*args)
-    else:
-        _ = fn(*args)
+    _ = fn(*args)
 
     return out, gelu_input
 
@@ -193,8 +195,8 @@ def gemm(
     out: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
     use_bias: bool = False,
-    ub_algo: tex.UbufOverlapAlgo = None,
-    ub: tex.UbufCommOverlap = None,
+    ub_algo: tex.CommOverlapAlgo = None,
+    ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
     extra_output_tensor: torch.Tensor = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Non FP8 GEMM."""
@@ -265,19 +267,19 @@ def gemm(
     fn = torch.ops.tex_ts.te_gemm_ts
     if ub_algo is not None:
         assert ub is not None, "ub object is None!"
-        if ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_AG:
+        if ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_AG:
             fn = ub.bulk_overlap
-            args = tuple(args + (1, empty_tensor))
-        elif ub_algo == tex.UbufOverlapAlgo.BULK_OVERLAP_RS:
+            args = tuple(args + (tex.CommOverlapType.AG, empty_tensor))
+        elif ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_RS:
             fn = ub.bulk_overlap
-            args = tuple(args + (0, empty_tensor))
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
+            args = tuple(args + (tex.CommOverlapType.RS, empty_tensor))
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
             fn = ub.split_overlap_ag_p2p
             extra_output_tensor = (
                 empty_tensor if extra_output_tensor is None else extra_output_tensor
             )
             args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS:
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
             fn = ub.split_overlap_rs
             assert (
                 extra_output_tensor is not None
@@ -289,7 +291,7 @@ def gemm(
                     extra_output_tensor,
                 )
             )
-        elif ub_algo == tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
+        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
             fn = ub.split_overlap_rs_p2p
             assert (
                 extra_output_tensor is not None
@@ -313,7 +315,7 @@ def grouped_gemm(
     layout: str = "TN",
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
-) -> Tuple[Union[List[torch.Tensor], None], ...]:
+) -> Tuple[List[torch.Tensor], ...]:
     """Non FP8 Grouped GEMM."""
 
     assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
@@ -380,7 +382,7 @@ def grouped_gemm(
 
 def fp8_grouped_gemm(
     A: List[torch.Tensor],
-    A_scale_inv: torch.Tensor,
+    A_scale_inv: List[torch.Tensor],
     A_fp8_tensor_offset: int,
     A_dtype: tex.DType,
     B: List[torch.Tensor],
@@ -390,6 +392,7 @@ def fp8_grouped_gemm(
     out: List[torch.Tensor],
     out_dtype: torch.dtype,
     workspaces: List[torch.Tensor],
+    m_splits: Optional[List[int]] = None,
     out_offset: Optional[int] = None,
     fp8_meta_tensor: tex.FP8TensorMeta = None,
     gelu: bool = False,
@@ -398,16 +401,25 @@ def fp8_grouped_gemm(
     use_bias: bool = False,
     use_split_accumulator: bool = False,
     D_dtype: Optional[tex.DType] = None,
-) -> Tuple[Union[List[torch.Tensor], None], ...]:
+) -> Tuple[List[torch.Tensor], ...]:
     """
     TN layout Grouped GEMM with fp8 inputs.
-    This method assumes the scale/scale_inv/amax of A/B/out is contiguous in the meta tensor.
-    scale: [ ...A_scale... | ...B_scale... | ...out_scale...]
-    scale_inv: [ ...A_scale_inv... | ...B_scale_inv... | ...out_scale_inv...]
-    amax: [ ...A_amax... | ...B_amax... | ...out_amax...]
+    Input requirements:
+        1. If len(A_scale_inv) == num_gemms, len(out) must be 1, and m_splits is not None.
+           This is used for the calculation of output (fwd) and dgrad (bwd).
+        2. if len(A_scale_inv) == 1, len(out) must be num_gemms. This is used for the
+           calculation of wgrad.
     """
-
     num_gemms = len(A)
+    if num_gemms > 1 and len(A_scale_inv) == num_gemms:
+        assert len(out) == 1 and m_splits is not None
+    elif num_gemms > 1 and len(A_scale_inv) == 1:
+        assert len(out) == num_gemms
+    elif num_gemms == 1:
+        assert len(A_scale_inv) == 1 and len(out) == 1
+    else:
+        raise ValueError("Invalid input combinations of A_scale_inv and out.")
+
     empty_tensor = _empty_tensor()
     empty_tensors = [empty_tensor] * num_gemms
     if D_dtype is not None and D_dtype in [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]:
@@ -420,41 +432,71 @@ def fp8_grouped_gemm(
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = torch.bfloat16 if bias is None else bias[0].dtype
-    if gelu:
-        gelu_input = [
-            torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
-            for o in out
-        ]
-    else:
-        gelu_input = empty_tensors
     bias_dtype = TE_DType[bias_dtype]
-
+    gelu_input = empty_tensors
     out_dtype = TE_DType[out[0].dtype] if D_dtype is None else D_dtype
 
-    torch.ops.tex_ts.te_grouped_gemm_ts(
-        A,
-        A_scale_inv,
-        A_fp8_tensor_offset,
-        A_dtype,
-        True,  # transa
-        B,
-        B_scale_inv,
-        B_fp8_tensor_offset,
-        B_dtype,
-        False,  # transb
-        out,
-        0 if out_offset is None else out_offset,
-        empty_tensor if out_offset is None else fp8_meta_tensor.scale,
-        out_dtype,
-        empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
-        bias if use_bias else empty_tensors,
-        bias_dtype,
-        gelu_input,  # this is pre_gelu_out
-        False,  # grad
-        workspaces,
-        workspaces[0].shape[0],
-        accumulate,
-        use_split_accumulator,
-    )
+    if len(A_scale_inv) == 1:
+        if gelu:
+            gelu_input = [
+                torch.empty_like(o, dtype=bias_dtype, memory_format=torch.contiguous_format)
+                for o in out
+            ]
+
+        torch.ops.tex_ts.te_grouped_gemm_ts(
+            A,
+            A_scale_inv[0],
+            A_fp8_tensor_offset,
+            A_dtype,
+            True,  # transa
+            B,
+            B_scale_inv,
+            B_fp8_tensor_offset,
+            B_dtype,
+            False,  # transb
+            out,
+            0 if out_offset is None else out_offset,
+            empty_tensor if out_offset is None else fp8_meta_tensor.scale,
+            out_dtype,
+            empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
+            bias if use_bias else empty_tensors,
+            bias_dtype,
+            gelu_input,  # this is pre_gelu_out
+            False,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+        )
+    else:
+        if gelu:
+            gelu_input = [torch.empty((m, A[0].size(0)), dtype=bias_dtype) for m in m_splits]
+
+        torch.ops.tex_ts.te_grouped_gemm_single_output_ts(
+            A,
+            A_scale_inv,
+            A_fp8_tensor_offset,
+            A_dtype,
+            True,  # transa
+            B,
+            B_scale_inv,
+            B_fp8_tensor_offset,
+            B_dtype,
+            False,  # transb
+            m_splits,
+            out[0],
+            0 if out_offset is None else out_offset,
+            empty_tensor if out_offset is None else fp8_meta_tensor.scale,
+            out_dtype,
+            empty_tensor if out_offset is None else fp8_meta_tensor.amax_history,
+            bias if use_bias else empty_tensors,
+            bias_dtype,
+            gelu_input,  # this is pre_gelu_out
+            False,  # grad
+            workspaces,
+            workspaces[0].shape[0],
+            accumulate,
+            use_split_accumulator,
+        )
 
     return out, gelu_input
