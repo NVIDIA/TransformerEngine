@@ -78,6 +78,7 @@ class FP8GlobalStateManager:
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
     FP8_AUTOCAST_DEPTH = 0
+    FP8_HEURISTIC = None
     global_amax_buffer = {}
     global_amax_history_buffer = {}
     global_scale_buffer = {}
@@ -264,6 +265,10 @@ class FP8GlobalStateManager:
     def fp8_graph_capturing(cls) -> bool:
         """Is CUDA graph capture under way?"""
         return cls.FP8_GRAPH_CAPTURING or torch.cuda.is_current_stream_capturing()
+
+    @classmethod
+    def fp8_heuristic(cls) -> Optional[str]:
+        return cls.FP8_HEURISTIC
 
     @classmethod
     def is_first_fp8_module(cls):
@@ -486,7 +491,10 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_model_init(enabled: bool = True) -> None:
+def fp8_model_init(
+    enabled: bool = True,
+    heuristic: Optional[str] = None,
+) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -514,11 +522,14 @@ def fp8_model_init(enabled: bool = True) -> None:
              This functionality is *EXPERIMENTAL*.
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
+    _fp8_heuristic  = FP8GlobalStateManager.FP8_HEURISTIC
     FP8GlobalStateManager.FP8_PARAMETERS = enabled
+    FP8GlobalStateManager.FP8_HEURISTIC = heuristic
     try:
         yield
     finally:
         FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
+        FP8GlobalStateManager.FP8_HEURISTIC = _fp8_heuristic
 
 
 @contextmanager

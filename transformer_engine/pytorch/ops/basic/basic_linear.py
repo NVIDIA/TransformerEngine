@@ -289,18 +289,27 @@ class BasicLinear(BasicOperation):
 
         # Cast to FP8 if needed
         if self._with_fp8_parameters:
+
+            # Dummy buffer to avoid overwriting amax history
             dummy_amax = torch.empty(
                 (1, 1),
                 dtype=torch.float32,
                 device=self.device,
-            )  # Dummy buffer to avoid overwriting amax history
+            )
+
+            # Decide whether to store FP8 transpose
+            with_transpose_cache = torch.is_grad_enabled()
+            if with_transpose_cache and FP8GlobalStateManager.fp8_heuristic() == "memory":
+                with_transpose_cache = False
+
+            # Cast to FP8
             weight = Float8Tensor.to_float8(
                 weight,
                 fp8_meta=self.get_fp8_meta("param"),
                 fp8_meta_forward=True,
                 fp8_meta_index=0,
                 amax=dummy_amax,
-                with_transpose_cache=torch.is_grad_enabled(),
+                with_transpose_cache=with_transpose_cache,
             )
 
         # Save updated parameter

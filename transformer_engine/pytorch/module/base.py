@@ -939,17 +939,25 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # If primary weights are in fp8, wrap the parameter as Float8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                # Dummy buffer to avoid overwriting amax history
                 dummy_amax = torch.empty(
                     (1, 1),
                     dtype=torch.float32,
                     device=param.device,
-                )  # Dummy buffer to avoid overwriting amax history
+                )
+
+                # Decide whether to store FP8 transpose
+                with_transpose_cache = torch.is_grad_enabled()
+                if with_transpose_cache and FP8GlobalStateManager.fp8_heuristic() == "memory":
+                    with_transpose_cache = False
+
+                # Cast param to FP8
                 param = Float8Tensor.to_float8(
                     param,
                     fp8_meta=self.fp8_meta,
                     fp8_meta_index=fp8_meta_index,
                     amax=dummy_amax,
-                    with_transpose_cache=torch.is_grad_enabled(),
+                    with_transpose_cache=with_transpose_cache,
                 )
 
             # Redo parameter wrap in case we broke it above
