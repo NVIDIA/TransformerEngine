@@ -8717,6 +8717,7 @@ class MultiheadAttention(torch.nn.Module):
             self.cp_size = get_distributed_world_size(cp_group)
             self.cp_rank = get_distributed_rank(cp_group)
         elif isinstance(cp_group, list):
+            assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
             assert (
                 cp_comm_type == "a2a+p2p"
             ), "Only cp_comm_type of a2a+p2p requires hierarchical CP groups!"
