@@ -8719,7 +8719,7 @@ class MultiheadAttention(torch.nn.Module):
         elif isinstance(cp_group, list):
             assert (
                 cp_comm_type == "a2a+p2p"
-            ), f"Only cp_comm_type of a2a+p2p requires hierarchical CP groups!"
+            ), "Only cp_comm_type of a2a+p2p requires hierarchical CP groups!"
             cp_size_a2a = get_distributed_world_size(cp_group[0])
             cp_rank_a2a = get_distributed_rank(cp_group[0])
             cp_size_p2p = get_distributed_world_size(cp_group[1])
