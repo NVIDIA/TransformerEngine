@@ -1729,17 +1729,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_qkv_dtype = None
         fused_attn_backend = None
         amax_per_step = None
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
+        is_input_fp8 = False
+        is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if fp8_meta["recipe"].fp8_mha:
-                    assert (
-                        isinstance(q, Float8Tensor)
-                        and isinstance(k, Float8Tensor)
-                        and isinstance(v, Float8Tensor)
-                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                assert isinstance(k, q.__class__) and isinstance(
+                    v, q.__class__
+                ), "q, k, and v must have the same type."
+                is_input_fp8 = isinstance(q, Float8Tensor)
+                if is_input_fp8:
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
@@ -1778,7 +1780,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
             if not fp8:
                 q_f16 = q
-            elif not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            elif not is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q_f16 = q
                 q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
 
@@ -1882,7 +1884,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
                     if (
                         not fp8
-                        or fp8_meta["recipe"].fp8_mha
+                        or is_input_fp8
                         or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
                     ):
                         kv_inputs[i % 2] = p2p_comm_buffers[i]
@@ -2436,11 +2438,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
         out_fp8 = None
-        out_f16 = out.to(q_fp8.dtype if fp8 and fp8_meta["recipe"].fp8_mha else q_f16.dtype)
-        if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
+        out_f16 = out.to(q_fp8.dtype if fp8 and is_output_fp8 else q_f16.dtype)
+        if fp8 and (is_output_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
             out_fp8 = cast_to_fp8(out_f16, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward)
 
-        if fp8 and fp8_meta["recipe"].fp8_mha:
+        if fp8 and is_output_fp8:
             out_ret = Float8Tensor(
                 data=out_fp8,
                 fp8_meta=fp8_meta,
@@ -2456,7 +2458,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_save, kv_save, out_save = q, kv, out_fp8
             fp8_fwd_scales = fp8_meta["scaling_fwd"].scale.clone()
             fp8_fwd_scale_invs = fp8_meta["scaling_fwd"].scale_inv.clone()
-        elif fp8 and fp8_meta["recipe"].fp8_mha:
+        elif fp8 and is_input_fp8:
             q_fp8 = Float8Tensor(
                 data=q,
                 fp8_meta=fp8_meta,
@@ -2513,6 +2515,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
+        ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         return out_ret
 
     @staticmethod
@@ -2595,7 +2599,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
                 dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
-                if ctx.fp8_meta["recipe"].fp8_mha:
+                if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout = dout._data
@@ -2617,7 +2621,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.fp8_meta is not None and ctx.is_input_fp8:
                 q, kv = [x.from_float8(x.dtype) for x in [q, kv]]
                 if cp_size_a2a == 1:
                     dout = dout.from_float8(dout_dtype)
@@ -2653,7 +2657,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.cp_stream,
                 True,
             )
-            if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if not ctx.fp8 and ctx.fp8_meta is not None and ctx.is_output_fp8:
                 dout = cast_from_fp8(
                     dout,
                     None,
@@ -3260,7 +3264,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dkv_[:, cu_seqlens_kv_padded[-1] :].fill_(0)
             dkv = dkv_
 
-        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.fp8 and ctx.is_input_fp8:
             dq, dkv = [
                 cast_to_fp8(x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward)
                 for x in [dq, dkv]
@@ -3283,7 +3287,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             elif ctx.qkv_format == "sbhd":
                 dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
-        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv = [
                 Float8Tensor(
                     data=x,
@@ -3854,17 +3858,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         fused_attn_backend = None
         fused_attn_qkv_dtype = None
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
+        is_input_fp8 = False
+        is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if fp8_meta["recipe"].fp8_mha:
-                    assert (
-                        isinstance(q, Float8Tensor)
-                        and isinstance(k, Float8Tensor)
-                        and isinstance(v, Float8Tensor)
-                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                assert isinstance(k, q.__class__) and isinstance(
+                    v, q.__class__
+                ), "q, k, and v must have the same type."
+                is_input_fp8 = isinstance(q, Float8Tensor)
+                if is_input_fp8:
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
@@ -3900,7 +3906,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, True
         )
 
-        if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+        if fp8 and not is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_f16, k_f16, v_f16 = q, k, v
             q, k, v = [
                 cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
@@ -3965,7 +3971,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out = out.view(-1, batch_size, *out.shape[-2:])
 
         if fp8:
-            if fp8_meta["recipe"].fp8_mha:
+            if is_output_fp8:
                 out_fp8 = Float8Tensor(
                     data=out,
                     fp8_meta=fp8_meta,
@@ -3991,7 +3997,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if fp8:
             if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q_save, k_save, v_save, out_save = q, k, v, out
-            elif fp8_meta["recipe"].fp8_mha:
+            elif is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = [
                     Float8Tensor(
                         data=x,
@@ -4043,6 +4049,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
+        ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         return out_ret
 
     @staticmethod
@@ -4071,7 +4079,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if ctx.fp8_meta["recipe"].fp8_mha:
+                if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout_fp8 = dout
@@ -4097,7 +4105,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.fp8_meta is not None and ctx.is_output_fp8:
                 assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                 q, k, v, out, dout = [x.from_float8(x.dtype) for x in [q, k, v, out, dout]]
             if ctx.use_fused_attention:
@@ -4194,7 +4202,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
         if ctx.fp8:
-            if ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.is_input_fp8:
                 dq, dk, dv = [
                     Float8Tensor(
                         data=x,
@@ -5434,11 +5442,12 @@ class FlashAttention(torch.nn.Module):
                             )
                             return out
 
-                        if fp8_meta["recipe"].fp8_mha:
-                            assert all(
-                                isinstance(x, Float8Tensor)
-                                for x in [query_layer, key_layer, value_layer]
-                            ), "q/k/v must be Float8Tensors for FP8 MHA."
+                        # "fp8_mha" decides outputs in fp8, while inputs are inferred from
+                        # the real dtype
+                        assert isinstance(key_layer, query_layer.__class__) and isinstance(
+                            value_layer, query_layer.__class__
+                        ), "q, k, and v must have the same type."
+                        if isinstance(query_layer, Float8Tensor):
                             fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
                         else:
                             query_layer, key_layer, value_layer = (
@@ -5580,6 +5589,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -5970,6 +5980,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -6424,6 +6435,7 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
