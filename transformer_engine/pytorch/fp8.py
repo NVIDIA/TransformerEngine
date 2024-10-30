@@ -522,7 +522,7 @@ def fp8_model_init(
              This functionality is *EXPERIMENTAL*.
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
-    _fp8_heuristic  = FP8GlobalStateManager.FP8_HEURISTIC
+    _fp8_heuristic = FP8GlobalStateManager.FP8_HEURISTIC
     FP8GlobalStateManager.FP8_PARAMETERS = enabled
     FP8GlobalStateManager.FP8_HEURISTIC = heuristic
     try:
