@@ -46,10 +46,9 @@ Error_Type TransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type 
 
   auto input_dims = input_buf.dimensions();
   if (transpose_axis < 0) transpose_axis += input_dims.size();
-  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
-                           std::multiplies<>());
-  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
-                           std::multiplies<>());
+  auto m = product(input_dims, 0, transpose_axis);
+  auto n = product(input_dims, transpose_axis, input_dims.size());
+
   auto input_shape = std::vector<size_t>{m, n};
   auto output_shape = std::vector<size_t>{n, m};
 
@@ -124,10 +123,8 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto input_dims = input_buf.dimensions();
   if (transpose_axis < 0) transpose_axis += input_dims.size();
-  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
-                           std::multiplies<>());
-  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
-                           std::multiplies<>());
+  auto m = product(input_dims, 0, transpose_axis);
+  auto n = product(input_dims, transpose_axis, input_dims.size());
   auto input_shape = std::vector<size_t>{m, n};
   auto input_trans_shape = std::vector<size_t>{n, m};
 

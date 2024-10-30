@@ -364,8 +364,7 @@ Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Ty
 
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
 
-  size_t wkspace_size = std::accumulate(workspace_buf->dimensions().begin(),
-                                        workspace_buf->dimensions().end(), 1, std::multiplies<>());
+  size_t wkspace_size = product(workspace_buf->dimensions());
   DType dtype = convert_ffi_datatype_to_te_dtype(q_buf.element_type());
   DType wkspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
 
@@ -608,7 +607,7 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dqkv = buffers[12];
     auto dqkv_tensor = TensorWrapper(dqkv, qkv_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dqkv, 0, product(qkv_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dqkv, 0, transformer_engine::product(qkv_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                   s_tensor.data(),  // not used for F16
@@ -630,8 +629,8 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dkv = buffers[13];
     auto dkv_tensor = TensorWrapper(dkv, kv_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, product(q_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dkv, 0, product(kv_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dkv, 0, transformer_engine::product(kv_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
@@ -659,9 +658,9 @@ void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, 
     auto dv = buffers[14];
     auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, product(q_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dk, 0, product(k_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dv, 0, product(v_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dk, 0, transformer_engine::product(k_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dv, 0, transformer_engine::product(v_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
                         doutput_tensor.data(),
