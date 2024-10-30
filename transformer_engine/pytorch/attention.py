@@ -134,7 +134,7 @@ flash_attn_cuda_bwd = None
 try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
             """ "pip install flash-attn".""",
@@ -158,7 +158,9 @@ else:
         _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
         _flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
-    elif get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
+    elif (
+        torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
+    ):
         fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
@@ -183,7 +185,7 @@ _flash_attn_3_installation_steps = """\
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
-    if get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
+    if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             _flash_attn_3_installation_steps,
@@ -8493,6 +8495,8 @@ class MultiheadAttention(torch.nn.Module):
         self.params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.num_attention_heads = num_attention_heads
         self.return_bias = return_bias
+        self.cp_size = 1
+        self.cp_rank = 0
 
         kv_channels = kv_channels if kv_channels else (hidden_size // num_attention_heads)
 
@@ -8711,6 +8715,21 @@ class MultiheadAttention(torch.nn.Module):
                       across each CP sub-group (e.g., via NVLink), then exchanging KV with
                       p2p between sub-groups (e.g., via IBLink).
         """
+        if isinstance(cp_group, dist_group_type):
+            self.cp_size = get_distributed_world_size(cp_group)
+            self.cp_rank = get_distributed_rank(cp_group)
+        elif isinstance(cp_group, list):
+            assert len(cp_group) == 2, "Current implementation only supports two-level CP groups!"
+            assert (
+                cp_comm_type == "a2a+p2p"
+            ), "Only cp_comm_type of a2a+p2p requires hierarchical CP groups!"
+            cp_size_a2a = get_distributed_world_size(cp_group[0])
+            cp_rank_a2a = get_distributed_rank(cp_group[0])
+            cp_size_p2p = get_distributed_world_size(cp_group[1])
+            cp_rank_p2p = get_distributed_rank(cp_group[1])
+            self.cp_size = cp_size_a2a * cp_size_p2p
+            self.cp_rank = cp_size_a2a * cp_rank_p2p + cp_rank_a2a
+
         # Deep iterate but skip self to avoid infinite recursion.
         for index, child in enumerate(self.modules()):
             if index == 0:
@@ -9045,8 +9064,24 @@ class MultiheadAttention(torch.nn.Module):
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
                 k_pos_emb = k_pos_emb[sequence_start:sequence_end, ...]
 
-            query_layer = apply_rotary_pos_emb(query_layer, q_pos_emb, self.qkv_format, fused=True)
-            key_layer = apply_rotary_pos_emb(key_layer, k_pos_emb, self.qkv_format, fused=True)
+            query_layer = apply_rotary_pos_emb(
+                query_layer,
+                q_pos_emb,
+                self.qkv_format,
+                fused=True,
+                cu_seqlens=cu_seqlens_q,
+                cp_size=self.cp_size,
+                cp_rank=self.cp_rank,
+            )
+            key_layer = apply_rotary_pos_emb(
+                key_layer,
+                k_pos_emb,
+                self.qkv_format,
+                fused=True,
+                cu_seqlens=cu_seqlens_kv,
+                cp_size=self.cp_size,
+                cp_rank=self.cp_rank,
+            )
 
         # ===========================
         # Core attention computation
