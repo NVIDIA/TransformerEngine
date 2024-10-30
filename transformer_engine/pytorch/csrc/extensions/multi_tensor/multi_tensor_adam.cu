@@ -508,8 +508,8 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
               g_in_type, 1, "adam",
               multi_tensor_apply<4>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
                                     tensor_lists,
-                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int64_t>(),
-                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int64_t>(), beta1,
+                                    beta2, bias_correction1, bias_correction2, epsilon, lr,
                                     (adamMode_t)mode, weight_decay);));
     } else {
       // g, p, m, v, p_master
@@ -531,8 +531,8 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
           DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
               g_in_type, 1, "adam",
               multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int32_t>(),
-                                    beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int32_t>(), beta1,
+                                    beta2, bias_correction1, bias_correction2, epsilon, lr,
                                     (adamMode_t)mode, weight_decay);));
     } else {
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(

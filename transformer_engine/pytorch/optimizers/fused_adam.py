@@ -76,11 +76,19 @@ class FusedAdam(torch.optim.Optimizer):
            in the optimizer with FP16/BF16 mixed precision training.
             (default: False)
         master_weight_dtype (torch.dtype, optional): The dtype of master weights.
-            If master_weights is False, this will be ignored.
+            If master_weights is False, this will be ignored. It can be one of
+            [torch.float32, torch.float16]. If it's not torch.float32, the optimizer
+            will create a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
-        exp_avg_dtype (torch.dtype, optional): The dtype of exp_avg.
+        exp_avg_dtype (torch.dtype, optional): The dtype of exp_avg. It can be
+            one of [torch.float32, torch.float16, torch.uint8], where torch.uint8
+            represents FP8. If it's not torch.float32, the optimizer will create
+            a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
-        exp_avg_sq_dtype (torch.dtype, optional): The dtype of exp_avg_sq.
+        exp_avg_sq_dtype (torch.dtype, optional): The dtype of exp_avg_sq. It
+            can be one of [torch.float32, torch.float16, torch.uint8], where
+            torch.uint8 represents FP8. If it's not torch.float32, the optimizer
+            will create a FP32 scalar scaling factor to ensure precision.
             (default: torch.float32)
         use_decoupled_grad (bool, optional): Whether to use ".decoupled_grad"
             instead of ".grad" for reading gradients. It's useful when the dtypes
@@ -116,11 +124,11 @@ class FusedAdam(torch.optim.Optimizer):
             raise RuntimeError("FusedAdam does not support the AMSGrad variant.")
 
         # Add constraints to dtypes of states.
-        if master_weights and master_weight_dtype not in [torch.float32, torch.half]:
+        if master_weights and master_weight_dtype not in [torch.float32, torch.float16]:
             raise RuntimeError("FusedAdam only supports fp32/fp16 master weights.")
-        if exp_avg_dtype not in [torch.float32, torch.half, torch.uint8]:
+        if exp_avg_dtype not in [torch.float32, torch.float16, torch.uint8]:
             raise RuntimeError("FusedAdam only supports fp32/fp16/fp8 exp_avg.")
-        if exp_avg_sq_dtype not in [torch.float32, torch.half, torch.uint8]:
+        if exp_avg_sq_dtype not in [torch.float32, torch.float16, torch.uint8]:
             raise RuntimeError("FusedAdam only supports fp32/fp16/fp8 exp_avg_sq.")
 
         # Currently, capturable mode only supports fp32 master weights and optimizer states.
@@ -177,7 +185,9 @@ class FusedAdam(torch.optim.Optimizer):
             "master_param": self.master_weight_dtype,
         }
         self.dtype_to_range_map = {
-            torch.half: torch.full([1], torch.finfo(torch.half).max / 2.0, dtype=torch.float32),
+            torch.float16: torch.full(
+                [1], torch.finfo(torch.float16).max / 2.0, dtype=torch.float32
+            ),
             torch.uint8: torch.full([1], 448.0, dtype=torch.float32),
         }
         self._scales = {}
@@ -245,17 +255,17 @@ class FusedAdam(torch.optim.Optimizer):
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(state[state_name], Float8Tensor)
-            return state[state_name].float()
-        elif dtype == torch.half:
-            assert state[state_name].dtype == torch.half
+            unscaled = state[state_name].float()
+        elif dtype == torch.float16:
+            assert state[state_name].dtype == torch.float16
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
-            return unscaled
         elif dtype == torch.float32:
             assert state[state_name].dtype == torch.float32
-            return state[state_name]
+            unscaled = state[state_name]
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/fp32.")
+        return unscaled
 
     def set_scaled_state(self, param, state_name, unscaled_state):
         """Set the optimizer state.
@@ -271,27 +281,15 @@ class FusedAdam(torch.optim.Optimizer):
         """
         assert unscaled_state.dtype == torch.float32
         state = self.state[param]
-        if param not in self._scales:
-            self._scales[param] = {}
-        scale = self._scales[param]
+        if state_name not in state:
+            self._initialize_state(param, state_name, False)
 
         dtype = self.name_to_dtype_map[state_name]
-        if dtype == torch.uint8:
-            if state_name not in state:
-                state[state_name] = Float8Tensor.to_float8(torch.empty_like(param.data).float())
-                scale[state_name] = torch.ones([1], device=param.device)
+        if dtype != torch.float32:
+            scale = self._scales[param]
             self._apply_scale(state_name, unscaled_state, state[state_name], scale[state_name])
-        elif dtype == torch.half:
-            if state_name not in state:
-                state[state_name] = torch.empty_like(param.data).half()
-                scale[state_name] = torch.ones([1], device=param.device)
-            self._apply_scale(state_name, unscaled_state, state[state_name], scale[state_name])
-        elif dtype == torch.float32:
-            if state_name not in state:
-                state[state_name] = torch.empty_like(param.data).float()
-            state[state_name].copy_(unscaled_state)
         else:
-            raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/fp32.")
+            state[state_name].copy_(unscaled_state)
 
     def _initialize_state(self, param, state_name, zero_buffer: bool):
         """Initialize one of the optimizer states according to `state_name`.
@@ -302,12 +300,19 @@ class FusedAdam(torch.optim.Optimizer):
                 and 'master_param`.
             zero_buffer (bool): Whether to initialize the optimizer state with zeros.
         """
-        buffer = torch.zeros_like(param).float() if zero_buffer else torch.empty_like(param).float()
         dtype = self.name_to_dtype_map[state_name]
+        data = torch.empty_like(param, dtype=dtype)
+        if zero_buffer:
+            data.zero_()
+
         if dtype == torch.uint8:
-            self.state[param][state_name] = Float8Tensor.to_float8(buffer)
+            self.state[param][state_name] = Float8Tensor(
+                data=data,
+                dtype=torch.float32,
+                fp8_scale_inv=torch.ones([1], dtype=torch.float32, device=param.device),
+            )
         else:
-            self.state[param][state_name] = buffer.to(dtype)
+            self.state[param][state_name] = data
 
         # Create scale if necessary.
         if dtype != torch.float32:
