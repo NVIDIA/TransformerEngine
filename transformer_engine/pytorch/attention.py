@@ -1729,6 +1729,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_qkv_dtype = None
         fused_attn_backend = None
         amax_per_step = None
+        qkv_dtype = q.dtype
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
@@ -1882,11 +1883,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             batch_p2p_comm,
                         )
 
-                    if (
-                        not fp8
-                        or is_input_fp8
-                        or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
-                    ):
+                    if not fp8 or is_input_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                         kv_inputs[i % 2] = p2p_comm_buffers[i]
                     else:
                         # KV exchange is in BF16/FP16, cast received KV in each step
@@ -2438,7 +2435,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
         out_fp8 = None
-        out_f16 = out.to(q_fp8.dtype if fp8 and is_output_fp8 else q_f16.dtype)
+        out_f16 = out.to(qkv_dtype)
         if fp8 and (is_output_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
             out_fp8 = cast_to_fp8(out_f16, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward)
 
@@ -2449,7 +2446,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fp8_meta_forward=True,
                 fp8_meta_index=META_O,
                 fp8_dtype=fp8_dtype_forward,
-                dtype=q_fp8.dtype,
+                dtype=qkv_dtype,
             )
         else:
             out_ret = out_f16
@@ -3856,6 +3853,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
 
+        qkv_dtype = q.dtype
         fused_attn_backend = None
         fused_attn_qkv_dtype = None
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
@@ -3978,7 +3976,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     fp8_meta_forward=True,
                     fp8_meta_index=META_O,
                     fp8_dtype=fp8_dtype_forward,
-                    dtype=q_fp8.dtype,
+                    dtype=qkv_dtype,
                 )
                 out = out_fp8._data
                 out_ret = out_fp8
@@ -4072,6 +4070,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fused_attn_backend = None
         fused_attn_dqkv_dtype = None
         fused_attn_qkv_dtype = None
+        dout_dtype = dout.dtype
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -4210,7 +4209,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         fp8_meta_forward=False,
                         fp8_meta_index=META_DQKV,
                         fp8_dtype=fp8_dtype_backward,
-                        dtype=dout_fp8.dtype,
+                        dtype=dout_dtype,
                     )
                     for x in [dq, dk, dv]
                 ]
@@ -4221,7 +4220,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"],
                         META_DQKV,
                         fp8_dtype_backward,
-                        TE_DType[dout_f16.dtype],
+                        TE_DType[dout_dtype],
                     )
                     for x in [dq, dk, dv]
                 ]
