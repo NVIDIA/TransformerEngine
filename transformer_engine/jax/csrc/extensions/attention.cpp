@@ -194,7 +194,6 @@ static void FusedAttnForwardImpl(
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
     bool is_training, bool deterministic, int64_t window_size_left, int64_t window_size_right) {
-
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
 
   /* Input tensors */
@@ -330,13 +329,13 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
       descriptor.deterministic, descriptor.window_size_left, descriptor.window_size_right);
 }
 
-Error_Type FusedAttnForwardFFI(
-    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
-    Buffer_Type bias_buf, Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
-    Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf, Buffer_Type seed_buf,
-    Result_Type output_buf, Result_Type softmax_aux_buf, Result_Type rng_state_buf,
-  Result_Type workspace_buf, Dictionary attrs) {
-
+Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                               Buffer_Type v_buf, Buffer_Type bias_buf,
+                               Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
+                               Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                               Buffer_Type seed_buf, Result_Type output_buf,
+                               Result_Type softmax_aux_buf, Result_Type rng_state_buf,
+                               Result_Type workspace_buf, Dictionary attrs) {
   /* Descriptor data type conversion */
   size_t input_batch = get_attr_value<int64_t>(attrs, "input_batch");
   size_t bias_batch = get_attr_value<int64_t>(attrs, "bias_batch");
@@ -371,17 +370,15 @@ Error_Type FusedAttnForwardFFI(
   DType wkspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
 
   FusedAttnForwardImpl(
-    stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
-    bias_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(), kv_cu_seqlens_buf.untyped_data(),
-    is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
-    is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, seed_buf.untyped_data(),
-    output_buf->untyped_data(), softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(),
-    workspace_buf->untyped_data(), 
-    input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
-    attn_heads, num_gqa_groups, bias_heads, head_dim, max_segments_per_seq,
-    wkspace_size, scaling_factor, dropout_probability,  bias_type, mask_type, 
-    qkv_layout, dtype, wkspace_dtype, is_training, deterministic,
-    window_size_left, window_size_right);
+      stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
+      bias_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(), kv_cu_seqlens_buf.untyped_data(),
+      is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
+      is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, seed_buf.untyped_data(),
+      output_buf->untyped_data(), softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(),
+      workspace_buf->untyped_data(), input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+      attn_heads, num_gqa_groups, bias_heads, head_dim, max_segments_per_seq, wkspace_size,
+      scaling_factor, dropout_probability, bias_type, mask_type, qkv_layout, dtype, wkspace_dtype,
+      is_training, deterministic, window_size_left, window_size_right);
 
   return ffi_with_cuda_error_check();
 }
