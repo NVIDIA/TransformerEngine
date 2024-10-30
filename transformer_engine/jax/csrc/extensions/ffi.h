@@ -70,7 +70,8 @@ T get_attr_value(Dictionary& attrs, std::string attr_name,
   return attr.value();
 }
 
-inline size_t product(const xla::ffi::Span<const int64_t>& data, size_t start_idx = 0, size_t end_idx = 0) {
+inline size_t product(const xla::ffi::Span<const int64_t>& data, size_t start_idx = 0,
+                      size_t end_idx = 0) {
   end_idx = (end_idx == 0) ? data.size() : end_idx;
   return std::accumulate(data.begin() + start_idx, data.begin() + end_idx, size_t(1),
                          std::multiplies<size_t>());
