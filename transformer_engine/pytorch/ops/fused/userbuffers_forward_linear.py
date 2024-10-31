@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine_torch import UbufOverlapAlgo
+from transformer_engine_torch import CommOverlapAlgo
 from ...cpp_extensions import fp8_gemm, gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
@@ -220,16 +220,16 @@ class UserbuffersForwardLinear(FusedOperation):
         ub_algo = None
         if with_ub_all_gather:
             if with_fp8_compute and ub_comm.is_atomic_gemm():
-                ub_algo = UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                ub_algo = CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
             else:
-                ub_algo = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                ub_algo = CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif with_ub_reduce_scatter:
             is_atomic_gemm = with_fp8_compute and ub_comm.is_atomic_gemm()
             ub_algo = {
-                (True, True): UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
-                (True, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
-                (False, True): UbufOverlapAlgo.ATOMIC_GEMM_RS,
-                (False, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS,
+                (True, True): CommOverlapAlgo.ATOMIC_GEMM_RS_P2P,
+                (True, False): CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
+                (False, True): CommOverlapAlgo.ATOMIC_GEMM_RS,
+                (False, False): CommOverlapAlgo.SPLIT_PIPELINED_RS,
             }[(ub_comm.is_p2p_overlap(), is_atomic_gemm)]
         else:
             raise RuntimeError("Could not choose Userbuffers communication algorithm")
