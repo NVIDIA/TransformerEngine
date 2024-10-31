@@ -392,14 +392,14 @@ __global__ void __launch_bounds__(MAX_THREADS) userbuffers_fp16_sum_inplace_gpu_
   if (threadIdx.x == 0 && lastSM) *reduceidptr = reduce_id;
 }  // fp16 reduce-scatter kernel (out of place)
 
-#if __CUDA_ARCH__ >= 900
+#if __CUDA_ARCH__ >= 900 && CUDART_VERSION >= 12010
 // All MC kernels here
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        float4 *mc_ptr) {
+                                        float4 *mc_ptr, const uint64_t ub_timeout) {
   int *flagptr, physgpu, targetgpu, *myptr;
   int *reduceidptr, reduce_id;
 
@@ -417,7 +417,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&(myptr[targetgpu]);
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > TIMEOUT) {
+      if (clock64() - s > ub_timeout) {
         UB_PRINT("Reduce-scatter: SM %d [%d]: expecting %d got %d", blockIdx.x, threadIdx.x,
                  reduce_id, *flag);
         break;
@@ -484,7 +484,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     volatile int *flag = (volatile int *)&myptr[targetgpu];
     clock_t s = clock64();
     while (CHECK_IDS(*flag, reduce_id)) {
-      if (clock64() - s > 2ull * TIMEOUT) {
+      if (clock64() - s > 2ull * ub_timeout) {
         UB_PRINT("Allgather: SM %d [%d]: expecting %d got %d", blockIdx.x, threadIdx.x, reduce_id,
                  *flag);
         break;
@@ -741,7 +741,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc(const int op, const int flagoffset, const int firstrank,
                                         const int myrank, const int gpustep, const int lineoffset,
                                         const int numlines, void **commbuff, const int handleridx,
-                                        float4 *mc_ptr) {}
+                                        float4 *mc_ptr, const uint64_t ub_timeout) {}
 template <int RANKS>
 __global__ void __launch_bounds__(MAX_THREADS)
     userbuffers_fp16_sum_inplace_gpu_mc_rs_oop(const int op, const int flagoffset,
@@ -2496,6 +2496,18 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
   }
 }
 
+// reset counters kernel
+static __global__ void reset_counters_kernel(void *atomic_ptr, int num_chunks, bool allgather) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+#pragma unroll
+    for (int i = 0; i < num_chunks; i++) {
+      ((unsigned int *)atomic_ptr)[i] = 1;
+      ((unsigned int *)atomic_ptr)[i + num_chunks] = 0;
+    }
+    if (allgather) ((unsigned int *)atomic_ptr)[0] = 0;
+  }
+}
+
 void producer(void *atomic_ptr, int chunk_i, cudaStream_t stream) {
   dim3 block(1);
   dim3 grid(1);
@@ -2512,6 +2524,12 @@ void consumer_batch(void *atomic_ptr, int first_chunk_i, int num_chunks, cudaStr
   dim3 block(1);
   dim3 grid(1);
   consumer_batch_kernel<<<grid, block, 0, stream>>>(atomic_ptr, first_chunk_i, num_chunks);
+}
+
+void reset_counters(void *atomic_ptr, int num_chunks, bool allgather, cudaStream_t stream) {
+  dim3 block(1);
+  dim3 grid(1);
+  reset_counters_kernel<<<grid, block, 0, stream>>>(atomic_ptr, num_chunks, allgather);
 }
 
 template <typename fp8type>
@@ -2546,3 +2564,24 @@ template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, 
 template void reduce_fp8_in_bf16_out<__nv_fp8_e5m2>(void *inputs, void *output, float *scale,
                                                     int num_inputs, int input_size,
                                                     cudaStream_t stream);
+
+__global__ void __launch_bounds__(MAX_THREADS / 4)
+    reduce_bf16_cuda(void *inputs, void *output, const int num_inputs, const int input_size) {
+  const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  half *inputs_half = reinterpret_cast<half *>(inputs);
+  float accum_buf = static_cast<float>(inputs_half[tid]);
+#pragma unroll
+  for (int i = 1; i < num_inputs; i++) {
+    accum_buf += static_cast<float>(inputs_half[tid + input_size * i]);
+  }
+  half *output_half = reinterpret_cast<half *>(output);
+  output_half[tid] = (half)accum_buf;
+}
+
+void reduce_bf16(void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream) {
+  size_t num_threads = MAX_THREADS / 4;
+  size_t num_blocks = (input_size + num_threads - 1) / num_threads;
+  dim3 block(num_threads);
+  dim3 grid(num_blocks);
+  reduce_bf16_cuda<<<grid, block, 0, stream>>>(inputs, output, num_inputs, input_size);
+}

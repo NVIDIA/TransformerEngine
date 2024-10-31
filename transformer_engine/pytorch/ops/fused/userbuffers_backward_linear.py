@@ -11,7 +11,7 @@ import warnings
 
 import torch
 
-from transformer_engine_torch import UbufOverlapAlgo
+from transformer_engine_torch import CommOverlapAlgo
 from ...cpp_extensions import (
     fp8_cast_transpose_bgrad_fused,
     fp8_gemm,
@@ -259,26 +259,26 @@ class UserbuffersBackwardLinear(FusedOperation):
             with_ub_all_gather_dy = True
             ub_comm_dy = get_ub(ub_comm_name + "_dgrad")
             if with_fp8_compute and ub_comm_dy.is_atomic_gemm():
-                ub_algo_dy = UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                ub_algo_dy = CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
             else:
-                ub_algo_dy = UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                ub_algo_dy = CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif tensor_parallel_mode == "column":
             with_ub_reduce_scatter_dx = True
             if weight_requires_grad:
                 with_ub_all_gather_x = True
                 ub_comm_dx = get_ub(ub_comm_name + "_wgrad")
                 ub_comm_x = get_ub(ub_comm_name + "_dgrad")
-                ub_algo_dx = UbufOverlapAlgo.BULK_OVERLAP_RS
-                ub_algo_x = UbufOverlapAlgo.BULK_OVERLAP_AG
+                ub_algo_dx = CommOverlapAlgo.BULK_OVERLAP_RS
+                ub_algo_x = CommOverlapAlgo.BULK_OVERLAP_AG
             else:
                 with_ub_all_gather_x = False
                 ub_comm_dx = get_ub(ub_comm_name + "_dgrad")
                 is_atomic_gemm = with_fp8_compute and ub_comm_dx.is_atomic_gemm()
                 ub_algo_dx = {
-                    (True, True): UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P,
-                    (True, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
-                    (False, True): UbufOverlapAlgo.ATOMIC_GEMM_RS,
-                    (False, False): UbufOverlapAlgo.SPLIT_PIPELINED_RS,
+                    (True, True): CommOverlapAlgo.ATOMIC_GEMM_RS_P2P,
+                    (True, False): CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P,
+                    (False, True): CommOverlapAlgo.ATOMIC_GEMM_RS,
+                    (False, False): CommOverlapAlgo.SPLIT_PIPELINED_RS,
                 }[(ub_comm_dx.is_p2p_overlap(), is_atomic_gemm)]
 
         # Check grad output tensor
