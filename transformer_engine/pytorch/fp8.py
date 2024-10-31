@@ -268,6 +268,7 @@ class FP8GlobalStateManager:
 
     @classmethod
     def fp8_heuristic(cls) -> Optional[str]:
+        """Heuristic for FP8 data format"""
         return cls.FP8_HEURISTIC
 
     @classmethod
@@ -495,14 +496,13 @@ def fp8_model_init(
     enabled: bool = True,
     heuristic: Optional[str] = None,
 ) -> None:
-    """
-    Context manager for FP8 initialization of parameters.
+    """Context manager for FP8 initialization of parameters.
 
     Example usage:
 
     .. code-block:: python
 
-        with fp8_model_init(enabled=True):
+        with fp8_model_init():
             model = transformer_engine.pytorch.Linear(768, 768)
 
     Parameters
@@ -520,6 +520,11 @@ def fp8_model_init(
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
 
              This functionality is *EXPERIMENTAL*.
+    heuristic: string, optional
+               Heuristic for FP8 data format. Supported options are
+               "performance" (maximize runtime performance, default)
+               and "memory" (minimize memory usage).
+
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
     _fp8_heuristic = FP8GlobalStateManager.FP8_HEURISTIC

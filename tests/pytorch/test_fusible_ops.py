@@ -429,6 +429,47 @@ class TestFuser:
             assert x.grad.dtype == model_dtype
             assert op.weight.grad.dtype == model_dtype
 
+    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.parametrize("heuristic", (None, "performance", "memory"))
+    def test_fp8_heuristics(
+        self,
+        *,
+        heuristic: Optional[str],
+        size: int = 16,
+        dtype: torch.dtype = torch.float32,
+        device: torch.device = "cuda",
+    ) -> None:
+        """Test with FP8 heuristics"""
+
+        # Construct model
+        with te.fp8_model_init(heuristic=heuristic):
+            op = te_ops.Linear(size, size, bias=False, device=device, dtype=dtype)
+
+        # Check FP8 param
+        assert isinstance(op.weight, Float8Tensor)
+        if heuristic == "performance" or heuristic is None:
+            assert op.weight._transpose is not None
+            assert not op.weight._transpose_invalid
+        if heuristic == "memory":
+            assert op.weight._transpose is None
+
+        # Training loop
+        optim = torch.optim.SGD(op.parameters(), lr=1e-4)
+        for _ in range(3):
+            optim.zero_grad()
+            x = torch.randn((size, size), dtype=dtype, device=device, requires_grad=True)
+            y = op(x)
+            y.square().sum().backward()
+            optim.step()
+
+        # Check FP8 param
+        assert isinstance(op.weight, Float8Tensor)
+        if heuristic == "performance" or heuristic is None:
+            assert op.weight._transpose is not None
+            assert not op.weight._transpose_invalid
+        if heuristic == "memory":
+            assert op.weight._transpose is None
+
 
 class TestBasicOps:
     """Tests for individual operations"""
