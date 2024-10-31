@@ -7,8 +7,6 @@
 
 #include <iostream>
 
-#include "common/util/logging.h"
-
 namespace transformer_engine {
 namespace jax {
 
