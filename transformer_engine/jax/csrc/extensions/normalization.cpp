@@ -128,8 +128,7 @@ Error_Type LayerNormForwardImplFFI(cudaStream_t stream, Buffer_Type *x_buf, Buff
     scale = reinterpret_cast<float *>(scale_buf->untyped_data());
     scale_inv = reinterpret_cast<float *>(scale_inv_buf->untyped_data());
     amax_out = (*amax_out_buf)->untyped_data();
-    NVTE_CHECK(amax_out == amax,
-               "amax not bound to amax_out in TE/JAX LayerNormForward primitive");
+    NVTE_CHECK(amax_out == amax, "amax not bound to amax_out in TE/JAX LayerNormForward primitive");
     out_dtype = DType::kFloat8E4M3;
   }
 
