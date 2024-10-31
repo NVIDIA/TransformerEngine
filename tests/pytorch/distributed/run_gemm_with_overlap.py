@@ -22,6 +22,7 @@ import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -32,8 +33,8 @@ torch_dtypes = {
 }
 
 nvte_comm_types = {
-    "rs": 0,
-    "ag": 1,
+    "rs": tex.CommOverlapType.RS,
+    "ag": tex.CommOverlapType.AG,
 }
 
 
@@ -75,7 +76,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--comm-type",
         type=partial(_mapped_argtype, typemap=nvte_comm_types),
-        default=0,
+        default=tex.CommOverlapType.AG,
         help="Comm type to overlap.",
     )
     parser.add_argument(
@@ -156,12 +157,10 @@ def _parse_args(argv=None, namespace=None):
         if opts.fp8:
             warnings.warn("Bulk overlap is supported in FP8 but only tested in BF16.")
             opts.fp8 = False
-    elif opts.comm_type == 1:
+    elif opts.comm_type == tex.CommOverlapType.AG:
         if opts.atomic:
             setattr(opts, "atomic_rs_p2p", opts.p2p)
-        if not opts.p2p:
-            warnings.warn("All-gather overlap is only supported with point-2-point comms.")
-            opts.p2p = True
+        opts.p2p = True
 
     if opts.atomic:
         if not te.fp8.check_fp8_support():
@@ -283,35 +282,35 @@ def _main(opts):
     if WORLD_RANK == 0:
         print("\n", end="", flush=True)
 
-    ub_callbacks = (
-        tex.UbufBootstrapCallbacks()
+    helper = (
+        tex.CommOverlapHelper()
         if tex.ubuf_built_with_mpi()
-        else tex.UbufBootstrapCallbacks(bootstrap_pg, bootstrap_pg)
+        else tex.CommOverlapHelper(bootstrap_pg)
     )
 
-    if opts.comm_type == 0:
+    if opts.comm_type == tex.CommOverlapType.RS:
         if opts.bulk_overlap:
-            ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_RS
+            ub_algo = tex.CommOverlapAlgo.BULK_OVERLAP_RS
         elif opts.p2p:
             ub_algo = (
-                tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
                 if opts.atomic
-                else tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                else tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
             )
         else:
             ub_algo = (
-                tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                tex.CommOverlapAlgo.ATOMIC_GEMM_RS
                 if opts.atomic
-                else tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                else tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
             )
-    elif opts.comm_type == 1:
+    elif opts.comm_type == tex.CommOverlapType.AG:
         if opts.bulk_overlap:
-            ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
+            ub_algo = tex.CommOverlapAlgo.BULK_OVERLAP_AG
         else:
             ub_algo = (
-                tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
                 if opts.atomic
-                else tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                else tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
             )
     else:
         raise TypeError("Invalid comm+GEMM overlap type!")
@@ -322,95 +321,55 @@ def _main(opts):
     hidden_size = opts.num_heads * opts.head_dim
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
-    ubuf_dtype = torch.bfloat16
-    if opts.fp8 and not opts.bulk_overlap and (opts.comm_type == 1 or opts.fp8_output):
-        ubuf_dtype = torch.uint8
-    sample_buffer = torch.empty((outer_size, hidden_size), dtype=ubuf_dtype, device="cuda")
-    ub_obj = ub_obj = (
-        tex.UbufP2PCommOverlap(
-            sample_buffer,  # Sample userbuffer
-            WORLD_RANK,  # World rank
-            WORLD_SIZE,  # World size
-            LOCAL_RANK,  # Rank within the node
-            LOCAL_SIZE,  # Number of ranks/GPUs per node
-            0,  # Node ID
-            1,  # Number of nodes
+    buffer_dtype = torch.bfloat16
+    if (
+        opts.fp8
+        and not opts.bulk_overlap
+        and (opts.comm_type == tex.CommOverlapType.AG or opts.fp8_output)
+    ):
+        buffer_dtype = torch.uint8
+    ub_obj = (
+        tex.CommOverlapP2P(
+            (outer_size, hidden_size),
+            buffer_dtype,
+            helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            1,  # Number of communication SMs
-            1,  # CGA cluster size
-            opts.comm_type == 0 or opts.atomic,  # Set SM margin
-            opts.aggregate,  # Aggregate 2X GEMM chunks
-            3,  # Max concurrent GEMM streams
-            opts.comm_type == 0,  # overlap with reduce scatter
-            opts.atomic,  # use a single GEMM with atomic-counters
-            not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
-            ub_callbacks,
+            opts.comm_type,
+            set_sm_margin=opts.comm_type == tex.CommOverlapType.RS or opts.atomic,
+            atomic_gemm=opts.atomic,
+            aggregate=opts.aggregate,
+            use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
         )
         if opts.p2p
-        else tex.UbufCommOverlap(
-            sample_buffer,  # Sample userbuffer
-            WORLD_RANK,  # World rank
-            WORLD_SIZE,  # World size
-            LOCAL_RANK,  # Rank within the node
-            LOCAL_SIZE,  # Number of ranks/GPUs per node
-            0,  # Node ID
-            1,  # Number of nodes
+        else tex.CommOverlap(
+            (outer_size, hidden_size),
+            buffer_dtype,
+            helper,
             tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-            16,  # Number of communication SMs
-            2,  # CGA cluster size
-            4,  # Number of communication splits
-            True,  # Set SM margin
-            3,  # Max concurrent GEMM streams
-            opts.atomic,  # Use a single GEMM with atomic-counters
-            ub_callbacks,
+            atomic_gemm=opts.atomic,
         )
     )
 
     # Numerical check on AG + atomic GEMM requires testing an AG+RS pair
     ub_obj2 = None
-    if opts.atomic and opts.comm_type == 1 and opts.check_numerics:
-        sample_buffer2 = torch.empty(
-            (outer_size, hidden_size),
-            dtype=torch.uint8 if opts.fp8_output else torch.bfloat16,
-            device="cuda",
-        )
+    if opts.atomic and opts.comm_type == tex.CommOverlapType.AG and opts.check_numerics:
         ub_obj2 = (
-            tex.UbufP2PCommOverlap(
-                sample_buffer2,  # Sample userbuffer
-                WORLD_RANK,  # World rank
-                WORLD_SIZE,  # World size
-                LOCAL_RANK,  # Rank within the node
-                LOCAL_SIZE,  # Number of ranks/GPUs per node
-                0,  # Node ID
-                1,  # Number of nodes
+            tex.CommOverlapP2P(
+                (outer_size, hidden_size),
+                torch.uint8 if opts.fp8_output else torch.bfloat16,
+                helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                1,  # Number of communication SMs
-                1,  # CGA cluster size
-                True,  # Set SM margin
-                False,  # Aggregate 2X GEMM chunks
-                3,  # Max concurrent GEMM streams
-                True,  # overlap with reduce scatter
-                True,  # use a single GEMM with atomic-counters
-                True,  # use copy engine for P2P communications
-                ub_callbacks,
+                tex.CommOverlapType.RS,
+                set_sm_margin=True,
+                atomic_gemm=True,
             )
             if opts.atomic_rs_p2p
-            else tex.UbufCommOverlap(
-                sample_buffer2,  # Sample userbuffer
-                WORLD_RANK,  # World rank
-                WORLD_SIZE,  # World size
-                LOCAL_RANK,  # Rank within the node
-                LOCAL_SIZE,  # Number of ranks/GPUs per node
-                0,  # Node ID
-                1,  # Number of nodes
+            else tex.CommOverlap(
+                (outer_size, hidden_size),
+                torch.uint8 if opts.fp8_output else torch.bfloat16,
+                helper,
                 tp_size,  # Tensor-parallel group size (may be different than LOCAL_SIZE)
-                16,  # Number of communication SMs
-                2,  # CGA cluster size
-                4,  # Number of communication splits
-                True,  # Set SM margin
-                3,  # Max concurrent GEMM streams
-                True,  # uUe a single GEMM with atomic-counters
-                ub_callbacks,
+                atomic_gemm=True,
             )
         )
 
@@ -426,12 +385,12 @@ def _main(opts):
         local_kernel_t_shape = (ffn_hidden_size, hidden_size)
         local_inp_shape = (outer_size, hidden_size)
         # Bulk overlap comm tensor is distributed for AG overlap only
-        if opts.comm_type == 1:
+        if opts.comm_type == tex.CommOverlapType.AG:
             bulk_inp_shape = (outer_size // tp_size, hidden_size)
         else:
             bulk_inp_shape = (outer_size, hidden_size)
     else:
-        if opts.comm_type == 1:
+        if opts.comm_type == tex.CommOverlapType.AG:
             # (M/P, N) -> overlapped AG -> (M, N) x (K/P, N)^T = (M, K/P)
             local_kernel_t_shape = (ffn_hidden_size // tp_size, hidden_size)
             local_inp_shape = (outer_size // tp_size, hidden_size)
@@ -472,7 +431,7 @@ def _main(opts):
             std=opts.std,
         )
     else:
-        if opts.comm_type == 1:
+        if opts.comm_type == tex.CommOverlapType.AG:
             # AG Kernel: (K/P, N) -> gather -> (K, N) -> T -> (N, K)
             ker_g = torch.transpose(
                 te.distributed.gather_along_first_dim(kernel_t, tp_group)[0], 0, 1
@@ -494,7 +453,7 @@ def _main(opts):
             ).to(dtype=torch.float32)
 
     if opts.bulk_overlap:
-        if opts.comm_type == 1:
+        if opts.comm_type == tex.CommOverlapType.AG:
             ref_g = te.distributed.gather_along_first_dim(bulk_inp, tp_group)[0]
         else:
             # First all-gather all the bulk inputs into a list
@@ -505,7 +464,7 @@ def _main(opts):
     else:
         ref_g = torch.matmul(inp_g, ker_g)
         if ub_obj2 is not None:
-            inp2_g = torch.nn.functional.gelu(ref_g)
+            inp2_g = torch.nn.functional.gelu(ref_g)  # pylint: disable=not-callable
             ref2_g = torch.matmul(inp2_g, ker2_g)
 
     if opts.fp8:
@@ -529,7 +488,7 @@ def _main(opts):
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_WEIGHT].copy_(ker_amax)
         ref_amax = torch.max(torch.abs(ref_g))
         fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM1_OUTPUT].copy_(ref_amax)
-        if opts.bulk_overlap and opts.comm_type == 0:
+        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
             bulk_amax = torch.max(torch.abs(bulk_inp))
             fp8_meta.amax_history[1][tex.FP8FwdTensors.GEMM2_OUTPUT].copy_(bulk_amax)
         elif ub_obj2 is not None:
@@ -551,7 +510,7 @@ def _main(opts):
         kernel_t_fp8 = tex.cast_to_fp8(
             kernel_t, fp8_meta, tex.FP8FwdTensors.GEMM1_WEIGHT, fp8_dtype
         )
-        if opts.bulk_overlap and opts.comm_type == 0:
+        if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
             bulk_inp_fp8 = tex.cast_to_fp8(
                 bulk_inp, fp8_meta, tex.FP8Tensors.GEMM2_OUTPUT, fp8_dtype
             )
@@ -574,7 +533,7 @@ def _main(opts):
                 rtol=0.125,
                 atol=0.0675,
             )
-            if opts.bulk_overlap and opts.comm_type == 0:
+            if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
                 torch.allclose(
                     bulk_inp.to(dtype=torch.float32),
                     bulk_inp_fp8 * fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT],
@@ -590,7 +549,7 @@ def _main(opts):
                 )
 
         # Set Fp8 scales for userbuffers
-        if opts.comm_type == 1:
+        if opts.comm_type == tex.CommOverlapType.AG:
             ub_obj.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM1_INPUT])
             if ub_obj2 is not None:
                 ub_obj2.set_ubuf_scale_inv(fp8_meta.scale_inv[tex.FP8FwdTensors.GEMM2_OUTPUT])
@@ -602,7 +561,7 @@ def _main(opts):
     # Set up comm/compute buffers
     ubuf_out2 = None
     rs_out2 = None
-    if opts.comm_type == 1:
+    if opts.comm_type == tex.CommOverlapType.AG:
         if opts.bulk_overlap:
             ub_obj.copy_input_to_ubuf(bulk_inp, 1)
             gemm_inp = inp
@@ -686,9 +645,9 @@ def _main(opts):
             gelu=False,
             use_split_accumulator=te.module.base._2X_ACC_FPROP,
             ub_algo=(
-                tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
                 if opts.atomic_rs_p2p
-                else tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                else tex.CommOverlapAlgo.ATOMIC_GEMM_RS
             ),
             ub=ub_obj2,
             extra_output_tensor=rs_out2,
@@ -762,10 +721,14 @@ def _main(opts):
     avg_gpu_time = sum(gpu_times) / opts.timing_iters
     gemm_name = "".join(
         [
-            "p2p all-gather + " if opts.comm_type == 1 else "",
+            "p2p all-gather + " if opts.comm_type == tex.CommOverlapType.AG else "",
             "atomic " if opts.atomic else "",
             "GEMM",
-            (f" + {'p2p ' if opts.p2p else ''}reduce-scatter" if opts.comm_type == 0 else ""),
+            (
+                f" + {'p2p ' if opts.p2p else ''}reduce-scatter"
+                if opts.comm_type == tex.CommOverlapType.RS
+                else ""
+            ),
         ]
     )
     timing_info = (
@@ -781,7 +744,7 @@ def _main(opts):
         dist.barrier(tp_group)
         if opts.bulk_overlap:
             output_info = ""
-            if opts.comm_type == 1:
+            if opts.comm_type == tex.CommOverlapType.AG:
                 # Bulk overlap AG output is already gathered
                 test_out = ub_obj.get_ubuf_output(1)
             else:
@@ -794,7 +757,7 @@ def _main(opts):
             output_info += f"output: {list(test_out.shape)} | reference: {list(ref_out.shape)}"
             dist_print(
                 output_info,
-                src=0 if opts.comm_type == 0 else None,
+                src=0 if opts.comm_type == tex.CommOverlapType.RS else None,
                 section=True,
             )
 
@@ -805,7 +768,7 @@ def _main(opts):
             )
             dist_print(nonzero_info, src=0, section=True, group=tp_group)
         else:
-            if opts.comm_type == 1:
+            if opts.comm_type == tex.CommOverlapType.AG:
                 if ub_obj2 is not None:
                     # AG+RS Output: (M/P, N) -> gather -> (M, N)
                     output = rs_out2.to(dtype=torch.float32)

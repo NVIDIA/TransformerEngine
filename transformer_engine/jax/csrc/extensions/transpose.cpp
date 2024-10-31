@@ -36,6 +36,37 @@ void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t o
   TransposeImpl(input, rows, cols, dtype, stream, output);
 }
 
+Error_Type TransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type output_buf,
+                        int64_t transpose_axis) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
+
+  void *input = input_buf.untyped_data();
+  void *output = output_buf->untyped_data();
+
+  auto input_dims = input_buf.dimensions();
+  if (transpose_axis < 0) transpose_axis += input_dims.size();
+  auto m = product(input_dims, 0, transpose_axis);
+  auto n = product(input_dims, transpose_axis, input_dims.size());
+
+  auto input_shape = std::vector<size_t>{m, n};
+  auto output_shape = std::vector<size_t>{n, m};
+
+  auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
+  auto output_tensor = TensorWrapper(output, output_shape, out_dtype);
+
+  nvte_transpose(input_tensor.data(), output_tensor.data(), stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(TransposeHandler, TransposeFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Ret<Buffer_Type>()      // output
+                                  .Attr<int64_t>("transpose_axis"),
+                              FFI_CudaGraph_Traits);
+
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
   float *amax = reinterpret_cast<float *>(buffers[1]);
@@ -82,7 +113,7 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto *input_cast = input_cast_buf->untyped_data();
   auto *input_cast_trans = input_cast_trans_buf->untyped_data();
   float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
-  assert(amax == amax_out);
+  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX CastTranspose primitive.");
 
   if (!use_fp8(out_dtype)) {
     scale = nullptr;
@@ -92,10 +123,8 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto input_dims = input_buf.dimensions();
   if (transpose_axis < 0) transpose_axis += input_dims.size();
-  auto m = std::accumulate(input_dims.begin(), input_dims.begin() + transpose_axis, 1,
-                           std::multiplies<>());
-  auto n = std::accumulate(input_dims.begin() + transpose_axis, input_dims.end(), 1,
-                           std::multiplies<>());
+  auto m = product(input_dims, 0, transpose_axis);
+  auto n = product(input_dims, transpose_axis, input_dims.size());
   auto input_shape = std::vector<size_t>{m, n};
   auto input_trans_shape = std::vector<size_t>{n, m};
 
@@ -120,7 +149,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CastTransposeHandler, CastTransposeFFI,
                                   .Ret<Buffer_Type>()      // input_cast
                                   .Ret<Buffer_Type>()      // input_cast_trans
                                   .Ret<Buffer_Type>()      // amax_out
-                                  .Attr<int64_t>("transpose_axis"));
+                                  .Attr<int64_t>("transpose_axis"),
+                              FFI_CudaGraph_Traits);
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype) {

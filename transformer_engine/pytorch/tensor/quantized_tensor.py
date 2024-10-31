@@ -20,6 +20,7 @@ class _DequantizeFunc(torch.autograd.Function):
         tensor: QuantizedTensor,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return tensor.dequantize(dtype=dtype)
 
     @staticmethod
@@ -27,6 +28,7 @@ class _DequantizeFunc(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> Tuple[Optional[torch.Tensor], ...]:
+        # pylint: disable=missing-function-docstring
         return grad, None
 
 
@@ -38,6 +40,7 @@ class _IdentityFunc(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         tensor: QuantizedTensor,
     ) -> QuantizedTensor:
+        # pylint: disable=missing-function-docstring
         return tensor.detach()
 
     @staticmethod
@@ -45,6 +48,7 @@ class _IdentityFunc(torch.autograd.Function):
         _ctx: torch.autograd.function.FunctionCtx,  # unused
         grad: torch.Tensor,
     ) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return grad
 
 
@@ -85,18 +89,23 @@ class QuantizedTensor(torch.Tensor):
         return f"{self.__class__.__name__}(data={self.dequantize(dtype=self.dtype)})"
 
     def float(self) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return _DequantizeFunc.apply(self, torch.float32)
 
     def bfloat16(self) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return _DequantizeFunc.apply(self, torch.bfloat16)
 
     def half(self) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return _DequantizeFunc.apply(self, torch.float16)
 
     def cpu(self) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         return _DequantizeFunc.apply(self).cpu()
 
     def expand_as(self, other: torch.Tensor) -> torch.Tensor:
+        # pylint: disable=missing-function-docstring
         if other is self:
             # Note: expand_as is hackily used to create dummy autograd nodes
             # and access the backward graph (see
