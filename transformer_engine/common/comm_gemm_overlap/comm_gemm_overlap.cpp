@@ -361,8 +361,8 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
                                     A.dtype(), nullptr, nullptr, A.scale_inv());
       output_chunk = TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk},
                                    D.dtype(), D.amax(), D.scale(), nullptr);
-      bias_chunk = TensorWrapper(reinterpret_cast<void *>(bias_chunk_ptr), {m_chunk},
-                                 bias.dtype(), nullptr, nullptr, nullptr);
+      bias_chunk = TensorWrapper(reinterpret_cast<void *>(bias_chunk_ptr), {m_chunk}, bias.dtype(),
+                                 nullptr, nullptr, nullptr);
       workspace_chunk = TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
                                       std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
 
