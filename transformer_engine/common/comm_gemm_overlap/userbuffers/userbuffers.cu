@@ -1934,11 +1934,11 @@ void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, 
 template void reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream);
+                                                         cudaStream_t stream, cudaEvent_t comm_launch_event);
 template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream);
+                                                         cudaStream_t stream, cudaEvent_t comm_launch_event);
 
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
