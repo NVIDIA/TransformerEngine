@@ -213,7 +213,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
 // for TP-parallelism, only single node is implemented
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                 communicator *comm, cudaStream_t stream = 0, 
+                                 communicator *comm, cudaStream_t stream = 0,
                                  cudaEvent_t comm_launch_event = 0);
 /*
 each Rank input is
@@ -229,24 +229,25 @@ for(int slice=0;slice<ncslices;slice++)
  allgather2_userbuff_inplace(hndl,offset, elements*nslices,comm,stream);
 */
 void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                     communicator *comm, cudaStream_t stream = 0, 
+                                     communicator *comm, cudaStream_t stream = 0,
                                      cudaEvent_t comm_launch_event = 0);
 void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,
-                             communicator *comm, cudaStream_t stream = 0, 
+                             communicator *comm, cudaStream_t stream = 0,
                              cudaEvent_t comm_launch_event = 0);
 void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
-                                           cudaStream_t stream = 0, cudaEvent_t comm_launch_event = 0);
+                                           cudaStream_t stream = 0,
+                                           cudaEvent_t comm_launch_event = 0);
 template <typename fp8type>
 void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const int handler,
                                                const int offset, const int rowelements,
                                                const int colelements, const int strideelements,
-                                               communicator *comm, cudaStream_t stream = 0, 
+                                               communicator *comm, cudaStream_t stream = 0,
                                                cudaEvent_t comm_launch_event = 0);
 template <typename fp8type>
 void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
-                                 const int elements, communicator *comm, cudaStream_t stream = 0, 
+                                 const int elements, communicator *comm, cudaStream_t stream = 0,
                                  cudaEvent_t comm_launch_event = 0);
 template <typename fp8type>
 void reducescatter2_userbuff_strided_atomic_fp8(void *output, float *scale, const int handler,

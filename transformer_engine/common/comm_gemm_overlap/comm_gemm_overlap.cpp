@@ -96,10 +96,9 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
   //Hopper-only feature
-  if (deviceProp.major == 9 && max_connection > 1){
+  if (deviceProp.major == 9 && max_connection > 1) {
     cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
-  }
-  else{
+  } else {
     _comm_launch_event = 0;
   }
 }
@@ -109,7 +108,7 @@ CommOverlapCore::~CommOverlapCore() {
   cudaEventDestroy(_start_comm);
   cudaEventDestroy(_stop_compute);
   cudaEventDestroy(_start_compute);
-  if(_comm_launch_event) cudaEventDestroy(_comm_launch_event);
+  if (_comm_launch_event) cudaEventDestroy(_comm_launch_event);
 
   if (_atomic_gemm) cudaFree(_counter.dptr());
 
@@ -181,7 +180,8 @@ void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper 
   // Communication: AG and RS
   int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
   if (comm_type == CommOverlapType::AG) {
-    allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm, (cudaEvent_t)_comm_launch_event);
+    allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
+                                (cudaEvent_t)_comm_launch_event);
   } else {
     if (_ubuf.element_size() == 1) {
       assert(_ubuf_scale_inv_initialized);
@@ -191,17 +191,18 @@ void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper 
       assert(rs_output.element_size() == 2);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, _ubuf_scale_inv, _ub_reg, 0,
-                                                 comm_elements, _ub_comm, _stream_comm, 
+                                                 comm_elements, _ub_comm, _stream_comm,
                                                  (cudaEvent_t)_comm_launch_event);
     } else {
-      reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm, 
+      reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
                                       (cudaEvent_t)_comm_launch_event);
     }
   }
 
   assert(pre_gelu_out.numel() == 0);
   // If enforcing the communication-computation launch order for the Hopper GPU, wait for the launch event
-  if(_comm_launch_event) NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _comm_launch_event, 0));
+  if (_comm_launch_event)
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _comm_launch_event, 0));
   nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), transa, transb,
                    grad, workspace.data(), accumulate, use_split_accumulator, _math_sms,
                    stream_main);
