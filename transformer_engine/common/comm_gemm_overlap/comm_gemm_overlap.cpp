@@ -98,11 +98,9 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   //Hopper-only feature
   if (deviceProp.major == 9 && max_connection > 1){
     cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
-    printf("!!! [UB][FDL] CUDA EVENT CREATION\n");
   }
   else{
     _comm_launch_event = 0;
-    printf("!!! [UB] non-FDL CUDA EVENT CREATION\n");
   }
 }
 
