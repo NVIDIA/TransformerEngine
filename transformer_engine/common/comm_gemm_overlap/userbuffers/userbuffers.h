@@ -242,7 +242,8 @@ template <typename fp8type>
 void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const int handler,
                                                const int offset, const int rowelements,
                                                const int colelements, const int strideelements,
-                                               communicator *comm, cudaStream_t stream = 0);
+                                               communicator *comm, cudaStream_t stream = 0, 
+                                               cudaEvent_t comm_launch_event = 0);
 template <typename fp8type>
 void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
                                  const int elements, communicator *comm, cudaStream_t stream = 0, 
