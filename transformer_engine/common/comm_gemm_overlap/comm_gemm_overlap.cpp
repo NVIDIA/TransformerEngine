@@ -92,9 +92,9 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   cudaEventCreateWithFlags(&_stop_comm, 0);
 
   /*
-    Defining the launcher order between the communication and GEMM kernels 
-    using Fast Dependent Launch when CUDA_DEVICE_MAX_CONNECTIONS>1. 
-    The event is used to schedule the communication kernel before the GEMM. 
+    Defining the launcher order between the communication and GEMM kernels
+    using Fast Dependent Launch when CUDA_DEVICE_MAX_CONNECTIONS>1.
+    The event is used to schedule the communication kernel before the GEMM.
     This is needed only for Hopper, which uses persistent CTA execution.
   */
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
