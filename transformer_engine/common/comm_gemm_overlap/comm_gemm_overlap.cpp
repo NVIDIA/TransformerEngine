@@ -91,11 +91,15 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   cudaEventCreateWithFlags(&_start_comm, 0);
   cudaEventCreateWithFlags(&_stop_comm, 0);
 
-  //Managing launch ordering to maximize comm-comp overlap for the case of using CUDA_DEVICE_MAX_CONNECTIONS>1
+  /*
+    Defining the launcher order between the communication and GEMM kernels 
+    using Fast Dependent Launch when CUDA_DEVICE_MAX_CONNECTIONS>1. 
+    The event is used to schedule the communication kernel before the GEMM. 
+    This is needed only for Hopper, which uses persistent CTA execution.
+  */
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
-  //Hopper-only feature
   if (deviceProp.major == 9 && max_connection > 1) {
     cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
   } else {
@@ -200,7 +204,7 @@ void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper 
   }
 
   assert(pre_gelu_out.numel() == 0);
-  // If enforcing the communication-computation launch order for the Hopper GPU, wait for the launch event
+  // When the kernel launch order is defined, enforce the GEMM kernel launch to wait for the communication kernel launch
   if (_comm_launch_event)
     NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _comm_launch_event, 0));
   nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), transa, transb,
