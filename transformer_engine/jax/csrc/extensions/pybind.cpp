@@ -68,6 +68,7 @@ pybind11::dict Registrations() {
 
   // Quantization
   dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
+  dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
   dict["te_scaled_softmax_forward_ffi"] = EncapsulateFunction(ScaledSoftmaxForwardHandler);
@@ -94,6 +95,11 @@ pybind11::dict Registrations() {
   fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
   fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
+
+  pybind11::dict fused_attn_backward_ffi;
+  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
+  dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
 
   return dict;
 }

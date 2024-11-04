@@ -377,8 +377,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        wkspace_aval = ctx.avals_out[-1]
-
         if is_ffi_enabled():
             name = "te_fused_attn_forward_ffi"
             out = ffi.ffi_lowering(name)(
@@ -429,6 +427,8 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 for output in ctx.avals_out
             ]
             args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+            wkspace_aval = ctx.avals_out[-1]
 
             opaque = transformer_engine_jax.pack_fused_attn_descriptor(
                 input_batch,
@@ -722,28 +722,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         """
         Fused attention bwd lowering rules
         """
-        operands = [
-            q,
-            k,
-            v,
-            bias,
-            softmax_aux,
-            rng_state,
-            output,
-            doutput,
-            q_cu_seqlen,
-            kv_cu_seqlen,
-            q_seq_offsets,
-            k_seq_offsets,
-        ]
-        operand_shapes = map(lambda x: x.type.shape, operands)
-        out_types = [
-            ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
-            for output in ctx.avals_out
-        ]
-
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-
         q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
 
         batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
@@ -758,33 +736,90 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        wkspace_aval = ctx.avals_out[-1]
+        if is_ffi_enabled() and bool(os.getenv("NVTE_JAX_FUSED_ATTN_WITH_FFI")):
+            name = "te_fused_attn_backward_ffi"
+            out = ffi.ffi_lowering(name)(
+                ctx,
+                q,
+                k,
+                v,
+                bias,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                input_batch=input_batch,
+                bias_batch=bias_batch,
+                q_max_seqlen=q_max_seqlen,
+                kv_max_seqlen=kv_max_seqlen,
+                attn_heads=attn_heads,
+                num_gqa_groups=num_gqa_groups,
+                bias_heads=bias_heads,
+                head_dim=head_dim,
+                max_segments_per_seq=config.max_segments_per_seq,
+                scaling_factor=float(config.scaling_factor),
+                dropout_probability=float(config.dropout_probability),
+                bias_type=int(config.attn_bias_type),
+                mask_type=int(config.attn_mask_type),
+                qkv_layout=int(config.qkv_layout),
+                is_training=config.is_training,
+                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+                window_size_left=config.window_size[0],
+                window_size_right=config.window_size[1],
+            )
+        else:
+            operands = [
+                q,
+                k,
+                v,
+                bias,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+            ]
+            operand_shapes = map(lambda x: x.type.shape, operands)
+            out_types = [
+                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+                for output in ctx.avals_out
+            ]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_fused_attn_descriptor(
-            input_batch,
-            bias_batch,
-            q_max_seqlen,
-            kv_max_seqlen,
-            attn_heads,
-            num_gqa_groups,
-            bias_heads,
-            head_dim,
-            config.max_segments_per_seq,
-            wkspace_aval.size,
-            config.scaling_factor,
-            config.dropout_probability,
-            config.attn_bias_type,
-            config.attn_mask_type,
-            config.qkv_layout,
-            jax_dtype_to_te_dtype(q_aval.dtype),
-            jax_dtype_to_te_dtype(wkspace_aval.dtype),
-            config.is_training,
-            not FusedAttnHelper.is_non_deterministic_allowed(),
-            config.window_size[0],
-            config.window_size[1],
-        )
+            wkspace_aval = ctx.avals_out[-1]
 
-        out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
+            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+                input_batch,
+                bias_batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                bias_heads,
+                head_dim,
+                config.max_segments_per_seq,
+                wkspace_aval.size,
+                config.scaling_factor,
+                config.dropout_probability,
+                config.attn_bias_type,
+                config.attn_mask_type,
+                config.qkv_layout,
+                jax_dtype_to_te_dtype(q_aval.dtype),
+                jax_dtype_to_te_dtype(wkspace_aval.dtype),
+                config.is_training,
+                not FusedAttnHelper.is_non_deterministic_allowed(),
+                config.window_size[0],
+                config.window_size[1],
+            )
+
+            out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
 
         return out
 

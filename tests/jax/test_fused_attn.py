@@ -735,7 +735,7 @@ class TestFusedAttn:
             pytest.param(False, id="INFERENCE"),
         ],
     )
-    def _test_forward(
+    def test_forward(
         b,
         s_q,
         s_kv,
@@ -753,8 +753,6 @@ class TestFusedAttn:
     ):
         """
         Test forward with parameterized configs
-        This test is not intended to run automatically during CI as it is time-consuming
-        It is kept for development and debugging
         """
         window_size = None
         if swa:
