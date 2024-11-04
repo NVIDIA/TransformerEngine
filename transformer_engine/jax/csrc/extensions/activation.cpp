@@ -110,7 +110,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Result_Type outp
   auto *output = output_buf->untyped_data();
 
   auto input_dims = input_buf.dimensions();
-  auto m = std::accumulate(input_dims.begin(), input_dims.end() - 2, 1, std::multiplies<>());
+  auto m = product(input_dims, 0, input_dims.size() - 2);
   auto n = input_dims.back();
   auto act_len = input_dims.end()[-2];
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
@@ -175,7 +175,7 @@ Error_Type ActLuFP8FFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type a
   }
 
   auto input_dims = input_buf.dimensions();
-  auto m = std::accumulate(input_dims.begin(), input_dims.end() - 2, 1, std::multiplies<>());
+  auto m = product(input_dims, 0, input_dims.size() - 2);
   auto n = input_dims.back();
   auto act_len = input_dims.end()[-2];
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
@@ -264,8 +264,7 @@ Error_Type DActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type act
   auto *output = output_buf->untyped_data();
 
   auto act_input_dims = act_input_buf.dimensions();
-  auto m =
-      std::accumulate(act_input_dims.begin(), act_input_dims.end() - 2, 1, std::multiplies<>());
+  auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
   auto n = act_input_dims.back();
   auto act_len = act_input_dims.end()[-2];
 

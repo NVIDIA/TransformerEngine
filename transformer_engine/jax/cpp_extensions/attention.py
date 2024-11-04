@@ -379,7 +379,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         wkspace_aval = ctx.avals_out[-1]
 
-        if is_ffi_enabled():
+        if is_ffi_enabled() and bool(os.getenv("NVTE_JAX_FUSED_ATTN_WITH_FFI")):
             name = "te_fused_attn_forward_ffi"
             out = ffi.ffi_lowering(name)(
                 ctx,
@@ -401,14 +401,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 bias_heads=bias_heads,
                 head_dim=head_dim,
                 max_segments_per_seq=config.max_segments_per_seq,
-                wkspace_size=wkspace_aval.size,
                 scaling_factor=float(config.scaling_factor),
                 dropout_probability=float(config.dropout_probability),
                 bias_type=int(config.attn_bias_type),
                 mask_type=int(config.attn_mask_type),
                 qkv_layout=int(config.qkv_layout),
-                dtype=int(jax_dtype_to_te_dtype(q_aval.dtype)),
-                wkspace_dtype=int(jax_dtype_to_te_dtype(wkspace_aval.dtype)),
                 is_training=config.is_training,
                 deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
                 window_size_left=config.window_size[0],
