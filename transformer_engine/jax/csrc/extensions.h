@@ -155,12 +155,14 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
+
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
 
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
-
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasCastTransposeHandler);
 
 // Activation
 
@@ -168,13 +170,13 @@ size_t get_activation_len(NVTE_Activation_Type activation_enum);
 
 void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
+
+void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
@@ -184,8 +186,12 @@ pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_
 void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                               size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasCastTransposeHandler);
+
 void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                               size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DGatedActLuCastTransposeHandler);
 
 // Normalization
 
