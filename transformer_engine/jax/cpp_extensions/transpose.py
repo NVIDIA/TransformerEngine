@@ -92,6 +92,7 @@ def _jax_dbias_cast_transpose(
     dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
     return casted_dz, cast_transposed_dz, dbias, updated_amax
 
+
 class TransposePrimitive(BasePrimitive):
     """
     Transpose Primitive
@@ -792,18 +793,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         return out, t_out, dbias, updated_amax_aval
 
     @staticmethod
-    def lowering(
-        ctx,
-        dz,
-        x,
-        amax,
-        scale,
-        scale_inv,
-        *,
-        out_dtype,
-        static_axis_boundary,
-        act_enum
-    ):
+    def lowering(ctx, dz, x, amax, scale, scale_inv, *, out_dtype, static_axis_boundary, act_enum):
         """
         te_dgated_act_lu_cast_transpose_p lowering rules
         """
@@ -816,13 +806,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_dact_lu_dbias_cast_transpose_ffi"
             out = ffi.ffi_lowering(name, operand_output_aliases={2: 3})(
-                ctx,
-                dz,
-                x,
-                amax,
-                scale,
-                scale_inv,
-                act_enum=int(act_enum)
+                ctx, dz, x, amax, scale, scale_inv, act_enum=int(act_enum)
             )
         else:
             ir_dz_type = ir.RankedTensorType(dz.type)
@@ -856,7 +840,13 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
                 ),
             ]
             operands = [dz, x, amax, scale, scale_inv]
-            operand_shapes = [ir_dz_shape, x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            operand_shapes = [
+                ir_dz_shape,
+                x_shape,
+                ir_amax_shape,
+                ir_scale_shape,
+                ir_scale_inv_shape,
+            ]
             args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
             opaque = transformer_engine_jax.pack_common_wk_descriptor(
                 contracted_x_shape,
@@ -905,14 +895,7 @@ class DActLuDBiasCastTransposePrimitive(BasePrimitive):
         return out, t_out, dbias, updated_amax
 
     @staticmethod
-    def batcher(
-        batched_args,
-        batch_dims,
-        *,
-        out_dtype,
-        static_axis_boundary,
-        act_enum
-    ):
+    def batcher(batched_args, batch_dims, *, out_dtype, static_axis_boundary, act_enum):
         """
         to describe batch rules for vmap
         """
@@ -1103,13 +1086,7 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
         if is_ffi_enabled():
             name = "te_dgated_act_lu_cast_transpose_ffi"
             out = ffi.ffi_lowering(name, operand_output_aliases={2: 2})(
-                ctx,
-                dz,
-                x,
-                amax,
-                scale,
-                scale_inv,
-                act_enum=int(act_enum)
+                ctx, dz, x, amax, scale, scale_inv, act_enum=int(act_enum)
             )
         else:
             ir_dz_type = ir.RankedTensorType(dz.type)
@@ -1136,7 +1113,13 @@ class DgatedActLuCastTransposePrimitive(BasePrimitive):
                 ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
             ]
             operands = [dz, x, amax, scale, scale_inv]
-            operand_shapes = [ir_dz_shape, x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            operand_shapes = [
+                ir_dz_shape,
+                x_shape,
+                ir_amax_shape,
+                ir_scale_shape,
+                ir_scale_inv_shape,
+            ]
             args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
             contracted_x_shape = (x_batch_size, x_shape[-1])
             opaque = transformer_engine_jax.pack_common_descriptor(

@@ -467,8 +467,7 @@ Error_Type DActLuDBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_bu
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto act_input_tensor = TensorWrapper(act_input, input_shape, in_dtype);
-  auto output_tensor =
-      TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
+  auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
   auto output_trans_tensor =
       TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);
@@ -624,8 +623,7 @@ Error_Type DGatedActLuCastTransposeFFI(cudaStream_t stream, Buffer_Type input_bu
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto act_input_tensor = TensorWrapper(act_input, act_input_shape, in_dtype);
-  auto output_tensor =
-      TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
+  auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
   auto output_trans_tensor =
       TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
 

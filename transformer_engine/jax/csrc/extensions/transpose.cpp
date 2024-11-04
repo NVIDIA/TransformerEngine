@@ -130,8 +130,7 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto output_trans_shape = std::vector<size_t>{n, m};
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
-  auto output_tensor =
-      TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
+  auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
   auto output_trans_tensor =
       TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
 
@@ -233,7 +232,8 @@ Error_Type DBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buf
   auto *dbias = dbias_buf->untyped_data();
   float *amax_out = reinterpret_cast<float *>(amax_out_buf->untyped_data());
   void *workspace = workspace_buf->untyped_data();
-  NVTE_CHECK(amax == amax_out, "amax not bound to amax_out in TE/JAX DBiasCastTranspose primitive.");
+  NVTE_CHECK(amax == amax_out,
+             "amax not bound to amax_out in TE/JAX DBiasCastTranspose primitive.");
   if (!use_fp8(out_dtype)) {
     scale = nullptr;
     scale_inv = nullptr;
@@ -252,8 +252,7 @@ Error_Type DBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buf
   std::vector<size_t> workspace_shape(workspace_dims.begin(), workspace_dims.end());
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
-  auto output_tensor =
-      TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
+  auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
   auto output_trans_tensor =
       TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);

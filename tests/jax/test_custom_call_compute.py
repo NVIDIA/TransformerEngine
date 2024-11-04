@@ -840,6 +840,7 @@ class TestTranspose:
         assert_tree_like_allclose(jax_output, ffi_output)
         assert_tree_like_allclose(noffi_output, ffi_output)
 
+
 @pytest.mark.skipif(not is_fp8_supported, reason=reason)
 @pytest.mark.parametrize(
     "input_shape",
