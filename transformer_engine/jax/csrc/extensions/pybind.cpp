@@ -69,6 +69,18 @@ pybind11::dict Registrations() {
   // Quantization
   dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
 
+  // Softmax
+  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFunction(ScaledSoftmaxForwardHandler);
+  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFunction(ScaledSoftmaxBackwardHandler);
+  dict["te_scaled_masked_softmax_forward_ffi"] =
+    EncapsulateFunction(ScaledMaskedSoftmaxForwardHandler);
+  dict["te_scaled_masked_softmax_backward_ffi"] =
+    EncapsulateFunction(ScaledMaskedSoftmaxBackwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
+    EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+  dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
+    EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+
   // Normalization
   dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
   dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
