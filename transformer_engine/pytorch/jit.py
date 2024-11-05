@@ -5,28 +5,29 @@
 """NVFuser functions and JIT utilities"""
 import os
 from typing import Callable, Optional, Tuple
-from functools import partial
 
 import torch
+
+from .utils import is_torch_min_version, gpu_autocast_ctx
 
 # pylint: disable=unnecessary-lambda-assignment
 
 jit_fuser = torch.jit.script
-if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+if is_torch_min_version("2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
-if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
+if is_torch_min_version("2.2a0") and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = torch.compile
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
 no_torch_dynamo = lambda recursive=True: lambda func: func
-if torch.__version__ >= "2":
+if is_torch_min_version("2a0"):
     import torch._dynamo
 
-    if torch.__version__ >= "2.1":
+    if is_torch_min_version("2.1a0"):
         no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(
             f, recursive=recursive
         )
@@ -34,20 +35,13 @@ if torch.__version__ >= "2":
         # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
         no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
 
-if torch.__version__ >= "2.4":
-    gpu_autocast_ctx = partial(torch.amp.autocast, device_type="cuda")
-else:
-    gpu_autocast_ctx = torch.cuda.amp.autocast
-
 
 def set_jit_fusion_options() -> None:
     """Set PyTorch JIT layer fusion options."""
     # flags required to enable jit fusion kernels
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
-    if TORCH_MAJOR == 2 and TORCH_MINOR >= 2:
+    if is_torch_min_version("2.2.0a0"):
         pass
-    elif (TORCH_MAJOR == 2) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
+    elif is_torch_min_version("1.10.0a0"):
         # nvfuser
         torch._C._jit_set_profiling_executor(True)
         torch._C._jit_set_profiling_mode(True)
