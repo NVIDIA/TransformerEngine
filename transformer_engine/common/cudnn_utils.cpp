@@ -5,9 +5,7 @@
  ************************************************************************/
 
 #include "../fused_attn/utils.h"
-
 #include "transformer_engine/cudnn.h"
-
 
 namespace transformer_engine {
 
