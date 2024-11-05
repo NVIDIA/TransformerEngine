@@ -12,7 +12,7 @@ pip install pytest==8.2.1
 export MAX_JOBS=4
 
 # Iterate over Flash Attention versions
-FA_versions=(2.1.1 2.3.0 2.4.0.post1 2.4.1 2.5.7 2.6.3 3.0.0b1)
+FA_versions=(2.1.1 2.3.0 2.4.1 2.5.7 2.6.3 3.0.0b1)
 for fa_version in "${FA_versions[@]}"
 do
 

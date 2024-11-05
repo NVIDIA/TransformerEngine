@@ -7,6 +7,7 @@ import functools
 import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
+import os
 
 import jax
 import jax.numpy as jnp
@@ -29,6 +30,9 @@ PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
+
+# Enables verbose printing of tensor numerics for debug.
+NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
 
 
 def is_devices_enough(required):
@@ -1466,3 +1470,23 @@ def sync_params_values(dst, src, transformations, sep="/"):
     synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
 
     return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
+
+
+@functools.partial(jax.jit, static_argnums=[0, 2])
+def print_debug_tensor_stats(prefix, tensor, hist=False):
+    if NVTE_DEBUG_NUMERICS:
+        args = [
+            jnp.mean(tensor),
+            jnp.min(tensor),
+            jnp.max(tensor),
+            jnp.cumprod(jnp.array(tensor.shape))[-1] if len(tensor.shape) >= 1 else 1,
+            jnp.count_nonzero(tensor),
+        ]
+        fmt = prefix + " mean={}, min={}, max={}, numel={}, nzcnt={}"
+
+        if hist:
+            h = jnp.histogram(tensor.astype(jnp.float32), bins=10)
+            args += [h[0], h[1]]
+            fmt = fmt + "\n  {}\n  {}"
+
+        jax.debug.print(fmt, *args)
