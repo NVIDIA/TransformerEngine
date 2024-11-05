@@ -27,8 +27,18 @@ class CustomCallAPIVersion(IntEnum):
     FFI = 1
 
 
+custom_call_with_cudnn = ["te_fused_attn_forward_ffi"]
+
 for _name, _value in transformer_engine_jax.registrations().items():
-    if _name.endswith("_ffi"):
+    if _name in custom_call_with_cudnn:
+        if is_ffi_enabled():
+            jex.ffi.register_ffi_target(
+                _name,
+                {"prepare": transformer_engine_jax.te_cudnn_handle_init_ffi, "execute": _value},
+                platform="CUDA",
+                api_version=CustomCallAPIVersion.FFI.value,
+            )
+    elif _name.endswith("_ffi"):
         if is_ffi_enabled():
             jex.ffi.register_ffi_target(
                 _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
