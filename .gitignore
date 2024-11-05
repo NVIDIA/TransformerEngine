@@ -22,9 +22,7 @@ __pycache__
 .hypothesis
 .devcontainer.json
 tests/cpp/build/
-docs/_build
 .ipynb_checkpoints
-docs/doxygen
 *.log
 CMakeFiles/CMakeSystem.cmake
 sdist/
@@ -40,3 +38,4 @@ dist/
 downloads/
 .pytest_cache/
 compile_commands.json
+.nfs

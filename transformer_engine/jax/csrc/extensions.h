@@ -151,6 +151,8 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
 
 void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
+
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
@@ -172,6 +174,8 @@ void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaq
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
 pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
@@ -192,8 +196,12 @@ pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidd
 
 void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardHandler);
+
 void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
                          size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardFP8Handler);
 
 pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                    DType in_dtype, DType w_dtype,
@@ -202,15 +210,25 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
 
 void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormBackwardHandler);
+
 void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardHandler);
 
 void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardFP8Handler);
+
 void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormBackwardHandler);
 
 // Quantization
 
 void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
 
 void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
@@ -252,6 +270,8 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
 
 void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
