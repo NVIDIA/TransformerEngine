@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_H_
-#define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_H_
+#ifndef TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
+#define TRANSFORMER_ENGINE_COMMON_NORM_COMMON_H_
 
 #include <cudnn.h>
 #include <cudnn_frontend.h>

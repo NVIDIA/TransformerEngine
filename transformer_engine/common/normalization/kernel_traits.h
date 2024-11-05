@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
-#define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
+#ifndef TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_
+#define TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_
 
 #include "../common.h"
 #include "../utils.cuh"
@@ -127,4 +127,4 @@ struct Kernel_traits : public Base {
 }  // namespace normalization
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_KERNEL_TRAITS_H_
+#endif  //  TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_ 
