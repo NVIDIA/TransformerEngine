@@ -43,7 +43,7 @@ constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, D
                       (uint32_t(NormType) << 8) | (uint32_t(NormStage)) << 9 |
                       (uint32_t(zero_centered_gamma) << 10);
   // We have 25 bits to hash batch_size or hidden_size. Undefined behavior when these sizes > 2^25
-  uint64_t key = hidden_size |  (batch_size << 25) | (uint64_t(is_tuned) << 50) | (type_key << 51);
+  uint64_t key = hidden_size | (batch_size << 25) | (uint64_t(is_tuned) << 50) | (type_key << 51);
   return key;
 }
 
@@ -125,21 +125,22 @@ std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() c
 
 template <typename KernelParamsType>
 void TeNormalizationPlan<KernelParamsType>::_set_workspace() {
-  if (_launch_params.getTotalWorkspaceBytes() > 0){
+  if (_launch_params.getTotalWorkspaceBytes() > 0) {
     auto workspace_dptr = reinterpret_cast<byte*>(_launch_params.params.workspace);
 
     if (_launch_params.barrier_bytes > 0) {
       _launch_params.params.barrier =
-        reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
+          reinterpret_cast<int*>(workspace_dptr + _launch_params.workspace_bytes);
       cudaMemsetAsync(_launch_params.params.barrier, 0, _launch_params.barrier_bytes,
                       _launch_params.stream);
     }
     if constexpr (std::is_same_v<KernelParamsType, BackwardKernelParams>) {
       _launch_params.params.dgamma_part =
-        workspace_dptr + _launch_params.workspace_bytes + _launch_params.barrier_bytes;
+          workspace_dptr + _launch_params.workspace_bytes + _launch_params.barrier_bytes;
       if (_is_layernorm) {
         _launch_params.params.dbeta_part =
-      reinterpret_cast<byte*>(_launch_params.params.dgamma_part) + _launch_params.dgamma_part_bytes;
+            reinterpret_cast<byte*>(_launch_params.params.dgamma_part) +
+            _launch_params.dgamma_part_bytes;
       }
     }
   }

@@ -196,11 +196,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   float epsilon = 1e-5;
   if (norm_type == LayerNorm){
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
-                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(), 
+                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_fwd = Tensor(workspace_fwd.shape(), workspace_fwd.dtype());
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
-                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(), 
+                       z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
 
     nvte_layernorm_bwd(dz.data(), input.data(),
@@ -216,20 +216,20 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        prop.multiProcessorCount, zero_centered_gamma, 0);
   } else {
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
-                     z.data(), rsigma.data(), workspace_fwd.data(), 
+                     z.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_fwd = Tensor(workspace_fwd.shape(), workspace_fwd.dtype());
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
-                     z.data(), rsigma.data(), workspace_fwd.data(), 
+                     z.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
 
     nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(), 
+                     dx.data(), dgamma.data(),
                      workspace_bwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
     workspace_bwd = Tensor(workspace_bwd.shape(), workspace_bwd.dtype());
     nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
-                     dx.data(), dgamma.data(), 
+                     dx.data(), dgamma.data(),
                      workspace_bwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
   }

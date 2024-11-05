@@ -39,10 +39,10 @@ struct LaunchParams {
 
   KernelParamsType params;
 
-  size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const{
-    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes); 
+  size_t getTotalWorkspaceBytes(const bool _is_layernorm = true) const {
+    return (workspace_bytes + barrier_bytes + size_t(_is_layernorm + 1) * dgamma_part_bytes);
   }
-  void alignWorkspace(size_t alignment = 16){
+  void alignWorkspace(size_t alignment = 16) {
     workspace_bytes = DIVUP(workspace_bytes, alignment) * alignment;
     barrier_bytes = DIVUP(barrier_bytes, alignment) * alignment;
     dgamma_part_bytes = DIVUP(dgamma_part_bytes, alignment) * alignment;
@@ -157,25 +157,27 @@ class TeNormalizationRegistry {
     return registry;
   }
 
-  static bool _is_tuned(const int64_t key) {return (key & (1ull << 50));};
-  static uint64_t _get_hidden_size(const uint64_t key) {return (key & ((1ull << 25) - 1));};
-  static uint64_t _get_general_key(const uint64_t key) {return ((key >> 51) << 51);};
+  static bool _is_tuned(const int64_t key) { return (key & (1ull << 50)); };
+  static uint64_t _get_hidden_size(const uint64_t key) { return (key & ((1ull << 25) - 1)); };
+  static uint64_t _get_general_key(const uint64_t key) { return ((key >> 51) << 51); };
 
  public:
-  static int registerFunction(uint64_t key, 
+  static int registerFunction(uint64_t key,
                               void (*func)(LaunchParams<KernelParamsType>&, const bool)) {
-    if (_is_tuned(key)) getInstance().tuned_function_map.emplace(key, Function(func));
-    else 
-      getInstance().general_function_map[_get_general_key(key)].emplace(_get_hidden_size(key), Function(func));
+    if (_is_tuned(key))
+      getInstance().tuned_function_map.emplace(key, Function(func));
+    else
+      getInstance().general_function_map[_get_general_key(key)].emplace(_get_hidden_size(key),
+                                                                        Function(func));
     return 0;
   }
 
   static Function getKernel(uint64_t key) {
     auto& instance = getInstance();
-    if (_is_tuned(key)){
+    if (_is_tuned(key)) {
       auto it = instance.tuned_function_map.find(key);
       if (it != instance.tuned_function_map.end()) return it->second;
-    } 
+    }
     auto general_key = _get_general_key(key);
     if (instance.general_function_map.count(general_key) == 0) {
       NVTE_ERROR("Unavailable kernel for this normalization config.");
@@ -183,8 +185,10 @@ class TeNormalizationRegistry {
     auto& general_func_map = instance.general_function_map.at(general_key);
     auto func_iter = general_func_map.lower_bound(_get_hidden_size(key));
     if (func_iter == general_func_map.end()) {
-      return general_func_map.rbegin()->second; // Hidden size is too big, need to use multi-CTA
-    } else { return func_iter->second; }
+      return general_func_map.rbegin()->second;  // Hidden size is too big, need to use multi-CTA
+    } else {
+      return func_iter->second;
+    }
   }
 
   TeNormalizationRegistry(const TeNormalizationRegistry&) = delete;
@@ -192,7 +196,6 @@ class TeNormalizationRegistry {
   TeNormalizationRegistry(TeNormalizationRegistry&&) = delete;
   TeNormalizationRegistry& operator=(TeNormalizationRegistry&&) = delete;
 };
-
 
 class NormalizationPlanBase {
  public:

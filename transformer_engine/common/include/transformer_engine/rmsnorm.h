@@ -17,8 +17,7 @@
 extern "C" {
 #endif
 
-
-/*! \brief Compute RMSNorm. 
+/*! \brief Compute RMSNorm.
  *
  * The formula used:
  * @f[
@@ -42,14 +41,12 @@ extern "C" {
  *                                     calculated over the last dimension. Shape: [N].
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
- *  \param[in]     zero_centered_gamma If zero_centered_gamma is enabled 
+ *  \param[in]     zero_centered_gamma If zero_centered_gamma is enabled
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float epsilon,
-                        NVTETensor z, NVTETensor rsigma, NVTETensor workspace,
-                        const int multiprocessorCount, const bool zero_centered_gamma,
-                        cudaStream_t stream);
-
+void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float epsilon, NVTETensor z,
+                      NVTETensor rsigma, NVTETensor workspace, const int multiprocessorCount,
+                      const bool zero_centered_gamma, cudaStream_t stream);
 
 /*! \brief Compute backward of RMSNorm.
  *
@@ -77,13 +74,13 @@ void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float ep
  *  \param[out]    dgamma              Gradient for gamma tensor of shape [H].
  *  \param[out]    workspace           Workspace tensor.
  *  \param[in]     multiprocessorCount Number of SMs in the device.
- *  \param[in]     zero_centered_gamma If zero_centered_gamma is enabled 
+ *  \param[in]     zero_centered_gamma If zero_centered_gamma is enabled
  *  \param[in]     stream              CUDA stream used for the operation.
  */
 void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor rsigma,
                       const NVTETensor gamma, NVTETensor dx, NVTETensor dgamma,
-                      NVTETensor workspace, const int multiprocessorCount, const bool zero_centered_gamma,
-                      cudaStream_t stream);
+                      NVTETensor workspace, const int multiprocessorCount,
+                      const bool zero_centered_gamma, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"

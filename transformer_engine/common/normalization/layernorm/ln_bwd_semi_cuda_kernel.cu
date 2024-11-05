@@ -33,7 +33,8 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
                                       Kernel_traits::CTAS_PER_ROW *
                                       sizeof(typename Kernel_traits::reduce_t) * 2;
     }
-    launch_params.dgamma_part_bytes = launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
+    launch_params.dgamma_part_bytes =
+        launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
     return;
   }
 

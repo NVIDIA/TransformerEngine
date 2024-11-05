@@ -19,9 +19,8 @@ namespace transformer_engine {
 using namespace normalization;
 
 void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
-                 Tensor *rsigma, Tensor *workspace, 
-                 const int multiprocessorCount, const bool zero_centered_gamma,
-                 cudaStream_t stream){
+                 Tensor *rsigma, Tensor *workspace, const int multiprocessorCount,
+                 const bool zero_centered_gamma, cudaStream_t stream) {
   NVTE_CHECK(x.data.shape.size() == 2);
 
   NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
@@ -75,11 +74,8 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 }
 
 void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const Tensor &gamma,
-                 Tensor *dx, Tensor *dgamma, 
-                 Tensor *workspace, 
-                 const int multiprocessorCount, 
-                 const bool zero_centered_gamma,
-                 cudaStream_t stream){
+                 Tensor *dx, Tensor *dgamma, Tensor *workspace, const int multiprocessorCount,
+                 const bool zero_centered_gamma, cudaStream_t stream) {
   using namespace transformer_engine;
 
   NVTE_CHECK(dz.data.dtype == gamma.data.dtype);
@@ -142,35 +138,29 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
 
 void nvte_rmsnorm_fwd(const NVTETensor x,      // Nxhidden_size
                       const NVTETensor gamma,  // hidden_size
-                      const float epsilon, NVTETensor z, NVTETensor rsigma, 
-                      NVTETensor workspace,
-                      const int multiprocessorCount, 
-                      const bool zero_centered_gamma,
-                      cudaStream_t stream){
+                      const float epsilon, NVTETensor z, NVTETensor rsigma, NVTETensor workspace,
+                      const int multiprocessorCount, const bool zero_centered_gamma,
+                      cudaStream_t stream) {
   NVTE_API_CALL(nvte_rmsnorm_fwd);
-using namespace transformer_engine;
-rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
-            epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma), 
-            reinterpret_cast<Tensor *>(workspace),
-            multiprocessorCount, zero_centered_gamma,
-            stream);
+  using namespace transformer_engine;
+  rmsnorm_fwd(*reinterpret_cast<const Tensor *>(x), *reinterpret_cast<const Tensor *>(gamma),
+              epsilon, reinterpret_cast<Tensor *>(z), reinterpret_cast<Tensor *>(rsigma),
+              reinterpret_cast<Tensor *>(workspace), multiprocessorCount, zero_centered_gamma,
+              stream);
 }
 
 void nvte_rmsnorm_bwd(const NVTETensor dz,      // Nxhidden_size
                       const NVTETensor x,       // Nxhidden_size
                       const NVTETensor rsigma,  // N, FP32!
                       const NVTETensor gamma,   // hidden_size
-                      NVTETensor dx, NVTETensor dgamma,
-                      NVTETensor workspace,
-                      const int multiprocessorCount, 
-                      const bool zero_centered_gamma,
-                      cudaStream_t stream){
+                      NVTETensor dx, NVTETensor dgamma, NVTETensor workspace,
+                      const int multiprocessorCount, const bool zero_centered_gamma,
+                      cudaStream_t stream) {
   NVTE_API_CALL(nvte_rmsnorm_bwd);
   using namespace transformer_engine;
   rmsnorm_bwd(*reinterpret_cast<const Tensor *>(dz), *reinterpret_cast<const Tensor *>(x),
               *reinterpret_cast<const Tensor *>(rsigma), *reinterpret_cast<const Tensor *>(gamma),
               reinterpret_cast<Tensor *>(dx), reinterpret_cast<Tensor *>(dgamma),
-              reinterpret_cast<Tensor *>(workspace), 
-              multiprocessorCount, zero_centered_gamma,
+              reinterpret_cast<Tensor *>(workspace), multiprocessorCount, zero_centered_gamma,
               stream);
 }

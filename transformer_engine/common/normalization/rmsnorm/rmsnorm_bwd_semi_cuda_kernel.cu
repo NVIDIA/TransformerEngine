@@ -32,7 +32,8 @@ void launch_tuned_(LaunchParams<BackwardKernelParams> &launch_params,
                                       Kernel_traits::CTAS_PER_ROW *
                                       sizeof(typename Kernel_traits::reduce_t) * 2;
     }
-    launch_params.dgamma_part_bytes = launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
+    launch_params.dgamma_part_bytes =
+        launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
     return;
   }
 
@@ -98,7 +99,8 @@ void launch_general_(LaunchParams<BackwardKernelParams> &launch_params,
       launch_params.workspace_bytes =
           (ctas_per_col * WARPS_M * ctas_per_row * sizeof(typename Kernel_traits::reduce_t) * 2);
     }
-    launch_params.dgamma_part_bytes = launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
+    launch_params.dgamma_part_bytes =
+        launch_params.params.ctas_per_col * launch_params.params.cols * sizeof(compute_t);
     return;
   }
 

@@ -127,4 +127,4 @@ struct Kernel_traits : public Base {
 }  // namespace normalization
 }  // namespace transformer_engine
 
-#endif  //  TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_ 
+#endif  //  TRANSFORMER_ENGINE_COMMON_NORM_KERNEL_TRAITS_H_
