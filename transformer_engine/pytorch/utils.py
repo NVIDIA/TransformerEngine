@@ -6,8 +6,8 @@
 from __future__ import annotations
 import functools
 import math
-from packaging.version import Version as PkgVersion
 from typing import Any, Callable, Optional, Tuple
+from packaging.version import Version as PkgVersion
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
