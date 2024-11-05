@@ -43,7 +43,7 @@ class OperationContext:
     _saved_tensors_range: Optional[tuple[int, int]] = None
 
     # Whether backward pass is required
-    _requires_grad: bool = False
+    requires_grad: bool = True
 
     def save_for_backward(self, *tensors: Optional[torch.Tensor]) -> None:
         """Register tensors to be saved for the backward function
