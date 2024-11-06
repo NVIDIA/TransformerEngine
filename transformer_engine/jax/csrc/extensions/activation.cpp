@@ -611,8 +611,6 @@ Error_Type DGatedActLuCastTransposeFFI(cudaStream_t stream, Buffer_Type input_bu
 
   auto input_dims = input_buf.dimensions();
   auto act_input_dims = act_input_buf.dimensions();
-  // m = x_batch_size = reduce(operator.mul, x_shape[:-2]), x_shape == act_input_dims
-  // n = x_shape[-1], x_shape == act_input_dims
   auto act_input_ranks = act_input_dims.size();
   auto m = product(act_input_dims, 0, act_input_ranks - 2);
   auto n = product(act_input_dims, act_input_ranks - 1, act_input_ranks);
