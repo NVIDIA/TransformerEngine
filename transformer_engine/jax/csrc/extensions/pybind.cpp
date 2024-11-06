@@ -73,7 +73,10 @@ pybind11::dict Registrations() {
   dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
 
   // Attention
-  dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
+  pybind11::dict fused_attn_forward_ffi;
+  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnForwardHandler);
+  dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
 
   return dict;
 }
@@ -100,9 +103,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
-
-  // Cudnn Helpers
-  m.add_object("te_cudnn_handle_init_ffi", EncapsulateFFI(CudnnHandleInitHandler));
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
