@@ -24,6 +24,8 @@ from jax.sharding import PartitionSpec, NamedSharding
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
 
+from common import is_bf16_supported
+
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"
@@ -552,8 +554,9 @@ def encoder_parser(args):
 def query_gpu(q):
     """Query GPU info on the system"""
     gpu_has_fp8, reason = te.fp8.is_fp8_available()
+    gpu_has_bf16 = is_bf16_supported()
     num_gpu = len(jax.devices())
-    q.put([num_gpu, gpu_has_fp8, reason])
+    q.put([num_gpu, gpu_has_fp8, gpu_has_bf16, reason])
 
 
 def unittest_query_gpu():
@@ -566,15 +569,15 @@ def unittest_query_gpu():
     q = mp.Queue()
     p = mp.Process(target=query_gpu, args=(q,))
     p.start()
-    num_gpu, gpu_has_fp8, reason = q.get()
+    num_gpu, gpu_has_fp8, gpu_has_bf16, reason = q.get()
     p.join()
-    return num_gpu, gpu_has_fp8, reason
+    return num_gpu, gpu_has_fp8, gpu_has_bf16, reason
 
 
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    num_gpu, gpu_has_fp8, reason = unittest_query_gpu()
+    num_gpu, gpu_has_fp8, gpu_has_bf16, reason = unittest_query_gpu()
 
     def exec(self, use_fp8):
         """Run 3 epochs for testing"""
@@ -598,6 +601,7 @@ class TestEncoder(unittest.TestCase):
 
         return results
 
+    @unittest.skipIf(not gpu_has_bf16, "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         results = self.exec(False)
