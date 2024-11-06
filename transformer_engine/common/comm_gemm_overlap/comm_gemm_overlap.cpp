@@ -314,11 +314,13 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
   size_t m_chunk = m / _num_splits;
   size_t input_a_chunk_size = m_chunk * k;
   size_t output_chunk_size = n * m_chunk;
+  size_t bias_chunk_size = m_chunk;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
 
   // Get input, output, and workspace data pointers
   char *input_a_chunk_ptr = reinterpret_cast<char *>(A.dptr());
   char *output_buf_chunk_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+  char *bias_chunk_ptr = reinterpret_cast<char *>(bias.dptr());
   char *workspace_ptr = reinterpret_cast<char *>(workspace.dptr());
 
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
@@ -337,16 +339,21 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
         TensorWrapper(A.dptr(), {m_chunk, k}, A.dtype(), nullptr, nullptr, A.scale_inv());
     auto output_chunk =
         TensorWrapper(_ubuf.dptr(), {m, m_chunk}, D.dtype(), D.amax(), D.scale(), nullptr);
+    auto bias_chunk =
+        TensorWrapper(bias.dptr(), {m_chunk}, bias.dtype(), nullptr, nullptr, nullptr);
     auto workspace_chunk = TensorWrapper(
         workspace.dptr(), std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
 
-    nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+    nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                      use_split_accumulator, _math_sms, _stream_compute[0]);
 
     for (int i = 1; i < _num_splits; i++) {
       input_a_chunk_ptr += input_a_chunk_size * B.element_size();
       output_buf_chunk_ptr += output_chunk_size * D.element_size();
+      if (bias_chunk_ptr != nullptr) {
+        bias_chunk_ptr += bias_chunk_size * bias.element_size();
+      }
       char *workspace_chunk_ptr =
           workspace_ptr + (i % _stream_compute.size()) * workspace_size_chunk;
 
@@ -354,10 +361,12 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
                                     A.dtype(), nullptr, nullptr, A.scale_inv());
       output_chunk = TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr), {n, m_chunk},
                                    D.dtype(), D.amax(), D.scale(), nullptr);
+      bias_chunk = TensorWrapper(reinterpret_cast<void *>(bias_chunk_ptr), {m_chunk}, bias.dtype(),
+                                 nullptr, nullptr, nullptr);
       workspace_chunk = TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
                                       std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
 
-      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                        pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
                        accumulate, use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
@@ -409,11 +418,13 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
                                          A.dtype(), nullptr, nullptr, A.scale_inv());
       auto output_chunk = TensorWrapper(reinterpret_cast<void *>(output_buf_chunk_ptr),
                                         {n, m_chunk}, D.dtype(), D.amax(), D.scale(), nullptr);
+      auto bias_chunk = TensorWrapper(reinterpret_cast<void *>(bias_chunk_ptr), {m_chunk},
+                                      bias.dtype(), nullptr, nullptr, nullptr);
       auto workspace_chunk =
           TensorWrapper(reinterpret_cast<void *>(workspace_chunk_ptr),
                         std::vector<size_t>{workspace_size_chunk}, workspace.dtype());
 
-      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                        pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
                        accumulate, use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
@@ -440,6 +451,9 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
       rs_output_ptr += m_chunk * rs_output.element_size();
       input_a_chunk_ptr += input_a_chunk_size * B.element_size();
       output_buf_chunk_ptr += output_chunk_size * _ubuf.element_size();
+      if (bias_chunk_ptr != nullptr) {
+        bias_chunk_ptr += bias_chunk_size * bias.element_size();
+      }
     }
   }
 
