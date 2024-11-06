@@ -83,6 +83,10 @@ class BasicLinear(BasicOperation):
         autograd. The weight's `main_grad` must be set externally and
         there is no guarantee that `grad` will be set or be
         meaningful.
+    userbuffers_options, dict, optional
+        Options for overlapping tensor-parallel communication with
+        compute using Userbuffers. This feature is highly
+        experimental.
 
     """
 
@@ -98,6 +102,7 @@ class BasicLinear(BasicOperation):
         sequence_parallel: bool = False,
         rng_state_tracker_function: Optional[Callable[[], CudaRNGStatesTracker]] = None,
         accumulate_into_main_grad: bool = False,
+        userbuffers_options: Optional[dict[str, Any]] = None,
     ) -> None:
         super().__init__()
 
@@ -143,7 +148,7 @@ class BasicLinear(BasicOperation):
         )
 
         # Whether weight tensor is natively in FP8
-        self._with_fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
+        self._with_fp8_parameters: bool = FP8GlobalStateManager.with_fp8_parameters()
         if self._with_fp8_parameters:
             self._fp8_metas = self._make_fp8_metas()
 
@@ -163,7 +168,10 @@ class BasicLinear(BasicOperation):
             self.reset_parameters()
 
         # Whether to accumulate weight gradient into main_grad
-        self._accumulate_into_main_grad = accumulate_into_main_grad
+        self._accumulate_into_main_grad: bool = accumulate_into_main_grad
+
+        # Userbuffers options
+        self._userbuffers_options: Optional[dict[str, Any]] = userbuffers_options
 
     @classmethod
     def _canonicalize_tensor_parallelism(
@@ -707,7 +715,7 @@ class BasicLinear(BasicOperation):
             FP8 metadata for casting loss gradient w.r.t. output
             tensor to FP8. Required if output grad is not already in
             FP8.
-        grad_output_fp8_meta: dict, optional
+        grad_input_fp8_meta: dict, optional
             FP8 metadata for casting loss gradient w.r.t. input
             tensor to FP8
 
