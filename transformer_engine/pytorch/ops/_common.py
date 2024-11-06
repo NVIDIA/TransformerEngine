@@ -9,6 +9,8 @@ from typing import Any, Iterable, Optional
 
 import torch
 
+from transformer_engine_torch import FP8TensorMeta
+from ..fp8 import FP8GlobalStateManager
 from ..tensor import Float8Tensor
 from ..utils import (
     canonicalize_device,  # pylint: disable=unused-import
@@ -56,6 +58,8 @@ def convert_tensor(
         if memory_format != torch.preserve_format and not data.is_contiguous(
             memory_format=memory_format
         ):
+            # Note: torch.Tensor.to ignores memory_format kwarg (see
+            # https://github.com/pytorch/pytorch/issues/132020).
             data = data.contiguous(memory_format=memory_format)
         return Float8Tensor.make_like(
             tensor,
@@ -65,7 +69,14 @@ def convert_tensor(
         )
 
     # Convert standard PyTorch tensor
-    return tensor.to(device=device, dtype=dtype, memory_format=memory_format)
+    tensor = tensor.to(device=device, dtype=dtype)
+    if memory_format != torch.preserve_format and not tensor.is_contiguous(
+        memory_format=memory_format
+    ):
+        # Note: torch.Tensor.to ignores memory_format kwarg (see
+        # https://github.com/pytorch/pytorch/issues/132020).
+        tensor = tensor.contiguous(memory_format=memory_format)
+    return tensor
 
 
 def reshape(
@@ -114,3 +125,36 @@ def reshape(
 
     # Reshape standard PyTorch tensor
     return tensor.view(shape)
+
+
+def maybe_autocast_dtype(
+    *,
+    device_type: str = "cuda",
+    default_dtype: Optional[torch.dtype] = None,
+) -> torch.dtype:
+    """Get autocast dtype if enabled"""
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return canonicalize_dtype(default_dtype)
+
+
+def get_fp8_meta_from_fp8_tensor(tensor: Float8Tensor) -> tuple[FP8TensorMeta, int]:
+    """Get FP8TensorMeta object and index corresponding to Float8Tensor
+
+    Constructs FP8TensorMeta if needed.
+
+    """
+
+    # Check if tensor already has FP8 metadata
+    if tensor._fp8_meta is not None:
+        key = FP8GlobalStateManager.get_meta_tensor_key(
+            forward=tensor._fp8_meta_forward,
+        )
+        return tensor._fp8_meta[key], tensor._fp8_meta_index
+
+    # Create FP8TensorMeta class
+    fp8_meta = FP8TensorMeta()
+    fp8_meta.scale = tensor._scale_inv.reciprocal()
+    fp8_meta.amax_history = torch.empty(1, 1, dtype=torch.float32, device=tensor.device)
+    fp8_meta.scale_inv = tensor._scale_inv
+    return fp8_meta, 0

@@ -7,19 +7,26 @@
 
 #include <iostream>
 
-#include "common/util/logging.h"
-
 namespace transformer_engine {
 namespace jax {
 
 // For XLA_FFI_DataType Enum Reference: https://github.com/openxla/xla/blob/d054e8366c4e8807726961feeb28b1cdba681888/xla/ffi/api/c_api.h#L163-L186
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
   switch (type) {
-    case xla::ffi::DataType::F16:
-      return DType::kFloat16;
+    case xla::ffi::DataType::U8:
+      return DType::kByte;
+      break;
+    case xla::ffi::DataType::S32:
+      return DType::kInt32;
+      break;
+    case xla::ffi::DataType::S64:
+      return DType::kInt64;
       break;
     case xla::ffi::DataType::F32:
       return DType::kFloat32;
+      break;
+    case xla::ffi::DataType::F16:
+      return DType::kFloat16;
       break;
     case xla::ffi::DataType::BF16:
       return DType::kBFloat16;

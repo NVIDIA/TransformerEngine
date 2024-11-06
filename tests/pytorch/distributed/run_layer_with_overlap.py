@@ -9,7 +9,6 @@ import sys
 import socket
 import argparse
 import warnings
-from functools import partial
 
 import torch
 import torch.distributed as dist
