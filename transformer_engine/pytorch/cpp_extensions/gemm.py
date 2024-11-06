@@ -286,7 +286,7 @@ def gemm(
             ), "SPLIT_PIPELINED_RS requires extra output tensor"
             # Disable the overlap between GEMM chunks at ampere and below
             major, _ = torch.cuda.get_device_capability()
-            overlap_gemm_chunks = True if major >= 9 else False
+            overlap_gemm_chunks = major >= 9
             args = tuple(
                 args
                 + (
