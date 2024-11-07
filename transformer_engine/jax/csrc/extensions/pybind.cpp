@@ -55,11 +55,16 @@ pybind11::dict Registrations() {
   // Transpose
   dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
   dict["te_cast_transpose_ffi"] = EncapsulateFFI(CastTransposeHandler);
+  dict["te_dbias_cast_transpose_ffi"] = EncapsulateFFI(DBiasCastTransposeHandler);
 
   // Activation
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
   dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
+  dict["te_dact_lu_dbias_cast_transpose_ffi"] =
+      EncapsulateFunction(DActLuDBiasCastTransposeHandler);
+  dict["te_dgated_act_lu_cast_transpose_ffi"] =
+      EncapsulateFunction(DGatedActLuCastTransposeHandler);
 
   // Quantization
   dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
