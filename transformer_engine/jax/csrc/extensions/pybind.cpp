@@ -97,8 +97,8 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
 
   pybind11::dict fused_attn_backward_ffi;
-  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
-  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
+  fused_attn_backward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
   dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
 
   return dict;

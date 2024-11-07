@@ -736,7 +736,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        if is_ffi_enabled() and bool(os.getenv("NVTE_JAX_FUSED_ATTN_WITH_FFI")):
+        if is_ffi_enabled():
             name = "te_fused_attn_backward_ffi"
             out = ffi.ffi_lowering(name)(
                 ctx,
