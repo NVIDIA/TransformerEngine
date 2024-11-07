@@ -234,14 +234,14 @@ def test_bulk_overlaps(comm_type, fp8, connections):
     if connections == 8:
         if torch.cuda.get_device_properties(0).major != 9:
             pytest.skip(
-                "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability 9.0 (HOPPER ARCH)."
+                "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
+                " 9.0 (HOPPER ARCH)."
             )
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
         _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
         os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
     else:
         _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
-
 
 
 @pytest.mark.parametrize(
