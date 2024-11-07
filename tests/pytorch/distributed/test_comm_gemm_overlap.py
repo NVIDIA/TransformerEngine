@@ -209,19 +209,39 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
 
 
 @pytest.mark.parametrize(
-    "comm_type,fp8",
+    "comm_type, fp8, connections",
     [
-        ("AG", False),
-        ("RS", False),
-        ("RS", True),
+        ("AG", False, 1),
+        ("RS", False, 1),
+        ("RS", True, 1),
+        ("AG", False, 8),
+        ("RS", False, 8),
+        ("RS", True, 8),
     ],
-    ids=[" ALL-GATHER     - BF16 ", " REDUCE-SCATTER - BF16 ", " REDUCE-SCATTER - FP8 "],
+    ids=[
+        "ALL-GATHER - BF16 - 1 connections",
+        "REDUCE-SCATTER - BF16 - 1 connections",
+        "REDUCE-SCATTER - FP8 - 1 connections",
+        "ALL-GATHER - BF16 - 8 connections",
+        "REDUCE-SCATTER - BF16 - 8 connections",
+        "REDUCE-SCATTER - FP8 - 8 connections",
+    ],
 )
-def test_bulk_overlaps(comm_type, fp8):
+def test_bulk_overlaps(comm_type, fp8, connections):
     """
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+    if connections == 8:
+        if torch.cuda.get_device_properties(0).major != 9:
+            pytest.skip(
+                "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability 9.0 (HOPPER ARCH)."
+            )
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
+        _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    else:
+        _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+
 
 
 @pytest.mark.parametrize(
