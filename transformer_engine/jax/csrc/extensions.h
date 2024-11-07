@@ -289,6 +289,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+// Cudnn helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 

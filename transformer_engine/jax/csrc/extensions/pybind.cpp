@@ -78,7 +78,10 @@ pybind11::dict Registrations() {
   dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
 
   // Attention
-  dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
+  pybind11::dict fused_attn_forward_ffi;
+  fused_attn_forward_ffi["prepare"] = EncapsulateFFI(CudnnHandleInitHandler);
+  fused_attn_forward_ffi["execute"] = EncapsulateFFI(FusedAttnForwardHandler);
+  dict["te_fused_attn_forward_ffi"] = fused_attn_forward_ffi;
 
   return dict;
 }

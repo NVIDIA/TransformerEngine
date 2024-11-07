@@ -16,10 +16,14 @@ namespace jax {
 
 using Buffer_Type = xla::ffi::AnyBuffer;
 using Result_Type = xla::ffi::Result<xla::ffi::AnyBuffer>;
+using Variadic_Buffer_Type = xla::ffi::RemainingArgs;
+using Variadic_Result_Type = xla::ffi::RemainingRets;
 using Error_Type = xla::ffi::Error;
 using FFI = xla::ffi::Ffi;
 using FFI_Stream_Type = xla::ffi::PlatformStream<cudaStream_t>;
 using Dictionary = xla::ffi::Dictionary;
+
+constexpr auto FFI_Prepare = xla::ffi::ExecutionStage::kPrepare;
 constexpr auto FFI_CudaGraph_Traits = {xla::ffi::Traits::kCmdBufferCompatible};
 
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType& type);

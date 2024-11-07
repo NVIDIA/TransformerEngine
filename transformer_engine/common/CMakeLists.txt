@@ -47,6 +47,7 @@ include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
      pycudnn.cpp
+     cudnn_utils.cpp
      transformer_engine.cpp
      common.cu
      transpose/cast_transpose.cu
