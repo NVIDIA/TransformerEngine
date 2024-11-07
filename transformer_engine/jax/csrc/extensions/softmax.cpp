@@ -4,8 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "extensions.h"
 #include "transformer_engine/softmax.h"
+
+#include "extensions.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
@@ -108,20 +109,20 @@ void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers,
                                                    dgrad_tensor.data(), desc.scale_factor, stream);
 }
 
-#define SOFTMAX_COMMON_BLOCK(tensor_buf) \
+#define SOFTMAX_COMMON_BLOCK(tensor_buf)                                      \
   auto dtype = convert_ffi_datatype_to_te_dtype((tensor_buf).element_type()); \
-  auto tensor_dims = (tensor_buf).dimensions(); \
-  auto tensor_ranks = tensor_dims.size(); \
-  auto batch_size = product(tensor_dims, 0, tensor_ranks - 3);  \
-  auto head_dim = product(tensor_dims, tensor_ranks - 3, tensor_ranks - 2);  \
-  auto q_seqlen = product(tensor_dims, tensor_ranks - 2, tensor_ranks - 1);  \
-  auto k_seqlen = product(tensor_dims, tensor_ranks - 1, tensor_ranks);  \
+  auto tensor_dims = (tensor_buf).dimensions();                               \
+  auto tensor_ranks = tensor_dims.size();                                     \
+  auto batch_size = product(tensor_dims, 0, tensor_ranks - 3);                \
+  auto head_dim = product(tensor_dims, tensor_ranks - 3, tensor_ranks - 2);   \
+  auto q_seqlen = product(tensor_dims, tensor_ranks - 2, tensor_ranks - 1);   \
+  auto k_seqlen = product(tensor_dims, tensor_ranks - 1, tensor_ranks);       \
   float scale_factor = static_cast<float>(scale_factor_);
 
-#define SOFTMAX_FORWARD_COMMON_BLOCK \
-  auto *input = input_buf.untyped_data();  \
-  auto *output = output_buf->untyped_data();  \
-  auto input_tensor = TensorWrapper(input, shape, dtype);  \
+#define SOFTMAX_FORWARD_COMMON_BLOCK                      \
+  auto *input = input_buf.untyped_data();                 \
+  auto *output = output_buf->untyped_data();              \
+  auto input_tensor = TensorWrapper(input, shape, dtype); \
   auto output_tensor = TensorWrapper(output, shape, dtype);
 
 Error_Type ScaledSoftmaxForwardFFI(cudaStream_t stream, Buffer_Type input_buf,
@@ -188,18 +189,17 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler,
                                   .Attr<double>("scale_factor"),
                               FFI_CudaGraph_Traits);
 
-#define SOFTMAX_BACKWARD_COMMON_BLOCK \
-  auto *grad_output = grad_output_buf.untyped_data();  \
-  auto *softmax_output = softmax_output_buf.untyped_data();  \
-  auto *dgrad = dgrad_buf->untyped_data();  \
-  auto grad_output_tensor = TensorWrapper(grad_output, shape, dtype);  \
-  auto softmax_output_tensor = TensorWrapper(softmax_output, shape, dtype);  \
+#define SOFTMAX_BACKWARD_COMMON_BLOCK                                       \
+  auto *grad_output = grad_output_buf.untyped_data();                       \
+  auto *softmax_output = softmax_output_buf.untyped_data();                 \
+  auto *dgrad = dgrad_buf->untyped_data();                                  \
+  auto grad_output_tensor = TensorWrapper(grad_output, shape, dtype);       \
+  auto softmax_output_tensor = TensorWrapper(softmax_output, shape, dtype); \
   auto dgrad_tensor = TensorWrapper(dgrad, shape, dtype);
 
 Error_Type ScaledSoftmaxBackwardFFI(cudaStream_t stream, Buffer_Type grad_output_buf,
                                     Buffer_Type softmax_output_buf, Result_Type dgrad_buf,
-                                    double scale_factor_)
-{
+                                    double scale_factor_) {
   SOFTMAX_COMMON_BLOCK(grad_output_buf);
   auto shape = std::vector<size_t>{batch_size, head_dim, q_seqlen, k_seqlen};
   SOFTMAX_BACKWARD_COMMON_BLOCK;
@@ -208,10 +208,10 @@ Error_Type ScaledSoftmaxBackwardFFI(cudaStream_t stream, Buffer_Type grad_output
   return ffi_with_cuda_error_check();
 }
 
-Error_Type ScaledUpperTriangMaskedSoftmaxBackwardFFI(
-  cudaStream_t stream, Buffer_Type grad_output_buf, Buffer_Type softmax_output_buf,
-  Result_Type dgrad_buf, double scale_factor_
-) {
+Error_Type ScaledUpperTriangMaskedSoftmaxBackwardFFI(cudaStream_t stream,
+                                                     Buffer_Type grad_output_buf,
+                                                     Buffer_Type softmax_output_buf,
+                                                     Result_Type dgrad_buf, double scale_factor_) {
   SOFTMAX_COMMON_BLOCK(grad_output_buf);
   auto shape = std::vector<size_t>{batch_size * head_dim, q_seqlen, k_seqlen};
   SOFTMAX_BACKWARD_COMMON_BLOCK;
