@@ -48,7 +48,7 @@ def attention_mask_func(
     attention_scores: torch.Tensor, attention_mask: torch.Tensor
 ) -> torch.Tensor:
     """Get attention mask"""
-    attention_scores.masked_fill_(attention_mask, -10000.0)
+    attention_scores.masked_fill_(attention_mask, float("-inf"))
     return attention_scores
 
 
