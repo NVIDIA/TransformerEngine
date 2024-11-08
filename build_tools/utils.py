@@ -255,9 +255,7 @@ def get_frameworks() -> List[str]:
     _frameworks = [framework.lower() for framework in _frameworks]
     for framework in _frameworks:
         if framework not in supported_frameworks:
-            raise ValueError(
-                f"Transformer Engine does not support framework={framework}"
-            )
+            raise ValueError(f"Transformer Engine does not support framework={framework}")
 
     return _frameworks
 
@@ -297,17 +295,10 @@ def copy_common_headers(
         shutil.copy(path, new_path)
 
 
-def pip_or_uv() -> List[str]:
-    if find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip"]
-    else:
-        return ["/usr/bin/env", "uv", "pip"]
-
-
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
     main_package = package.split("[")[0]
-    subprocess.check_call([*pip_or_uv(), "install", package])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
     globals()[main_package] = importlib.import_module(main_package)
 
 
