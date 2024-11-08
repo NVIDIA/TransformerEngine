@@ -4,10 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/cudnn.h"
+#include "cudnn_utils.h"
 
 #include "./util/logging.h"
-#include "cudnn_utils.h"
+#include "transformer_engine/cudnn.h"
 
 namespace transformer_engine {
 
