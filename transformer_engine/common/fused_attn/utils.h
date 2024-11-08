@@ -140,29 +140,8 @@ DType get_ragged_offset_dtype(NVTE_QKV_Layout_Group layout_group, int64_t num_at
 
 size_t get_max_batch_size(size_t batch_size);
 size_t get_max_tokens(size_t num_tokens);
+
 }  // namespace fused_attn
-
-cudnnDataType_t get_cudnn_dtype(const transformer_engine::DType t);
-cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t);
-
-class cudnnExecutionPlanManager {
- public:
-  static cudnnExecutionPlanManager &Instance() {
-    static thread_local cudnnExecutionPlanManager instance;
-    return instance;
-  }
-
-  cudnnHandle_t GetCudnnHandle() {
-    static thread_local std::once_flag flag;
-    std::call_once(flag, [&] { cudnnCreate(&handle_); });
-    return handle_;
-  }
-
-  ~cudnnExecutionPlanManager() {}
-
- private:
-  cudnnHandle_t handle_ = nullptr;
-};
 }  // namespace transformer_engine
 
 #endif
