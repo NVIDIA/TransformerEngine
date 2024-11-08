@@ -38,6 +38,7 @@ if "pytorch" in frameworks:
 elif "paddle" in frameworks:
     from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
+    install_and_import("jax[cuda12_local]")
     install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 

@@ -25,7 +25,10 @@ from .utils import (
     get_frameworks,
     cuda_path,
     get_max_jobs_for_parallel_build,
+    install_and_import,
 )
+
+install_and_import("pybind11[global]")
 
 
 class CMakeExtension(setuptools.Extension):
