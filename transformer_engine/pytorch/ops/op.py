@@ -382,7 +382,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                     fp8_params = list(filter(is_float8_tensor, self.parameters()))
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                         self.get_fp8_meta("param"),
-                        fp8_weights=(fp8_params if fp8_params else None),
                     )
                 if self.num_fp8_scales("grad_output"):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
