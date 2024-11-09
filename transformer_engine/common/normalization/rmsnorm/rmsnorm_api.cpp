@@ -54,7 +54,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
       gamma.data.dtype,  // wtype
       x.data.dtype,      // itype
-      z->data.dtype,  // otype
+      z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned);
