@@ -202,9 +202,7 @@ class FP8GlobalStateManager:
                 # Handles non-parameter FP8 modules, e.g. DPA.
                 continue
 
-            key = cls.get_key_in_buffer(
-                forward, fp8_meta["recipe"], fp8_meta["fp8_group"]
-            )
+            key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
