@@ -46,6 +46,27 @@ class AttnMaskType(Enum):
     CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK
     PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
+    def is_causal(self):
+        return self in [
+            AttnMaskType.CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_padding(self):
+        return self in [
+            AttnMaskType.PADDING_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_bottom_right(self):
+        return self in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
 
 class QKVLayout(Enum):
     """
@@ -123,12 +144,8 @@ def make_swa_mask(
     swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
     if window_size is None:
         return swa_mask
-    bottom_right_masks = [
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    ]
     left_window, right_window = window_size
-    if attn_mask_type in bottom_right_masks:
+    if attn_mask_type.is_bottom_right():
         if left_window < 0:
             left_window = max_seqlen_kv
         if right_window < 0:
@@ -313,11 +330,7 @@ def fused_attn(
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
-    if attn_mask_type in [
-        AttnMaskType.NO_MASK,
-        AttnMaskType.CAUSAL_MASK,
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-    ]:
+    if not attn_mask_type.is_padding():
         batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
         q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
         kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)

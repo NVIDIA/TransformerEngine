@@ -101,13 +101,6 @@ def general_dot_product_attention(
     return context
 
 
-def is_causal_mask(mask: AttnMaskType):
-    """
-    Check if the mask is a causal mask
-    """
-    return mask in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]
-
-
 def make_causal_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
     """
     Create inverse padded causal mask where `True` means allowing the corresponding
@@ -135,7 +128,7 @@ def make_mask(
     inv_mask = make_attention_mask(
         q_token, kv_token, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
-    if is_causal_mask(attn_mask_type):
+    if attn_mask_type.is_causal():
         inv_causal_mask = make_causal_mask(q_token, kv_token)
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
     if segment_pad_q is not None and segment_pad_kv is not None:
@@ -454,7 +447,7 @@ class FusedAttnRunner:
             )
             # TODO(rewang): Check if qkvpacked supported different q/kv
             # TODO(rewang): Causal with different q/kv segment_id fails
-            if self.qkv_layout == QKVLayout.T3HD or is_causal_mask(self.attn_mask_type):
+            if self.qkv_layout == QKVLayout.T3HD or self.attn_mask_type.is_causal():
                 self.token_kv = self.token_q
                 self.segment_pad_kv = self.segment_pad_q
             else:
@@ -552,7 +545,7 @@ class FusedAttnRunner:
         def grad_func(func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.max_seqlen_q * self.num_heads_q
-            if is_causal_mask(self.attn_mask_type):
+            if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             # Keep only valid result for the gradient
             ret_valid = jnp.where(
