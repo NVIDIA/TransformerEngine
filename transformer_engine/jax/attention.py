@@ -47,6 +47,7 @@ class AttnMaskType(Enum):
     PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
     def is_causal(self):
+        """Returns True if the mask is a causal mask"""
         return self in [
             AttnMaskType.CAUSAL_MASK,
             AttnMaskType.PADDING_CAUSAL_MASK,
@@ -55,6 +56,7 @@ class AttnMaskType(Enum):
         ]
 
     def is_padding(self):
+        """Returns True if the mask includes padding"""
         return self in [
             AttnMaskType.PADDING_MASK,
             AttnMaskType.PADDING_CAUSAL_MASK,
@@ -62,6 +64,7 @@ class AttnMaskType(Enum):
         ]
 
     def is_bottom_right(self):
+        """Returns True if the causal mask is calculated from the bottom-right section"""
         return self in [
             AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
             AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
