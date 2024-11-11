@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from math import sqrt
 from typing import Tuple, Optional
+import random
 
 import jax
 import jax.numpy as jnp
