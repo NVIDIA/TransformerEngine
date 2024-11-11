@@ -19,7 +19,7 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
-from ._common import canonicalize_device, is_float8_tensor
+from ._common import canonicalize_device
 
 
 @dataclasses.dataclass
@@ -379,7 +379,6 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         self.get_fp8_meta("input"),
                     )
                 if self.num_fp8_scales("param"):
-                    fp8_params = list(filter(is_float8_tensor, self.parameters()))
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                         self.get_fp8_meta("param"),
                     )
