@@ -20,7 +20,6 @@ from distributed_test_base import (
 from utils import (
     make_causal_mask,
     make_self_mask,
-    assert_tree_like_allclose,
     assert_allclose,
     print_debug_tensor_stats,
 )
@@ -503,7 +502,7 @@ class TestDistributedContextParallelSelfAttn:
             # Gradient is small, use a gradient multiplier to amplify the gradient
             _, max_seq_len, num_heads, _ = data_shape
             gradient_multiplier = max_seq_len * num_heads
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK]:
+            if attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             ret_valid = func(*args, **kwargs)
             return (jnp.mean(ret_valid, dtype=jnp.float32) * gradient_multiplier).astype(dtype)
