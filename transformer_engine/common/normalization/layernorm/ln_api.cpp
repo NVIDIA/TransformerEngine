@@ -4,7 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <transformer_engine/layernorm.h>
+#include <transformer_engine/normalization.h>
 
 #include <cstdint>
 #include <cstdlib>

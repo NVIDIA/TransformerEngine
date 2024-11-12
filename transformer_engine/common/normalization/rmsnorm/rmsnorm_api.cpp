@@ -12,7 +12,7 @@
 
 #include "../../common.h"
 #include "../common.h"
-#include "transformer_engine/rmsnorm.h"
+#include "transformer_engine/normalization.h"
 
 namespace transformer_engine {
 
