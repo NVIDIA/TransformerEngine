@@ -7,6 +7,7 @@
 #include "transformer_engine/fused_attn.h"
 
 #include "../common.h"
+#include "../cudnn_utils.h"
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_f16_arbitrary_seqlen.h"

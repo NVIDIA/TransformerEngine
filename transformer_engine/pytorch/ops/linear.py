@@ -133,6 +133,38 @@ class Linear(FusedOperation):
         # Initialize base class
         super().__init__(ops)
 
-        # Register parameters
-        self.register_parameter("weight", self.basic_ops[0].weight)
-        self.register_parameter("bias", self.basic_ops[1].bias if bias else None)
+        self._has_bias: bool = bias
+
+    @property
+    def weight(self) -> torch.nn.Parameter:
+        """Weight tensor
+
+        Parameter is owned by `BasicLinear` operation.
+
+        """
+        return self.basic_ops[0].weight
+
+    @weight.setter
+    def weight(self, value: Optional[torch.nn.Parameter]) -> None:
+        self.basic_ops[0].weight = value
+
+    @property
+    def bias(self) -> Optional[torch.nn.Parameter]:
+        """Bias tensor
+
+        Parameter is owned by `Bias` operation.
+
+        """
+        if self._has_bias:
+            return self.basic_ops[1].bias
+        return None
+
+    @bias.setter
+    def bias(self, value: Optional[torch.nn.Parameter]) -> None:
+        if self._has_bias:
+            self.basic_ops[1].bias = value
+        elif value is not None:
+            raise ValueError(
+                "Attempted to set bias parameter in Linear operation "
+                "that does not have bias enabled"
+            )

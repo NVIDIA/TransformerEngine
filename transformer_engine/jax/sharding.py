@@ -197,7 +197,7 @@ class MeshResource:
         The axis name in Mesh used to split the batch and weights along.
         If it is None, then full-sharded data parallelism is disabled.
     pp_resource : str, default = None
-        The axis name in Mesh used to split model layers. along.
+        The axis name in Mesh used to split model layers along.
         If it is None, then pipeline parallelism is disabled.
     cp_resource : str, default = None
         The axis name in Mesh used to split sequence (context) dimensions along

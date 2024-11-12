@@ -516,7 +516,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                     dactivation_lu_scale_inv,
                     bwd_dtype,
                     static_axis_boundary=-1,
-                    transpose_axis_boundary=-2,
                     activation_type=activation_type,
                 )
             )

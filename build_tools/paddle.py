@@ -25,7 +25,7 @@ def setup_paddle_extension(
     # Source files
     csrc_source_files = Path(csrc_source_files)
     sources = [
-        csrc_source_files / "extensions.cu",
+        csrc_source_files / "extensions.cpp",
         csrc_source_files / "common.cpp",
         csrc_source_files / "custom_ops.cu",
     ]

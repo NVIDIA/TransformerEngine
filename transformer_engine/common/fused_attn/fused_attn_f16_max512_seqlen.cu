@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "../cudnn_utils.h"
 #include "fused_attn_f16_max512_seqlen.h"
 #include "utils.h"
 

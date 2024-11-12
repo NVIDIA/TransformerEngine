@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "common.h"
+
 #include "transformer_engine/transformer_engine.h"
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,

@@ -39,6 +39,7 @@ jobs:
            || github.actor == 'pggPL'
            || github.actor == 'vasunvidia'
            || github.actor == 'erhoo82'
+           || github.actor == 'kocchop'
          )
     steps:
       - name: Check if comment is issued by authorized person
