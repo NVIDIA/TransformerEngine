@@ -10,7 +10,7 @@
 namespace transformer_engine {
 namespace jax {
 
-pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
+pybind11::pair GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                   DType in_dtype, DType w_dtype, DType out_dtype,
                                                   bool is_layer_norm, bool zero_centered_gamma,
                                                   float eps, int sm_margin) {
@@ -25,27 +25,25 @@ pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidd
   auto rsigma_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
   // dummy tensor wrappers that will carry workspace size info later
-  TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
+  TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
-  auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
   if (is_layer_norm) {
     auto beta_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
     auto mu_tensor = TensorWrapper(nullptr, intermediates_shape, DType::kFloat32);
 
-    layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
-                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), nullptr,
-                       num_sm, dummy_work_tensor.data(), dummy_barrier_tensor.data());
+    nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
+                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+                       dummy_work_tensor.data(), num_sm, zero_centered_gamma, nullptr);
   } else {
+    // TODO(Phuong): Verify and remove this check
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), nullptr, num_sm, dummy_work_tensor.data(),
-                     dummy_barrier_tensor.data());
+                     rsigma_tensor.data(), dummy_work_tensor.data(),
+                     num_sm, zero_centered_gamma, nullptr);
   }
 
   auto work_shape = MakeShapeVector(dummy_work_tensor.shape());
-  auto barrier_shape = MakeShapeVector(dummy_barrier_tensor.shape());
-  return pybind11::make_tuple(std::make_pair(work_shape, dummy_work_tensor.dtype()),
-                              std::make_pair(barrier_shape, dummy_barrier_tensor.dtype()));
+  return std::make_pair(work_shape, dummy_work_tensor.dtype());
 }
 
 void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspace_size,
@@ -58,7 +56,6 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
   auto workspace_shape = std::vector<size_t>{workspace_size};
-  auto barrier_shape = std::vector<size_t>{barrier_size};
   auto is_layer_norm = (bias) ? true : false;
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
@@ -74,20 +71,20 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
   auto layernorm_fwd_func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
 
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, work_dtype);
-  auto barrier_tensor = TensorWrapper(barrier, barrier_shape, barrier_dtype);
 
   if (is_layer_norm) {
     auto beta_tensor = TensorWrapper(bias, weight_shape, w_dtype);
     auto mu_tensor = TensorWrapper(mu, intermediates_shape, DType::kFloat32);
 
-    layernorm_fwd_func(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
-                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(), stream, num_sm,
-                       workspace_tensor.data(), barrier_tensor.data());
+    nvte_layernorm_fwd(input_tensor.data(), gamma_tensor.data(), beta_tensor.data(), eps,
+                       output_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+                       workspace_tensor.data(), num_sm, zero_centered_gamma, stream);
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), stream, num_sm, workspace_tensor.data(),
-                     barrier_tensor.data());
+                     rsigma_tensor.data(), 
+                     workspace_tensor.data(),
+                     num_sm, zero_centered_gamma, stream);
   }
 }
 
@@ -303,8 +300,7 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
   auto wgrad_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
 
   // dummy tensor wrappers that will carry workspace size info later
-  TensorWrapper dummy_work_tensor, dummy_barrier_tensor;
-  TensorWrapper dummy_dgamma_part_tensor, dummy_dbeta_part_tensor;
+  TensorWrapper dummy_work_tensor;
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount() - sm_margin;
   auto layernorm_bwd_func = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
 
@@ -314,18 +310,18 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
     auto mu_tensor = TensorWrapper(nullptr, intermediates_shape, intermediates_dtype);
     auto dbeta_tensor = TensorWrapper(nullptr, weight_shape, w_dtype);
 
-    layernorm_bwd_func(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
+    nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-                       dbeta_tensor.data(), dummy_dgamma_part_tensor.data(),
-                       dummy_dbeta_part_tensor.data(), nullptr, num_sm, dummy_work_tensor.data(),
-                       dummy_barrier_tensor.data());
+                       dbeta_tensor.data(), dummy_work_tensor.data(),
+                       num_sm, zero_centered_gamma, nullptr);
 
     dbeta_part_shape = MakeShapeVector(dummy_dbeta_part_tensor.shape());
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_bwd(dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(), gamma_tensor.data(),
-                     xgrad_tensor.data(), wgrad_tensor.data(), dummy_dgamma_part_tensor.data(),
-                     nullptr, num_sm, dummy_work_tensor.data(), dummy_barrier_tensor.data());
+                     xgrad_tensor.data(), wgrad_tensor.data(), 
+                     dummy_work_tensor.data(),
+                     num_sm, zero_centered_gamma, nullptr);
 
     dbeta_part_shape = std::vector<size_t>{0, 0};
   }
