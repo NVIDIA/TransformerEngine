@@ -21,8 +21,7 @@ extern "C" {
  *
  * The formula used:
  * @f[
- * y = \frac{x}{RMS_\varepsilon(x)}(1 + \gamma)       if zero_centered_gamma
- * y = \frac{x}{RMS_\varepsilon(x)}\gamma             otherwise
+ * y = \frac{x}{RMS_\varepsilon(x)}\gamma
  * @f]
  * where
  * @f[
@@ -52,8 +51,7 @@ void nvte_rmsnorm_fwd(const NVTETensor x, const NVTETensor gamma, const float ep
  *
  * This function computes the gradient of function:
  * @f[
- * y = \frac{x}{RMS_\varepsilon(x)}(1 + \gamma)         if zero_centered_gamma
- * y = \frac{x}{RMS_\varepsilon(x)}\gamma               otherwise
+ * y = \frac{x}{RMS_\varepsilon(x)}\gamma
  * @f]
  * where
  * @f[

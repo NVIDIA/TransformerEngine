@@ -21,8 +21,7 @@ extern "C" {
  *
  * The formula used:
  * @f[
- * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}(1 + \gamma) + \beta   if zero_centered_gamma
- * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}\gamma) + \beta        otherwise
+ * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}\gamma) + \beta
  * @f]
  *
  * Calling this function with workspace set to empty tensor will not perform the operation,
@@ -51,8 +50,7 @@ void nvte_layernorm_fwd(const NVTETensor x, const NVTETensor gamma, const NVTETe
  *
  * This function computes the gradient of function:
  * @f[
- * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}(1 + \gamma) + \beta     if zero_centered_gamma
- * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}\gamma + \beta           otherwise
+ * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}\gamma + \beta
  * @f]
  * else
  * with respect to \f$x\f$, \f$\gamma\f$ and \f$\beta\f$.
