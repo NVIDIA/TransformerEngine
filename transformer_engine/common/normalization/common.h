@@ -238,7 +238,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
   LaunchParams<KernelParamsType> _launch_params;
   std::function<void(LaunchParams<KernelParamsType>&, const bool)> _kernel;
 
-  bool _is_layernorm;
+  const bool _is_layernorm;
 };
 
 class CudnnNormalizationPlan : public NormalizationPlanBase {

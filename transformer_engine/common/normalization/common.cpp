@@ -51,8 +51,8 @@ template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
     DType ctype, const size_t batch_size, const size_t hidden_size, const size_t sm_count,
-    const bool zero_centered_gamma, const bool is_tuned) {
-  _is_layernorm = (NormType == NVTE_Norm_Type::LayerNorm);
+    const bool zero_centered_gamma, const bool is_tuned) :
+  _is_layernorm(NormType == NVTE_Norm_Type::LayerNorm) {
 
   _launch_params.multiprocessorCount = sm_count;
 
@@ -94,10 +94,6 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(Tensor* z, void* x_dptr, 
     kernel_params.beta = beta_dptr;
   }
 
-  if (z->amax.dptr) {
-    auto amax_byte_size = product(z->amax.shape) * typeToSize(z->amax.dtype);
-    cudaMemsetAsync(kernel_params.amax, 0, amax_byte_size, _launch_params.stream);
-  }
   _set_workspace();
   _kernel(_launch_params, false);
 }
