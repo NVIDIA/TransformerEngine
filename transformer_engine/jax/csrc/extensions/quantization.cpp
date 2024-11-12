@@ -74,11 +74,41 @@ void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t 
 
   auto shape = desc.shape.to_vector();
   auto input_tensor = TensorWrapper(input, shape, desc.in_dtype, amax, scale, scale_inv);
-
   auto output_tensor = TensorWrapper(output, shape, desc.out_dtype);
 
   nvte_fp8_dequantize(input_tensor.data(), output_tensor.data(), stream);
 }
+
+Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
+                         Buffer_Type scale_buf, Buffer_Type scale_inv_buf, Result_Type output_buf) {
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
+
+  auto *input = input_buf.untyped_data();
+  auto *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
+  auto *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
+  auto *scale_inv = reinterpret_cast<float *>(scale_inv_buf.untyped_data());
+
+  auto *output = output_buf->untyped_data();
+
+  auto input_dims = input_buf.dimensions();
+  std::vector<size_t> shape(input_dims.begin(), input_dims.end());
+  auto input_tensor = TensorWrapper(input, shape, in_dtype, amax, scale, scale_inv);
+  auto output_tensor = TensorWrapper(output, shape, out_dtype);
+
+  nvte_fp8_dequantize(input_tensor.data(), output_tensor.data(), stream);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(DequantizeHandler, DequantizeFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // input
+                                  .Arg<Buffer_Type>()      // amax
+                                  .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // scale_inv
+                                  .Ret<Buffer_Type>(),     // output
+                              FFI_CudaGraph_Traits);
 
 }  // namespace jax
 }  // namespace transformer_engine
