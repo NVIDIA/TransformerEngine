@@ -20,7 +20,12 @@ from ...cpp_extensions import (
 )
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...tensor import Float8Tensor, QuantizedTensor
-from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
+from ...utils import (
+    canonicalize_device,
+    canonicalize_dtype,
+    clear_tensor_data,
+    devices_match,
+)
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape
 
@@ -83,22 +88,17 @@ class RMSNorm(BasicOperation):
             normalized_shape = (normalized_shape,)
         else:
             normalized_shape = tuple(normalized_shape)
-        self._shape: tuple[int, ...] = normalized_shape
 
         # Parameter device
         defer_param_init = False
         device = canonicalize_device(device)
         if device.type == "meta":
             defer_param_init = True
-            device = canonicalize_device(None)
-        if device.type != "cuda":
-            raise ValueError(f"Only CUDA devices are supported (got {device})")
-        self.device: torch.device = device
 
         # Initialize parameters if needed
         weight = torch.empty(
-            self._shape,
-            device="meta",
+            normalized_shape,
+            device=device,
             dtype=canonicalize_dtype(dtype),
         )
         weight = torch.nn.Parameter(weight)
@@ -133,12 +133,15 @@ class RMSNorm(BasicOperation):
     def reset_parameters(self) -> None:
         """Initialize parameter buffers and values"""
 
-        # Make sure parameter is initialized
+        # Parameter device
         weight = self.weight
-        if weight.device.type != "cuda":
-            weight = torch.empty_like(weight, device=self.device)
-        else:
-            weight = weight.to(device=self.device)
+        device = weight.device
+        if device.type == "meta":
+            device = canonicalize_device(None)
+
+        # Initialize param buffers
+        if not devices_match(weight.device, device):
+            weight = torch.empty_like(weight, device=device)
 
         # Initialize values
         if self.zero_centered_gamma:
@@ -165,17 +168,21 @@ class RMSNorm(BasicOperation):
     ) -> torch.Tensor:
 
         # Check tensor dims
+        weight = self.weight
+        weight_dims = tuple(weight.size())
         input_dims = tuple(input_.size())
-        if len(input_dims) < len(self._shape) or input_dims[-len(self._shape) :] != self._shape:
+        if len(input_dims) < len(weight_dims) or input_dims[-len(weight_dims) :] != weight_dims:
             raise ValueError(
                 f"Input tensor (shape={input_dims}) "
-                f"and weight tensor (shape={self._shape}) are not compatible"
+                f"and weight tensor (shape={weight_dims}) are not compatible"
             )
 
         # Check input tensors
-        inner_dim = math.prod(self._shape)
-        device = self.device
-        dtype = maybe_autocast_dtype(default_dtype=self.weight.dtype)
+        inner_dim = math.prod(weight_dims)
+        device = weight.device
+        if device.type != "cuda":
+            device = canonicalize_device(None)
+        dtype = maybe_autocast_dtype(default_dtype=weight.dtype)
         x = reshape(input_, (-1, inner_dim), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
         if isinstance(x, QuantizedTensor):
@@ -241,6 +248,7 @@ class RMSNorm(BasicOperation):
         # Save state for backward pass
         if requires_grad:
             ctx.save_for_backward(x, rstdevs)
+            ctx.device = device
             ctx.dtype = dtype
             ctx.has_prev_op = prev_op is not None
 
@@ -257,9 +265,12 @@ class RMSNorm(BasicOperation):
         # Saved tensors from forward pass
         x, rstdevs = ctx.saved_tensors
 
+        # Tensor dims
+        weight_dims = self.weight.size()
+        inner_dim = math.prod(weight_dims)
+
         # Check input tensors
-        inner_dim = x.size(-1)
-        device = self.device
+        device = ctx.device
         dtype = ctx.dtype
         dy = reshape(grad_output, x.size(), device=device, dtype=dtype)
         w = reshape(self.weight, (inner_dim,), device=device, dtype=dtype)
@@ -285,5 +296,5 @@ class RMSNorm(BasicOperation):
 
         # Reshape results
         grad_input = reshape(dx, grad_output.size())
-        grad_weight = reshape(dw, self._shape)
+        grad_weight = reshape(dw, weight_dims)
         return grad_input, (grad_weight,)
