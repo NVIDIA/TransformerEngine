@@ -184,7 +184,6 @@ class LayerNorm(BasicOperation):
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
-
         # Check tensor dims
         weight = self.weight
         weight_dims = tuple(weight.size())
