@@ -118,9 +118,7 @@ void TeNormalizationPlan<KernelParamsType>::_build() {
 
 template <typename KernelParamsType>
 std::vector<size_t> TeNormalizationPlan<KernelParamsType>::getWorkspaceShape() const {
-  // +1 bytes to ensure workspace_dptr != nullptr
-  auto total_size = _launch_params.getTotalWorkspaceBytes(_is_layernorm) + 1;
-  return {total_size};
+  return {_launch_params.getTotalWorkspaceBytes(_is_layernorm)};
 }
 
 template <typename KernelParamsType>

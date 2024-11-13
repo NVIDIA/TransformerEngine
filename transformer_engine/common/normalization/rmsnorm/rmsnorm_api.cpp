@@ -31,7 +31,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
 
-  if (workspace->data.dptr != nullptr) {
+  if (workspace->data.shape.empty()) {
     CheckInputTensor(x, "x");
     CheckInputTensor(gamma, "gamma");
 
@@ -59,7 +59,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       x.data.shape[1],   // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned);
 
-  if (workspace->data.dptr == nullptr) {
+  if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
@@ -92,7 +92,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   NVTE_CHECK(dgamma->data.shape == gamma.data.shape);
   NVTE_CHECK(dgamma->data.dtype == gamma.data.dtype);
 
-  if (workspace->data.dptr != nullptr) {
+  if (workspace->data.shape.empty()) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(rsigma, "rsigma");
@@ -122,7 +122,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
       x.data.shape[1],   // hidden_size
       multiprocessorCount, zero_centered_gamma, is_aligned);
 
-  if (workspace->data.dptr == nullptr) {
+  if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
