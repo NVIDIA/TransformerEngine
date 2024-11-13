@@ -6,7 +6,7 @@ set -e
 
 # Paths
 : ${TE_PATH:=/opt/transformerengine}
-: ${MCORE_PATH:=${TE_PATH}/qa/L1_pytorch_mcore_integrationtest/Megatron-LM}
+: ${MCORE_PATH:=${TE_PATH}/qa/L1_pytorch_mcore_integration/Megatron-LM}
 
 # Download Megatron-LM if needed
 if [ ! -d "${MCORE_PATH}" ]; then
