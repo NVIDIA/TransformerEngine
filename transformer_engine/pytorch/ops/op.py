@@ -505,7 +505,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             basic_op_kwargs=[kwargs],
         )
 
-    def get_extra_state(self) -> Optional[torch.Tensor]:
+    def get_extra_state(self) -> torch.Tensor:
         """Serialize extra state
 
         Contains metadata for FP8 casting.
@@ -534,7 +534,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self.num_fp8_scales(mode) > 0 for mode in ("input", "param", "grad_output")
         )
         if not has_fp8_state:
-            return None
+            return torch.Tensor()
 
         def to_cpu(src: torch.Tensor) -> torch.Tensor:
             """Helper function to make CPU copy of tensor
@@ -588,7 +588,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
         """Load extra state"""
-        if state is None:
+        if state is None or state.numel() == 0:
             return
 
         # Deserialize state from byte tensor
