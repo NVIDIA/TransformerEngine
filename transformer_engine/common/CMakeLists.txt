@@ -85,17 +85,23 @@ add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+add_subdirectory(nvshmem_api)
+
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cuda_driver
-                      CUDA::cudart)
+                      CUDA::cudart
+                      nvshmemapi)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+target_include_directories(transformer_engine PUBLIC ${NVSHMEMAPI_INCLUDE_DIR})
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
+
+
 
 # Helper functions to make header files with C++ strings
 function(make_string_header STRING STRING_NAME)

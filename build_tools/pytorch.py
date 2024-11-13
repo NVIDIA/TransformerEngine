@@ -58,6 +58,7 @@ def setup_pytorch_extension(
         "--expt-relaxed-constexpr",
         "--expt-extended-lambda",
         "--use_fast_math",
+        "-rdc=true",
     ]
 
     cuda_architectures = cuda_archs()
@@ -98,6 +99,12 @@ def setup_pytorch_extension(
         nvcc_flags.append("-DNVTE_UB_WITH_MPI")
         library_dirs.append(mpi_home / "lib")
         libraries.append("mpi")
+    
+    COMPILE_WITH_NVSHMEM=True
+    if COMPILE_WITH_NVSHMEM:
+        include_dirs.append("/workdir/libnvshmem/include")
+        library_dirs.append("/workdir/libnvshmem/lib")
+
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
@@ -112,6 +119,8 @@ def setup_pytorch_extension(
             "cxx": cxx_flags,
             "nvcc": nvcc_flags,
         },
+        dlink=True,
+        dlink_libraries=["nvshmem_device", "nvshmem_host"],
         libraries=[str(lib) for lib in libraries],
         library_dirs=[str(lib_dir) for lib_dir in library_dirs],
     )

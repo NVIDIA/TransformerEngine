@@ -9,6 +9,7 @@
 
 #include "common.h"
 #include "common/common.h"
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 /***************************************************************************************************
  * Permutation
@@ -503,5 +504,19 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list);
+
+/***************************************************************************************************
+ * NVSHMEM APIs
+ **************************************************************************************************/
+
+
+namespace nvshmem_api {
+  void init_nvshmem_backend(c10d::ProcessGroup *process_group);
+  torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+  void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal);
+  void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind);
+}
+
+
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
