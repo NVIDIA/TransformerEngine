@@ -85,8 +85,7 @@ class RMSNorm(_RMSNormOp):
             normalized_shape = hidden_size
         elif hidden_size is not None:
             raise RuntimeError(
-                "Both `normalized_shape` and `hidden_size` (deprecated) "
-                "args are provided"
+                "Both `normalized_shape` and `hidden_size` (deprecated) args are provided"
             )
         if params_dtype is not None:
             if "dtype" in kwargs:
