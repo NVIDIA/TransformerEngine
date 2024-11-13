@@ -15,8 +15,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <transformer_engine/layernorm.h>
-#include <transformer_engine/rmsnorm.h>
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
