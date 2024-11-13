@@ -238,6 +238,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
 
 void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
+
 // Softmax
 
 void ScaledSoftmaxForward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -258,7 +260,22 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+
 // Attention
+
+// Cudnn helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -289,8 +306,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-// Cudnn helpers
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine

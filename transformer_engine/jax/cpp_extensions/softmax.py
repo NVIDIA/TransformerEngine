@@ -12,12 +12,13 @@ import jax.numpy as jnp
 from jax import core, dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
-from .misc import get_padded_spec, check_valid_batch_dims, jax_dtype_to_te_dtype
+from .misc import get_padded_spec, check_valid_batch_dims, jax_dtype_to_te_dtype, is_ffi_enabled
 from ..softmax import SoftmaxType
 
 
@@ -133,32 +134,36 @@ class SoftmaxPrimitive(BasePrimitive):
         """
         softmax_forward lowering rules
         """
-        (i_aval,) = ctx.avals_in
-        i_type = ir.RankedTensorType(logits.type)
-        i_shape = i_type.shape
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, i_shape[:-3])
-        pad_batch = batch
-        heads = i_shape[-3]
-        q_seqlen = i_shape[-2]
-        k_seqlen = i_shape[-1]
+        if is_ffi_enabled():
+            ffi_name = name + "_ffi"
+            out = ffi.ffi_lowering(ffi_name)(ctx, logits, scale_factor=scale_factor)
+        else:
+            (i_aval,) = ctx.avals_in
+            i_type = ir.RankedTensorType(logits.type)
+            i_shape = i_type.shape
+            # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+            batch = reduce(operator.mul, i_shape[:-3])
+            pad_batch = batch
+            heads = i_shape[-3]
+            q_seqlen = i_shape[-2]
+            k_seqlen = i_shape[-1]
 
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [logits]
-        operand_shapes = [i_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
+            operands = [logits]
+            operand_shapes = [i_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(i_aval.dtype),
-            scale_factor,
-        )
+            opaque = transformer_engine_jax.pack_softmax_descriptor(
+                batch,
+                pad_batch,
+                heads,
+                q_seqlen,
+                k_seqlen,
+                jax_dtype_to_te_dtype(i_aval.dtype),
+                scale_factor,
+            )
 
-        out = custom_caller(name, args, opaque, False)
+            out = custom_caller(name, args, opaque, False)
 
         return out
 
@@ -240,37 +245,41 @@ class SoftmaxPrimitive(BasePrimitive):
         """
         softmax_backward lowering rules
         """
-        dz_aval, _ = ctx.avals_in
+        if is_ffi_enabled():
+            ffi_name = name + "_ffi"
+            out = ffi.ffi_lowering(ffi_name)(ctx, dz, softmax_out, scale_factor=scale_factor)
+        else:
+            dz_aval, _ = ctx.avals_in
 
-        dz_type = ir.RankedTensorType(dz.type)
-        dz_shape = dz_type.shape
+            dz_type = ir.RankedTensorType(dz.type)
+            dz_shape = dz_type.shape
 
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, dz_shape[:-3])
-        pad_batch = batch  # unused
-        heads = dz_shape[-3]
-        q_seqlen = dz_shape[-2]
-        k_seqlen = dz_shape[-1]
+            # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+            batch = reduce(operator.mul, dz_shape[:-3])
+            pad_batch = batch  # unused
+            heads = dz_shape[-3]
+            q_seqlen = dz_shape[-2]
+            k_seqlen = dz_shape[-1]
 
-        softmax_out_type = ir.RankedTensorType(softmax_out.type)
-        softmax_out_shape = softmax_out_type.shape
+            softmax_out_type = ir.RankedTensorType(softmax_out.type)
+            softmax_out_shape = softmax_out_type.shape
 
-        out_types = [ir.RankedTensorType.get(dz_shape, dz_type.element_type)]
-        operands = [dz, softmax_out]
-        operand_shapes = [dz_shape, softmax_out_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [ir.RankedTensorType.get(dz_shape, dz_type.element_type)]
+            operands = [dz, softmax_out]
+            operand_shapes = [dz_shape, softmax_out_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(dz_aval.dtype),
-            scale_factor,
-        )
+            opaque = transformer_engine_jax.pack_softmax_descriptor(
+                batch,
+                pad_batch,
+                heads,
+                q_seqlen,
+                k_seqlen,
+                jax_dtype_to_te_dtype(dz_aval.dtype),
+                scale_factor,
+            )
 
-        out = custom_caller(name, args, opaque, False)
+            out = custom_caller(name, args, opaque, False)
 
         return out
 
@@ -577,36 +586,39 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
         """
         te_scaled_masked_softmax_forward lowering rules
         """
+        if is_ffi_enabled():
+            ffi_name = "te_scaled_masked_softmax_forward_ffi"
+            out = ffi.ffi_lowering(ffi_name)(ctx, logits, mask, scale_factor=scale_factor)
+        else:
+            logits_aval, _ = ctx.avals_in
+            i_type = ir.RankedTensorType(logits.type)
+            i_shape = i_type.shape
+            # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
+            batch = reduce(operator.mul, i_shape[:-3])
+            heads = i_shape[-3]
+            q_seqlen = i_shape[-2]
+            k_seqlen = i_shape[-1]
 
-        logits_aval, _ = ctx.avals_in
-        i_type = ir.RankedTensorType(logits.type)
-        i_shape = i_type.shape
-        # Assume [...Batch, Head, Q_Seqlen, K_Seqlen]
-        batch = reduce(operator.mul, i_shape[:-3])
-        heads = i_shape[-3]
-        q_seqlen = i_shape[-2]
-        k_seqlen = i_shape[-1]
+            mask_type = ir.RankedTensorType(mask.type)
+            mask_shape = mask_type.shape
+            pad_batch = reduce(operator.mul, mask_shape[:-3])
 
-        mask_type = ir.RankedTensorType(mask.type)
-        mask_shape = mask_type.shape
-        pad_batch = reduce(operator.mul, mask_shape[:-3])
+            out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
+            operands = [logits, mask]
+            operand_shapes = [i_shape, mask_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        out_types = [ir.RankedTensorType.get(i_shape, i_type.element_type)]
-        operands = [logits, mask]
-        operand_shapes = [i_shape, mask_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            opaque = transformer_engine_jax.pack_softmax_descriptor(
+                batch,
+                pad_batch,
+                heads,
+                q_seqlen,
+                k_seqlen,
+                jax_dtype_to_te_dtype(logits_aval.dtype),
+                scale_factor,
+            )
 
-        opaque = transformer_engine_jax.pack_softmax_descriptor(
-            batch,
-            pad_batch,
-            heads,
-            q_seqlen,
-            k_seqlen,
-            jax_dtype_to_te_dtype(logits_aval.dtype),
-            scale_factor,
-        )
-
-        out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
+            out = custom_caller(ScaledMaskedSoftmaxFwdPrimitive.name, args, opaque, False)
 
         return out
 
