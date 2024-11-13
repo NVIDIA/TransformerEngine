@@ -161,9 +161,9 @@ class _LayerNormLinear(torch.autograd.Function):
             if not return_layernorm_output:
                 ln_out = torch.empty_like(ln_out)
             if ub_obj_lnout.is_atomic_gemm():
-                ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
             else:
-                ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
         elif parallel_mode == "column" and sequence_parallel:
             ln_out_gathered = True
             ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
@@ -293,7 +293,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
-                ub_algo=tex.UbufOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None,
+                ub_algo=tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P if ub_overlap_ag else None,
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
@@ -485,7 +485,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             rs_out = None
             if ctx.ub_bulk_dgrad:
-                ub_algo = tex.UbufOverlapAlgo.BULK_OVERLAP_AG
+                ub_algo = tex.CommOverlapAlgo.BULK_OVERLAP_AG
                 ub_obj = ub_obj_lnout
             elif ctx.ub_overlap_rs_dgrad:
                 dim_size = list(grad_output.size())
@@ -496,14 +496,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 if ub_obj_dgrad.is_p2p_overlap():
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
                 else:
                     if ctx.fp8 and ub_obj_dgrad.is_atomic_gemm():
-                        ub_algo = tex.UbufOverlapAlgo.ATOMIC_GEMM_RS
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS
                     else:
-                        ub_algo = tex.UbufOverlapAlgo.SPLIT_PIPELINED_RS
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
                 ub_obj = ub_obj_dgrad
             else:
                 ub_algo = None
@@ -616,7 +616,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             use_split_accumulator=_2X_ACC_WGRAD,
                             ub_algo=(
-                                tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
+                                tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
                             ),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
@@ -640,7 +640,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                             ub_algo=(
-                                tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
+                                tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
                             ),
                             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                             extra_output_tensor=extra_output_tensor,
@@ -658,7 +658,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         use_bias=ctx.use_bias,
                         accumulate=accumulate_wgrad_into_param_main_grad,
                         out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        ub_algo=tex.UbufOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+                        ub_algo=tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
                         ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
                     )
                     clear_tensor_data(ln_out_total)
@@ -1159,7 +1159,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         with self.prepare_forward(inp, is_first_microbatch) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [self._fast_get_param(name) for name in self.weight_names]
+            unfused_weights = [getattr(self, name) for name in self.weight_names]
             if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
                 if self.fp8:
                     if len(unfused_weights) != 1:
@@ -1170,9 +1170,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     unfused_weights = [w.dequantize() for w in unfused_weights]
             weight_tensor = _noop_cat(unfused_weights)
             if self.use_bias:
-                bias_tensor = _noop_cat([self._fast_get_param(name) for name in self.bias_names])
+                bias_tensor = _noop_cat([getattr(self, name) for name in self.bias_names])
             else:
-                bias_tensor = self._fast_get_param(self.bias_names[0])  # Unused
+                bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
             # Initialize FP8 weights if needed
             weight_fp8 = None
@@ -1206,8 +1206,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 args = [None]
             args += (
                 inp,
-                self._fast_get_param("layer_norm_weight"),
-                self._fast_get_param("layer_norm_bias"),
+                self.layer_norm_weight,
+                self.layer_norm_bias,
                 weight_tensor,
                 weight_fp8,
                 bias_tensor,

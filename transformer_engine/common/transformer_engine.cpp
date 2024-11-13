@@ -93,6 +93,31 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   return ret;
 }
 
+size_t nvte_tensor_ndim(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.data.shape.size();
+}
+
+size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  NVTE_CHECK(dim >= 0 && dim < t.data.shape.size(), "Invalid dimension index: ", dim);
+  return t.data.shape[dim];
+}
+
+size_t nvte_tensor_numel(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  size_t numel = 1;
+  for (auto size : t.data.shape) {
+    numel *= size;
+  }
+  return numel;
+}
+
+size_t nvte_tensor_element_size(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return transformer_engine::typeToSize(t.data.dtype);
+}
+
 void *nvte_tensor_data(const NVTETensor tensor) {
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   return t.data.dptr;

@@ -76,7 +76,7 @@ jobs:
     name: 'PaddlePaddle'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/paddlepaddle:24.07-py3
+      image: nvcr.io/nvidia/paddlepaddle:24.10-py3
       options: --user root
     steps:
       - name: 'Checkout'

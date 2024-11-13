@@ -162,8 +162,30 @@ def is_ffi_enabled():
     """
     Helper function checking if XLA Custom Call with FFI is enabled
     """
-    is_supported = jax_version_meet_requirement("0.4.31")
+    is_supported = jax_version_meet_requirement("0.4.35")
     # New APIs with FFI are enabled by default
     is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
     assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
     return is_supported and is_enabled
+
+
+def get_xla_flag(flag: str, default=None, cast=str):
+    """
+    Returns the value of a flag/option in XLA_FLAGS environment variable if present or returns the default value.
+    """
+    xla_flags = []
+    if xla_flags_env := os.getenv("XLA_FLAGS"):
+        xla_flags.extend(xla_flags_env.split())
+
+    for flag_i in sorted(xla_flags):
+        if "=" in flag_i:
+            # option like --xla_abc=foo
+            name, val = flag_i.split("=", 2)
+            if name == flag:
+                return val if cast is None else cast(val)
+        else:
+            # flag like --xla_enable_foo
+            name, val = flag_i, None
+            if name == flag:
+                return True
+    return default

@@ -8,17 +8,7 @@ This operation-based API is experimental and subject to change.
 
 """
 
-from transformer_engine.pytorch.ops.basic import (
-    AddInPlace,
-    AllGather,
-    AllReduce,
-    BasicLinear,
-    Bias,
-    Identity,
-    MakeExtraOutput,
-    ReduceScatter,
-    Reshape,
-)
+from transformer_engine.pytorch.ops.basic import *
 from transformer_engine.pytorch.ops.linear import Linear
 from transformer_engine.pytorch.ops.op import FusibleOperation
 from transformer_engine.pytorch.ops.sequential import Sequential

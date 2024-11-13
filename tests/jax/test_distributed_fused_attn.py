@@ -35,7 +35,9 @@ from transformer_engine.jax.attention import (
     get_qkv_format,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
+    CPStrategy,
 )
+from transformer_engine.jax.sharding import MeshResource
 
 # We will use the golden reference model from our non distributed attention test fixture.
 from test_fused_attn import general_dot_product_attention, make_mask
@@ -133,7 +135,6 @@ class TestDistributedSelfAttn:
             seqlen,
             hidden,
             None,  # no window
-            False,  # not context parallel
         ):
             pytest.skip(f"No FusedAttn backend found")
 
@@ -268,7 +269,6 @@ class TestDistributedCrossAttn:
             seqlen,
             hidden,
             None,  # no window
-            False,  # not context parallel
         ):
             pytest.skip(f"No FusedAttn backend found")
 
@@ -335,6 +335,36 @@ class TestDistributedCrossAttn:
             )
 
 
+@pytest.mark.parametrize(
+    "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
+)
+@pytest.mark.parametrize(
+    "data_shape",
+    [
+        pytest.param([2, 512, 12, 128], id="2-512-12-128"),
+        pytest.param([4, 1024, 16, 64], id="4-1024-16-64"),
+    ],
+)
+@pytest.mark.parametrize("kv_groups", [1, 4, 8, 12, 16])
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+    ],
+)
+@pytest.mark.parametrize("dtype", [jnp.bfloat16])
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BSHD_BS2HD, id="COMBINED_KV"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
+    ],
+)
+@pytest.mark.parametrize(
+    "load_balanced",
+    [pytest.param(False, id="UNBALANCED"), pytest.param(True, id="BALANCED")],
+)
 class TestDistributedContextParallelSelfAttn:
 
     def generate_inputs(self, shape, kv_groups: int, attn_mask_type: AttnMaskType, dtype):
@@ -372,37 +402,7 @@ class TestDistributedContextParallelSelfAttn:
                 raise ValueError(f"Unsupported {qkv_layout=}")
         return qkv_args
 
-    @pytest.mark.parametrize(
-        "device_count,mesh_shape,mesh_axes,mesh_resource", generate_context_parallel_configs()
-    )
-    @pytest.mark.parametrize(
-        "data_shape",
-        [
-            pytest.param([2, 512, 12, 128], id="2-512-12-128"),
-            pytest.param([4, 1024, 16, 64], id="4-1024-16-64"),
-        ],
-    )
-    @pytest.mark.parametrize("kv_groups", [1, 4, 8, 12, 16])
-    @pytest.mark.parametrize(
-        "attn_mask_type",
-        [
-            pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL_MASK"),
-            pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-        ],
-    )
-    @pytest.mark.parametrize("dtype", [jnp.bfloat16])
-    @pytest.mark.parametrize(
-        "qkv_layout",
-        [
-            pytest.param(QKVLayout.BSHD_BS2HD, id="COMBINED_KV"),
-            pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "load_balanced",
-        [pytest.param(False, id="UNBALANCED"), pytest.param(True, id="BALANCED")],
-    )
-    def test_contex_parallel_self_attn(
+    def impl_test_contex_parallel_attn(
         self,
         device_count,
         mesh_shape,
@@ -414,6 +414,7 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        cp_strategy,
     ):
         attn_bias_type = AttnBiasType.NO_BIAS
         dropout_prob = 0.0
@@ -425,22 +426,32 @@ class TestDistributedContextParallelSelfAttn:
         num_kv_heads = num_head // kv_groups
         scaling_factor = 1.0 / np.sqrt(num_head)
 
-        if not is_fused_attn_kernel_available(
-            dtype,
-            dtype,
-            qkv_layout,
-            attn_bias_type,
-            attn_mask_type,
-            dropout_prob,
-            num_head,
-            num_kv_heads,
-            seqlen,
-            seqlen,
-            hidden,
-            None,  # no window
-            cp_size > 1,
-        ):
-            pytest.skip(f"No FusedAttn backend found")
+        def check_has_backend_for_mask(mask_type):
+            return is_fused_attn_kernel_available(
+                dtype,
+                dtype,
+                qkv_layout,
+                attn_bias_type,
+                attn_mask_type,
+                dropout_prob,
+                num_head,
+                num_kv_heads,
+                seqlen,
+                seqlen,
+                hidden,
+                None,
+            )  # no SWA for CP
+
+        # For causal masking we depend on having bottom right support also.
+        # The API does not check this and instead we rely on lower level checks to raise
+        # and exception if the step backend is not supported. This was a deliberate API
+        # decision to keep the CP size or flag out of the function.
+        has_backend = check_has_backend_for_mask(attn_mask_type)
+        if cp_size > 1 and attn_mask_type == AttnMaskType.CAUSAL_MASK:
+            has_backend &= check_has_backend_for_mask(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK)
+
+        if not has_backend:
+            pytest.skip(f"No FusedAttn backend found {cp_size=} {attn_mask_type=}.")
 
         if dp_size > 1 and batch % dp_size != 0:
             pytest.skip(f"Skipping {batch=} not a multiple of {dp_size=}")
@@ -461,6 +472,7 @@ class TestDistributedContextParallelSelfAttn:
                 scaling_factor=scaling_factor,
                 dropout_probability=dropout_prob,
                 is_training=is_training,
+                context_parallel_strategy=cp_strategy,
                 context_parallel_causal_load_balanced=load_balanced,
                 context_parallel_axis="cp",
             ).astype(dtype)
@@ -565,6 +577,60 @@ class TestDistributedContextParallelSelfAttn:
                     )
 
                 assert_allclose(target_grads[i], ref_grads[i], dtype=dtype)
+
+    def test_contex_parallel_allgather_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+        load_balanced,
+    ):
+        return self.impl_test_contex_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced,
+            CPStrategy.ALL_GATHER,
+        )
+
+    def test_context_parallel_ring_attn(
+        self,
+        device_count,
+        mesh_shape,
+        mesh_axes,
+        mesh_resource,
+        data_shape,
+        kv_groups,
+        attn_mask_type,
+        dtype,
+        qkv_layout,
+        load_balanced,
+    ):
+        return self.impl_test_contex_parallel_attn(
+            device_count,
+            mesh_shape,
+            mesh_axes,
+            mesh_resource,
+            data_shape,
+            kv_groups,
+            attn_mask_type,
+            dtype,
+            qkv_layout,
+            load_balanced,
+            CPStrategy.RING,
+        )
 
 
 class TestReorderCausalLoadBalancing:
