@@ -798,7 +798,7 @@ L1_pytorch_distributed_unittest--H100_4GPU:
     - .L1_test
     - .H100_4GPU
 
-L1_pytorch_mcore_integrationtest--H100_1GPU:
+L1_pytorch_mcore_integration--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
