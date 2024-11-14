@@ -35,13 +35,13 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
-                           DType itype, DType otype, DType ctype, uint64_t batch_size,
-                           uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned) {
+extern constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
+                                  DType itype, DType otype, DType ctype, uint64_t batch_size,
+                                  uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned) {
   uint64_t type_key = static_cast<uint32_t>(wtype) | (static_cast<uint32_t>(itype) << 2) |
-                      (static_cast<uint32_t>(otype) << 4) | (static_cast<uint32_t>(ctype) << 6) |
-                      (uint32_t(NormType) << 8) | (uint32_t(NormStage)) << 9 |
-                      (uint32_t(zero_centered_gamma) << 10);
+    (static_cast<uint32_t>(otype) << 4) | (static_cast<uint32_t>(ctype) << 6) |
+    (uint32_t(NormType) << 8) | (uint32_t(NormStage)) << 9 |
+    (uint32_t(zero_centered_gamma) << 10);
   // We have 25 bits to hash batch_size or hidden_size. Undefined behavior when these sizes > 2^25
   uint64_t key = hidden_size | (batch_size << 25) | (uint64_t(is_tuned) << 50) | (type_key << 51);
   return key;
