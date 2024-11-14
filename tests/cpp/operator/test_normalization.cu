@@ -59,6 +59,40 @@ void compute_ref_stats(NormType norm_type,
   }
 }
 
+const static bool use_cudnn = (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") || 
+  std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") ||
+  std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN") ||
+  std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN"));
+
+template <typename InputType>
+inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma){
+
+  using compute_t = float;
+  if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
+    compute_t g = static_cast<compute_t>(gamma);
+    if (zero_centered_gamma) {
+      g += static_cast<compute_t>(1.f);
+    }
+    return g;
+  } else {
+    if (use_cudnn){
+      compute_t g = static_cast<compute_t>(0.f);
+      InputType gi = gamma;
+      if (zero_centered_gamma) {
+        gi = gi + static_cast<InputType>(1.f);
+      }
+      g = static_cast<compute_t>(gi);
+      return g;
+    } else {
+      compute_t g = static_cast<compute_t>(gamma);
+      if (zero_centered_gamma) {
+        g += static_cast<compute_t>(1.f);
+      }
+      return g;
+    }
+  }
+}
+
 template <typename InputType, typename OutputType>
 void compute_ref_output(NormType norm_type,
                         const InputType *data, const InputType *gamma, const InputType *beta,
@@ -71,10 +105,11 @@ void compute_ref_output(NormType norm_type,
   for (size_t i = 0; i < N; ++i) {
     for (size_t j = 0; j < H; ++j) {
       compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1.0;
-      }
+      // compute_t g = static_cast<compute_t>(gamma[j]);
+      // if (zero_centered_gamma) {
+      //   g += 1.0;
+      // }
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
 
       compute_t tmp;
       if (norm_type == LayerNorm) {
@@ -110,10 +145,11 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1;
-      }
+      // compute_t g = static_cast<compute_t>(gamma[j]);
+      // if (zero_centered_gamma) {
+      //   g += 1;
+      // }
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -130,10 +166,11 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1;
-      }
+      // compute_t g = static_cast<compute_t>(gamma[j]);
+      // if (zero_centered_gamma) {
+      //   g += 1;
+      // }
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
