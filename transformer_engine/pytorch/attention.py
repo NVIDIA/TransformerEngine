@@ -4060,9 +4060,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
 
         (*saved_tensors,) = ctx.saved_tensors
         q, k, v, out = saved_tensors[:4]
-        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = saved_tensors[
-            4:8
-        ]
+        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = saved_tensors[4:8]
         fp8_fwd_scales, fp8_fwd_scale_invs = saved_tensors[8:10]
         aux_ctx_tensors = saved_tensors[10:]
 
