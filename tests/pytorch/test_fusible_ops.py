@@ -293,7 +293,7 @@ class TestFuser:
             )
 
             # Check that scaling factors match expected
-            w_amax_ref = max(w_vals[: step + 2])
+            w_amax_ref = max(w_vals[: step + 1])
             x_amax_ref = max(x_vals[: step + 1])
             dy_amax_ref = max(dy_vals[: step + 1])
             w_scale_ref = (fp8_format.value.max_fwd / w_amax_ref) / (2**margin)
