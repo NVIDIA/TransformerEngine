@@ -24,10 +24,10 @@ from .misc import (
     jax_dtype_is_fp8,
     get_padded_spec,
     is_ffi_enabled,
+    check_valid_batch_dims,
 )
 from ..sharding import (
     global_mesh_resource,
-    get_mesh_axis_size,
     lax_paral_op,
     all_reduce_max_along_all_axes_except_PP,
 )
@@ -83,9 +83,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 and dtypes.canonicalize_dtype(rhs_scale_inv_aval.dtype) == jnp.float32
             ), "Missing RHS operand scale inverse in FP8 GEMM."
 
-        # Disallow batching for RHS
-        assert rhs_aval.ndim == 2, "GEMM does not support batching the RHS operand."
-
         # Validate operand layouts
         lhs_inner_dim, rhs_inner_dim = map(
             lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
@@ -97,12 +94,12 @@ class CollectiveGemmPrimitive(BasePrimitive):
         ), f"Incompatible operand sizes: {lhs_aval.shape} x {rhs_aval.shape}."
 
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
-        rhs_trans = rhs_inner_dim == 1
+        rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
         assert (
             not (lhs_trans and rhs_trans)
         ), "GEMM does not support transposed LHS and transposed RHS at the same time."
         if is_fp8:
-            assert lhs_trans, "FP8 GEMM does not support transposed LHS."
+            assert not lhs_trans, "FP8 GEMM does not support transposed LHS."
             assert rhs_trans, "FP8 GEMM requires transposed RHS."
 
         # Validate output dtype
@@ -124,11 +121,18 @@ class CollectiveGemmPrimitive(BasePrimitive):
             out_scale_updated_dtype = jnp.float32
 
         # Infer output shape
-        rhs_outer_dim = 0 if rhs_trans else 1
         lhs_outer_dim = lhs_aval.ndim - 1 if lhs_trans else lhs_aval.ndim - 2
         lhs_bdims = [dim for dim in range(lhs_aval.ndim)
                      if dim not in [lhs_outer_dim, lhs_inner_dim]]
         lhs_batch_shape = [lhs_aval.shape[dim] for dim in lhs_bdims]
+        lhs_batch_size = reduce(operator.mul, lhs_batch_shape, 1)
+        rhs_outer_dim = rhs_aval.ndim - 2 if rhs_trans else rhs_aval.ndim - 1
+        rhs_bdims = [dim for dim in range(rhs_aval.ndim)
+                     if dim not in [rhs_outer_dim, rhs_inner_dim]]
+        rhs_batch_size = reduce(operator.mul, rhs_bdims, 1)
+        assert (
+            lhs_batch_size == rhs_batch_size
+        ), "LHS and RHS operands must have the same batched sizes."
         out_shape = (*lhs_batch_shape, lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
 
         # Validate bias/bias_grad shape against inferred output
@@ -201,7 +205,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim)
         )
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
-        rhs_trans = rhs_inner_dim == 1
+        rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
 
         operand_output_aliases = {
             4: 4,  # bias        <-->  bias_grad
@@ -248,12 +252,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
             ]
             args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-            rhs_outer_dim = 0 if rhs_trans else 1
             lhs_outer_dim = lhs_aval.ndim - 1 if lhs_trans else lhs_aval.ndim - 2
-            lhs_bdims = [dim for dim in range(lhs_aval.ndim)
-                        if dim not in [lhs_outer_dim, lhs_inner_dim]]
-            lhs_batch_shape = [lhs_aval.shape[dim] for dim in lhs_bdims]
-            m = reduce(operator.mul, lhs_batch_shape, 1) * lhs_aval.shape[lhs_outer_dim]
+            rhs_outer_dim = rhs_aval.ndim - 2 if rhs_trans else rhs_aval.ndim - 1
+            m = lhs_aval.shape[lhs_outer_dim]
             k = rhs_aval.shape[rhs_inner_dim]
             n = rhs_aval.shape[rhs_outer_dim]
             workspace_size = get_cublas_workspace_size_bytes()
@@ -308,77 +309,32 @@ class CollectiveGemmPrimitive(BasePrimitive):
     def batcher(batched_args, batch_dims, *, out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad,
                 accumulate, use_split_accumulator):
         assert CollectiveGemmPrimitive.outer_primitive is not None
+        check_valid_batch_dims(batch_dims)
+        lhs_bdims, *_, bias_bdims, gelu_input_bdims, out_amax_bdims, out_scale_bdims = batch_dims
 
-        lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax, out_scale = batched_args
-        assert rhs.ndim == 2, "TE/JAX GEMM custom op does not support batching RHS operands."
-
-        # Get contracting and batch dimensions out
-        lhs_inner_dim, rhs_inner_dim = map(
-            lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
-            contracting_dims,
-            (lhs.ndim, rhs.ndim)
-        )
-        lhs_trans = lhs_inner_dim != lhs.ndim - 1
-        rhs_trans = rhs_inner_dim == 1
-        lhs_outer_dim = lhs.ndim - 1 if lhs_trans else lhs.ndim - 2
-        rhs_outer_dim = 0 if rhs_trans else 1
-        lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
-
-        # FP8 GEMM only supports lhs_trans = False and rhs_trans = True so we may need to
-        # reorder the axes here to match
-        if jax_dtype_is_fp8(lhs.dtype):
-            lhs = jnp.transpose(lhs, (*lhs_bdims, lhs_outer_dim, lhs_inner_dim))
-            lhs_trans = False
-            rhs = jnp.transpose(rhs, (rhs_outer_dim, rhs_inner_dim))
-            rhs_trans = True
-            contracting_dims = (1, 1)
-
-        # Collapse all non-contracting dimensions
-        batch_shape = [lhs.shape[dim] for dim in lhs_bdims]
-        batch_size = reduce(operator.mul, batch_shape, 1)
-        lhs_outer_size = lhs.shape[lhs_outer_dim]
-        lhs_shape_2d = (
-            (lhs.shape[lhs_inner_dim], batch_size * lhs_outer_size)
-            if lhs_trans
-            else (batch_size * lhs_outer_size, lhs.shape[lhs_inner_dim])
-        )
-        lhs = jnp.reshape(lhs, lhs_shape_2d)
-        if fuse_gelu:
-            gelu_input = jnp.reshape(
-                gelu_input, (batch_size * lhs_outer_size, rhs.shape[rhs_outer_dim])
-            )
-
-        outputs = CollectiveGemmPrimitive.outer_primitive.bind(
-            lhs,
-            lhs_scale_inv,
-            rhs,
-            rhs_scale_inv,
-            bias,
-            gelu_input,
-            out_amax,
-            out_scale,
-            out_dtype=out_dtype,
-            contracting_dims=contracting_dims,
-            fuse_gelu=fuse_gelu,
-            fuse_bias=fuse_bias,
-            grad=grad,
-            accumulate=accumulate,
-            use_split_accumulator=use_split_accumulator,
-        )
-
-        # Reshape output to recover original LHS batch shape
-        outputs[0] = jnp.reshape(
-            outputs[0],
-            (*batch_shape, lhs_outer_size, rhs.shape[rhs_outer_dim])
-        )
-        gelu_bdims = batch_dims[3]
-        if fuse_gelu:
-            outputs[3] = jnp.reshape(outputs[3], outputs[0].shape)
-            gelu_bdims = lhs_bdims
+         # FP8 GEMM only supports non-transposed LHS and transposed RHS
+        lhs, _, rhs, *_ = batched_args
+        lhs_trans = contracting_dims[0] != lhs.ndim - 1
+        rhs_trans = contracting_dims[1] == rhs.ndim - 1
+        lhs = jnp.matrix_transpose(lhs) if lhs_trans and jax_dtype_is_fp8(lhs.dtype) else lhs
+        rhs = jnp.matrix_transpose(rhs) if not rhs_trans and jax_dtype_is_fp8(rhs.dtype) else rhs
+        contracting_dims = (1, 1)
 
         return (
-            outputs,
-            (lhs_bdims, batch_dims[1], batch_dims[2], gelu_bdims, batch_dims[4])
+            CollectiveGemmPrimitive.outer_primitive.bind(
+                lhs,
+                batched_args[1],
+                rhs,
+                *batched_args[3:],
+                out_dtype=out_dtype,
+                contracting_dims=contracting_dims,
+                fuse_gelu=fuse_gelu,
+                fuse_bias=fuse_bias,
+                grad=grad,
+                accumulate=accumulate,
+                use_split_accumulator=use_split_accumulator,
+            )
+            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
         )
 
     @staticmethod
@@ -400,9 +356,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
                           + "not already partitioned correctly.")
 
         lhs_trans = lhs_inner_dim != lhs.ndim - 1
-        rhs_trans = rhs_inner_dim == 1
+        rhs_trans = rhs_inner_dim == rhs.ndim - 1
         lhs_outer_dim = lhs.ndim - 1 if lhs_trans else lhs.ndim - 2
-        rhs_outer_dim = 0 if rhs_trans else 1
+        rhs_outer_dim = rhs.ndim - 2 if rhs_trans else rhs.ndim - 1
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
         rhs_outer_spec = rhs_spec[rhs_outer_dim]
@@ -440,9 +396,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         lhs_trans = lhs_inner_dim != lhs.ndim - 1
-        rhs_trans = rhs_inner_dim == 1
+        rhs_trans = rhs_inner_dim == rhs.ndim - 1
         lhs_outer_dim = lhs.ndim - 1 if lhs_trans else lhs.ndim - 2
-        rhs_outer_dim = 0 if rhs_trans else 1
+        rhs_outer_dim = rhs.ndim - 2 if rhs_trans else rhs.ndim - 1
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
         rhs_outer_spec = rhs_spec[rhs_outer_dim]
@@ -558,7 +514,7 @@ def fp8_gemm_impl(
         gelu_input = jnp.zeros(0, dtype=bias.dtype)
     elif gelu_input is None:
         lhs_outer_dim = lhs.ndim - 1 if contracting_dims[0] == 1 else lhs.ndim - 2
-        rhs_outer_dim = 1 if contracting_dims[1] == 0 else 0
+        rhs_outer_dim = rhs.ndim - 2 if contracting_dims[1] == 0 else rhs.ndim - 1
         out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
         gelu_input = jnp.zeros(out_shape, dtype=bias.dtype)
 
@@ -599,7 +555,7 @@ def gemm_impl(
     dummy_fp8_meta = jnp.zeros(0, dtype=jnp.float32)
 
     lhs_outer_dim = lhs.ndim - 1 if contracting_dims[0] == 1 else lhs.ndim - 2
-    rhs_outer_dim = 1 if contracting_dims[1] == 0 else 0
+    rhs_outer_dim = rhs.ndim - 2 if contracting_dims[1] == 0 else rhs.ndim - 1
     out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
 
     if not fuse_bias:
@@ -618,9 +574,6 @@ def gemm_impl(
             gelu_input is not None
         ), "Backward GEMM with dGELU epilogue requires pre-GELU output from forward GEMM."
     elif gelu_input is None:
-        lhs_outer_dim = lhs.ndim - 1 if contracting_dims[0] == 1 else lhs.ndim - 2
-        rhs_outer_dim = 1 if contracting_dims[1] == 0 else 0
-        out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
         gelu_input = jnp.zeros(out_shape, dtype=lhs.dtypes)
 
     out, _, _, pre_gelu_out, bias_grad = CollectiveGemmPrimitive.outer_primitive.bind(
