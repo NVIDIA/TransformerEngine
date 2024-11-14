@@ -867,6 +867,14 @@ L0_jax_unittest--L40_1GPU:
     - .L0_test
     - .L40_1GPU
 
+L0_jax_distributed_unittest--H100_4GPU:
+    variables:
+      FRAMEWORK: jax
+    needs: [ jax-py3-devel ]
+    extends:
+    - .L0_test
+    - .H100_4GPU
+
 L1_jax_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: jax
