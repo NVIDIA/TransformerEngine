@@ -62,7 +62,8 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
   auto *out_scale_updated = reinterpret_cast<float *>(buffers[10]);
   auto *pre_gelu_out = buffers[11];
   auto *bias_grad = buffers[12];
-  auto *workspace = buffers[13];
+  // buffers[13] is the extra output for comm+GEMM overlap, not used here
+  auto *workspace = buffers[14];
 
   // Operand aliasing
   NVTE_CHECK(bias == bias_grad, "bias not bound to bias_grad in TE/JAX GEMM");
@@ -88,9 +89,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
                    Result_Type out_amax_updated, Result_Type out_scale_updated,
-                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type workspace,
-                   bool lhs_trans, bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
-                   bool accumulate, bool use_split_accumulator) {
+                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type dummy_out,
+                   Result_Type workspace, bool lhs_trans, bool rhs_trans, bool fuse_gelu,
+                   bool fuse_bias, bool grad, bool accumulate, bool use_split_accumulator) {
   // Inputs
   auto lhs_ptr = lhs.untyped_data();
   auto lhs_scale_inv_ptr = reinterpret_cast<float *>(lhs_scale_inv.untyped_data());
@@ -110,6 +111,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto out_dtype = convert_ffi_datatype_to_te_dtype(out->element_type());
   auto pre_gelu_out_ptr = pre_gelu_out->untyped_data();
   auto bias_grad_ptr = bias_grad->untyped_data();
+  // dummy_out is the extra output for comm+GEMM overlap, not used here
   auto workspace_ptr = workspace->untyped_data();
   auto workspace_size = workspace->dimensions().back();
 
@@ -151,6 +153,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Ret<Buffer_Type>()      // out_scale_updated
                                   .Ret<Buffer_Type>()      // pre_gelu_out
                                   .Ret<Buffer_Type>()      // bias_grad
+                                  .Ret<Buffer_Type>()      // dummy_out
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<bool>("lhs_trans")
                                   .Attr<bool>("rhs_trans")

@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
-#define TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#ifndef TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_H_
+#define TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_H_
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -13,6 +13,7 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
@@ -148,7 +149,6 @@ pybind11::bytes PackCustomCallFusedAttnDescriptor(
     bool deterministic, int64_t window_size_left, int64_t window_size_right);
 
 struct CustomCallGemmDescriptor {
-  size_t batch;
   size_t m;
   size_t k;
   size_t n;
@@ -165,12 +165,49 @@ struct CustomCallGemmDescriptor {
   bool use_split_accumulator;
 };
 
-pybind11::bytes PackCustomCallGemmDescriptor(size_t batch, size_t m, size_t n, size_t k,
-                                             size_t workspace_size, DType operand_dtype,
-                                             DType out_dtype, DType bias_dtype, bool lhs_trans,
-                                             bool rhs_trans, bool fuse_gelu, bool fuse_bias,
-                                             bool grad, bool accumulate,
+pybind11::bytes PackCustomCallGemmDescriptor(size_t m, size_t n, size_t k, size_t workspace_size,
+                                             DType operand_dtype, DType out_dtype, DType bias_dtype,
+                                             bool lhs_trans, bool rhs_trans, bool fuse_gelu,
+                                             bool fuse_bias, bool grad, bool accumulate,
                                              bool use_split_accumulator);
+
+struct CustomCallBufferDescriptor {
+  const std::string name;
+  const size_t *shape;
+  const size_t ndim;
+  DType dtype;
+  CommOverlapType comm_type;
+};
+
+pybind11::bytes PackCustomCallBufferDescriptor(const std::string &name,
+                                               const std::vector<size_t> &shape, DType dtype,
+                                               CommOverlapType comm_type);
+
+struct CustomCallOverlapDescriptor {
+  size_t m;
+  size_t k;
+  size_t n;
+  size_t workspace_size;
+  DType operand_dtype;
+  DType bias_dtype;
+  DType out_dtype;
+  bool lhs_trans;
+  bool rhs_trans;
+  bool fuse_gelu;
+  bool fuse_bias;
+  bool grad;
+  bool accumulate;
+  bool use_split_accumulator;
+  CommOverlapType comm_type;
+  const std::string name;
+};
+
+pybind11::bytes PackCustomCallOverlapDescriptor(size_t m, size_t k, size_t n, size_t workspace_size,
+                                                DType operand_dtype, DType bias_dtype,
+                                                DType out_dtype, bool lhs_trans, bool rhs_trans,
+                                                bool fuse_gelu, bool fuse_bias, bool grad,
+                                                bool accumulate, bool use_split_accumulator,
+                                                CommOverlapType comm_type, const std::string &name);
 
 // Transpose
 
@@ -341,13 +378,52 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
                    Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
                    Result_Type out_amax_updated, Result_Type out_scale_updated,
-                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type workspace,
-                   bool lhs_trans, bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
-                   bool accumulate, bool use_split_accumulator);
+                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type dummy_out,
+                   Result_Type workspace, bool lhs_trans, bool rhs_trans, bool fuse_gelu,
+                   bool fuse_bias, bool grad, bool accumulate, bool use_split_accumulator);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
+
+// Comm+GEMM Overlap
+
+void BootstrapCommGemmOverlap(const std::string &name, const std::string &method,
+                              const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                              CommOverlapType comm_type, int tp_size, int num_splits,
+                              int num_max_streams, int comm_cga_size, int num_comm_sm,
+                              int set_sm_margin, bool use_ce, bool atomic_gemm, bool aggregate,
+                              bool pipeline_rs_overlap_first_gemm);
+
+void DestroyCommGemmOverlap(const std::string &name);
+
+void SetOverlapBufferScaleInverse(const std::string &name, pybind11::object scale_inv,
+                                  bool grad = false);
+
+bool OverlapBufferIsFp8(const std::string &name);
+
+pybind11::object GetOverlapBuffer(const std::string &name, CommOverlapType comm_type);
+
+void CopyIntoOverlapBuffer(cudaStream_t, void **buffers, const char *opaque, size_t opaque_len);
+
+Error_Type CopyIntoOverlapBufferFFI(cudaStream_t stream, Buffer_Type input, std::string_view name,
+                                    int32_t comm_type_flag);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CopyIntoOverlapBufferHandler);
+
+void CommGemmOverlap(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+Error_Type CommGemmOverlapFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
+                              Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                              Buffer_Type gelu_input, Buffer_Type out_amax, Buffer_Type out_scale,
+                              Result_Type out, Result_Type out_amax_new, Result_Type out_scale_new,
+                              Result_Type pre_gelu_out, Result_Type bias_grad,
+                              Result_Type extra_out, Result_Type workspace, bool lhs_trans,
+                              bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
+                              bool accumulate, bool use_split_accumulator, int32_t comm_type_flag,
+                              std::string_view name);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CommGemmOverlapHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_
+#endif  // TRANSFORMER_ENGINE_JAX_CSRC_EXTENSIONS_H_

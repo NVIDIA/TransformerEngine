@@ -139,11 +139,12 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
                                  ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
                                  int comm_cga_size, int num_comm_sm, bool set_sm_margin,
-                                 bool atomic_gemm)
+                                 bool atomic_gemm, bool overlap_first_gemm)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, num_splits, num_max_streams, comm_cga_size,
                       num_comm_sm, set_sm_margin, false, atomic_gemm) {
   _rs_kernel_type = getenv<int>("NVTE_RS_STRIDED_ATOMIC", 0);
+  _overlap_first_gemm = overlap_first_gemm;
   NVTE_CHECK(_rs_kernel_type >= 0 && _rs_kernel_type <= 3,
              "Invalid choice for NVTE_RS_STRIDED_ATOMIC: Must be 0 (non-atomic), 1 (atomic) ",
              "or 2 (multi-atomic).");
@@ -162,6 +163,36 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
 CommOverlapBase::~CommOverlapBase() {
   cudaEventDestroy(_start_d2dcopy);
   cudaStreamDestroy(_stream_comm);
+}
+
+TensorWrapper CommOverlapBase::get_ubuf_output(CommOverlapType comm_type) {
+  char *output_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+  if (comm_type == CommOverlapType::RS)
+    output_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
+  size_t output_c_dim0 =
+      (comm_type == CommOverlapType::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
+  size_t output_c_dim1 = _ubuf.size(1);
+  return TensorWrapper(reinterpret_cast<void *>(output_ptr), {output_c_dim0, output_c_dim1},
+                       _ubuf.dtype());
+}
+
+void CommOverlapBase::copy_into_ubuf(cudaStream_t stream, TensorWrapper &input,
+                                     CommOverlapType comm_type) {
+  char *ubuf_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+  if (comm_type == CommOverlapType::AG) {
+    if ((input.numel() * _tp_size) != (int64_t)_ubuf.numel() ||
+        input.element_size() != (int64_t)_ubuf.element_size()) {
+      NVTE_ERROR("Input and buffer sizes do not match!");
+    }
+    ubuf_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
+  } else {
+    if (input.numel() != (int64_t)_ubuf.numel() ||
+        input.element_size() != (int64_t)_ubuf.element_size()) {
+      NVTE_ERROR("Input and buffer sizes do not match!");
+    }
+  }
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input.dptr(), input.numel() * input.element_size(),
+                                  cudaMemcpyDeviceToDevice, stream));
 }
 
 /*
@@ -225,8 +256,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(TensorWrapper &A, bool transa, Tens
                                              bool transb, TensorWrapper &D, TensorWrapper &bias,
                                              TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                              bool grad, bool accumulate, bool use_split_accumulator,
-                                             bool gemm_overlap, TensorWrapper &rs_output,
-                                             cudaStream_t stream_main) {
+                                             TensorWrapper &rs_output, cudaStream_t stream_main) {
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -325,8 +355,7 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
                                        TensorWrapper &D, TensorWrapper &bias,
                                        TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                        bool grad, bool accumulate, bool use_split_accumulator,
-                                       bool gemm_overlap, TensorWrapper &rs_output,
-                                       cudaStream_t stream_main) {
+                                       TensorWrapper &rs_output, cudaStream_t stream_main) {
   // Get GEMM dimensions
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
@@ -358,7 +387,7 @@ void CommOverlapBase::split_overlap_rs(TensorWrapper &A, bool transa, TensorWrap
 
   assert(pre_gelu_out.numel() == 0);
 
-  if (gemm_overlap) {
+  if (_overlap_first_gemm) {
     auto input_a_chunk =
         TensorWrapper(A.dptr(), {m_chunk, k}, A.dtype(), nullptr, nullptr, A.scale_inv());
     auto output_chunk =
@@ -563,6 +592,37 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   cudaEventDestroy(_stop_send);
   cudaStreamDestroy(_stream_recv);
   cudaStreamDestroy(_stream_send);
+}
+
+TensorWrapper CommOverlapP2PBase::get_ubuf_output(CommOverlapType comm_type) {
+  char *output_ptr = reinterpret_cast<char *>(_ubuf.dptr());
+  if (comm_type == CommOverlapType::RS)
+    output_ptr += _ubuf.numel() / _tp_size * _self_chunk_id * _ubuf.element_size();
+  size_t output_c_dim0 =
+      (comm_type == CommOverlapType::AG) ? _ubuf.size(0) : _ubuf.size(0) / _tp_size;
+  size_t output_c_dim1 = _ubuf.size(1);
+  return TensorWrapper(reinterpret_cast<void *>(output_ptr), {output_c_dim0, output_c_dim1},
+                       _ubuf.dtype());
+}
+
+void CommOverlapP2PBase::copy_into_ubuf(cudaStream_t stream, TensorWrapper &input,
+                                        CommOverlapType comm_type) {
+  if (comm_type == CommOverlapType::RS) {
+    // Copy input to the target ubuf chunk by rank offset
+    if (input.numel() != _ubufs[0].numel() || input.element_size() != _ubufs[0].element_size()) {
+      NVTE_ERROR("Input and buffer sizes do not match!");
+    }
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubufs[_tp_id].dptr(), input.dptr(),
+                                    input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
+                                    stream));
+  } else {
+    if (input.numel() != _ubuf.numel() || input.element_size() != _ubuf.element_size()) {
+      NVTE_ERROR("Input and buffer sizes do not match!");
+    }
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(_ubuf.dptr(), input.dptr(),
+                                    input.numel() * input.element_size(), cudaMemcpyDeviceToDevice,
+                                    stream));
+  }
 }
 
 /*

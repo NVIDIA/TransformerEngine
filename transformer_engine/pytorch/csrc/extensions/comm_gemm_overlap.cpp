@@ -186,13 +186,13 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
 CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                          CommOverlapHelper *helper, int tp_size, int num_splits,
                          int num_max_streams, int comm_cga_size, int num_comm_sm,
-                         bool set_sm_margin, bool atomic_gemm)
-    : te::CommOverlapBase(buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank,
-                          helper->numranks, helper->mylocal, helper->numlocal, helper->mynode,
-                          helper->numnodes, tp_size,
-                          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-                          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
-                          num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+                         bool set_sm_margin, bool atomic_gemm, bool overlap_first_gemm)
+    : te::CommOverlapBase(
+          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
+          comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm, overlap_first_gemm) {
   // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
   // for PyTorch to factor externally allocated memory into its memory pool and garbage collection
   // threshold calculation.

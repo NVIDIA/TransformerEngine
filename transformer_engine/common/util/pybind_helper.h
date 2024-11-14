@@ -28,7 +28,8 @@
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                      \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                        \
       .value("NVTE_POST_SCALE_BIAS", NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)                      \
-      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI);                                         \
+      .value("NVTE_ALIBI", NVTE_Bias_Type::NVTE_ALIBI)                                          \
+      .export_values();                                                                         \
   pybind11::enum_<NVTE_Mask_Type>(m, "NVTE_Mask_Type")                                          \
       .value("NVTE_NO_MASK", NVTE_Mask_Type::NVTE_NO_MASK)                                      \
       .value("NVTE_PADDING_MASK", NVTE_Mask_Type::NVTE_PADDING_MASK)                            \
@@ -36,11 +37,13 @@
       .value("NVTE_PADDING_CAUSAL_MASK", NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)              \
       .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)    \
       .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",                                           \
-             NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);                            \
+             NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK)                             \
+      .export_values();                                                                         \
   pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format")                                        \
       .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)                                           \
       .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)                                           \
-      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);                                            \
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD)                                             \
+      .export_values();                                                                         \
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout")                                        \
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)                                         \
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)                                         \
@@ -56,12 +59,14 @@
       .value("NVTE_TH3D", NVTE_QKV_Layout::NVTE_TH3D)                                           \
       .value("NVTE_THD_T2HD", NVTE_QKV_Layout::NVTE_THD_T2HD)                                   \
       .value("NVTE_THD_TH2D", NVTE_QKV_Layout::NVTE_THD_TH2D)                                   \
-      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD);                            \
+      .value("NVTE_THD_THD_THD", NVTE_QKV_Layout::NVTE_THD_THD_THD)                             \
+      .export_values();                                                                         \
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend")                        \
       .value("NVTE_F16_max512_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_max512_seqlen)         \
       .value("NVTE_F16_arbitrary_seqlen", NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen)   \
       .value("NVTE_FP8", NVTE_Fused_Attn_Backend::NVTE_FP8)                                     \
-      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);                      \
+      .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend)                       \
+      .export_values();                                                                         \
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type")                              \
       .value("GELU", NVTE_Activation_Type::GELU)                                                \
       .value("GEGLU", NVTE_Activation_Type::GEGLU)                                              \
@@ -72,7 +77,8 @@
       .value("QGELU", NVTE_Activation_Type::QGELU)                                              \
       .value("QGEGLU", NVTE_Activation_Type::QGEGLU)                                            \
       .value("SRELU", NVTE_Activation_Type::SRELU)                                              \
-      .value("SREGLU", NVTE_Activation_Type::SREGLU);                                           \
+      .value("SREGLU", NVTE_Activation_Type::SREGLU)                                            \
+      .export_values();                                                                         \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType")                    \
       .value("RS", transformer_engine::CommOverlapType::RS)                                     \
       .value("AG", transformer_engine::CommOverlapType::AG);                                    \

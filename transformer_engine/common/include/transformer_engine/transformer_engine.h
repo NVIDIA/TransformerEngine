@@ -393,7 +393,7 @@ class TensorWrapper {
     return nvte_tensor_scale_inv(tensor_);
   }
 
- private:
+ protected:
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
 };

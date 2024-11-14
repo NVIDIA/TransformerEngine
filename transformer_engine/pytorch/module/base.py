@@ -306,6 +306,7 @@ def initialize_ub(
             "num_splits": 4 if method == "pipeline" else tp_size,
             "aggregate": False,
             "atomic_gemm": False,
+            "pipeline_rs_overlap_first_gemm": False,
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
         }
@@ -314,13 +315,14 @@ def initialize_ub(
     def add_ub(
         name: str,
         method: str,
-        is_reduce_scatter: int,
+        is_reduce_scatter: bool,
         num_sm: int = 16,
         cga_size: int = 2,
-        set_sm_margin: int = 0,
-        num_splits: int = 0,
-        aggregate: int = 0,
-        atomic_gemm: int = 0,
+        set_sm_margin: bool = False,
+        num_splits: int = 4,
+        aggregate: bool = False,
+        atomic_gemm: bool = False,
+        pipeline_rs_overlap_first_gemm: bool = False,
         use_ce: bool = True,
         fp8_buf: bool = False,
     ) -> None:
@@ -386,6 +388,7 @@ def initialize_ub(
                 num_comm_sm=num_sm,
                 set_sm_margin=set_sm_margin,
                 atomic_gemm=atomic_gemm,
+                overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[name] = ub_obj
 
