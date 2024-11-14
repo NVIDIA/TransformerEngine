@@ -155,12 +155,14 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
 
 void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
+
 pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
                                                     DType in_dtype, DType out_dtype);
 
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
-
 void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasCastTransposeHandler);
 
 // Activation
 
@@ -168,13 +170,13 @@ size_t get_activation_len(NVTE_Activation_Type activation_enum);
 
 void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
-void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
+
+void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
 
@@ -184,8 +186,12 @@ pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_
 void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                               size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasCastTransposeHandler);
+
 void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
                               size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DGatedActLuCastTransposeHandler);
 
 // Normalization
 
@@ -232,6 +238,8 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
 
 void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
+
 // Softmax
 
 void ScaledSoftmaxForward(cudaStream_t stream, void **buffers, const char *opaque,
@@ -252,7 +260,22 @@ void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, 
 void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
                                             std::size_t opaque_len);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledMaskedSoftmaxBackwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+
 // Attention
+
+// Cudnn helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -282,6 +305,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     int64_t window_size_right);
 
 void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine

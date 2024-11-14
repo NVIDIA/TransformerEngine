@@ -22,6 +22,7 @@ from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
 from transformer_engine.jax.cpp_extensions.transpose import (
     _jax_transpose,
     _jax_cast_transpose,
+    _jax_dbias_cast_transpose,
 )
 from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax import cpp_extensions as tex
@@ -504,7 +505,6 @@ class TestActivationLuFP8(TestActivationLu):
                         scale_inv,
                         FP8Helper.BWD_DTYPE,
                         -1,
-                        -2,
                         self.activation_type,
                     )
                 )
@@ -807,6 +807,34 @@ class TestTranspose:
         )
         os.environ["NVTE_JAX_WITH_FFI"] = "1"
         ffi_output = tex.cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        assert_tree_like_allclose(jax_output, ffi_output)
+        assert_tree_like_allclose(noffi_output, ffi_output)
+
+    @pytest.mark.parametrize(
+        "out_dtype",
+        [
+            pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
+            pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+        ],
+    )
+    def test_dbias_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
+        amax = jnp.zeros(1, jnp.float32)
+        scale = jnp.ones(1, jnp.float32)
+        scale_inv = jnp.ones(1, jnp.float32)
+        key = jax.random.PRNGKey(0)
+        input = jax.random.uniform(key, input_shape, in_dtype)
+        static_axis_boundary = -1
+        jax_output = _jax_dbias_cast_transpose(
+            input, amax, scale, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "0"
+        noffi_output = tex.dbias_cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "1"
+        ffi_output = tex.dbias_cast_transpose(
             input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
         )
         assert_tree_like_allclose(jax_output, ffi_output)
