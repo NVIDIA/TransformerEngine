@@ -21,7 +21,6 @@ from .cpp_extensions import (
 )
 
 
-
 __all__ = [
     "gemm",
     "fp8_gemm",
@@ -52,8 +51,9 @@ def _gemm(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> ArrayLike:
-    out, _ = _gemm_fwd_rule(x, kernel, bias, contracting_dims, fuse_gelu, accumulate,
-                            use_split_accumulator)
+    out, _ = _gemm_fwd_rule(
+        x, kernel, bias, contracting_dims, fuse_gelu, accumulate, use_split_accumulator
+    )
     return out
 
 
@@ -76,7 +76,7 @@ def _gemm_fwd_rule(
         fuse_gelu=fuse_gelu,
         fuse_bias=fuse_bias,
         accumulate=accumulate,
-        use_split_accumulator=use_split_accumulator
+        use_split_accumulator=use_split_accumulator,
     )
 
     ctx = (
@@ -145,8 +145,18 @@ def fp8_gemm(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
 ) -> ArrayLike:
-    return _fp8_gemm(x, kernel, bias, fp8_meta.amax_list, fp8_meta.scale_list, out_dtype,
-                     contracting_dims, fuse_gelu, accumulate, use_split_accumulator)
+    return _fp8_gemm(
+        x,
+        kernel,
+        bias,
+        fp8_meta.amax_list,
+        fp8_meta.scale_list,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        accumulate,
+        use_split_accumulator,
+    )
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
@@ -163,8 +173,18 @@ def _fp8_gemm(
     use_split_accumulator: bool,
 ) -> ArrayLike:
     """Non-FP8 `nvte_cublas_gemm()` with optional GELU and bias-add fusions."""
-    out, _ = _fp8_gemm_fwd_rule(x, kernel, bias, amax_list, scale_list, out_dtype,
-                                contracting_dims, fuse_gelu, accumulate, use_split_accumulator)
+    out, _ = _fp8_gemm_fwd_rule(
+        x,
+        kernel,
+        bias,
+        amax_list,
+        scale_list,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        accumulate,
+        use_split_accumulator,
+    )
     return out
 
 
@@ -183,7 +203,8 @@ def _fp8_gemm_fwd_rule(
     fuse_bias = bias is not None
 
     maybe_fm32_to_fp32, maybe_fp32_to_fm32 = FP8Helper.generate_fp8_meta_dtype_converter_pair(
-        *amax_list, *scale_list,
+        *amax_list,
+        *scale_list,
     )
     amax_list = maybe_fm32_to_fp32(*amax_list)
     scale_list = maybe_fm32_to_fp32(*scale_list)
@@ -272,7 +293,7 @@ def _fp8_gemm_fwd_rule(
         fuse_gelu=fuse_gelu,
         fuse_bias=fuse_bias,
         accumulate=accumulate,
-        use_split_accumulator=use_split_accumulator
+        use_split_accumulator=use_split_accumulator,
     )
     if out_dtype not in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
         updated_out_amax = None
@@ -288,7 +309,7 @@ def _fp8_gemm_fwd_rule(
         updated_kernel_amax,
         pre_gelu_out if fuse_gelu else None,
         fuse_bias,
-        maybe_fp32_to_fm32
+        maybe_fp32_to_fm32,
     )
 
     return (out, updated_out_amax, updated_out_scale), ctx
@@ -313,7 +334,7 @@ def _fp8_gemm_bwd_rule(
         updated_kernel_amax,
         pre_gelu_out,
         fuse_bias,
-        maybe_fp32_to_fm32
+        maybe_fp32_to_fm32,
     ) = ctx
 
     fwd_dtype = FP8Helper.FWD_DTYPE
@@ -347,8 +368,6 @@ def _fp8_gemm_bwd_rule(
         )
         bgrad = None
 
-
-
     x_scale_inv = scale_inv_list[FP8MetaPackage.INPUT_IDX]
     wgrad, *_ = fp8_gemm_impl(
         casted_x,
@@ -370,11 +389,11 @@ def _fp8_gemm_bwd_rule(
             bwd_dtype,
             static_axis_boundary=-1,
             transpose_axis_boundary=-1,
-            activation_type=("gelu", ),
+            activation_type=("gelu",),
         )
     elif fuse_gelu:
         # No bias to fuse so we just do dGELU.
-        casted_dgelu, casted_dgelu_t, updated_dgelu_amax = dact_lu(grad, pre_gelu_out, ("gelu", ))
+        casted_dgelu, casted_dgelu_t, updated_dgelu_amax = dact_lu(grad, pre_gelu_out, ("gelu",))
         bgrad = None
 
     kernel_scale_inv = scale_inv_list[FP8MetaPackage.WEIGHT_IDX]
@@ -414,12 +433,23 @@ def type_safe_gemm(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
 ) -> ArrayLike:
-    if (x.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]
-        or kernel.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]):
+    if x.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2] or kernel.dtype in [
+        jnp.float8_e4m3fn,
+        jnp.float8_e5m2,
+    ]:
         assert fp8_meta is not None, "GEMM operands have FP8 dtypes but FP8MetaPackage is None."
 
     if fp8_meta is not None:
-        return fp8_gemm(x, kernel, bias, fp8_meta, out_dtype, contracting_dims, fuse_gelu,
-                        accumulate, use_split_accumulator)
+        return fp8_gemm(
+            x,
+            kernel,
+            bias,
+            fp8_meta,
+            out_dtype,
+            contracting_dims,
+            fuse_gelu,
+            accumulate,
+            use_split_accumulator,
+        )
     else:
         return gemm(x, kernel, bias, contracting_dims, fuse_gelu, accumulate, use_split_accumulator)

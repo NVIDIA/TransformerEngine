@@ -29,8 +29,8 @@ void GemmImpl(cudaStream_t stream, void *lhs, const std::vector<size_t> &lhs_sha
   auto out_ = TensorWrapper(out, out_shape, out_dtype, out_amax, out_scale, nullptr);
 
   void *bias_ptr = (fuse_bias) ? bias : nullptr;
-  std::vector<size_t> bias_shape = (fuse_bias) ? std::vector<size_t>{out_shape[1]}
-                                               : std::vector<size_t>{0};
+  std::vector<size_t> bias_shape =
+      (fuse_bias) ? std::vector<size_t>{out_shape[1]} : std::vector<size_t>{0};
   auto bias_ = TensorWrapper(bias_ptr, bias_shape, bias_dtype);
 
   void *pre_gelu_ptr = (fuse_gelu) ? pre_gelu_out : nullptr;
@@ -65,12 +65,9 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
   auto *workspace = buffers[13];
 
   // Operand aliasing
-  NVTE_CHECK(bias == bias_grad,
-             "bias not bound to bias_grad in TE/JAX GEMM");
-  NVTE_CHECK(gelu_input == pre_gelu_out,
-             "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
-  NVTE_CHECK(out_amax == out_amax_updated,
-             "out_amax not bound to out_amax_updated in TE/JAX GEMM");
+  NVTE_CHECK(bias == bias_grad, "bias not bound to bias_grad in TE/JAX GEMM");
+  NVTE_CHECK(gelu_input == pre_gelu_out, "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
+  NVTE_CHECK(out_amax == out_amax_updated, "out_amax not bound to out_amax_updated in TE/JAX GEMM");
   NVTE_CHECK(out_scale == out_scale_updated,
              "out_scale not bound to out_scale_updated in TE/JAX GEMM");
 
@@ -117,8 +114,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto workspace_size = workspace->dimensions().back();
 
   // Operand aliasing
-  NVTE_CHECK(bias_ptr == bias_grad_ptr,
-             "bias not bound to bias_grad in TE/JAX GEMM");
+  NVTE_CHECK(bias_ptr == bias_grad_ptr, "bias not bound to bias_grad in TE/JAX GEMM");
   NVTE_CHECK(gelu_input_ptr == pre_gelu_out_ptr,
              "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
   NVTE_CHECK(out_amax_ptr == out_amax_updated_ptr,

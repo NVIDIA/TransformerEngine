@@ -362,8 +362,16 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
         grad_amax, grad_scale = generate_a_set(grad_name_post_fix)
         output_amax, output_scale = generate_a_set(output_name_post_fix)
 
-        return FP8MetaPackage(input_amax, input_scale, weight_amax, weight_scale, grad_amax,
-                              grad_scale, output_amax, output_scale)
+        return FP8MetaPackage(
+            input_amax,
+            input_scale,
+            weight_amax,
+            weight_scale,
+            grad_amax,
+            grad_scale,
+            output_amax,
+            output_scale,
+        )
 
 
 class DenseGeneral(TransformerEngineBase):

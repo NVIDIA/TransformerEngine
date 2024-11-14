@@ -58,9 +58,23 @@ class CollectiveGemmPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(lhs_aval, lhs_scale_inv_aval, rhs_aval, rhs_scale_inv_aval, bias_aval,
-                 gelu_input_aval, out_amax_aval, out_scale_aval, out_dtype, contracting_dims,
-                 fuse_gelu, fuse_bias, grad, accumulate, use_split_accumulator):
+    def abstract(
+        lhs_aval,
+        lhs_scale_inv_aval,
+        rhs_aval,
+        rhs_scale_inv_aval,
+        bias_aval,
+        gelu_input_aval,
+        out_amax_aval,
+        out_scale_aval,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+    ):
         """
         cuBlasLt GEMM abstract
         """
@@ -87,7 +101,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_inner_dim, rhs_inner_dim = map(
             lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
             contracting_dims,
-            (lhs_aval.ndim, rhs_aval.ndim)
+            (lhs_aval.ndim, rhs_aval.ndim),
         )
         assert (
             lhs_aval.shape[lhs_inner_dim] == rhs_aval.shape[rhs_inner_dim]
@@ -95,8 +109,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
         rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
-        assert (
-            not (lhs_trans and rhs_trans)
+        assert not (
+            lhs_trans and rhs_trans
         ), "GEMM does not support transposed LHS and transposed RHS at the same time."
         if is_fp8:
             assert not lhs_trans, "FP8 GEMM does not support transposed LHS."
@@ -104,8 +118,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Validate output dtype
         if jax_dtype_is_fp8(out_dtype):
-            assert (
-                jax_dtype_is_fp8(lhs_dtype) and jax_dtype_is_fp8(rhs_dtype)
+            assert jax_dtype_is_fp8(lhs_dtype) and jax_dtype_is_fp8(
+                rhs_dtype
             ), "FP8 GEMM output requires FP8 inputs."
             assert (
                 out_amax_aval.size == out_scale_aval.size == 1
@@ -122,13 +136,15 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Infer output shape
         lhs_outer_dim = lhs_aval.ndim - 1 if lhs_trans else lhs_aval.ndim - 2
-        lhs_bdims = [dim for dim in range(lhs_aval.ndim)
-                     if dim not in [lhs_outer_dim, lhs_inner_dim]]
+        lhs_bdims = [
+            dim for dim in range(lhs_aval.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]
+        ]
         lhs_batch_shape = [lhs_aval.shape[dim] for dim in lhs_bdims]
         lhs_batch_size = reduce(operator.mul, lhs_batch_shape, 1)
         rhs_outer_dim = rhs_aval.ndim - 2 if rhs_trans else rhs_aval.ndim - 1
-        rhs_bdims = [dim for dim in range(rhs_aval.ndim)
-                     if dim not in [rhs_outer_dim, rhs_inner_dim]]
+        rhs_bdims = [
+            dim for dim in range(rhs_aval.ndim) if dim not in [rhs_outer_dim, rhs_inner_dim]
+        ]
         rhs_batch_size = reduce(operator.mul, rhs_bdims, 1)
         assert (
             lhs_batch_size == rhs_batch_size
@@ -139,9 +155,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         bias_dtype = jnp.bfloat16 if jax_dtype_is_fp8(out_dtype) else out_dtype
         if fuse_bias:
             assert (
-                bias_aval.size > 0
-                and bias_aval.ndim == 1
-                and bias_aval.shape[0] == out_shape[-1]
+                bias_aval.size > 0 and bias_aval.ndim == 1 and bias_aval.shape[0] == out_shape[-1]
             ), "Incorrect bias shape."
             bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
         else:
@@ -149,8 +163,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Validate GELU input/output
         if fuse_gelu:
-            assert (
-                all([gelu_input_aval.shape[i] == out_shape[i] for i in len(out_shape)])
+            assert all(
+                [gelu_input_aval.shape[i] == out_shape[i] for i in len(out_shape)]
             ), "Invalid GELU input shape."
             assert gelu_input_aval.dtype == bias_dtype, "Invalid GELU dtype."
         else:
@@ -158,14 +172,17 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Create abstract arrays for all outputs
         out_aval = lhs_aval.update(shape=out_shape, dtype=out_dtype)
-        out_amax_updated_aval = out_amax_aval.update(shape=out_amax_aval.shape,
-                                                     dtype=out_amax_updated_dtype)
-        out_scale_updated_aval = out_scale_aval.update(shape=out_scale_aval.shape,
-                                                       dtype=out_scale_updated_dtype)
+        out_amax_updated_aval = out_amax_aval.update(
+            shape=out_amax_aval.shape, dtype=out_amax_updated_dtype
+        )
+        out_scale_updated_aval = out_scale_aval.update(
+            shape=out_scale_aval.shape, dtype=out_scale_updated_dtype
+        )
         pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_input_aval.shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        workspace_aval = jax.core.ShapedArray(shape=(get_cublas_workspace_size_bytes(), ),
-                                              dtype=jnp.uint8)
+        workspace_aval = jax.core.ShapedArray(
+            shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
+        )
 
         return (
             out_aval,
@@ -173,7 +190,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
             out_scale_updated_aval,
             pre_gelu_out_aval,
             bias_grad_aval,
-            workspace_aval
+            workspace_aval,
         )
 
     @staticmethod
@@ -181,20 +198,31 @@ class CollectiveGemmPrimitive(BasePrimitive):
         """
         cuBlasLt GEMM outer abstract
         """
-        (
-            out_aval,
-            out_amax_aval,
-            out_scale_aval,
-            pre_gelu_out_aval,
-            bias_grad_aval,
-            _
-        ) = CollectiveGemmPrimitive.abstract(*args, **kwargs)
+        (out_aval, out_amax_aval, out_scale_aval, pre_gelu_out_aval, bias_grad_aval, _) = (
+            CollectiveGemmPrimitive.abstract(*args, **kwargs)
+        )
         return out_aval, out_amax_aval, out_scale_aval, pre_gelu_out_aval, bias_grad_aval
 
     @staticmethod
-    def lowering(ctx, lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax, out_scale,
-                 *, out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad, accumulate,
-                 use_split_accumulator):
+    def lowering(
+        ctx,
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_amax,
+        out_scale,
+        *,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+    ):
         """
         Fused attention fwd lowering rules
         """
@@ -202,7 +230,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_inner_dim, rhs_inner_dim = map(
             lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
             contracting_dims,
-            (lhs_aval.ndim, rhs_aval.ndim)
+            (lhs_aval.ndim, rhs_aval.ndim),
         )
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
         rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
@@ -232,7 +260,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 fuse_bias=fuse_bias,
                 grad=grad,
                 accumulate=accumulate,
-                use_split_accumulator=use_split_accumulator
+                use_split_accumulator=use_split_accumulator,
             )
         else:
             operands = [
@@ -260,10 +288,22 @@ class CollectiveGemmPrimitive(BasePrimitive):
             workspace_size = get_cublas_workspace_size_bytes()
             operand_dtype = jax_dtype_to_te_dtype(lhs_aval.dtype)
             bias_dtype = jax_dtype_to_te_dtype(bias_aval.dtype)
-            opaque = tex.pack_gemm_descriptor(m, n, k, workspace_size, operand_dtype,
-                                              jax_dtype_to_te_dtype(out_dtype), bias_dtype,
-                                              lhs_trans, rhs_trans, fuse_gelu, fuse_bias, grad,
-                                              accumulate, use_split_accumulator)
+            opaque = tex.pack_gemm_descriptor(
+                m,
+                n,
+                k,
+                workspace_size,
+                operand_dtype,
+                jax_dtype_to_te_dtype(out_dtype),
+                bias_dtype,
+                lhs_trans,
+                rhs_trans,
+                fuse_gelu,
+                fuse_bias,
+                grad,
+                accumulate,
+                use_split_accumulator,
+            )
 
             return custom_caller(
                 CollectiveGemmPrimitive.name,
@@ -274,9 +314,23 @@ class CollectiveGemmPrimitive(BasePrimitive):
             )
 
     @staticmethod
-    def impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax, out_scale,
-             out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad, accumulate,
-             use_split_accumulator):
+    def impl(
+        lhs,
+        lhs_scale_inv,
+        rhs,
+        rhs_scale_inv,
+        bias,
+        gelu_input,
+        out_amax,
+        out_scale,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+    ):
         assert CollectiveGemmPrimitive.inner_primitive is not None
 
         (
@@ -306,13 +360,23 @@ class CollectiveGemmPrimitive(BasePrimitive):
         return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad,
-                accumulate, use_split_accumulator):
+    def batcher(
+        batched_args,
+        batch_dims,
+        *,
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+    ):
         assert CollectiveGemmPrimitive.outer_primitive is not None
         check_valid_batch_dims(batch_dims)
         lhs_bdims, *_, bias_bdims, gelu_input_bdims, out_amax_bdims, out_scale_bdims = batch_dims
 
-         # FP8 GEMM only supports non-transposed LHS and transposed RHS
+        # FP8 GEMM only supports non-transposed LHS and transposed RHS
         lhs, _, rhs, *_ = batched_args
         lhs_trans = contracting_dims[0] != lhs.ndim - 1
         rhs_trans = contracting_dims[1] == rhs.ndim - 1
@@ -320,27 +384,33 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs = jnp.matrix_transpose(rhs) if not rhs_trans and jax_dtype_is_fp8(rhs.dtype) else rhs
         contracting_dims = (1, 1)
 
-        return (
-            CollectiveGemmPrimitive.outer_primitive.bind(
-                lhs,
-                batched_args[1],
-                rhs,
-                *batched_args[3:],
-                out_dtype=out_dtype,
-                contracting_dims=contracting_dims,
-                fuse_gelu=fuse_gelu,
-                fuse_bias=fuse_bias,
-                grad=grad,
-                accumulate=accumulate,
-                use_split_accumulator=use_split_accumulator,
-            )
-            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
-        )
+        return CollectiveGemmPrimitive.outer_primitive.bind(
+            lhs,
+            batched_args[1],
+            rhs,
+            *batched_args[3:],
+            out_dtype=out_dtype,
+            contracting_dims=contracting_dims,
+            fuse_gelu=fuse_gelu,
+            fuse_bias=fuse_bias,
+            grad=grad,
+            accumulate=accumulate,
+            use_split_accumulator=use_split_accumulator,
+        )(lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
 
     @staticmethod
-    def infer_sharding_from_operands(out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad,
-                                     accumulate, use_split_accumulator, mesh, arg_infos,
-                                     result_infos):
+    def infer_sharding_from_operands(
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
         del out_dtype, accumulate, use_split_accumulator, result_infos
         lhs, _, rhs, *_ = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
@@ -348,12 +418,14 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_inner_dim, rhs_inner_dim = map(
             lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
             contracting_dims,
-            (lhs.ndim, rhs.ndim)
+            (lhs.ndim, rhs.ndim),
         )
         if lhs_spec[lhs_inner_dim] != rhs_spec[rhs_inner_dim] and not grad:
-            warnings.warn("Forcing the inner dimension of LHS to match the sharding of inner "
-                          + "dimension of RHS. This can trigger additional communication if LHS is "
-                          + "not already partitioned correctly.")
+            warnings.warn(
+                "Forcing the inner dimension of LHS to match the sharding of inner "
+                + "dimension of RHS. This can trigger additional communication if LHS is "
+                + "not already partitioned correctly."
+            )
 
         lhs_trans = lhs_inner_dim != lhs.ndim - 1
         rhs_trans = rhs_inner_dim == rhs.ndim - 1
@@ -383,8 +455,18 @@ class CollectiveGemmPrimitive(BasePrimitive):
         return (out_sharding, fp8_meta_sharding, fp8_meta_sharding, gelu_sharding, bias_sharding)
 
     @staticmethod
-    def partition(out_dtype, contracting_dims, fuse_gelu, fuse_bias, grad, accumulate,
-                  use_split_accumulator, mesh, arg_infos, result_infos):
+    def partition(
+        out_dtype,
+        contracting_dims,
+        fuse_gelu,
+        fuse_bias,
+        grad,
+        accumulate,
+        use_split_accumulator,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
         del result_infos
         lhs, _, rhs, *_ = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
@@ -392,7 +474,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_inner_dim, rhs_inner_dim = map(
             lambda inner_dim, ndims: (ndims - inner_dim) if inner_dim < 0 else inner_dim,
             contracting_dims,
-            (lhs.ndim, rhs.ndim)
+            (lhs.ndim, rhs.ndim),
         )
 
         lhs_trans = lhs_inner_dim != lhs.ndim - 1
@@ -426,13 +508,27 @@ class CollectiveGemmPrimitive(BasePrimitive):
         gelu_spec = out_spec if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
-        arg_shardings = (lhs_sharding, fp8_meta_sharding, rhs_sharding, fp8_meta_sharding,
-                         bias_sharding, gelu_sharding, fp8_meta_sharding, fp8_meta_sharding)
-        out_shardings = (out_sharding, fp8_meta_sharding, fp8_meta_sharding, gelu_sharding,
-                         bias_sharding)
+        arg_shardings = (
+            lhs_sharding,
+            fp8_meta_sharding,
+            rhs_sharding,
+            fp8_meta_sharding,
+            bias_sharding,
+            gelu_sharding,
+            fp8_meta_sharding,
+            fp8_meta_sharding,
+        )
+        out_shardings = (
+            out_sharding,
+            fp8_meta_sharding,
+            fp8_meta_sharding,
+            gelu_sharding,
+            bias_sharding,
+        )
 
-        def sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax,
-                         out_scale):
+        def sharded_impl(
+            lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax, out_scale
+        ):
             (
                 out,
                 out_amax_updated,
@@ -465,8 +561,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 # GEMM output needs to be all-reduced when the contracting dimension is sharded.
                 # If the layer is sequence-parallel, we also need to scatter the output, which we
                 # can combine into a reduce-scatter here.
-                out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().cp_resource,
-                                      mesh)
+                out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().cp_resource, mesh)
                 if fuse_gelu:
                     pre_gelu_out = lax_paral_op(
                         pre_gelu_out, jax.lax.psum, global_mesh_resource().cp_resource, mesh
@@ -485,10 +580,10 @@ def fp8_gemm_impl(
     lhs_scale_inv: ArrayLike,
     rhs: ArrayLike,
     rhs_scale_inv: ArrayLike,
-    bias:  Optional[ArrayLike] = None,
+    bias: Optional[ArrayLike] = None,
     gelu_input: Optional[ArrayLike] = None,
-    out_amax:  Optional[ArrayLike] = None,
-    out_scale:  Optional[ArrayLike] = None,
+    out_amax: Optional[ArrayLike] = None,
+    out_scale: Optional[ArrayLike] = None,
     out_dtype: jnp.dtype = jnp.bfloat16,
     contracting_dims: Tuple[int, int] = (1, 1),
     fuse_gelu: bool = False,
@@ -506,9 +601,7 @@ def fp8_gemm_impl(
     if not fuse_bias:
         bias = jnp.zeros(0, dtype=jnp.bfloat16)
     else:
-        assert (
-            bias is not None
-        ), "Missing bias in forward GEMM when bias epilogue is enabled."
+        assert bias is not None, "Missing bias in forward GEMM when bias epilogue is enabled."
 
     if not fuse_gelu:
         gelu_input = jnp.zeros(0, dtype=bias.dtype)
@@ -542,8 +635,8 @@ def fp8_gemm_impl(
 def gemm_impl(
     lhs: ArrayLike,
     rhs: ArrayLike,
-    bias:  Optional[ArrayLike] = None,
-    gelu_input:  Optional[ArrayLike] = None,
+    bias: Optional[ArrayLike] = None,
+    gelu_input: Optional[ArrayLike] = None,
     contracting_dims: Tuple[int, int] = (1, 0),
     fuse_gelu: bool = False,
     fuse_bias: bool = False,
@@ -563,9 +656,7 @@ def gemm_impl(
     elif grad:
         bias = jnp.zeros(out_shape[-1], dtype=lhs.dtype)
     else:
-        assert (
-            bias is not None
-        ), "Missing bias in forward GEMM when bias epilogue is enabled."
+        assert bias is not None, "Missing bias in forward GEMM when bias epilogue is enabled."
 
     if not fuse_gelu:
         gelu_input = jnp.zeros(0, dtype=lhs.dtype)
