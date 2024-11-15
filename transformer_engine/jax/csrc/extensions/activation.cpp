@@ -264,8 +264,8 @@ Error_Type DActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type act
   auto *output = output_buf->untyped_data();
 
   auto act_input_dims = act_input_buf.dimensions();
-  auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
-  auto n = act_input_dims.back();
+  auto m = static_cast<size_t>(product(act_input_dims, 0, act_input_dims.size() - 2));
+  auto n = static_cast<size_t>(act_input_dims.back());
   auto act_len = act_input_dims.end()[-2];
 
   auto input_shape = std::vector<size_t>{m, n};

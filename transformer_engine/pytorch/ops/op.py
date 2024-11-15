@@ -19,7 +19,7 @@ from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_default_fp8_recipe,
 )
-from ._common import canonicalize_device, is_float8_tensor
+from ._common import canonicalize_device
 
 
 @dataclasses.dataclass
@@ -379,10 +379,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                         self.get_fp8_meta("input"),
                     )
                 if self.num_fp8_scales("param"):
-                    fp8_params = list(filter(is_float8_tensor, self.parameters()))
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
                         self.get_fp8_meta("param"),
-                        fp8_weights=(fp8_params if fp8_params else None),
                     )
                 if self.num_fp8_scales("grad_output"):
                     FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
@@ -505,7 +503,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             basic_op_kwargs=[kwargs],
         )
 
-    def get_extra_state(self) -> Optional[torch.Tensor]:
+    def get_extra_state(self) -> torch.Tensor:
         """Serialize extra state
 
         Contains metadata for FP8 casting.
@@ -534,7 +532,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             self.num_fp8_scales(mode) > 0 for mode in ("input", "param", "grad_output")
         )
         if not has_fp8_state:
-            return None
+            return torch.Tensor()
 
         def to_cpu(src: torch.Tensor) -> torch.Tensor:
             """Helper function to make CPU copy of tensor
@@ -588,7 +586,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
 
     def set_extra_state(self, state: Optional[torch.Tensor]) -> None:
         """Load extra state"""
-        if state is None:
+        if state is None or state.numel() == 0:
             return
 
         # Deserialize state from byte tensor
