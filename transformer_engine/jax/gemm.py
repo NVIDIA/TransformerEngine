@@ -102,7 +102,6 @@ def _gemm_bwd_rule(
     x, kernel, pre_gelu_out, fuse_bias = ctx
     x_inner_dim, kernel_inner_dim = map(sanitize_dims, contracting_dims, (x.ndim, kernel.ndim))
 
-
     kernel_t_contracting = (
         kernel.ndim - 2 if kernel_inner_dim == kernel.ndim - 1 else kernel.ndim - 1
     )
@@ -441,15 +440,15 @@ def type_safe_gemm(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
 ) -> ArrayLike:
-    if (x.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]
-        or kernel.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]):
+    if x.dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2] or kernel.dtype in [
+        jnp.float8_e4m3fn,
+        jnp.float8_e5m2,
+    ]:
         assert fp8_meta is not None, "GEMM operands have FP8 dtypes but FP8MetaPackage is None."
 
     if fp8_meta is not None:
         x_inner_dim, kernel_inner_dim = map(sanitize_dims, contracting_dims, (x.ndim, kernel.ndim))
-        assert (
-            x_inner_dim == x.ndim - 1 and kernel_inner_dim == kernel.ndim - 2
-        ), (
+        assert x_inner_dim == x.ndim - 1 and kernel_inner_dim == kernel.ndim - 2, (
             "FP8 GEMM requires non-transposed X (LHS) and transposed kernel (RHS), "
             + "i.e. contracting_dims=(-1, -1)."
         )

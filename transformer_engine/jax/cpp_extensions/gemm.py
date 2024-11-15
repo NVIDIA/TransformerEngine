@@ -101,8 +101,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
             ), "Missing RHS operand scale inverse in FP8 GEMM."
 
         # Validate operand layouts
-        lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims,
-                                           (lhs_aval.ndim, rhs_aval.ndim))
+        lhs_inner_dim, rhs_inner_dim = map(
+            sanitize_dims, contracting_dims, (lhs_aval.ndim, rhs_aval.ndim)
+        )
         assert (
             lhs_aval.shape[lhs_inner_dim] == rhs_aval.shape[rhs_inner_dim]
         ), f"Incompatible operand sizes: {lhs_aval.shape} x {rhs_aval.shape}."
@@ -150,9 +151,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
             rhs_batch_shape = [rhs_aval.shape[dim] for dim in rhs_bdims]
             rhs_batch_size = reduce(operator.mul, rhs_batch_shape, 1)
             if rhs_batch_size > 1:
-                assert (
-                    lhs_batch_size == rhs_batch_size
-                ), (
+                assert lhs_batch_size == rhs_batch_size, (
                     f"Leading dimensins of RHS ({rhs_batch_shape=}) is not broadcast-compatible "
                     + f"with the leading dimensions of LHS ({lhs_batch_shape=})."
                 )
@@ -235,8 +234,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         Fused attention fwd lowering rules
         """
         lhs_aval, _, rhs_aval, _, bias_aval, *_ = ctx.avals_in
-        lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims,
-                                           (lhs_aval.ndim, rhs_aval.ndim))
+        lhs_inner_dim, rhs_inner_dim = map(
+            sanitize_dims, contracting_dims, (lhs_aval.ndim, rhs_aval.ndim)
+        )
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
         rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
 
