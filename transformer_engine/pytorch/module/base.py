@@ -317,10 +317,10 @@ def initialize_ub(
         is_reduce_scatter: int,
         num_sm: int = 16,
         cga_size: int = 2,
-        set_sm_margin: int = 0,
+        set_sm_margin: bool = False,
         num_splits: int = 0,
-        aggregate: int = 0,
-        atomic_gemm: int = 0,
+        aggregate: bool = False,
+        atomic_gemm: bool = False,
         use_ce: bool = True,
         fp8_buf: bool = False,
     ) -> None:
@@ -389,27 +389,38 @@ def initialize_ub(
             )
         _ub_communicators[name] = ub_obj
 
-    if ub_cfgs is not None:
-        for name in dgrad_reduce_scatter_overlap:
-            if name in ub_cfgs and "method" in ub_cfgs[name] and ub_cfgs[name]["method"] != "bulk":
+    # Loop over user configs and disable dgrad and wgrad bulk overlaps for every layer that has a
+    # reduce-scatter dgrad overlap.
+    ub_cfg = dict() if ub_cfg is None else ub_cfg
+    for name in dgrad_reduce_scatter_overlap:
+        if name in ub_cfgs:
+            final_cfg = get_default_config(name)
+            final_cfg.update(ub_cfgs[name])
+
+            if final_cfg["method"] != "bulk":
                 wgrad_name = name.replace("dgrad", "wgrad")
                 assert wgrad_name not in ub_cfgs
+
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+
                 methods["bulk"].remove(name)
-                new_method = ub_cfgs[name]["method"]
+                methods["bulk"].remove(wgrad_name)
+                new_method = final_cfg["method"]
                 methods[new_method].append(name)
 
+            ub_cfg[name] = final_cfg
+
+    # Now initialize the UB objects for each layer
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
-        ub_cfg = get_default_config(name)
         if ub_cfgs is not None and name in ub_cfgs:
-            fp8_buf = (name in layers_all_gather_overlap) or (
+            final_cfg = get_default_config(name)
+            final_cfg.update(ub_cfgs[name])
+            final_cfg["fp8_buf"] = (name in layers_all_gather_overlap) or (
                 ub_cfgs[name].get("fp8_buf", False) and name in methods["pipeline"]
             )
-            ub_cfg.update(ub_cfgs[name])
-            ub_cfg["fp8_buf"] = fp8_buf
-        add_ub(name, **ub_cfg)
+            add_ub(name, **final_cfg)
 
 
 def get_ub(name: str):

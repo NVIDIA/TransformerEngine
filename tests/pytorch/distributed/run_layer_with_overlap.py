@@ -83,6 +83,36 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
     return args, kwargs, input_shape
 
 
+def _get_ub_cfg(layer_type):
+    ub_cfg = dict()
+    if layer_type in [te.LayerNormLinear, te.MultiheadAttention, te.TransformerLayer]:
+        ub_cfg.update(
+            {
+                "qkv_fprop": dict(),
+                "qkv_dgrad": dict(),
+                "qkv_wgrad": dict(),
+            }
+        )
+    if layer_type in [te.Linear, te.MultiheadAttention, te.TransformerLayer]:
+        ub_cfg.update(
+            {
+                "proj_fprop" : dict(),
+                "proj_dgrad" : dict(),
+            }
+        )
+    if layer_type in [te.LayerNormMLP, te.TransformerLayer]:
+        ub_cfg.update(
+            {
+                "fc1_fprop": dict(),
+                "fc1_dgrad": dict(),
+                "fc1_wgrad": dict(),
+                "fc2_fprop": dict(),
+                "fc2_dgrad": dict(),
+            }
+        )
+    return ub_cfg
+
+
 def _parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(
         description="Test a Transformer Engine layer with GEMM+comm overlap via Userbuffers."
@@ -236,6 +266,7 @@ def _train(opts):
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
+        ub_cfg=_get_ub_cfg(opts.layer_type),
     )
 
     # Initialize the Transformer Engine layer with overlap
