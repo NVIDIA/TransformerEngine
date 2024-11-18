@@ -391,7 +391,7 @@ def initialize_ub(
 
     # Loop over user configs and disable dgrad and wgrad bulk overlaps for every layer that has a
     # reduce-scatter dgrad overlap.
-    ub_cfg = dict() if ub_cfg is None else ub_cfg
+    ub_cfg = {} if ub_cfg is None else ub_cfg
     for name in dgrad_reduce_scatter_overlap:
         if name in ub_cfgs:
             final_cfg = get_default_config(name)
