@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -406,6 +406,27 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
+        self.activation_dtype: Optional[torch.dtype] = None
+
+    # Names of attributes that can be set quickly (see __setattr__
+    # method)
+    _fast_setattr_names: Set[str] = {
+        "activation_dtype",
+        "fp8",
+        "fp8_initialized",
+        "fp8_calibration",
+        "fp8_parameters",
+    }
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in TransformerEngineBaseModule._fast_setattr_names:
+            # torch.nn.Module has a custom __setattr__ that handles
+            # modules, parameters, and buffers. This is unnecessary
+            # overhead when setting plain attrs.
+            self.__dict__[name] = value
+        else:
+            # Default case
+            super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
         """Increase or decrease size of amax history based on given `length`.
@@ -593,7 +614,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         # All checks after this have already been performed once, thus skip
-        if hasattr(self, "activation_dtype") and self.activation_dtype == inp.dtype:
+        if self.activation_dtype == inp.dtype:
             return
 
         dtype = inp.dtype
@@ -664,7 +685,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         else:
             # If fp8 isn't enabled, turn off and return.
             self.fp8_initialized = False
-            return
 
     @contextmanager
     def prepare_forward(
@@ -708,14 +728,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 FP8GlobalStateManager.copy_forward_fp8_meta_tensors_for_recompute(self.fp8_meta)
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
-            if not allow_non_contiguous:
-                yield inp.contiguous()
-            else:
-                yield inp
+            if not allow_non_contiguous and not inp.is_contiguous():
+                inp = inp.contiguous()
+            yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
-            return
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled

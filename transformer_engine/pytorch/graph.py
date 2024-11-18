@@ -61,6 +61,7 @@ def _make_graphed_callables(
     fp8_weight_caching: bool = False,
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
+    pool: Optional[Tuple[int, ...]] = None,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -193,7 +194,7 @@ def _make_graphed_callables(
                 fwd_graph.register_generator_state(state)
                 bwd_graph.register_generator_state(state)
 
-    mempool = graph_pool_handle()
+    mempool = graph_pool_handle() if pool is None else pool
 
     # Warmup
     # Hopefully prevents cudnn benchmarking and other lazy-initialization cuda work
@@ -357,6 +358,7 @@ def _make_graphed_callables(
 
             @staticmethod
             def forward(ctx, skip_fp8_weight_update, *inputs):
+                # pylint: disable=missing-function-docstring
 
                 # Set flag for whether to update FP8 weight updates
                 ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
@@ -376,6 +378,7 @@ def _make_graphed_callables(
             @staticmethod
             @torch.autograd.function.once_differentiable
             def backward(ctx, *grads):
+                # pylint: disable=missing-function-docstring
 
                 # Replay backward graph
                 assert len(grads) == len(static_grad_outputs)
@@ -518,6 +521,7 @@ def make_graphed_callables(
     fp8_recipe: Optional[DelayedScaling] = None,
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
+    pool: Optional[Tuple[int, ...]] = None,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -541,6 +545,9 @@ def make_graphed_callables(
                         and outputs are disconnected in compute graph.
     sample_kwargs: (tuple of) dict, optional
                    Keyword arguments to callable(s)
+    pool: (tuple of) int, default = `None`, optional
+          An instance returned from function `torch.cuda.graph_pool_handle` that hints
+          this graph may share memory with the indicated pool.
 
     FP8-related parameters
     ----------------------
@@ -617,6 +624,7 @@ def make_graphed_callables(
         fp8_weight_caching=fp8_weight_caching,
         sample_kwargs=sample_kwargs,
         _order=_order,
+        pool=pool,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.

@@ -583,6 +583,7 @@ def fused_attn_fwd_qkvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    rng_elts_per_thread = None
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
         rng_elts_per_thread = (
@@ -773,6 +774,7 @@ def fused_attn_fwd_kvpacked(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    rng_elts_per_thread = None
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
         rng_elts_per_thread = (
@@ -982,6 +984,7 @@ def fused_attn_fwd(
         fused_attention_backend != FusedAttnBackend["No_Backend"]
     ), "Fused attention does not support this input combination."
 
+    rng_elts_per_thread = None
     # BF16/FP16 fused attention API from fmha_v1 apex
     if fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
         rng_elts_per_thread = (

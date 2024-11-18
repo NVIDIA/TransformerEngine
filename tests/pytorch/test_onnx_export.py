@@ -72,7 +72,7 @@ OPSET = 17
 assert OPSET >= TRILU_OPSET
 
 # Shared library implementing custom FP8 Q/DQ operators for ONNX Runtime (ORT).
-ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "./libcustom_ort_fp8_qdq_ops.so")
+ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "custom_ort_ops", "libcustom_ort_ops.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -85,7 +85,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 @pytest.fixture()
 def seed_default_rng():
     """Reseed the PRNG for test reproducibility"""
-    torch.random.seed()
+    torch.manual_seed(1234)
 
 
 @pytest.fixture()
