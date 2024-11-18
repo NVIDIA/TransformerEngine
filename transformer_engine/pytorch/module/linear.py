@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import warnings
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -43,7 +44,7 @@ from ..cpp_extensions import (
     fp8_cast_transpose_fused,
     cast_to_fp8,
 )
-from ..constants import GemmParallelModes, dist_group_type
+from ..constants import GemmParallelModes, dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..float8_tensor import Float8Tensor
@@ -80,8 +81,10 @@ class _Linear(torch.autograd.Function):
         activation_dtype: torch.dtype,
         parallel_mode: Union[str, None],
         is_grad_enabled: bool,
-        ub_overlap_rs: bool,
-        ub_overlap_ag: bool,
+        ub_overlap_ag_fprop: bool,
+        ub_overlap_rs_fprop: bool,
+        ub_overlap_ag_dgrad: bool,
+        ub_overlap_rs_dgrad: bool,
         ub_name: str,
         fp8_output: bool,
         fsdp_group: Union[dist_group_type, None],
@@ -99,6 +102,7 @@ class _Linear(torch.autograd.Function):
             assert_dim_for_fp8_exec(weight)
 
         tp_world_size = get_distributed_world_size(tp_group)
+        ub_overlap_ag = False if tp_world_size == 1 else ub_overlap_ag
         ub_overlap_rs = False if tp_world_size == 1 else ub_overlap_rs
 
         # Cast input to expected dtype
@@ -150,10 +154,11 @@ class _Linear(torch.autograd.Function):
                 inputmat_scale_inv.fill_(inputmat_scale_inv.item())
 
         # Column Parallel Linear
-        if parallel_mode == "column" and sequence_parallel:
+        if parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop:
             inputmat_total, _ = gather_along_first_dim(inputmat, tp_group)
         else:
             inputmat_total = inputmat
+
         if fp8:
             bias_dtype = torch.bfloat16 if activation_dtype == torch.float32 else activation_dtype
             bias = cast_if_needed(bias, bias_dtype) if use_bias else bias
@@ -179,61 +184,81 @@ class _Linear(torch.autograd.Function):
                     activation_dtype,
                 )
 
+            ub_obj = None
             ub_algo = None
             rs_out = None
-            if ub_overlap_rs:
-                ub_obj_projout = get_ub(ub_name + "_fprop")
-                out = ub_obj_projout.get_ubuf_output(1)
+            inputmat_data = (
+                inputmat_total._data
+                if isinstance(inputmat_total, Float8Tensor)
+                else inputmat_total
+            )
+            if ub_overlap_rs_fprop:
+                ub_obj = get_ub(ub_name + "_fprop")
+                out = ub_obj.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
                 dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = out_features
-                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
-                if ub_obj_projout.is_p2p_overlap():
-                    if ub_obj_projout.is_atomic_gemm():
+                rs_out = torch.empty(dim_size, dtype=activation_dtype,
+                                        device=inputmat_total.device)
+                if ub_obj.is_p2p_overlap():
+                    if ub_obj.is_atomic_gemm():
                         ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
                     else:
                         ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
                 else:
-                    if ub_obj_projout.is_atomic_gemm():
+                    if ub_obj.is_atomic_gemm():
                         ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS
                     else:
                         ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
-                if ub_obj_projout.is_fp8_ubuf():
-                    proj_out_index = tex.FP8FwdTensors.GEMM1_OUTPUT
+                if ub_obj.is_fp8_ubuf():
+                    out_index = tex.FP8FwdTensors.GEMM1_OUTPUT
                     meta_tensor = fp8_meta["scaling_fwd"]
-                    proj_out_tetype = fp8_dtype_forward
-                    proj_out_pttype = torch.uint8
-                    ub_obj_projout.set_ubuf_scale_inv(meta_tensor.scale_inv[proj_out_index])
+                    out_tedtype = fp8_dtype_forward
+                    out_pttype = torch.uint8
+                    ub_obj.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
+
+            elif ub_overlap_ag_fprop:
+                ub_obj = get_ub(ub_name + "_fprop")
+                assert ub_obj.is_fp8_ubuf(), "AG overlap with FP8 GEMM requires FP8 buffer."
+                ub_obj.copy_input_to_ubuf(inputmat_data, 0)
+                ub_obj.set_ubuf_scale_inv(inputmat_scale_inv)
+                if ub_obj.is_atomic_gemm():
+                    ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
+                else:
+                    ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+                out_tedtype = TE_DType[activation_dtype]
+                out_pttype = activation_dtype
+                dim_size = list(inputmat_total.size())
+                dim_size[0] *= tp_size
+                dim_size[1] = out_features
+                out = torch.empty(dim_size, dtype=out_pttype, device=inputmat_total.device)
+
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = out_features
-                out = torch.empty(dim_size, dtype=proj_out_pttype, device=inputmat_total.device)
+                out = torch.empty(dim_size, dtype=out_pttype, device=inputmat_total.device)
 
             _ = fp8_gemm(
                 weight_fp8._data,
                 weight_fp8._scale_inv,
                 0,
                 weight_fp8._fp8_dtype,
-                (
-                    inputmat_total._data
-                    if isinstance(inputmat_total, Float8Tensor)
-                    else inputmat_total
-                ),
+                inputmat_data,
                 inputmat_scale_inv,
                 0,
                 fp8_dtype_forward,
-                proj_out_pttype,
+                out_pttype,
                 get_workspace(),
                 bias=bias,
                 use_bias=use_bias,
                 use_split_accumulator=_2X_ACC_FPROP,
                 out=out,
-                ub_algo=ub_algo if ub_overlap_rs else None,
-                ub=ub_obj_projout if ub_overlap_rs else None,
-                extra_output_tensor=rs_out if ub_overlap_rs else None,
+                ub_algo=ub_algo,
+                ub=ub_obj,
+                extra_output_tensor=rs_out,
                 out_index=proj_out_index,
                 fp8_meta_tensor=meta_tensor,
-                D_dtype=proj_out_tetype,
+                D_dtype=out_tedtype,
             )
             if fp8_output:
                 out = Float8Tensor(
@@ -261,17 +286,31 @@ class _Linear(torch.autograd.Function):
                     -amin, amax
                 ).float()
 
-            if ub_overlap_rs:
-                ub_obj_projout = get_ub(ub_name + "_fprop")
-                out = ub_obj_projout.get_ubuf_output(1)
+            ub_obj = None
+            ub_algo = None
+            rs_out = None
+            if ub_overlap_rs_fprop:
+                ub_obj = get_ub(ub_name + "_fprop")
+                out = ub_obj.get_ubuf_output(1)
                 dim_size = list(inputmat_total.size())
-                dim_size[0] = dim_size[0] // get_distributed_world_size(tp_group)
+                dim_size[0] = dim_size[0] // tp_world_size
                 dim_size[1] = out_features
-                rs_out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
-                if ub_obj_projout.is_p2p_overlap():
+                rs_out = torch.empty(dim_size, dtype=activation_dtype,
+                                        device=inputmat_total.device)
+                if ub_obj.is_p2p_overlap():
                     ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
                 else:
                     ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
+
+            elif ub_overlap_ag_fprop:
+                ub_obj = get_ub(ub_name + "_fprop")
+                ub_obj.copy_input_to_ubuf(inputmat_total, 0)
+                dim_size = list(inputmat_total.size())
+                dim_size[0] *= tp_size  # all-gathered sequence length
+                dim_size[1] = out_features
+                out = torch.empty(dim_size, dtype=activation_dtype, device=inputmat_total.device)
+                ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+
             else:
                 dim_size = list(inputmat_total.size())
                 dim_size[1] = out_features
@@ -285,9 +324,9 @@ class _Linear(torch.autograd.Function):
                 bias=bias,
                 use_bias=use_bias,
                 out=out,
-                ub_algo=ub_algo if ub_overlap_rs else None,
-                ub=ub_obj_projout if ub_overlap_rs else None,
-                extra_output_tensor=rs_out if ub_overlap_rs else None,
+                ub_algo=ub_algo,
+                ub=ub_obj,
+                extra_output_tensor=rs_out,
             )
 
         if is_grad_enabled:
@@ -343,7 +382,8 @@ class _Linear(torch.autograd.Function):
             ctx.inp_shape = inp_shape
             ctx.parallel_mode = parallel_mode
             ctx.tp_group = tp_group
-            ctx.ub_overlap_ag = ub_overlap_ag
+            ctx.ub_overlap_ag = ub_overlap_ag_dgrad
+            ctx.ub_overlap_rs = ub_overlap_rs_dgrad
             ctx.ub_name = ub_name
             ctx.tp_size = tp_size
             ctx.requires_dgrad = inp.requires_grad
@@ -400,9 +440,12 @@ class _Linear(torch.autograd.Function):
                 weight.main_grad = main_grad
 
             tp_world_size = get_distributed_world_size(ctx.tp_group)
-            ctx.ub_overlap_ag = False if tp_world_size == 1 else ctx.ub_overlap_ag
+            ctx.ub_overlap_ag = False if tp_world_size == 1 else ctx.ub_overlap_ag_dgrad
+            ctx.ub_overlap_rs = False if tp_world_size == 1 else ctx.ub_overlap_rs_dgrad
+            ctx.ub_obj_gradout = None
             ub_algo = None
-            if ctx.ub_overlap_ag:
+            rs_out = None
+            if ctx.ub_overlap_ag_dgrad:
                 dim_size = list(grad_output.size())
                 dim_size[0] = dim_size[0] * tp_world_size
                 ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
@@ -410,6 +453,23 @@ class _Linear(torch.autograd.Function):
                     ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P
                 else:
                     ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
+            elif ctx.ub_overlap_rs_dgrad:
+                ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
+                dim_size = list(inputmat_total.size())
+                dim_size[0] /= tp_world_size  # sequence-parallel
+                dim_size[1] = weight.shape[0]  # out_features
+                rs_out = torch.empty(dim_size, dtype=ctx.activation_dtype,
+                                     device=inputmat_total.device)
+                if ctx.ub_obj_gradout.is_p2p_overlap():
+                    if ctx.ub_obj_gradout.is_atomic_gemm():
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P
+                    else:
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P
+                else:
+                    if ctx.ub_obj_gradout.is_atomic_gemm():
+                        ub_algo = tex.CommOverlapAlgo.ATOMIC_GEMM_RS
+                    else:
+                        ub_algo = tex.CommOverlapAlgo.SPLIT_PIPELINED_RS
 
             (
                 grad_output,
@@ -425,7 +485,10 @@ class _Linear(torch.autograd.Function):
             inputmat_total = None
             inputmat_t_total = None
             handle = None
-            if weight.requires_grad and ctx.parallel_mode == "column" and ctx.sequence_parallel:
+            if (weight.requires_grad
+                and ctx.parallel_mode == "column"
+                and ctx.sequence_parallel
+                and not ctx.ub_overlap_ag):
                 inputmat_total, handle = gather_along_first_dim(
                     inputmat, ctx.tp_group, async_op=ctx.requires_dgrad
                 )
@@ -472,13 +535,18 @@ class _Linear(torch.autograd.Function):
                         output_dtype,
                         get_workspace(),
                         use_split_accumulator=_2X_ACC_DGRAD,
-                        ub_algo=ub_algo if ctx.ub_overlap_ag else None,
-                        ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
+                        ub_algo=ub_algo,
+                        ub=ctx.ub_obj_gradout,
                         out_index=out_index,
                         fp8_meta_tensor=meta_tensor,
                         D_dtype=output_te_dtype,
+                        extra_output_tensor=rs_out,
                     )
-                    if output_dtype == torch.uint8:
+
+                    if ctx.ub_overlap_rs_dgrad:
+                        dgrad = rs_out
+
+                    elif output_dtype == torch.uint8:
                         dgrad = Float8Tensor(
                             data=dgrad,
                             fp8_meta=ctx.fp8_meta,
@@ -495,16 +563,18 @@ class _Linear(torch.autograd.Function):
                         get_workspace(),
                         layout="NN",
                         grad=True,
-                        ub_algo=(
-                            tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P
-                            if ctx.ub_overlap_ag
-                            else None
-                        ),
-                        ub=ctx.ub_obj_gradout if ctx.ub_overlap_ag else None,
+                        ub_algo=ub_algo,
+                        ub=ctx.ub_obj_gradout,
+                        extra_output_tensor=rs_out,
                     )
 
+                    if ctx.ub_overlap_rs_dgrad:
+                        dgrad = rs_out
+
                 # Overlap dgrad-RS/AR with wgrad
-                if ctx.parallel_mode == "column" and ctx.sequence_parallel:
+                if (ctx.parallel_mode == "column"
+                    and ctx.sequence_parallel
+                    and not ctx.ub_overlap_rs_dgrad):
                     if handle is not None:
                         handle.wait()
                     dgrad, handle = reduce_scatter_along_first_dim(
@@ -579,7 +649,10 @@ class _Linear(torch.autograd.Function):
                 clear_tensor_data(inputmat_t_total)
 
             # Column Parallel Linear
-            if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
+            if (ctx.parallel_mode == "column"
+                and (ctx.tensor_parallel
+                     or (ctx.sequence_parallel and not ctx.ub_overlap_rs_dgrad))
+                and handle is not None):
                 handle.wait()
 
             if not ctx.use_bias:
@@ -634,8 +707,10 @@ class _Linear(torch.autograd.Function):
             None,  # activation_dtype
             None,  # parallel_mode
             None,  # is_grad_enabled
-            None,  # ub_overlap_rs
-            None,  # ub_overlap_ag
+            None,  # ub_overlap_ag_fprop
+            None,  # ub_overlap_rs_fprop
+            None,  # ub_overlap_ag_dgrad
+            None,  # ub_overlap_rs_dgrad
             None,  # ub_name
             None,  # fp8_output
             None,  # fsdp_group
@@ -729,8 +804,12 @@ class Linear(TransformerEngineBaseModule):
         parallel_mode: Optional[str] = None,
         parameters_split: Optional[Union[Tuple[str, ...], Dict[str, int]]] = None,
         device: Union[torch.device, str] = "cuda",
-        ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
+        ub_overlap_rs: bool = False,
+        ub_overlap_ag_fprop: bool = False,
+        ub_overlap_rs_fprop: bool = False,
+        ub_overlap_ag_dgrad: bool = False,
+        ub_overlap_rs_dgrad: bool = False,
         ub_name: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -742,13 +821,6 @@ class Linear(TransformerEngineBaseModule):
         self.use_bias = bias
         self.return_bias = return_bias
         self.apply_bias = bias and not return_bias
-        self.ub_overlap_rs = ub_overlap_rs
-        self.ub_overlap_ag = ub_overlap_ag
-        if ub_overlap_rs or ub_overlap_ag:
-            assert ub_name is not None, "Userbuffer name [string] is not set."
-        self.ub_name = ub_name
-        self.get_rng_state_tracker = get_rng_state_tracker
-        self.rng_tracker_name = rng_tracker_name
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -772,6 +844,53 @@ class Linear(TransformerEngineBaseModule):
             self.in_features = divide(self.in_features, self.tp_size)
 
         self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
+
+        assert (
+            not ((ub_overlap_rs or ub_overlap_rs_fprop) and ub_overlap_ag_fprop)
+        ), "Cannot enable both all-gather and reduce-scatter overlaps in a te.Linear forward pass."
+        assert (
+            not ((ub_overlap_ag or ub_overlap_ag_dgrad) and ub_overlap_rs_dgrad)
+        ), "Cannot enable both all-gather and reduce-scatter overlaps in a te.Linear backward pass."
+
+        if ub_overlap_rs:
+            warnings.warn(
+                (
+                    "`ub_overlap_rs=True` will only enable reduce-scatter overlap in the forward "
+                    + "pass. To enable reduce-scatter overlap in the backward pass, please use "
+                    + "the `ub_overlap_rs_dgrad=True` option instead."
+                ),
+                DeprecationWarning
+            )
+            ub_overlap_rs_fprop = True
+        if ub_overlap_ag:
+            warnings.warn(
+                (
+                    "`ub_overlap_ag=True` will only enable all-gather overlap in the backward "
+                    + "pass. To enable all-gather overlap in the forward pass, please use "
+                    + "the `ub_overlap_rs_dgrad=True` option instead."
+                ),
+                DeprecationWarning
+            )
+            ub_overlap_ag_dgrad = True
+
+        self.ub_overlap_ag_fprop = ub_overlap_ag_fprop
+        self.ub_overlap_rs_fprop = ub_overlap_rs_fprop
+        self.ub_overlap_ag_dgrad = ub_overlap_ag_dgrad
+        self.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad
+
+        if ub_overlap_ag_fprop or ub_overlap_rs_fprop or ub_overlap_ag_dgrad or ub_overlap_rs_dgrad:
+            assert self.tp_size > 1, "TP overlap requires `tp_size > 1`."
+            assert ub_name is not None, f"Userbuffer name [string] is not set."
+        self.ub_name = ub_name
+
+        if self.ub_overlap_ag_fprop or self.ub_overlap_rs_dgrad:
+            assert sequence_parallel and parallel_mode == "column", (
+                "All-gather overlap in the forward pass or reduce-scatter overlap in the backward "
+                + "pass require `parallel_mode=\'column\'` and `sequence_parallel=True`."
+            )
+
+        self.get_rng_state_tracker = get_rng_state_tracker
+        self.rng_tracker_name = rng_tracker_name
 
         # Initialize params in FP8
         with_fp8_params = FP8GlobalStateManager.with_fp8_parameters()
@@ -1017,8 +1136,10 @@ class Linear(TransformerEngineBaseModule):
                 self.activation_dtype,
                 self.parallel_mode,
                 torch.is_grad_enabled(),
-                self.ub_overlap_rs,
-                self.ub_overlap_ag,
+                self.ub_overlap_ag_fprop,
+                self.ub_overlap_rs_fprop,
+                self.ub_overlap_ag_dgrad,
+                self.ub_overlap_rs_dgrad,
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
