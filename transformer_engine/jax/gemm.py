@@ -101,16 +101,15 @@ def _gemm_bwd_rule(
 ):
     x, kernel, pre_gelu_out, fuse_bias = ctx
     x_inner_dim, kernel_inner_dim = map(sanitize_dims, contracting_dims, (x.ndim, kernel.ndim))
+    x_outer_dim = x.ndim - 1 if x_inner_dim != x.ndim - 1 else x.ndim - 2
+    kernel_outer_dim = kernel.ndim - 2 if kernel_inner_dim == kernel.ndim - 1 else kernel.ndim - 1
 
-    kernel_t_contracting = (
-        kernel.ndim - 2 if kernel_inner_dim == kernel.ndim - 1 else kernel.ndim - 1
-    )
     # DGRAD: ([B], M, N) x (K, N)^T = ([B], M, K)
     dgrad, dgelu, _ = gemm_impl(
         grad,
         kernel,
         gelu_input=pre_gelu_out,
-        contracting_dims=(-1, kernel_t_contracting),
+        contracting_dims=(-1, kernel_outer_dim),
         fuse_gelu=fuse_gelu,
         fuse_bias=False,
         grad=True,
@@ -118,28 +117,13 @@ def _gemm_bwd_rule(
         use_split_accumulator=use_split_accumulator,
     )
 
-    # Collapse batch x sequence dimensions for WGRAD
-    x_outer_dim = x.ndim - 2 if x_inner_dim == x.ndim - 1 else x.ndim - 1
+    # WGRAD: ([B], M, K)^T x ([B], M, N) = (K, N)
     wgrad_rhs = dgelu if fuse_gelu else grad
-    if x.ndim > 2:
-        batch_size = reduce(operator.mul, x.shape[:-2], 1)
-        x = jax.lax.reshape(
-            jax.lax.transpose(x, (*list(range(x.ndim - 2)), x_outer_dim, x_inner_dim)),
-            (batch_size * x.shape[x_outer_dim], x.shape[x_inner_dim]),
-        )
-        wgrad_rhs = jnp.reshape(
-            wgrad_rhs, shape=(batch_size * wgrad_rhs.shape[-2], wgrad_rhs.shape[-1])
-        )
-        x_t_contracting = 0
-    else:
-        x_t_contracting = x_outer_dim
-
-    # WGRAD: ([B], M, K)^T x ([B], M, N) = ([B], K, N)
     wgrad, _, bgrad = gemm_impl(
         x,
         wgrad_rhs,
         gelu_input=pre_gelu_out,
-        contracting_dims=(x_t_contracting, wgrad_rhs.ndim - 2),
+        contracting_dims=(x_outer_dim, wgrad_rhs.ndim - 2),
         fuse_gelu=False,
         fuse_bias=fuse_bias,
         grad=True,

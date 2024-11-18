@@ -136,8 +136,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
             out_scale_updated_dtype = jnp.float32
 
         # Make sure leading dimensions of RHS is broadcast-compatible with LHS
-        lhs_outer_dim = lhs_aval.ndim - 1 if lhs_trans else lhs_aval.ndim - 2
-        rhs_outer_dim = rhs_aval.ndim - 2 if rhs_trans else rhs_aval.ndim - 1
+        lhs_outer_dim, rhs_outer_dim = map(
+            lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
+            (lhs_inner_dim, rhs_inner_dim),
+            (lhs_aval.ndim, rhs_aval.ndim)
+        )
 
         lhs_bdims = [
             dim for dim in range(lhs_aval.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]
@@ -152,12 +155,17 @@ class CollectiveGemmPrimitive(BasePrimitive):
             rhs_batch_size = reduce(operator.mul, rhs_batch_shape, 1)
             if rhs_batch_size > 1:
                 assert lhs_batch_size == rhs_batch_size, (
-                    f"Leading dimensins of RHS ({rhs_batch_shape=}) is not broadcast-compatible "
-                    + f"with the leading dimensions of LHS ({lhs_batch_shape=})."
+                    f"Leading dimensins of RHS ({rhs_aval.shape=}) is not broadcast-compatible "
+                    + f"with the leading dimensions of LHS ({lhs_aval.shape=})."
                 )
 
-        # Infer output shape
+        # Infer output shape:
         out_shape = (*lhs_batch_shape, lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
+        if lhs_aval.ndim > 2 and rhs_aval.ndim > 2 and lhs_batch_size > 1:
+            # When both RHS and LHS are batched, the batch dimensions are collapsed into the
+            # contracting dimension.
+            out_shape = (lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
+
         # Validate bias/bias_grad shape against inferred output
         bias_dtype = jnp.bfloat16 if jax_dtype_is_fp8(out_dtype) else out_dtype
         if fuse_bias:
@@ -169,9 +177,16 @@ class CollectiveGemmPrimitive(BasePrimitive):
             assert bias_aval.size == 0, "Internal TE error."
 
         # Validate GELU input/output
+        gelu_shape = (0, )
         if fuse_gelu:
-            assert all(
-                [gelu_input_aval.shape[i] == out_shape[i] for i in len(out_shape)]
+            gelu_shape = (
+                (reduce(operator.mul, out_shape[:-1], 1), out_shape[-1])
+                if len(out_shape) > 2
+                else out_shape
+            )
+            assert (
+                gelu_input_aval.ndim == 2
+                and all([gelu_input_aval.shape[i] == gelu_shape[i] for i in len(gelu_shape)])
             ), "Invalid GELU input shape."
             assert gelu_input_aval.dtype == bias_dtype, "Invalid GELU dtype."
         else:
@@ -185,7 +200,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         out_scale_updated_aval = out_scale_aval.update(
             shape=out_scale_aval.shape, dtype=out_scale_updated_dtype
         )
-        pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_input_aval.shape, dtype=bias_dtype)
+        pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
         workspace_aval = jax.core.ShapedArray(
             shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
@@ -285,8 +300,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
             ]
             args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-            lhs_outer_dim = lhs_aval.ndim - 1 if lhs_trans else lhs_aval.ndim - 2
-            rhs_outer_dim = rhs_aval.ndim - 2 if rhs_trans else rhs_aval.ndim - 1
+            lhs_outer_dim, rhs_outer_dim = map(
+                lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
+                (lhs_inner_dim, rhs_inner_dim),
+                (lhs_aval.ndim, rhs_aval.ndim)
+            )
             m = lhs_aval.shape[lhs_outer_dim]
             k = rhs_aval.shape[rhs_inner_dim]
             n = rhs_aval.shape[rhs_outer_dim]
@@ -338,6 +356,43 @@ class CollectiveGemmPrimitive(BasePrimitive):
     ):
         assert CollectiveGemmPrimitive.inner_primitive is not None
 
+        lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
+        lhs_trans = lhs_inner_dim != lhs.ndim - 1
+        rhs_trans = rhs_inner_dim == rhs.ndim - 1
+
+        # Squeeze batch dimensions of size 1 without any modification.
+        squeeze_dims = []
+        expand_out = False
+        if lhs.ndim > 2:
+            squeeze_dims = [dim for dim in range(lhs.ndim - 2) if lhs.shape[dim] == 1]
+            if len(squeeze_dims) > 0:
+                expand_out = True
+                lhs = jax.lax.squeeze(lhs, squeeze_dims)
+                contracting_dims = (lhs.ndim - 2 if lhs_trans else lhs.ndim - 1,
+                                    contracting_dims[1])
+        if rhs.ndim > 2:
+            rhs_squeeze_dims = [dim for dim in range(rhs.ndim - 2) if rhs.shape[dim] == 1]
+            if len(squeeze_dims) > 0:
+                rhs = jax.lax.squeeze(rhs, rhs_squeeze_dims)
+                contracting_dims = (contracting_dims[0],
+                                    rhs.ndim - 1 if rhs_trans else rhs.ndim - 2)
+
+        # Collapse batch dimensions that are larger thanm size 1.
+        # FWD: (B, M, K) x (K, N) = (B*M, K) x (K, N) = (B*M, N)
+        # DGRAD: (B, M, N) x (K, N)^T = (B*M, N) x (N, K) = (B*M, K)
+        # WGRAD: (B, M, K)^T x (B, M, N) = (K, B*M) x (B*M, N) = (K, N)
+        batch_shape = [lhs.shape[dim] for dim in range(lhs.ndim - 2)]
+        batch_size = reduce(operator.mul, batch_shape, 1)
+        reshape_output = not (lhs.ndim > 2 and rhs.ndim > 2)
+        if lhs.ndim > 2:
+            lhs_2d_shape = (batch_size * lhs.shape[-2], lhs.shape[-1])
+            lhs = jax.lax.reshape(lhs, lhs_2d_shape)
+            contracting_dims = (0 if lhs_trans else 1, contracting_dims[1])
+        if rhs.ndim > 2:
+            rhs_2d_shape = (reduce(operator.mul, rhs.shape[:-1], 1), rhs.shape[-1])
+            rhs = jax.lax.reshape(rhs, rhs_2d_shape)
+            contracting_dims = (contracting_dims[0], 1 if rhs_trans else 0)
+
         (
             out,
             out_amax_updated,
@@ -362,6 +417,15 @@ class CollectiveGemmPrimitive(BasePrimitive):
             accumulate=accumulate,
             use_split_accumulator=use_split_accumulator,
         )
+
+        # Recover batched dimensions in the output
+        if reshape_output:
+            out_batched_shape = (*batch_shape, int(out.shape[-2] / batch_size), out.shape[-1])
+            out = jax.lax.reshape(out, out_batched_shape)
+
+        if expand_out:
+            out = jax.lax.expand_dims(out, squeeze_dims)
+
         return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad
 
     @staticmethod
@@ -381,16 +445,19 @@ class CollectiveGemmPrimitive(BasePrimitive):
         check_valid_batch_dims(batch_dims)
         lhs_bdims, *_, bias_bdims, gelu_input_bdims, out_amax_bdims, out_scale_bdims = batch_dims
 
-        return CollectiveGemmPrimitive.outer_primitive.bind(
-            *batched_args,
-            out_dtype=out_dtype,
-            contracting_dims=contracting_dims,
-            fuse_gelu=fuse_gelu,
-            fuse_bias=fuse_bias,
-            grad=grad,
-            accumulate=accumulate,
-            use_split_accumulator=use_split_accumulator,
-        )(lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
+        return (
+            CollectiveGemmPrimitive.outer_primitive.bind(
+                *batched_args,
+                out_dtype=out_dtype,
+                contracting_dims=contracting_dims,
+                fuse_gelu=fuse_gelu,
+                fuse_bias=fuse_bias,
+                grad=grad,
+                accumulate=accumulate,
+                use_split_accumulator=use_split_accumulator,
+            ),
+            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
+        )
 
     @staticmethod
     def infer_sharding_from_operands(
@@ -417,10 +484,12 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 + "not already partitioned correctly."
             )
 
-        lhs_trans = lhs_inner_dim != lhs.ndim - 1
-        rhs_trans = rhs_inner_dim == rhs.ndim - 1
-        lhs_outer_dim = lhs.ndim - 1 if lhs_trans else lhs.ndim - 2
-        rhs_outer_dim = rhs.ndim - 2 if rhs_trans else rhs.ndim - 1
+        lhs_outer_dim, rhs_outer_dim = map(
+            lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
+            (lhs_inner_dim, rhs_inner_dim),
+            (lhs.ndim, rhs.ndim)
+        )
+        rhs_outer_dim = rhs.ndim - 2 if rhs_inner_dim == rhs.ndim - 1 else rhs.ndim - 1
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
         rhs_outer_spec = rhs_spec[rhs_outer_dim]
@@ -430,18 +499,20 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Outer (sequence) dimension of the GEMM output is always unsharded
         out_spec = [*batch_specs, None, rhs_outer_spec]
+        batch_size = reduce(operator.mul, lhs.shape[:-2], 1)
+        if lhs.ndim > 2 and rhs.ndim > 2 and batch_size > 1:
+            out_spec = [None, rhs_outer_spec]
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
         # FP8 metas are always unsharded
         fp8_meta_sharding = NamedSharding(mesh, PartitionSpec(None))
 
-        # Pre-GELU output matches output spec if GELU fusion is turned on, otherwise unsharded
-        gelu_spec = out_spec if fuse_gelu else [None]
+        # Pre-GELU output matches output, if GELU fusion is turned on, otherwise unsharded
+        gelu_spec = [None, rhs_outer_spec] if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
         # Bias gradient spec matches outer dimension of output if bias fusion is turned on
         bias_sharding = NamedSharding(mesh, PartitionSpec(rhs_outer_spec if fuse_bias else None))
-
         return (out_sharding, fp8_meta_sharding, fp8_meta_sharding, gelu_sharding, bias_sharding)
 
     @staticmethod
@@ -462,11 +533,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
 
         lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
-
-        lhs_trans = lhs_inner_dim != lhs.ndim - 1
-        rhs_trans = rhs_inner_dim == rhs.ndim - 1
-        lhs_outer_dim = lhs.ndim - 1 if lhs_trans else lhs.ndim - 2
-        rhs_outer_dim = rhs.ndim - 2 if rhs_trans else rhs.ndim - 1
+        lhs_outer_dim, rhs_outer_dim = map(
+            lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
+            (lhs_inner_dim, rhs_inner_dim),
+            (lhs.ndim, rhs.ndim)
+        )
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
         rhs_outer_spec = rhs_spec[rhs_outer_dim]
@@ -488,10 +559,13 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Outer (sequence) dimension of the GEMM output is always unsharded
         out_spec = [*batch_specs, None, rhs_outer_spec]
+        batch_size = reduce(operator.mul, lhs.shape[:-2], 1)
+        if lhs.ndim > 2 and rhs.ndim > 2 and batch_size > 1:
+            out_spec = [None, rhs_outer_spec]
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
         # Pre-GELU output matches output spec if GELU fusion is turned on, otherwise unsharded
-        gelu_spec = out_spec if fuse_gelu else [None]
+        gelu_spec = [None, rhs_outer_spec] if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
         arg_shardings = (
@@ -547,10 +621,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 # GEMM output needs to be all-reduced when the contracting dimension is sharded.
                 # If the layer is sequence-parallel, we also need to scatter the output, which we
                 # can combine into a reduce-scatter here.
-                out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().cp_resource, mesh)
+                out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().tp_resource, mesh)
                 if fuse_gelu:
                     pre_gelu_out = lax_paral_op(
-                        pre_gelu_out, jax.lax.psum, global_mesh_resource().cp_resource, mesh
+                        pre_gelu_out, jax.lax.psum, global_mesh_resource().tp_resource, mesh
                     )
 
             return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad
@@ -629,8 +703,11 @@ def gemm_impl(
 ) -> Tuple[ArrayLike, ...]:
     """Non-FP8 mat-mul with `nvte_cublas_gemm()` custom op."""
     lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
-    lhs_outer_dim = lhs.ndim - 1 if lhs_inner_dim == lhs.ndim - 2 else lhs.ndim - 2
-    rhs_outer_dim = rhs.ndim - 2 if rhs_inner_dim == rhs.ndim - 1 else rhs.ndim - 1
+    lhs_outer_dim, rhs_outer_dim = map(
+        lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
+        (lhs_inner_dim, rhs_inner_dim),
+        (lhs.ndim, rhs.ndim)
+    )
     out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
 
     if not fuse_bias:
