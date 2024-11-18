@@ -53,9 +53,12 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
     if config.layer_type is te.Linear:
         input_shape[2] = hidden_size // tp_size
         args.append(hidden_size)
-        kwargs["parallel_mode"] = "row"
-        kwargs["ub_overlap_rs"] = not reference
-        kwargs["ub_name"] = "proj"
+        kwargs["parallel_mode"] = config.parallel_mode
+        kwargs["ub_overlap_rs_fprop"] = not reference and config.parallel_mode == "row"
+        kwargs["ub_overlap_ag_dgrad"] = not reference and config.parallel_mode == "row"
+        kwargs["ub_overlap_ag_fprop"] = not reference and config.parallel_mode == "column"
+        kwargs["ub_overlap_rs_dgrad"] = not reference and config.parallel_mode == "column"
+        kwargs["ub_name"] = "proj" if config.parallel_mode == "row" else "qkv"
     else:
         input_shape[0] = config.seq_length // tp_size
         kwargs["ub_bulk_wgrad"] = not reference
@@ -124,6 +127,13 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
+    )
+    parser.add_argument(
+        "--linear-parallel-mode",
+        type=str.lower,
+        default="row",
+        choices=["row", "column"],
+        help="Parallel mode for te.Linear."
     )
     parser.add_argument(
         "--debug",
