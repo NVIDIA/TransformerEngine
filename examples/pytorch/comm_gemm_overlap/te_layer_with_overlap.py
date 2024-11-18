@@ -176,8 +176,8 @@ def _get_ub_cfg(layer_type):
     if layer_type in [te.Linear, te.MultiheadAttention, te.TransformerLayer]:
         ub_cfg.update(
             {
-                "proj_fprop" : dict(),
-                "proj_dgrad" : dict(),
+                "proj_fprop": dict(),
+                "proj_dgrad": dict(),
             }
         )
     if layer_type in [te.LayerNormMLP, te.TransformerLayer]:
