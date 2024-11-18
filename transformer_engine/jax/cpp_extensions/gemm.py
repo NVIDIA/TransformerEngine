@@ -139,7 +139,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_outer_dim, rhs_outer_dim = map(
             lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
             (lhs_inner_dim, rhs_inner_dim),
-            (lhs_aval.ndim, rhs_aval.ndim)
+            (lhs_aval.ndim, rhs_aval.ndim),
         )
 
         lhs_bdims = [
@@ -177,16 +177,15 @@ class CollectiveGemmPrimitive(BasePrimitive):
             assert bias_aval.size == 0, "Internal TE error."
 
         # Validate GELU input/output
-        gelu_shape = (0, )
+        gelu_shape = (0,)
         if fuse_gelu:
             gelu_shape = (
                 (reduce(operator.mul, out_shape[:-1], 1), out_shape[-1])
                 if len(out_shape) > 2
                 else out_shape
             )
-            assert (
-                gelu_input_aval.ndim == 2
-                and all([gelu_input_aval.shape[i] == gelu_shape[i] for i in len(gelu_shape)])
+            assert gelu_input_aval.ndim == 2 and all(
+                [gelu_input_aval.shape[i] == gelu_shape[i] for i in len(gelu_shape)]
             ), "Invalid GELU input shape."
             assert gelu_input_aval.dtype == bias_dtype, "Invalid GELU dtype."
         else:
@@ -303,7 +302,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
             lhs_outer_dim, rhs_outer_dim = map(
                 lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
                 (lhs_inner_dim, rhs_inner_dim),
-                (lhs_aval.ndim, rhs_aval.ndim)
+                (lhs_aval.ndim, rhs_aval.ndim),
             )
             m = lhs_aval.shape[lhs_outer_dim]
             k = rhs_aval.shape[rhs_inner_dim]
@@ -368,14 +367,18 @@ class CollectiveGemmPrimitive(BasePrimitive):
             if len(squeeze_dims) > 0:
                 expand_out = True
                 lhs = jax.lax.squeeze(lhs, squeeze_dims)
-                contracting_dims = (lhs.ndim - 2 if lhs_trans else lhs.ndim - 1,
-                                    contracting_dims[1])
+                contracting_dims = (
+                    lhs.ndim - 2 if lhs_trans else lhs.ndim - 1,
+                    contracting_dims[1],
+                )
         if rhs.ndim > 2:
             rhs_squeeze_dims = [dim for dim in range(rhs.ndim - 2) if rhs.shape[dim] == 1]
             if len(squeeze_dims) > 0:
                 rhs = jax.lax.squeeze(rhs, rhs_squeeze_dims)
-                contracting_dims = (contracting_dims[0],
-                                    rhs.ndim - 1 if rhs_trans else rhs.ndim - 2)
+                contracting_dims = (
+                    contracting_dims[0],
+                    rhs.ndim - 1 if rhs_trans else rhs.ndim - 2,
+                )
 
         # Collapse batch dimensions that are larger thanm size 1.
         # FWD: (B, M, K) x (K, N) = (B*M, K) x (K, N) = (B*M, N)
@@ -456,7 +459,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 accumulate=accumulate,
                 use_split_accumulator=use_split_accumulator,
             ),
-            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims)
+            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims),
         )
 
     @staticmethod
@@ -487,7 +490,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_outer_dim, rhs_outer_dim = map(
             lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
             (lhs_inner_dim, rhs_inner_dim),
-            (lhs.ndim, rhs.ndim)
+            (lhs.ndim, rhs.ndim),
         )
         rhs_outer_dim = rhs.ndim - 2 if rhs_inner_dim == rhs.ndim - 1 else rhs.ndim - 1
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
@@ -536,7 +539,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_outer_dim, rhs_outer_dim = map(
             lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
             (lhs_inner_dim, rhs_inner_dim),
-            (lhs.ndim, rhs.ndim)
+            (lhs.ndim, rhs.ndim),
         )
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
@@ -706,7 +709,7 @@ def gemm_impl(
     lhs_outer_dim, rhs_outer_dim = map(
         lambda inner_dim, ndim: ndim - 2 if inner_dim == ndim - 1 else ndim - 1,
         (lhs_inner_dim, rhs_inner_dim),
-        (lhs.ndim, rhs.ndim)
+        (lhs.ndim, rhs.ndim),
     )
     out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
 
