@@ -21,8 +21,10 @@ SEQ_LENGTH: int = 512
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 12
 HEAD_DIM: int = 64
+
+# NOTE: te.Linear is intentionally omitted here and manually added later for testing both
+#       row and column parallel layouts.
 TE_LAYERS = [
-    te.Linear,
     te.LayerNormLinear,
     te.LayerNormMLP,
     te.MultiheadAttention,
@@ -245,9 +247,15 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 
 
 @pytest.mark.parametrize(
-    "layer_type",
-    [layer.__name__ for layer in TE_LAYERS],
-    ids=[(" " + layer.__name__ + " ") for layer in TE_LAYERS],
+    "layer_type,linear_parallel_mode",
+    (
+        list(zip([layer.__name__ for layer in TE_LAYERS], [None for _ in range(len(TE_LAYERS))]))
+        + [(te.Linear, "row"), (te.Linear, "column")]
+    ),
+    ids=(
+        [(" " + layer.__name__ + " ") for layer in TE_LAYERS]
+        + [" te.Linear (row-parallel) ", " te.Linear (column-parallel) "]
+    ),
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
@@ -262,7 +270,7 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         " FP8  GEMM - FP8  PARAMS ",
     ],
 )
-def test_layers_with_overlap(layer_type, fp8, fp8_init):
+def test_layers_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
