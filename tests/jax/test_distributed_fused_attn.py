@@ -31,7 +31,6 @@ from transformer_engine.jax.attention import (
     AttnMaskType,
     QKVLayout,
     QKVFormat,
-    get_qkv_format,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     CPStrategy,
@@ -420,7 +419,7 @@ class TestDistributedContextParallelSelfAttn:
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = get_qkv_format(qkv_layout)
+        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
 

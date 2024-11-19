@@ -28,7 +28,6 @@ from transformer_engine.jax.attention import (
     QKVFormat,
     fused_attn,
     fused_attn_thd,
-    get_qkv_format,
     make_swa_mask,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
@@ -221,7 +220,6 @@ def customcall_fused_dpa(
     TE customcall dot product attention implementation
     """
     qkv_layout = kwargs["qkv_layout"]
-    is_thd = get_qkv_format(qkv_layout) == QKVFormat.THD
     match qkv_layout:
         case QKVLayout.BS3HD | QKVLayout.T3HD:
             query, key, value = map(partial(jnp.expand_dims, axis=-3), [query, key, value])
@@ -235,7 +233,7 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    if not is_thd:
+    if not qkv_layout.is_thd():
         kwargs.pop("max_segments_per_seq")
         return fused_attn(qkv_args, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
     return fused_attn_thd(
@@ -293,14 +291,10 @@ class FusedAttnRunner:
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
-        if get_qkv_format(self.qkv_layout) == QKVFormat.THD and not self.attn_mask_type in [
-            AttnMaskType.PADDING_MASK,
-            AttnMaskType.PADDING_CAUSAL_MASK,
-        ]:
+        if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
-        qkv_format = get_qkv_format(self.qkv_layout)
-        if self.qkv_layout == QKVLayout.BS3HD or qkv_format == QKVFormat.THD:
+        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout.is_thd():
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
 
@@ -437,7 +431,7 @@ class FusedAttnRunner:
                 segment_pad[i, current_pos:sequence_length] = 1
             return segment_ids, segment_pad
 
-        if get_qkv_format(self.qkv_layout) == QKVFormat.THD:
+        if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
             self.token_q, self.segment_pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
@@ -471,7 +465,7 @@ class FusedAttnRunner:
             self.window_size,
         )
 
-        if get_qkv_format(self.qkv_layout) == QKVFormat.THD:
+        if self.qkv_layout.is_thd():
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(
                 self.token_q, self.segment_pad_q
             )
