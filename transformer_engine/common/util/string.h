@@ -18,22 +18,20 @@ inline const std::string &to_string_like(const std::string &val) noexcept { retu
 constexpr const char *to_string_like(const char *val) noexcept { return val; }
 
 /* \brief Convert arithmetic type to string */
-template <typename T,
-          typename = typename std::enable_if<std::is_arithmetic<T>::value>::type>
+template <typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value>::type>
 inline std::string to_string_like(const T &val) {
   return std::to_string(val);
 }
 
 /* \brief Convert container to string */
-template <typename T,
-          typename = typename std::enable_if<!std::is_arithmetic<T>::value>::type,
+template <typename T, typename = typename std::enable_if<!std::is_arithmetic<T>::value>::type,
           typename = decltype(std::declval<T>().begin())>
 inline std::string to_string_like(const T &container) {
   std::string str;
   str.reserve(1024);  // Assume strings are <1 KB
   str += "(";
   bool first = true;
-  for (const auto &val: container) {
+  for (const auto &val : container) {
     if (!first) {
       str += ",";
     }
