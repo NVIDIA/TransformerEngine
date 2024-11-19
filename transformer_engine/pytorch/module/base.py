@@ -762,9 +762,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
 
             if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
-                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                    self.fp8_meta, fp8_weights=self._get_fp8_params()
-                )
+                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
             # Activation recomputation is used and this is the first forward phase.
             if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
