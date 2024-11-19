@@ -161,7 +161,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Infer output shape:
         out_shape = (*lhs_batch_shape, lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
-        if lhs_aval.ndim > 2 and rhs_aval.ndim > 2 and lhs_batch_size > 1:
+        if lhs_aval.ndim > 2 and rhs_aval.ndim > 2:
             # When both RHS and LHS are batched, the batch dimensions are collapsed into the
             # contracting dimension.
             out_shape = (lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
@@ -359,27 +359,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_trans = lhs_inner_dim != lhs.ndim - 1
         rhs_trans = rhs_inner_dim == rhs.ndim - 1
 
-        # Squeeze batch dimensions of size 1 without any modification.
-        squeeze_dims = []
-        expand_out = False
-        if lhs.ndim > 2:
-            squeeze_dims = [dim for dim in range(lhs.ndim - 2) if lhs.shape[dim] == 1]
-            if len(squeeze_dims) > 0:
-                expand_out = True
-                lhs = jax.lax.squeeze(lhs, squeeze_dims)
-                contracting_dims = (
-                    lhs.ndim - 2 if lhs_trans else lhs.ndim - 1,
-                    contracting_dims[1],
-                )
-        if rhs.ndim > 2:
-            rhs_squeeze_dims = [dim for dim in range(rhs.ndim - 2) if rhs.shape[dim] == 1]
-            if len(squeeze_dims) > 0:
-                rhs = jax.lax.squeeze(rhs, rhs_squeeze_dims)
-                contracting_dims = (
-                    contracting_dims[0],
-                    rhs.ndim - 1 if rhs_trans else rhs.ndim - 2,
-                )
-
         # Collapse batch dimensions that are larger thanm size 1.
         # FWD: (B, M, K) x (K, N) = (B*M, K) x (K, N) = (B*M, N)
         # DGRAD: (B, M, N) x (K, N)^T = (B*M, N) x (N, K) = (B*M, K)
@@ -425,9 +404,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         if reshape_output:
             out_batched_shape = (*batch_shape, int(out.shape[-2] / batch_size), out.shape[-1])
             out = jax.lax.reshape(out, out_batched_shape)
-
-        if expand_out:
-            out = jax.lax.expand_dims(out, squeeze_dims)
 
         return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad
 
@@ -497,13 +473,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
         rhs_outer_spec = rhs_spec[rhs_outer_dim]
 
-        if rhs_spec[rhs_inner_dim] is not None and rhs_outer_spec is not None:
-            raise RuntimeError("Both inner and outer dimensions of RHS cannot be sharded.")
-
         # Outer (sequence) dimension of the GEMM output is always unsharded
         out_spec = [*batch_specs, None, rhs_outer_spec]
-        batch_size = reduce(operator.mul, lhs.shape[:-2], 1)
-        if lhs.ndim > 2 and rhs.ndim > 2 and batch_size > 1:
+        if lhs.ndim > 2 and rhs.ndim > 2:
             out_spec = [None, rhs_outer_spec]
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
@@ -543,7 +515,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]]
         batch_specs = [lhs_spec[bdim] for bdim in lhs_bdims]
-        rhs_outer_spec = rhs_spec[rhs_outer_dim]
 
         # Force all-gather the outer (sequence) dimension of the LHS operand
         lhs_spec_new = [spec for spec in lhs_spec]
@@ -551,8 +522,29 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_spec_new[lhs_inner_dim] = rhs_spec[rhs_inner_dim]
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_spec_new))
 
+        # If both dims of RHS is sharded (i.e. FSDP), determine if we do AG or AR based on LHS
+        # sharding.
+        rhs_spec_new = [spec for spec in rhs_spec]
+        if rhs_spec[rhs_inner_dim] is not None and rhs_spec[rhs_outer_dim] is not None:
+            if lhs_spec[lhs_inner_dim] is not None and lhs_spec[lhs_outer_dim] is not None:
+                # All dimensions of both LHS and RHS are sharded and the collective operation is
+                # ambiguous, we cannot infer sharding.
+                raise RuntimeError(
+                    "Collective GEMM custom op cannot infer partitioning when both outer and "
+                    + "contracting dimensions of both LHS and RHS operands are sharded."
+                )
+            elif lhs_spec[lhs_inner_dim] is not None:
+                # All-reduce after GEMM, so unshard the outer dimension of RHS
+                rhs_spec_new[rhs_outer_dim] = None
+            else:
+                # We either do all-gather before GEMM, or LHS is already unsharded, so unshard
+                # the inner dimension of RHS to match
+                rhs_spec_new[rhs_inner_dim] = None
+
+        rhs_outer_spec = rhs_spec_new[rhs_outer_dim]
+
         # RHS operand is unchanged, we already enforce that only one dimension can be sharded
-        rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_spec))
+        rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_spec_new))
 
         # Bias is sharded to match outer dimension spec of the RHS operand (also the output)
         bias_sharding = NamedSharding(mesh, PartitionSpec(rhs_outer_spec if fuse_bias else None))
@@ -562,8 +554,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Outer (sequence) dimension of the GEMM output is always unsharded
         out_spec = [*batch_specs, None, rhs_outer_spec]
-        batch_size = reduce(operator.mul, lhs.shape[:-2], 1)
-        if lhs.ndim > 2 and rhs.ndim > 2 and batch_size > 1:
+        if lhs.ndim > 2 and rhs.ndim > 2:
             out_spec = [None, rhs_outer_spec]
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
@@ -620,10 +611,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
             if jax_dtype_is_fp8(lhs.dtype):
                 out_amax_updated = all_reduce_max_along_all_axes_except_PP(out_amax_updated, mesh)
 
-            if rhs_spec[rhs_inner_dim] is not None:
-                # GEMM output needs to be all-reduced when the contracting dimension is sharded.
-                # If the layer is sequence-parallel, we also need to scatter the output, which we
-                # can combine into a reduce-scatter here.
+            # GEMM output needs to be all-reduced when the contracting dimension is sharded.
+            if rhs_spec_new[rhs_inner_dim] is not None:
                 out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().tp_resource, mesh)
                 if fuse_gelu:
                     pre_gelu_out = lax_paral_op(

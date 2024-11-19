@@ -8,13 +8,11 @@ from typing import Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
-from jax.ad_checkpoint import checkpoint_name
 
 from .fp8 import FP8Helper, FP8MetaPackage
 from .cpp_extensions import (
     gemm_impl,
     fp8_gemm_impl,
-    cast_fp8,
     cast_transpose,
     dact_lu,
     dbias_cast_transpose,
@@ -68,6 +66,10 @@ def _gemm_fwd_rule(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> Tuple[ArrayLike, ...]:
+    assert kernel.ndim == 2, (
+        "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
+    )
+
     fuse_bias = bias is not None
 
     out, pre_gelu_out = gemm_impl(
@@ -142,7 +144,7 @@ _gemm.defvjp(_gemm_fwd_rule, _gemm_bwd_rule)
 
 def fp8_gemm(
     x: ArrayLike,
-    kernel: ArrayLike,
+    kernel_t: ArrayLike,
     fp8_meta: FP8MetaPackage,
     bias: Optional[ArrayLike] = None,
     out_dtype: jnp.dtype = jnp.bfloat16,
@@ -150,9 +152,10 @@ def fp8_gemm(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
 ) -> ArrayLike:
+    """Non-FP8 `nvte_cublas_gemm()` with optional GELU and bias-add fusions."""
     return _fp8_gemm(
         x,
-        kernel,
+        kernel_t,
         bias,
         fp8_meta.amax_list,
         fp8_meta.scale_list,
@@ -175,7 +178,6 @@ def _fp8_gemm(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> ArrayLike:
-    """Non-FP8 `nvte_cublas_gemm()` with optional GELU and bias-add fusions."""
     out, _ = _fp8_gemm_fwd_rule(
         x,
         kernel_t,
@@ -201,6 +203,10 @@ def _fp8_gemm_fwd_rule(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> Tuple[ArrayLike, ...]:
+    assert kernel_t.ndim == 2, (
+        "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
+    )
+
     fuse_bias = bias is not None
 
     maybe_fm32_to_fp32, maybe_fp32_to_fm32 = FP8Helper.generate_fp8_meta_dtype_converter_pair(
@@ -432,7 +438,7 @@ def type_safe_gemm(
 
     if fp8_meta is not None:
         x_inner_dim, kernel_inner_dim = map(sanitize_dims, contracting_dims, (x.ndim, kernel.ndim))
-        assert x_inner_dim == x.ndim - 1 and kernel_inner_dim == kernel.ndim - 2, (
+        assert x_inner_dim == x.ndim - 1 and kernel_inner_dim == kernel.ndim - 1, (
             "FP8 GEMM requires non-transposed X (LHS) and transposed kernel (RHS), "
             + "i.e. contracting_dims=(-1, -1)."
         )
