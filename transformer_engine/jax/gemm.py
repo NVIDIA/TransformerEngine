@@ -66,9 +66,9 @@ def _gemm_fwd_rule(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> Tuple[ArrayLike, ...]:
-    assert kernel.ndim == 2, (
-        "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
-    )
+    assert (
+        kernel.ndim == 2
+    ), "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
 
     fuse_bias = bias is not None
 
@@ -203,9 +203,9 @@ def _fp8_gemm_fwd_rule(
     accumulate: bool,
     use_split_accumulator: bool,
 ) -> Tuple[ArrayLike, ...]:
-    assert kernel_t.ndim == 2, (
-        "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
-    )
+    assert (
+        kernel_t.ndim == 2
+    ), "TE/JAX Collective GEMM custom op does not support batched RHS operand in forward mode."
 
     fuse_bias = bias is not None
 
