@@ -458,8 +458,6 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
 
-__forceinline__ __device__ int binary_search(int target, int *array, int len);
-
 /***************************************************************************************************
  * multi_tensor_* kernels
  **************************************************************************************************/
