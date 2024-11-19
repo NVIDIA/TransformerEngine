@@ -71,6 +71,18 @@ class AttnMaskType(Enum):
         ]
 
 
+class QKVFormat(Enum):
+    """
+    SBHD: q,k,v memory layout with [s, b, ..., h, d]
+    BSHD: q,k,v memory layout with [b, s, ..., h, d]
+    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
+    """
+
+    SBHD = NVTE_QKV_Format.NVTE_SBHD
+    BSHD = NVTE_QKV_Format.NVTE_BSHD
+    THD = NVTE_QKV_Format.NVTE_THD
+
+
 class QKVLayout(Enum):
     """
     BSHD Format:
@@ -90,17 +102,20 @@ class QKVLayout(Enum):
     THD_T2HD = NVTE_QKV_Layout.NVTE_THD_T2HD
     THD_THD_THD = NVTE_QKV_Layout.NVTE_THD_THD_THD
 
+    def get_qkv_format(self):
+        return QKVFormat(nvte_get_qkv_format(self.value))
 
-class QKVFormat(Enum):
-    """
-    SBHD: q,k,v memory layout with [s, b, ..., h, d]
-    BSHD: q,k,v memory layout with [b, s, ..., h, d]
-    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
-    """
+    def is_qkvpacked(self):
+        return self in [QKVLayout.BS3HD, QKVLayout.T3HD]
 
-    SBHD = NVTE_QKV_Format.NVTE_SBHD
-    BSHD = NVTE_QKV_Format.NVTE_BSHD
-    THD = NVTE_QKV_Format.NVTE_THD
+    def is_kvpacked(self):
+        return self in [QKVLayout.BSHD_BS2HD, QKVLayout.THD_T2HD]
+
+    def is_separate(self):
+        return self in [QKVLayout.BSHD_BSHD_BSHD, QKVLayout.THD_THD_THD]
+
+    def is_thd(self):
+        return self in [QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
 
 
 class CPStrategy(Enum):
@@ -114,13 +129,6 @@ class CPStrategy(Enum):
     DEFAULT = 0
     ALL_GATHER = 1
     RING = 2
-
-
-def get_qkv_format(qkv_layout):
-    """
-    Get qkv_format from qkv_layout
-    """
-    return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
 
 
 def make_swa_mask(
@@ -330,7 +338,7 @@ def fused_attn(
         (jnp.ndarray): The output tensor from the fused attention.
     """
     assert (
-        get_qkv_format(qkv_layout) != QKVFormat.THD
+        not qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn_thd for THD format."
 
     # Check inputs qkv
@@ -464,7 +472,7 @@ def fused_attn_thd(
                                  QKVLayout.T3HD, 0.125, 0, True, 3)
     """
     assert (
-        get_qkv_format(qkv_layout) == QKVFormat.THD
+        qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
 
     # Check inputs qkv
