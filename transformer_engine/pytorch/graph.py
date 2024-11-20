@@ -264,6 +264,8 @@ def _make_graphed_callables(
                     allow_unused=allow_unused_input,
                 )
                 del outputs, grad_inputs
+            # The following code is added specifically for MCore's special requirements,
+            # aimed at preventing warmup from altering the control flow.
             for module in func.modules():
                 if hasattr(module, "is_first_microbatch"):
                     module.is_first_microbatch = True
@@ -527,12 +529,14 @@ def _make_graphed_callables(
                                     # Only Set the FP8 meta for the modules included by forward
                                     continue
                                 fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+                                from transformer_engine.pytorch.attention import DotProductAttention
+
                                 if (
-                                    not fp8_recipe.fp8_mha
+                                    isinstance(m, DotProductAttention)
+                                    and not fp8_recipe.fp8_mha
                                     and not fp8_recipe.fp8_dpa
-                                    and hasattr(m, "attention_dropout")
-                                    and m.deterministic
                                 ):
+                                    # Don't need to update FP8 meta for non-FP8 DPA
                                     continue
                                 m.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
                                 m.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
