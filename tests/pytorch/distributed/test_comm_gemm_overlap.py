@@ -88,7 +88,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, fp8, fp8_init):
+def _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -99,6 +99,8 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
         f"--head-dim={HEAD_DIM}",
         f"--layer-type={layer_type}",
     ]
+    if layer_type == te.Linear.__name__:
+        test_cmd.append(f"--linear-parallel-mode={linear_parallel_mode}")
 
     if fp8:
         if not fp8_available:
@@ -249,12 +251,12 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode",
     (
-        list(zip([layer.__name__ for layer in TE_LAYERS], [None for _ in range(len(TE_LAYERS))]))
-        + [(te.Linear, "row"), (te.Linear, "column")]
+        [(te.Linear.__name__, "row"), (te.Linear.__name__, "column")]
+        + list(zip([layer.__name__ for layer in TE_LAYERS], [None for _ in range(len(TE_LAYERS))]))
     ),
     ids=(
-        [(" " + layer.__name__ + " ") for layer in TE_LAYERS]
-        + [" te.Linear (row-parallel) ", " te.Linear (column-parallel) "]
+        [f" {te.Linear.__name__} (row-parallel) ", f" {te.Linear.__name__} (column-parallel) "]
+        + [(" " + layer.__name__ + " ") for layer in TE_LAYERS]
     ),
 )
 @pytest.mark.parametrize(
@@ -274,4 +276,4 @@ def test_layers_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, fp8, fp8_init)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init)
