@@ -138,13 +138,13 @@ def _parse_args(argv=None, namespace=None):
         type=str.lower,
         default="row",
         choices=["row", "column"],
-        help="Parallel mode for te.Linear."
+        help="Parallel mode for te.Linear.",
     )
     parser.add_argument(
         "--overlap-rs-dgrad",
         action="store_true",
         default=False,
-        help="Overlap reduce-scatter with DGRAD in the backward pass instead of bulk overlaps."
+        help="Overlap reduce-scatter with DGRAD in the backward pass instead of bulk overlaps.",
     )
     parser.add_argument(
         "--debug",
@@ -254,8 +254,8 @@ def _train(opts):
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
         ub_cfgs = {
-            "proj_dgrad" : {"method" : "ring_exchange"},
-            "qkv_dgrad" : {"method" : "ring_exchange"},
+            "proj_dgrad": {"method": "ring_exchange"},
+            "qkv_dgrad": {"method": "ring_exchange"},
         }
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
