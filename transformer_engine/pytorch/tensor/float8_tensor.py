@@ -74,30 +74,6 @@ class _FromFloat8Func(torch.autograd.Function):
         return grad, None
 
 
-def post_optimizer_step_fwd_amax_reduction(param: Float8Tensor) -> None:
-    """Amax scale and update when there is at least 1 trainable FP8 parameter."""
-    param_id = id(param._data)
-
-    if param_id not in FP8GlobalStateManager.fp8_param_to_autocast:
-        return
-
-    autocast_key = FP8GlobalStateManager.fp8_param_to_autocast[param_id]
-
-    if autocast_key not in FP8GlobalStateManager.autocast_to_fp8_params:
-        return
-
-    if autocast_key in updated_fp8_params:
-        updated_fp8_params[autocast_key].add(param_id)
-    else:
-        updated_fp8_params[autocast_key] = {param_id}
-
-    current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
-    # All FP8 trainable parameters have been updated.
-    if updated_fp8_params[autocast_key] == current_fp8_params_set:
-        FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True, fp8_weights=True)
-        del updated_fp8_params[autocast_key]
-
-
 class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
 
@@ -675,9 +651,6 @@ class Float8Tensor(QuantizedTensor):
                 noop_flag=noop_flag,
             )
             dst._transpose_invalid = False
-
-        # Callback hook to perform amax reduction after optimizer step
-        post_optimizer_step_fwd_amax_reduction(self)
 
         return self
 

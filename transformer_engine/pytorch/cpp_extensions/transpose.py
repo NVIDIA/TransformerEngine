@@ -16,6 +16,7 @@ __all__ = [
     "fp8_cast_transpose_fused",
     "fp8_cast_transpose_bgrad_fused",
     "fp8_cast_transpose_bgrad_dgelu_fused",
+    "fp8_dswiglu_cast_transpose_fused",
     "fp8_multi_cast_transpose_fused",
     "fp8_transpose_bgrad_fused",
 ]
@@ -160,6 +161,44 @@ def fp8_cast_transpose_bgrad_dgelu_fused(
     return tex.fused_cast_transpose_bgrad_dgelu(
         grad_output,
         gelu_input,
+        fp8_scales["scale"],
+        fp8_scales["amax"],
+        fp8_scales["scale_inv"],
+        otype,
+        **fp8_scales_offsets,
+    )
+
+
+def fp8_dswiglu_cast_transpose_fused(
+    grad_output: torch.Tensor,
+    inp: torch.Tensor,
+    *,
+    grad_input: torch.Tensor,
+    grad_input_transpose: torch.Tensor,
+    otype: tex.DType,
+    fp8_meta: Optional[tex.FP8TensorMeta] = None,
+    fp8_meta_index: Union[tex.FP8FwdTensors, tex.FP8BwdTensors, None] = None,
+    scale: Optional[torch.Tensor] = None,
+    amax: Optional[torch.Tensor] = None,
+    scale_inv: Optional[torch.Tensor] = None,
+) -> None:
+    """Fused SwiGLU backward + FP8 cast + FP8 transpose"""
+
+    # Get FP8 scaling factors
+    fp8_scales, fp8_scales_offsets = canonicalize_fp8_scales(
+        scale=scale,
+        amax=amax,
+        scale_inv=scale_inv,
+        fp8_meta=fp8_meta,
+        fp8_meta_index=fp8_meta_index,
+    )
+
+    # Launch kernel
+    return tex.fused_dswiglu_cast_transpose(
+        grad_output,
+        inp,
+        grad_input,
+        grad_input_transpose,
         fp8_scales["scale"],
         fp8_scales["amax"],
         fp8_scales["scale_inv"],
