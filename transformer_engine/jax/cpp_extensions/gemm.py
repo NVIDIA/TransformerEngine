@@ -198,18 +198,18 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Infer output shape
         if batched_output:
-            assert lhs_aval.ndim > 2 and rhs_aval.ndim == 2, (
-                "Batched output requires batched LHS and non-batched RHS operands."
-            )
+            assert (
+                lhs_aval.ndim > 2 and rhs_aval.ndim == 2
+            ), "Batched output requires batched LHS and non-batched RHS operands."
             out_shape = (
                 *lhs_batch_shape,
                 lhs_aval.shape[lhs_outer_dim],
-                rhs_aval.shape[rhs_outer_dim]
+                rhs_aval.shape[rhs_outer_dim],
             )
         else:
-            assert lhs_aval.ndim == rhs_aval.ndim, (
-                "Non-batched output requires LHS and RHS operands with same number of dimensions."
-            )
+            assert (
+                lhs_aval.ndim == rhs_aval.ndim
+            ), "Non-batched output requires LHS and RHS operands with same number of dimensions."
             if lhs_aval.ndim > 2:
                 rhs_bdims = [
                     dim for dim in range(rhs_aval.ndim) if dim not in [rhs_outer_dim, rhs_inner_dim]
