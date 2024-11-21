@@ -47,49 +47,6 @@ def mirror_dim(dim, ndims):
     return ndims - 2 if dim == ndims - 1 else ndims - 1
 
 
-def remove_fsdp_specs(pspecs):
-    fsdp_resource = global_mesh_resource().fsdp_resource
-    if fsdp_resource is None:
-        return list(pspecs).copy()
-
-    new_pspecs = []
-    for spec in pspecs:
-        if spec is None:
-            new_pspecs.append(None)
-
-        elif isinstance(spec, Iterable) and not isinstance(spec, str):
-            new_spec = []
-            for s in spec:
-                if s == fsdp_resource:
-                    new_spec.append(None)
-                else:
-                    new_spec.append(s)
-
-            if len(new_spec) > 1:
-                new_pspecs.append(new_spec)
-            elif len(new_spec) == 1:
-                new_pspecs.append(new_spec[0])
-            else:
-                new_pspecs.append(None)
-
-        elif isinstance(spec, str):
-            if spec == fsdp_resource:
-                new_pspecs.append(None)
-            else:
-                new_pspecs.append(spec)
-
-        else:
-            new_pspecs.append(spec)
-
-    assert len(new_pspecs) == len(pspecs), (
-        "Length of partition specs changed when removing FSDP sharding!\n"
-        + f"Original: {pspecs}\n"
-        + f"Filtered: {new_pspecs}\n"
-    )
-
-    return new_pspecs
-
-
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if tex.get_device_compute_capability() >= 90:
@@ -563,8 +520,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
         # - FSDP axes are all-gathered
         # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
         # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
-        lhs_spec_new = remove_fsdp_specs(lhs_spec)
-        rhs_spec_new = remove_fsdp_specs(rhs_spec)
+        lhs_spec_new = [spec for spec in lhs_spec]
+        rhs_spec_new = [spec for spec in rhs_spec]
         if lhs_spec_new[lhs_inner_dim] != rhs_spec_new[rhs_inner_dim] and not grad:
             warnings.warn(
                 "Forcing the inner dimension of LHS to match the sharding of inner "
@@ -594,6 +551,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Bias gradient spec matches outer dimension of output if bias fusion is turned on
         bias_sharding = NamedSharding(mesh, PartitionSpec(rhs_outer_spec if fuse_bias else None))
+
         return (out_sharding, fp8_meta_sharding, fp8_meta_sharding, gelu_sharding, bias_sharding)
 
     @staticmethod
@@ -625,8 +583,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
         # - FSDP axes are all-gathered
         # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
         # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
-        lhs_spec_new = remove_fsdp_specs(lhs_spec)
-        rhs_spec_new = remove_fsdp_specs(rhs_spec)
+        lhs_spec_new = [spec for spec in lhs_spec]
+        rhs_spec_new = [spec for spec in rhs_spec]
         rhs_outer_spec = rhs_spec_new[rhs_outer_dim]
         if rhs_outer_spec is not None:
             lhs_spec_new[lhs_outer_dim] = None

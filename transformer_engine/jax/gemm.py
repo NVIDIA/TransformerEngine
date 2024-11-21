@@ -8,6 +8,7 @@ from typing import Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
+from jax.sharding import NamedSharding, PartitionSpec
 
 from .fp8 import FP8Helper, FP8MetaPackage
 from .cpp_extensions import (
