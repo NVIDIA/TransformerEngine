@@ -18,7 +18,7 @@ from .cpp_extensions import (
     dbias_cast_transpose,
     dact_lu_dbias_cast_transpose,
 )
-from .cpp_extensions.gemm import sanitize_dims
+from .cpp_extensions.gemm import sanitize_dims, mirror_dim
 
 
 __all__ = [
@@ -72,10 +72,13 @@ def _gemm_fwd_rule(
 
     fuse_bias = bias is not None
 
+    # AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) --------> ([B], M, N/P)
+    # GEMM+AR:                       ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
     out, pre_gelu_out = gemm_impl(
         x,
         kernel,
         bias=bias,
+        batched_output=(x.ndim > 2),
         contracting_dims=contracting_dims,
         fuse_gelu=fuse_gelu,
         fuse_bias=fuse_bias,
@@ -103,14 +106,22 @@ def _gemm_bwd_rule(
 ):
     x, kernel, pre_gelu_out, fuse_bias = ctx
     x_inner_dim, kernel_inner_dim = map(sanitize_dims, contracting_dims, (x.ndim, kernel.ndim))
-    x_outer_dim = x.ndim - 1 if x_inner_dim != x.ndim - 1 else x.ndim - 2
-    kernel_outer_dim = kernel.ndim - 2 if kernel_inner_dim == kernel.ndim - 1 else kernel.ndim - 1
+    x_outer_dim, kernel_outer_dim = map(
+        mirror_dim, (x_inner_dim, kernel_inner_dim), (x.ndim, kernel.ndim)
+    )
 
-    # DGRAD: ([B], M, N) x (K, N)^T = ([B], M, K)
+    # FWD MODE:
+    #    AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) --------> ([B], M, N/P)
+    #    GEMM+AR:                       ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
+
+    # DGRAD:
+    #    AG+GEMM: ([B], M, N/P) x (K, N/P)^T --(AR)--> ([B], M, K)
+    #    GEMM+AR:   ([B], M, N) x (K/P, N)^T --------> ([B], M, K/P)
     dgrad, dgelu, _ = gemm_impl(
         grad,
         kernel,
         gelu_input=pre_gelu_out,
+        batched_output=(x.ndim > 2),
         contracting_dims=(-1, kernel_outer_dim),
         fuse_gelu=fuse_gelu,
         fuse_bias=False,
@@ -119,12 +130,15 @@ def _gemm_bwd_rule(
         use_split_accumulator=use_split_accumulator,
     )
 
-    # WGRAD: ([B], M, K)^T x ([B], M, N) = (K, N)
+    # WGRAD:
+    #    AG+GEMM: ([B], M/P, K)^T --(AG)--> ([B], M, K)^T x ([B], M, N/P) --> (K, N/P)
+    #    GEMM+AR:                         ([B], M, K/P)^T x ([B], M, N) ----> (K/P, N)
     wgrad_rhs = dgelu if fuse_gelu else grad
     wgrad, _, bgrad = gemm_impl(
         x,
         wgrad_rhs,
         gelu_input=pre_gelu_out,
+        batched_output=False,
         contracting_dims=(x_outer_dim, wgrad_rhs.ndim - 2),
         fuse_gelu=False,
         fuse_bias=fuse_bias,
@@ -279,6 +293,7 @@ def _fp8_gemm_fwd_rule(
         out_amax=out_amax,
         out_scale=out_scale,
         out_dtype=out_dtype,
+        batched_output=(x.ndim > 2),
         fuse_gelu=fuse_gelu,
         fuse_bias=fuse_bias,
         accumulate=accumulate,
@@ -300,6 +315,7 @@ def _fp8_gemm_fwd_rule(
         pre_gelu_out if fuse_gelu else None,
         fuse_bias,
         maybe_fp32_to_fm32,
+        (x.ndim > 2),
     )
 
     return (out, updated_out_scale), ctx
@@ -325,6 +341,7 @@ def _fp8_gemm_bwd_rule(
         pre_gelu_out,
         fuse_bias,
         maybe_fp32_to_fm32,
+        batched_input,
     ) = ctx
 
     bwd_dtype = FP8Helper.BWD_DTYPE
@@ -382,6 +399,7 @@ def _fp8_gemm_bwd_rule(
         grad_scale_inv,
         casted_kernel,
         kernel_scale_inv,
+        batched_output=batched_input,
         accumulate=accumulate,
         use_split_accumulator=use_split_accumulator,
     )
@@ -392,6 +410,7 @@ def _fp8_gemm_bwd_rule(
         x_scale_inv,
         casted_grad_t,
         grad_scale_inv,
+        out_shape=False,
         accumulate=accumulate,
         use_split_accumulator=use_split_accumulator,
     )
