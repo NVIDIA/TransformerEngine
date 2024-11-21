@@ -1366,7 +1366,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   cfg.attrs = attribute_ub;                                                          \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (CUDART_VERSION >= 12030)
+#if (CUDART_VERSION >= 12030)
 #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
   attribute_ub[2].id = cudaLaunchAttributeLaunchCompletionEvent;     \
   attribute_ub[2].val.launchCompletionEvent.event = comm_launch_event;
