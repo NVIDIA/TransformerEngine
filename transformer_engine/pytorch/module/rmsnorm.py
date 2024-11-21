@@ -76,6 +76,10 @@ class RMSNorm(_RMSNormOp):
 
         # Handle deprecated options
         if normalized_shape is None:
+            if hidden_size is None:
+                raise RuntimeError(
+                    "Neither `normalized_shape` nor `hidden_size` (deprecated) args are provided"
+                )
             warnings.warn(
                 "`hidden_size` arg has been renamed to `normalized_shape` "
                 "for compatibility with `torch.nn.LayerNorm`.",
