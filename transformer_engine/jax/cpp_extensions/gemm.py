@@ -516,7 +516,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         # Modify operand specs:
-        # - FSDP axes are all-gathered
         # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
         # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
         lhs_spec_new = [spec for spec in lhs_spec]
@@ -584,7 +583,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         # Modify operand specs:
-        # - FSDP axes are all-gathered
         # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
         # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
         lhs_spec_new = [spec for spec in lhs_spec]
