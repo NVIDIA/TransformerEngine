@@ -98,9 +98,11 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     This is needed only for Hopper, which uses persistent CTA execution.
   */
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
+  int runtime_version = 0;
+  cudaRuntimeGetVersion(&runtime_version);
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0);
-  if (deviceProp.major == 9 && max_connection > 1) {
+  if (runtime_version >= 12030 && deviceProp.major == 9 && max_connection > 1) {
     cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
   } else {
     _comm_launch_event = 0;
