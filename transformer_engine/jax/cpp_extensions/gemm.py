@@ -53,6 +53,7 @@ def get_cublas_workspace_size_bytes() -> None:
         return 33_554_432
     return 4_194_304
 
+
 class CollectiveGemmPrimitive(BasePrimitive):
     """
     cuBlasLt GEMM Primitive w/ support for distributed inputs
