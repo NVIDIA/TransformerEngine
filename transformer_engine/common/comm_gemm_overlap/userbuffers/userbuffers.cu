@@ -1366,18 +1366,27 @@ __global__ void __launch_bounds__(MAX_THREADS)
   cfg.attrs = attribute_ub;                                                          \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
 
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900) && (CUDART_VERSION >= 12030)
+    #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
+        attribute_ub[2].id = cudaLaunchAttributeLaunchCompletionEvent;    \
+        attribute_ub[2].val.launchCompletionEvent.event = comm_launch_event;
+    #define NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH 3
+#else
+    #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event)
+    #define NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH 2
+#endif
+
 #define SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, threads, stream, comm_launch_event) \
-  cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                             \
-  cudaLaunchAttribute attribute_ub[3] = {};                                                \
-  attribute_ub[2].id = cudaLaunchAttributeLaunchCompletionEvent;                           \
-  attribute_ub[2].val.launchCompletionEvent.event = comm_launch_event;                     \
-  attribute_ub[1].id = cudaLaunchAttributeClusterDimension;                                \
-  attribute_ub[1].val.clusterDim.x = sms % comm->cga_size == 0 ? comm->cga_size : 1;       \
-  attribute_ub[1].val.clusterDim.y = 1;                                                    \
-  attribute_ub[1].val.clusterDim.z = 1;                                                    \
-  attribute_ub[0].id = cudaLaunchAttributeCooperative;                                     \
-  cfg.attrs = attribute_ub;                                                                \
-  cfg.numAttrs = 3;
+    cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                           \
+    cudaLaunchAttribute attribute_ub[NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH] = {};            \
+    ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event)                           \
+    attribute_ub[1].id = cudaLaunchAttributeClusterDimension;                              \
+    attribute_ub[1].val.clusterDim.x = sms % comm->cga_size == 0 ? comm->cga_size : 1;     \
+    attribute_ub[1].val.clusterDim.y = 1;                                                  \
+    attribute_ub[1].val.clusterDim.z = 1;                                                  \
+    attribute_ub[0].id = cudaLaunchAttributeCooperative;                                   \
+    cfg.attrs = attribute_ub;                                                              \
+    cfg.numAttrs = NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH;
 
 #define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
