@@ -214,6 +214,7 @@ def _make_graphed_callables(
                     grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
                     only_inputs=True,
                     allow_unused=allow_unused_input,
+                    retain_graph=True,
                 )
                 del outputs, grad_inputs
     torch.cuda.synchronize()
@@ -269,6 +270,7 @@ def _make_graphed_callables(
                             grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                             only_inputs=True,
                             allow_unused=allow_unused_input,
+                            retain_graph=True,
                         )
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
@@ -320,6 +322,7 @@ def _make_graphed_callables(
                     grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                     only_inputs=True,
                     allow_unused=allow_unused_input,
+                    retain_graph=True,
                 )
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
