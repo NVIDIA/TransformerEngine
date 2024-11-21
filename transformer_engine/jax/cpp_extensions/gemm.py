@@ -53,7 +53,6 @@ def get_cublas_workspace_size_bytes() -> None:
         return 33_554_432
     return 4_194_304
 
-
 class CollectiveGemmPrimitive(BasePrimitive):
     """
     cuBlasLt GEMM Primitive w/ support for distributed inputs
@@ -385,15 +384,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_batch_shape = [lhs.shape[dim] for dim in lhs_batch_dims]
         lhs_batch_size = reduce(operator.mul, lhs_batch_shape, 1)
         contracting_dims_2d = list(contracting_dims).copy()
-        if batched_output:
-            # If output is batched, the LSH batch dimension collapses into the outer dimension
-            # and RHS cannot be batched
-            lhs_2d_shape = (lhs_batch_size * lhs.shape[lhs_outer_dim], lhs.shape[lhs_inner_dim])
-            lhs_layout = (*lhs_batch_dims, lhs_outer_dim, lhs_inner_dim)
-            contracting_dims_2d[0] = 1
-        else:
-            # If the output is not batched, both LHS and RHS batch  dimensions collapse into the
-            # contracting dimensions
+        if lhs.ndim > 2 and rhs.ndim > 2:
+            # If both LHS and RHS are batched, the batch dimensions collapse into the
+            # contracting dimensions for both operands
             lhs_2d_shape = (lhs_batch_size * lhs.shape[lhs_inner_dim], lhs.shape[lhs_outer_dim])
             lhs_layout = (*lhs_batch_dims, lhs_inner_dim, lhs_outer_dim)
             contracting_dims_2d[0] = 0
@@ -406,6 +399,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
             rhs_2d_shape = (rhs_batch_size * rhs.shape[rhs_inner_dim], rhs.shape[rhs_outer_dim])
             rhs_layout = (*rhs_batch_dims, rhs_inner_dim, rhs_outer_dim)
             contracting_dims_2d[1] = 0
+        elif lhs.ndim > 2:
+            # If only the LHS is batched,the batch dimension collapses into the outer dimension
+            lhs_2d_shape = (lhs_batch_size * lhs.shape[lhs_outer_dim], lhs.shape[lhs_inner_dim])
+            lhs_layout = (*lhs_batch_dims, lhs_outer_dim, lhs_inner_dim)
+            contracting_dims_2d[0] = 1
 
         # Reshape LHS and RHS into 2D and fix layouts for FP8 GEMM
         if lhs_2d_shape is not None and lhs.ndim > 2:
@@ -524,12 +522,17 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_spec_new = [spec for spec in rhs_spec]
         if lhs_spec_new[lhs_inner_dim] != rhs_spec_new[rhs_inner_dim] and not grad:
             warnings.warn(
-                "Forcing the inner dimension of LHS to match the sharding of inner "
-                + "dimension of RHS. This can trigger additional communication if LHS is "
-                + "not already partitioned correctly."
+                "Forcing LHS sharding in the contracting dimension to match RHS. This can trigger "
+                + "additional communication if LHS is not already partitioned correctly."
             )
         rhs_outer_spec = rhs_spec_new[rhs_outer_dim]
         if rhs_outer_spec is not None:
+            warnings.warn(
+                "Forcing the outer dimension of LHS (sequence/context dim) to be all- gathered. "
+                + "This may trigger additional communication if LHS is not already partitioned "
+                + "correctly. Additionally, the DGRAD output in the backward pass will not match "
+                + "the sharding of a sequence/context-parallel LHS operand."
+            )
             lhs_spec_new[lhs_outer_dim] = None
         lhs_spec_new[lhs_inner_dim] = rhs_spec_new[rhs_inner_dim]
 
@@ -661,8 +664,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
             if jax_dtype_is_fp8(lhs.dtype):
                 out_amax_updated = all_reduce_max_along_all_axes_except_PP(out_amax_updated, mesh)
 
-            # GEMM output needs to be all-reduced when the contracting dimension is sharded.
             if rhs_spec_new[rhs_inner_dim] is not None:
+                # GEMM output needs to be all-reduced when the contracting dimension is sharded.
                 out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().tp_resource, mesh)
                 if fuse_gelu:
                     pre_gelu_out = lax_paral_op(
