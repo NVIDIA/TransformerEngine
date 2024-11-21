@@ -61,15 +61,32 @@ class LayerNorm(_LayerNormOp):
 
     def __init__(
         self,
-        normalized_shape: Union[Iterable[int], int],
+        normalized_shape: Union[Iterable[int], int, None] = None,
         eps: float = 1e-5,
         sequence_parallel: Optional[bool] = None,  # legacy
         params_dtype: Optional[torch.dtype] = None,  # deprecated
         zero_centered_gamma: bool = False,
+        hidden_size: Optional[int] = None,  # deprecated
         **kwargs,
     ) -> None:
 
         # Handle deprecated options
+        if normalized_shape is None:
+            if hidden_size is None:
+                raise RuntimeError(
+                    "Neither `normalized_shape` nor `hidden_size` (deprecated) args are provided"
+                )
+            warnings.warn(
+                "`hidden_size` arg has been renamed to `normalized_shape` "
+                "for compatibility with `torch.nn.LayerNorm`.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            normalized_shape = hidden_size
+        elif hidden_size is not None:
+            raise RuntimeError(
+                "Both `normalized_shape` and `hidden_size` (deprecated) args are provided"
+            )
         if params_dtype is not None:
             if "dtype" in kwargs:
                 raise RuntimeError(
