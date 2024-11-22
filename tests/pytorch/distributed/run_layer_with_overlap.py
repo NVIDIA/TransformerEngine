@@ -266,7 +266,7 @@ def _train(opts):
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
-        ub_cfg=_get_ub_cfg(opts.layer_type),
+        ub_cfgs=_get_ub_cfg(opts.layer_type),
     )
 
     # Initialize the Transformer Engine layer with overlap
