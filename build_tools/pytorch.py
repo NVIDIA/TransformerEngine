@@ -100,10 +100,15 @@ def setup_pytorch_extension(
         library_dirs.append(mpi_home / "lib")
         libraries.append("mpi")
     
+    # TODO: make this an option later
     COMPILE_WITH_NVSHMEM=True
     if COMPILE_WITH_NVSHMEM:
-        include_dirs.append("/workdir/libnvshmem/include")
-        library_dirs.append("/workdir/libnvshmem/lib")
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
+        include_dirs.append(nvshmem_home / "include")
+        library_dirs.append(nvshmem_home / "lib")
 
 
     # Construct PyTorch CUDA extension
