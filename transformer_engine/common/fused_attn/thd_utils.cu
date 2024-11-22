@@ -7,6 +7,9 @@
 #include "../cudnn_utils.h"
 #include "thd_utils.h"
 
+namespace transformer_engine {
+namespace fused_attn {
+
 __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int batch,
                                              int total_tokens, int world_size, int rank) {
   extern __shared__ int cu_seqlens_s[];
@@ -68,3 +71,6 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
     }
   }
 }
+
+}  // namespace fused_attn
+}  // namespace transformer_engine

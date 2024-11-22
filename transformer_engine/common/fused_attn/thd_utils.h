@@ -10,6 +10,9 @@
 #include <cuda.h>
 #include <cuda_bf16.h>
 
+namespace transformer_engine {
+namespace fused_attn {
+
 /***************************************************************************************************
  * Support THD format for Context Parallel: Binary search an array for a target value
  **************************************************************************************************/
@@ -239,5 +242,8 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
     }
   }
 }
+
+}  // namespace fused_attn
+}  // namespace transformer_engine
 
 #endif

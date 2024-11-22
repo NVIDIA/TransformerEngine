@@ -7,6 +7,8 @@
 #include "common/fused_attn/thd_utils.h"
 #include "extensions.h"
 
+using namespace transformer_engine::fused_attn;
+
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
 
