@@ -77,4 +77,45 @@ void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torc
 
   nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET, peer, (cudaStream_t)cur_stream);
 }
+void nvshmem_finalize(){
+  nvshmem_finalize();
+}
+
+void nvshmem_quiet(){
+  nvshmem_quiet();
+}
+
+void nvshmem_ag_from_p2p_on_stream(torch::Tensor buf, torch::Tensor singals, int my_rank, const std::vector<int> &global_ranks){
+  // Draft implementation of CE based AG using ring-exchange; This function assumes that the gathered data on local rank is already in buf tensor
+  // global_ranks: global ranks for current process group
+  // my_rank: the local rank in current process group
+  // size of signals must be equal to the size of current process group
+  int num_ranks = global_ranks.size();
+  if (num_ranks == 1) return ;
+
+  char* buf_start_ptr = (char *) buf.data_ptr();
+  uint64_t* signal_start_addr = (uint64_t*) singals.data_ptr();
+  size_t perchunksize = buf.numel() * buf.element_size()/num_ranks;
+  at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
+  int cur_rank, recv_rank, dst_PE;
+  char* src_ptr;
+  uint64_t* send_sig_addr, *recv_sig_addr;
+  uint64_t signal_reset = 0;
+  uint64_t sigval = 1;
+
+
+  dst_PE =  global_ranks.at((my_rank + 1) % num_ranks);
+
+  for (int idx =0 ; idx < num_ranks-1; idx ++ ){
+    cur_rank = (my_rank - idx + num_ranks) % num_ranks;
+    recv_rank = (my_rank - idx - 1 + num_ranks)% num_ranks;
+    src_ptr = buf_start_ptr + cur_rank*perchunksize;
+    send_sig_addr = signal_start_addr + cur_rank;
+    nvshmemx_putmem_signal_on_stream((void *)src_ptr, (void *)src_ptr, perchunksize, send_sig_addr, sigval, NVSHMEM_SIGNAL_SET, dst_PE, (cudaStream_t)cur_stream);
+    recv_sig_addr = signal_start_addr + recv_rank;
+    cuStreamWaitValue64((CUstream)cur_stream, (CUdeviceptr)recv_sig_addr, (cuuint64_t)sigval, CU_STREAM_WAIT_VALUE_GEQ);
+    cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)recv_sig_addr, (cuuint64_t)signal_reset, CU_STREAM_WRITE_VALUE_DEFAULT);
+  }
+}
+
 }

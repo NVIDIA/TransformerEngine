@@ -515,6 +515,9 @@ namespace nvshmem_api {
   torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
   void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal);
   void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind);
+  void nvshmem_ag_from_p2p_on_stream(torch::Tensor buf, torch::Tensor singals, int my_rank, const std::vector<int> &global_ranks);
+  void nvshmem_finalize();
+  void nvshmem_quiet();
 }
 
 
