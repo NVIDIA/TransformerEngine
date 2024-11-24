@@ -5720,6 +5720,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (qkv, out_save) if not ctx.fp8 else (None, None)
+        fp8_tensors = fp8_tensors if ctx.fp8 else (None, None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors, cu_seqlens, cu_seqlens_padded, *fp8_tensors, *aux_ctx_tensors
         )
@@ -6132,6 +6133,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, kv, out_save) if not ctx.fp8 else (None, None, None)
+        fp8_tensors = fp8_tensors if ctx.fp8 else (None, None, None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
             cu_seqlens_q,
@@ -6671,6 +6673,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         qkvo_tensors = (q, k, v, out_save) if not ctx.fp8 else (None, None, None, None)
+        fp8_tensors = fp8_tensors if ctx.fp8 else (None, None, None, None, None, None)
         ctx.save_for_backward(
             *qkvo_tensors,
             cu_seqlens_q,
