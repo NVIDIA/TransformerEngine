@@ -521,7 +521,7 @@ upload_logs:
       for i in `seq 1 ${CURL_ATTEMPTS}`; do
           sleep ${CURL_SLEEP}
           CURL_RESULT=$(curl --silent -o ${tmp_file} --write-out "%{http_code}" --request POST \
-            --user ptredak:${JENKINS_TOKEN} \
+            --user tmoon@nvidia.com:${JENKINS_TOKEN} \
             --data token="${JENKINS_CI_TOKEN}" \
             --data PIPELINE_ID="${CI_PIPELINE_ID}" \
             --data githubData="${githubData}" \
