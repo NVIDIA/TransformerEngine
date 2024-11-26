@@ -442,16 +442,16 @@ class FP8GlobalStateManager:
         stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
-        fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
-        fp8_meta["scaling_fwd"].scale = stashed_fp8_meta[1]
-        fp8_meta["scaling_fwd"].scale_inv = stashed_fp8_meta[2]
+        fp8_meta["scaling_fwd"].amax_history.copy_(stashed_fp8_meta[0])
+        fp8_meta["scaling_fwd"].scale.copy_(stashed_fp8_meta[1])
+        fp8_meta["scaling_fwd"].scale_inv.copy_(stashed_fp8_meta[2])
 
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-        fp8_meta["scaling_fwd"].amax_history = fp8_meta["updated_amax_history_fwd"]
-        fp8_meta["scaling_fwd"].scale = fp8_meta["updated_scale_fwd"]
-        fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]
+        fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
+        fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+        fp8_meta["scaling_fwd"].scale_inv.copy_(fp8_meta["updated_scale_inv_fwd"])
 
 
 @contextmanager

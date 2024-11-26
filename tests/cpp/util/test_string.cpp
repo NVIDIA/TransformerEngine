@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -57,6 +58,12 @@ TEST(UtilTest, ToStringLike) {  // to_string_like
   EXPECT_EQ(std::stof(to_string_like(-2.5f)), -2.5f);
   EXPECT_EQ(std::stod(to_string_like(2.25)), 2.25);
   EXPECT_EQ(std::stod(to_string_like(-4.5)), -4.5);
+
+  // Container types
+  EXPECT_EQ(to_string_like(std::vector<int>{-3,1,-4}), "(-3,1,-4)");
+  EXPECT_EQ(to_string_like(std::vector<std::string>{"Accept", "no", "substitutes", ".",
+                                                    "Buy", "N", "V", "IDIA"}),
+            "(Accept,no,substitutes,.,Buy,N,V,IDIA)");
 }
 
 TEST(UtilTest, ConcatStringsTest) {  // concat_strings
@@ -88,6 +95,9 @@ TEST(UtilTest, ConcatStringsTest) {  // concat_strings
   EXPECT_EQ(std::stof(concat_strings(6.5f)), 6.5f);
   EXPECT_EQ(std::stod(concat_strings("-", 4.25)), -4.25);
   EXPECT_EQ(std::stod(concat_strings(8.5)), 8.5);
+
+  // Container types
+  EXPECT_EQ(concat_strings("vector ", std::vector<int>{1,-2,3}), "vector (1,-2,3)");
 }
 
 TEST(UtilTest, RegexReplaceTest) {  // regex_replace

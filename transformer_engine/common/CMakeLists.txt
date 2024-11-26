@@ -61,6 +61,7 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
+     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      layer_norm/ln_api.cpp
