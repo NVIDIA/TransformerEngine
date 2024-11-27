@@ -33,7 +33,7 @@ def gemm(
     x: ArrayLike,
     kernel: ArrayLike,
     bias: Optional[ArrayLike] = None,
-    contracting_dims: Tuple[int, int] = (1, 0),
+    contracting_dims: Tuple[int, int] = (-1, -2),
     fuse_gelu: bool = False,
     accumulate: bool = False,
     use_split_accumulator: bool = False,
@@ -73,8 +73,11 @@ def _gemm_fwd_rule(
 
     fuse_bias = bias is not None
 
-    # AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) --------> ([B], M, N/P)
-    # GEMM+AR:                       ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
+    # AG+GEMM:    ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) ------> ([B], M, N/P)
+    # (DP, TP, None) --(AG)--> (DP, None, None) x (None, TP) --> (DP, None, TP)
+    #
+    # GEMM+AR: ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
+    #     (DP, None, TP) x (TP, None) --(AR)--> (DP, None, None)
     out, pre_gelu_out = gemm_impl(
         x,
         kernel,
@@ -112,12 +115,18 @@ def _gemm_bwd_rule(
     )
 
     # FWD MODE:
-    #    AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) --------> ([B], M, N/P)
-    #    GEMM+AR:                       ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
+    #     AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) ------> ([B], M, N/P)
+    #  (DP, TP, None) --(AG)--> (DP, None, None) x (None, TP) --> (DP, None, TP)
+    #
+    #     GEMM+AR: ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
+    #         (DP, None, TP) x (TP, None) --(AR)--> (DP, None, None)
 
     # DGRAD:
-    #    AG+GEMM: ([B], M, N/P) x (K, N/P)^T --(AR)--> ([B], M, K)
-    #    GEMM+AR:   ([B], M, N) x (K/P, N)^T --------> ([B], M, K/P)
+    #    AG+GEMM: ([B], M, N/P) x (K, N/P)^T ----(AR)----> ([B], M, K)
+    #        (DP, None, TP) x (None, TP)^T --(AR)--> (DP, None, None)
+    #
+    #    GEMM+AR:   ([B], M, N) x (K/P, N)^T ------> ([B], M, K/P)
+    #        (DP, None, None) x (TP, None)^T --> (DP, None, TP)
     dgrad, dgelu, _ = gemm_impl(
         grad,
         kernel,
@@ -133,7 +142,11 @@ def _gemm_bwd_rule(
 
     # WGRAD:
     #    AG+GEMM: ([B], M/P, K)^T --(AG)--> ([B], M, K)^T x ([B], M, N/P) --> (K, N/P)
-    #    GEMM+AR:                         ([B], M, K/P)^T x ([B], M, N) ----> (K/P, N)
+    #  (DP, 'tp', None)^T --(AG)-->(DP, None, None)^T x (DP, None, 'tp') --> (None, 'tp')
+    #
+    #    GEMM+AR: ([B], M, K/P)^T --(AG)--> ([B], M, K)^T x ([B], M, N) ---------> (K/P, N)
+    #     (DP, None, 'tp')^T --(AG)--> (DP, None, None)^T x (DP, None, None) ----> (None, None)
+    #     Make XLA scatter output in first dim.
     wgrad_rhs = dgelu if fuse_gelu else grad
     wgrad, _, bgrad = gemm_impl(
         x,
@@ -445,7 +458,7 @@ def type_safe_gemm(
     bias: Optional[ArrayLike] = None,
     fp8_meta: Optional[FP8MetaPackage] = None,
     out_dtype: Optional[jnp.dtype] = None,
-    contracting_dims: Tuple[int, int] = (1, 0),
+    contracting_dims: Tuple[int, int] = (-1, -2),
     fuse_gelu: bool = False,
     accumulate: bool = False,
     use_split_accumulator: bool = False,

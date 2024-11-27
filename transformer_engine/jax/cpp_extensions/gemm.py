@@ -516,31 +516,53 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         # Modify operand specs:
-        # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
-        # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
-        lhs_spec_new = [spec for spec in lhs_spec]
-        rhs_spec_new = [spec for spec in rhs_spec]
-        if lhs_spec_new[lhs_inner_dim] != rhs_spec_new[rhs_inner_dim] and not grad:
-            warnings.warn(
-                "Forcing LHS sharding in the contracting dimension to match RHS. This can trigger "
-                + "additional communication if LHS is not already partitioned correctly."
+        # - If contracting dimensions of both operands are sharded, force them to match.
+        # - If contracting dimensions of both operands are sharded, all-gather outer dimensions.
+        # - If contracting dimension of only one operand is sharded, all-gather the sharded
+        #   operand.
+        # - Never scatter any operand.
+        lhs_spec_new = list(lhs_spec).copy()
+        rhs_spec_new = list(rhs_spec).copy()
+        lhs_spec_new[lhs_outer_dim] = None
+        if lhs_spec_new[lhs_inner_dim] is not None and rhs_spec_new[rhs_inner_dim] is not None:
+            assert lhs_spec_new[lhs_inner_dim] == rhs_spec_new[rhs_inner_dim], (
+                "Contracting dimensions of LHS and RHS operands must have the same sharding."
             )
-        rhs_outer_spec = rhs_spec_new[rhs_outer_dim]
-        if rhs_outer_spec is not None:
-            warnings.warn(
-                "Forcing the outer dimension of LHS (sequence/context dim) to be all- gathered. "
-                + "This may trigger additional communication if LHS is not already partitioned "
-                + "correctly. Additionally, the DGRAD output in the backward pass will not match "
-                + "the sharding of a sequence/context-parallel LHS operand."
-            )
-            lhs_spec_new[lhs_outer_dim] = None
-        lhs_spec_new[lhs_inner_dim] = rhs_spec_new[rhs_inner_dim]
+            if lhs_spec_new[lhs_outer_dim] is not None:
+                warnings.warn(
+                    "Outer dimension of the LHS operand must be all-gathered when both contracting "
+                    + "dimensions are sharded. This will cause additional communication overhead."
+                )
+
+            if rhs_spec_new[rhs_outer_dim] is not None:
+                warnings.warn(
+                    "Outer dimension of the RHS operand must be all-gathered when both contracting "
+                    + "dimensions are sharded. This will cause additional communication overhead."
+                )
+            rhs_spec_new[rhs_outer_dim] = None
+        else:
+            if lhs_spec_new[lhs_inner_dim] is None and rhs_spec_new[rhs_inner_dim] is not None:
+                warnings.warn(
+                    "Contracting dimension of the RHS operand must be all-gathered when the "
+                    + "contracting dimension of the LHS operand is unsharded. This will cause "
+                    + "additional communication overhead."
+                )
+            if lhs_spec_new[lhs_inner_dim] is not None and rhs_spec_new[rhs_inner_dim] is None:
+                if not grad:
+                    # This is expected for sequence/context-parallel gradient in BWD (DGRAD) GEMM.
+                    warnings.warn(
+                        "Contracting dimension of the LHS operand must be all-gathered when the "
+                        + "contracting dimension of the RHS operand is unsharded. This will cause "
+                        + "additional communication overhead."
+                    )
+            lhs_spec_new[lhs_inner_dim] = None
+            rhs_spec_new[rhs_inner_dim] = None
+        out_col_spec = rhs_spec_new[rhs_outer_dim]
 
         # Output sharding is conditional on output shape
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_inner_dim, lhs_outer_dim]]
         batch_spec = [lhs_spec_new[dim] for dim in lhs_bdims]
-        lhs_outer_spec = lhs_spec_new[lhs_outer_dim]
-        out_spec = [lhs_outer_spec, rhs_outer_spec]
+        out_spec = [None, out_col_spec]
         if batched_output:
             out_spec = batch_spec + out_spec
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
@@ -549,11 +571,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
         fp8_meta_sharding = NamedSharding(mesh, PartitionSpec(None))
 
         # Pre-GELU output is always 2D if GELU fusion is turned on, otherwise unsharded
-        gelu_spec = [lhs_outer_spec, rhs_outer_spec] if fuse_gelu else [None]
+        gelu_spec = [None, out_col_spec] if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
         # Bias gradient spec matches outer dimension of output if bias fusion is turned on
-        bias_sharding = NamedSharding(mesh, PartitionSpec(rhs_outer_spec if fuse_bias else None))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(out_col_spec if fuse_bias else None))
 
         return (out_sharding, fp8_meta_sharding, fp8_meta_sharding, gelu_sharding, bias_sharding)
 
@@ -583,19 +605,27 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         # Modify operand specs:
-        # - LHS operand outer dimension is all-gathered if RHS operand outer dimension is sharded
-        # - LHS operand contracting dimension sharding is forced to match RHS contracting dimension
-        lhs_spec_new = [spec for spec in lhs_spec]
-        rhs_spec_new = [spec for spec in rhs_spec]
-        rhs_outer_spec = rhs_spec_new[rhs_outer_dim]
-        if rhs_outer_spec is not None:
-            lhs_spec_new[lhs_outer_dim] = None
-        lhs_spec_new[lhs_inner_dim] = rhs_spec_new[rhs_inner_dim]
+        # - Always all-gather the outer dimension of LHS.
+        # - If contracting dimensions of both operands are sharded, all-gather RHS outer dimension.
+        # - If contracting dimension of only one operand is sharded, all-gather the sharded
+        #   operand.
+        # - Never scatter any operand.
+        lhs_spec_new = list(lhs_spec).copy()
+        rhs_spec_new = list(rhs_spec).copy()
+        reduce_output = False
+        lhs_spec_new[lhs_outer_dim] = None
+        if lhs_spec_new[lhs_inner_dim] is not None and rhs_spec_new[rhs_inner_dim] is not None:
+            rhs_spec_new[rhs_outer_dim] = None
+            reduce_output = True
+        else:
+            lhs_spec_new[lhs_inner_dim] = None
+            rhs_spec_new[rhs_inner_dim] = None
+        out_col_spec = rhs_spec_new[rhs_outer_dim]
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_spec_new))
         rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_spec_new))
 
         # Bias is sharded to match outer dimension spec of the RHS operand (also the output)
-        bias_sharding = NamedSharding(mesh, PartitionSpec(rhs_outer_spec if fuse_bias else None))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(out_col_spec if fuse_bias else None))
 
         # FP8 metas are always unsharded
         fp8_meta_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -603,14 +633,13 @@ class CollectiveGemmPrimitive(BasePrimitive):
         # Output sharding is conditional on output shape
         lhs_bdims = [dim for dim in range(lhs.ndim) if dim not in [lhs_inner_dim, lhs_outer_dim]]
         batch_spec = [lhs_spec_new[dim] for dim in lhs_bdims]
-        lhs_outer_spec = lhs_spec_new[lhs_outer_dim]
-        out_spec = [lhs_outer_spec, rhs_outer_spec]
+        out_spec = [None, out_col_spec]
         if batched_output:
             out_spec = batch_spec + out_spec
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
 
         # Pre-GELU output is always 2D if GELU fusion is turned on, otherwise unsharded
-        gelu_spec = [lhs_outer_spec, rhs_outer_spec] if fuse_gelu else [None]
+        gelu_spec = [None, out_col_spec] if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
         arg_shardings = (
@@ -663,13 +692,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
             if jax_dtype_is_fp8(lhs.dtype):
                 out_amax_updated = all_reduce_max_along_all_axes_except_PP(out_amax_updated, mesh)
 
-            if rhs_spec_new[rhs_inner_dim] is not None:
-                # GEMM output needs to be all-reduced when the contracting dimension is sharded.
-                out = lax_paral_op(out, jax.lax.psum, global_mesh_resource().tp_resource, mesh)
+            # All-reduce sum GEMM output when contracting dimensions are sharded
+            if reduce_output:
+                out = jax.lax.psum(out, global_mesh_resource().tp_resource)
                 if fuse_gelu:
-                    pre_gelu_out = lax_paral_op(
-                        pre_gelu_out, jax.lax.psum, global_mesh_resource().tp_resource, mesh
-                    )
+                    pre_gelu_out = jax.lax.psum(pre_gelu_out, global_mesh_resource().tp_resource)
 
             return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad
 
