@@ -4,7 +4,7 @@
 
 """Installation script."""
 
-lols
+assert False, "lols"
 
 import os
 import time
