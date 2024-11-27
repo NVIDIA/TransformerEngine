@@ -525,9 +525,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_spec_new = list(rhs_spec).copy()
         lhs_spec_new[lhs_outer_dim] = None
         if lhs_spec_new[lhs_inner_dim] is not None and rhs_spec_new[rhs_inner_dim] is not None:
-            assert lhs_spec_new[lhs_inner_dim] == rhs_spec_new[rhs_inner_dim], (
-                "Contracting dimensions of LHS and RHS operands must have the same sharding."
-            )
+            assert (
+                lhs_spec_new[lhs_inner_dim] == rhs_spec_new[rhs_inner_dim]
+            ), "Contracting dimensions of LHS and RHS operands must have the same sharding."
             if lhs_spec_new[lhs_outer_dim] is not None:
                 warnings.warn(
                     "Outer dimension of the LHS operand must be all-gathered when both contracting "
