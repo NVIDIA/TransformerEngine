@@ -4,8 +4,6 @@
 
 """Installation script."""
 
-assert False, "lols"
-
 import os
 import time
 from pathlib import Path
