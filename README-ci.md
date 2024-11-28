@@ -132,19 +132,20 @@ discussion for more information.
 QA expects the TE team to provide test containers that are compatible
 with their scripts. The QA containers should have the form
 `gitlab-master.nvidia.com/dl/transformerengine/transformerengine:<monthly release version>-<DL framework>-py3-qa`.
-Note that the tag doesn't use TE release versions, but NVIDIA monthly
-release versions (e.g. the 23.10 release in October 2023). To build
-these containers, launch a GitLab CI pipeline on the `te_ci` branch
-with the following variables:
+To build these containers, launch a GitLab CI pipeline on the `te_ci`
+branch with the following variables:
 
 | Key             | Value                                                                           |
 |-----------------|---------------------------------------------------------------------------------|
 | `GH_BRANCH`     | `release_v<latest TE version>`                                                  |
 | `PYTORCH_IMAGE` | `gitlab-master.nvidia.com:5005/dl/dgx/pytorch:<release version>-py3-base-amd64` |
-| `PADDLE_IMAGE`  | `gitlab-master.nvidia.com:5005/dl/dgx/paddle:<release version>-py3-base`        |
-| `TAG_ROOT`      | Release version                                                                 |
+| `TAG_ROOT`      | TE release version                                                              |
+| `RUN_L0_TESTS`  | `1` (optional)                                                                  |
+| `RUN_L1_TESTS`  | `1` (optional)                                                                  |
+| `RUN_L2_TESTS`  | `1` (optional)                                                                  |
+| `RUN_L3_TESTS`  | `1` (optional)                                                                  |
 
-This is somewhat of a messy process, since other framework teams may
+This is somewhat of a messy process since other framework teams may
 delay building their containers or may need to rebuild. When
 containers have been built, we should notify QA on the
 `#swdl-fw-builds` Slack channel.
