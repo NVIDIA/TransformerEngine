@@ -1717,8 +1717,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
 
-        pad_between_seqs_q = not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
-        pad_between_seqs_kv = not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+        pad_between_seqs_q = not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
+        pad_between_seqs_kv = not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
         max_seqlen_q = max_seqlen_q // cp_size
         max_seqlen_kv = max_seqlen_kv // cp_size
         cu_seqlens_q_padded = cu_seqlens_q_padded // cp_size
@@ -8109,10 +8109,10 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             pad_between_seqs = (
                 cu_seqlens_q_padded is not None
-                and not torch.equal(cu_seqlens_q_padded, cu_seqlens_q)
+                and not torch.equal(cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1])
             ) or (
                 cu_seqlens_kv_padded is not None
-                and not torch.equal(cu_seqlens_kv_padded, cu_seqlens_kv)
+                and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
             )
 
             attention_params = AttentionParams(
