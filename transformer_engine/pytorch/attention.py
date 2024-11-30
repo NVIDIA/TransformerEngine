@@ -142,13 +142,15 @@ except PackageNotFoundError:
 else:
     if _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as flash_attn_varlen_fwd,
-        )
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_backward as flash_attn_varlen_bwd,
-        )
         from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
+        from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
+        )
 
         _flash_attn_is_installed = True
         _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
@@ -195,11 +197,13 @@ else:
     from flashattn_hopper.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
     from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_forward as flash_attn_varlen_fwd_v3,
+        _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
     )
     from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_backward as flash_attn_varlen_bwd_v3,
+        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
     )
 
     _flash_attn_3_is_installed = True
@@ -1827,10 +1831,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_fwd = flash_attn_varlen_fwd_v3
+                flash_attn_fwd = _flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
             else:
-                flash_attn_fwd = flash_attn_varlen_fwd
+                flash_attn_fwd = _flash_attn_varlen_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
                 if _flash_attn_2_3_plus:
@@ -2673,10 +2677,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_bwd = flash_attn_varlen_bwd_v3
+                flash_attn_bwd = _flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
-                flash_attn_bwd = flash_attn_varlen_bwd
+                flash_attn_bwd = _flash_attn_varlen_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if _flash_attn_2_4_plus:
                     fa_backward_kwargs["alibi_slopes"] = None
@@ -3407,9 +3411,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_fwd = flash_attn_varlen_fwd_v3
+                flash_attn_fwd = _flash_attn_varlen_fwd_v3
             else:
-                flash_attn_fwd = flash_attn_varlen_fwd
+                flash_attn_fwd = _flash_attn_varlen_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
                 if _flash_attn_2_4_plus:
@@ -3624,10 +3628,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_bwd = flash_attn_varlen_bwd_v3
+                flash_attn_bwd = _flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
-                flash_attn_bwd = flash_attn_varlen_bwd
+                flash_attn_bwd = _flash_attn_varlen_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if _flash_attn_2_4_plus:
                     fa_backward_kwargs["alibi_slopes"] = None
@@ -3829,10 +3833,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_fwd = flash_attn_varlen_fwd_v3
+                flash_attn_fwd = _flash_attn_varlen_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
             else:
-                flash_attn_fwd = flash_attn_varlen_fwd
+                flash_attn_fwd = _flash_attn_varlen_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
                 if _flash_attn_2_3_plus:
@@ -4127,11 +4131,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if _use_flash_attn_3:
-                flash_attn_bwd = flash_attn_varlen_bwd_v3
+                flash_attn_bwd = _flash_attn_varlen_bwd_v3
                 fa_backward_kwargs["window_size"] = ctx.window_size
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
-                flash_attn_bwd = flash_attn_varlen_bwd
+                flash_attn_bwd = _flash_attn_varlen_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
                 if _flash_attn_2_3_plus:
                     fa_backward_kwargs["window_size"] = ctx.window_size
