@@ -59,7 +59,7 @@ void compute_ref_stats(NormType norm_type,
   }
 }
 
-const static bool use_cudnn = (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") || 
+const static bool use_cudnn = (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") ||
   std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") ||
   std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN") ||
   std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN"));

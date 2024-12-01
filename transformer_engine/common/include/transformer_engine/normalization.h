@@ -82,7 +82,6 @@ void nvte_layernorm_bwd(const NVTETensor dz,      // BxSxhidden_size
                         const int multiprocessorCount, const bool zero_centered_gamma,
                         cudaStream_t stream);
 
-
 /*! \brief Compute RMSNorm.
  *
  * The formula used:

@@ -11,9 +11,9 @@ namespace transformer_engine {
 namespace jax {
 
 pybind11::pair GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                  DType in_dtype, DType w_dtype, DType out_dtype,
-                                                  bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps, int sm_margin) {
+                                                 DType in_dtype, DType w_dtype, DType out_dtype,
+                                                 bool is_layer_norm, bool zero_centered_gamma,
+                                                 float eps, int sm_margin) {
   auto input_shape = std::vector<size_t>{batch_size, hidden_size};
   auto weight_shape = std::vector<size_t>{hidden_size};
   auto intermediates_shape = std::vector<size_t>{batch_size};
@@ -38,8 +38,8 @@ pybind11::pair GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidde
     // TODO(Phuong): Verify and remove this check
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), dummy_work_tensor.data(),
-                     num_sm, zero_centered_gamma, nullptr);
+                     rsigma_tensor.data(), dummy_work_tensor.data(), num_sm, zero_centered_gamma,
+                     nullptr);
   }
 
   auto work_shape = MakeShapeVector(dummy_work_tensor.shape());
@@ -82,9 +82,8 @@ void LayerNormForwardImpl(size_t batch_size, size_t hidden_size, size_t workspac
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_fwd(input_tensor.data(), gamma_tensor.data(), eps, output_tensor.data(),
-                     rsigma_tensor.data(), 
-                     workspace_tensor.data(),
-                     num_sm, zero_centered_gamma, stream);
+                     rsigma_tensor.data(), workspace_tensor.data(), num_sm, zero_centered_gamma,
+                     stream);
   }
 }
 
@@ -312,16 +311,15 @@ pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hid
 
     nvte_layernorm_bwd(dz_tensor.data(), x_tensor.data(), mu_tensor.data(), rsigma_tensor.data(),
                        gamma_tensor.data(), xgrad_tensor.data(), wgrad_tensor.data(),
-                       dbeta_tensor.data(), dummy_work_tensor.data(),
-                       num_sm, zero_centered_gamma, nullptr);
+                       dbeta_tensor.data(), dummy_work_tensor.data(), num_sm, zero_centered_gamma,
+                       nullptr);
 
     dbeta_part_shape = MakeShapeVector(dummy_dbeta_part_tensor.shape());
   } else {
     NVTE_CHECK(!zero_centered_gamma, "rmsnorm doesn't support zero_centered_gamma.");
     nvte_rmsnorm_bwd(dz_tensor.data(), x_tensor.data(), rsigma_tensor.data(), gamma_tensor.data(),
-                     xgrad_tensor.data(), wgrad_tensor.data(), 
-                     dummy_work_tensor.data(),
-                     num_sm, zero_centered_gamma, nullptr);
+                     xgrad_tensor.data(), wgrad_tensor.data(), dummy_work_tensor.data(), num_sm,
+                     zero_centered_gamma, nullptr);
 
     dbeta_part_shape = std::vector<size_t>{0, 0};
   }
