@@ -20,8 +20,7 @@
 #include <vector>
 
 #include "../common.h"
-// TODO move cudnn common utils out of fused_attn
-#include "../fused_attn/utils.h"
+#include "../cudnn_utils.h"
 
 namespace transformer_engine {
 
