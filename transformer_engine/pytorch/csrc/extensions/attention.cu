@@ -1310,7 +1310,7 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
     } else if (qkv_format == "thd") {
       if (softmax_lse_in_packed_format) {
         fused_out_correction_kernel<dtype, tile, causal, QKVFormat::TH, QKVFormat::HT, max_tensors>
-            <<<grid, block, sizeof(int) * (batch + 1) , at::cuda::getCurrentCUDAStream()>>>(
+            <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
                 batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
       } else {
