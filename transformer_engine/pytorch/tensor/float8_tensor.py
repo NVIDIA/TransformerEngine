@@ -429,6 +429,26 @@ class Float8Tensor(QuantizedTensor):
         self._transpose_invalid = self._transpose is None
 
         return self
+    
+    # TODO: might be care about self._scale_inv
+    def fsdp_pre_all_gather(self, mesh):
+        # return (self._data,), (self._scale_inv,)
+        return (self._data,), (self,)
+
+    # TODO: might be care about self._scale_inv
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,
+        *,
+        out: Optional[torch.Tensor] = None,
+        ):
+            (data,) = all_gather_outputs
+            (sample,) = metadata
+            if out is not None:
+                return
+            return Float8Tensor.make_like(sample, data=data), all_gather_outputs
 
     @classmethod
     def make_like(
@@ -901,7 +921,30 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=data_view)
-
+        
+        # Related to FSDP2
+        # print(f'__torch_dispatch__ call from TE FP8 func:{func}\ntypes:{types}\nargs:{args}\nkwargs:{kwargs}\n')
+        if func == aten.split.Tensor:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
+        if func == aten.new_zeros.default:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(tensor, data=func_out)
+        
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
 
