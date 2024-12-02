@@ -145,6 +145,14 @@ def make_mask(
     Create attention mask based on mask type. A `True` value in the mask means
     masking out the corresponding position and a `False` value means allowing
     that position to participate in attention.
+
+    - segment_ids should start with 1, and using 0s for the paddings.
+      Expected that each segment starts without paddings.
+    - segment_pos marks the token position in the segments.
+
+    A example pair of segments_ids and segment_pos:
+    segment_ids: [1, 1, 1, 0, 2, 2, 2, 3, 3, 3, 4, 0, 0, 5, 5, 5]
+    segment_pos: [0, 1, 2, 3, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
     """
     inv_mask = make_attention_mask(
         segment_ids_q, segment_ids_kv, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
