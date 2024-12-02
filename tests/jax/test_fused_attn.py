@@ -49,6 +49,7 @@ def init():
     yield
 
 
+@partial(jax.jit, static_argnums=(5, 6, 7, 8, 9))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
@@ -101,6 +102,7 @@ def general_dot_product_attention(
     return context
 
 
+@jax.jit
 def make_causal_mask(
     segment_ids_q: ArrayLike,
     segment_ids_kv: ArrayLike,
@@ -130,9 +132,10 @@ def print_mask(mask):
     print("-" * 20)
 
 
+@partial(jax.jit, static_argnums=(4, 5))
 def make_mask(
-    q_token: ArrayLike,
-    kv_token: ArrayLike,
+    segment_ids_q: ArrayLike,
+    segment_ids_kv: ArrayLike,
     segment_pos_q: ArrayLike,
     segment_pos_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
@@ -144,16 +147,16 @@ def make_mask(
     that position to participate in attention.
     """
     inv_mask = make_attention_mask(
-        q_token, kv_token, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
+        segment_ids_q, segment_ids_kv, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
     if attn_mask_type.is_causal():
         if segment_pos_q is None:
             segment_pos_q = jnp.broadcast_to(
-                jnp.arange(q_token.shape[-1], dtype=jnp.int32), q_token.shape
+                jnp.arange(segment_ids_q.shape[-1], dtype=jnp.int32), segment_ids_q.shape
             )
         if segment_pos_kv is None:
             segment_pos_kv = jnp.broadcast_to(
-                jnp.arange(kv_token.shape[-1], dtype=jnp.int32), kv_token.shape
+                jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
             )
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
@@ -172,6 +175,7 @@ def make_mask(
     return mask
 
 
+@jax.jit
 def get_seqlens_and_offsets(segment_ids):
     batch, max_seqlen = segment_ids.shape
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
@@ -272,10 +276,10 @@ class BiasShape(Enum):
     Enum class to represent the different bias shapes used in the fused attention.
     """
 
-    BIAS_1HSS = "1HSS"
-    BIAS_B1SS = "B1SS"
-    BIAS_BHSS = "BHSS"
-    BIAS_11SS = "11SS"
+    _1HSS = "1HSS"
+    _B1SS = "B1SS"
+    _BHSS = "BHSS"
+    _11SS = "11SS"
 
 
 @dataclass
@@ -345,7 +349,7 @@ class FusedAttnRunner:
 
         if (
             self.attn_bias_type == AttnBiasType.POST_SCALE_BIAS
-            and self.bias_shape != BiasShape.BIAS_1HSS
+            and self.bias_shape != BiasShape._1HSS
         ):
             if self.attn_mask_type.is_padding():
                 pytest.skip(
@@ -372,18 +376,18 @@ class FusedAttnRunner:
 
         if self.attn_bias_type == AttnBiasType.NO_BIAS:
             bias_shape = None
-        elif self.bias_shape == BiasShape.BIAS_1HSS:
+        elif self.bias_shape == BiasShape._1HSS:
             bias_shape = (1, self.num_heads_q, self.max_seqlen_q, self.max_seqlen_kv)
-        elif self.bias_shape == BiasShape.BIAS_B1SS:
+        elif self.bias_shape == BiasShape._B1SS:
             bias_shape = (self.batch_size, 1, self.max_seqlen_q, self.max_seqlen_kv)
-        elif self.bias_shape == BiasShape.BIAS_BHSS:
+        elif self.bias_shape == BiasShape._BHSS:
             bias_shape = (
                 self.batch_size,
                 self.num_heads_q,
                 self.max_seqlen_q,
                 self.max_seqlen_kv,
             )
-        elif self.bias_shape == BiasShape.BIAS_11SS:
+        elif self.bias_shape == BiasShape._11SS:
             bias_shape = (1, 1, self.max_seqlen_q, self.max_seqlen_kv)
         else:
             pytest.fail(f"PyTest attempted to use an unrecognized bias_layout = {self.bias_shape}!")
@@ -393,7 +397,7 @@ class FusedAttnRunner:
         self.v = jax.random.uniform(v_key, v_shape, self.dtype, -1.0)
 
         if self.attn_bias_type != AttnBiasType.NO_BIAS:
-            if self.bias_shape == BiasShape.BIAS_1HSS:
+            if self.bias_shape == BiasShape._1HSS:
                 self.bias = jax.random.uniform(bias_key, bias_shape, self.dtype, -1.0)
             else:
                 # [b, 1, s, s], [b, h, s, s] and [1, 1, s, s] bias shapes are workarounds for
@@ -452,20 +456,23 @@ class FusedAttnRunner:
                     segment_id += 1
                 segment_pad[i, current_pos:sequence_length] = 1
 
+            segment_ids, segment_pos, segment_pad = map(
+                jnp.asarray, [segment_ids, segment_pos, segment_pad]
+            )
             segment_ids = jnp.where(segment_pad, 0, segment_ids)
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
-            self.token_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
+            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
             if self.qkv_layout == QKVLayout.T3HD:
-                self.token_kv = self.token_q
+                self.segment_ids_kv = self.segment_ids_q
                 self.segment_pos_kv = self.segment_pos_q
                 self.pad_kv = self.pad_q
             else:
-                self.token_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
+                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
                     self.num_segments_per_seq,
@@ -473,13 +480,17 @@ class FusedAttnRunner:
                 )
         else:
             self.num_segments_per_seq = 1
-            self.token_q, self.pad_q = gen_valid(self.batch_size, self.max_seqlen_q, pad_ratio)
-            self.token_kv, self.pad_kv = gen_valid(self.batch_size, self.max_seqlen_kv, pad_ratio)
+            self.segment_ids_q, self.pad_q = gen_valid(
+                self.batch_size, self.max_seqlen_q, pad_ratio
+            )
+            self.segment_ids_kv, self.pad_kv = gen_valid(
+                self.batch_size, self.max_seqlen_kv, pad_ratio
+            )
             self.segment_pos_q = self.segment_pos_kv = None
 
         self.mask = make_mask(
-            self.token_q,
-            self.token_kv,
+            self.segment_ids_q,
+            self.segment_ids_kv,
             self.segment_pos_q,
             self.segment_pos_kv,
             self.attn_mask_type,
@@ -487,8 +498,8 @@ class FusedAttnRunner:
         )
 
         if self.qkv_layout.is_thd():
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.token_q)
-            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.token_kv)
+            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
+            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
             self.mask_for_customcall = None  # THD format doesn't support mask
         else:
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
@@ -547,8 +558,6 @@ class FusedAttnRunner:
         """
 
         self._setup_inputs()
-        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape != BiasShape.BIAS_1HSS:
-            pytest.skip("Bias gradient calculation is only supported for 1HSS bias shape.")
 
         def grad_func(func, *args, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient
@@ -586,7 +595,7 @@ class FusedAttnRunner:
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
-        arg_nums = (0, 1, 2, 3) if self.bias_shape == BiasShape.BIAS_1HSS else (0, 1, 2)
+        arg_nums = (0, 1, 2, 3) if self.bias_shape == BiasShape._1HSS else (0, 1, 2)
 
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
@@ -629,7 +638,7 @@ class FusedAttnRunner:
         check_dqkv(primitive_dk, reference_dk, self.pad_kv)
         check_dqkv(primitive_dv, reference_dv, self.pad_kv)
 
-        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape.BIAS_1HSS:
+        if self.attn_bias_type != AttnBiasType.NO_BIAS and self.bias_shape == BiasShape._1HSS:
             primitive_dbias = primitive_dgrad[3]
             reference_dbias = reference_dgrad[3]
 
@@ -658,16 +667,6 @@ class FusedAttnRunner:
             )
 
 
-@pytest.mark.parametrize(
-    "attn_bias_type, bias_shape",
-    [
-        pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
-        pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape.BIAS_1HSS, id="POST_SCALE_BIAS-1HSS"),
-        pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape.BIAS_B1SS, id="POST_SCALE_BIAS-B1SS"),
-        pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape.BIAS_BHSS, id="POST_SCALE_BIAS-BHSS"),
-        pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape.BIAS_11SS, id="POST_SCALE_BIAS-11SS"),
-    ],
-)
 @pytest.mark.parametrize(
     "attn_mask_type",
     [
@@ -736,6 +735,16 @@ class TestFusedAttn:
             pytest.param(False, id="INFERENCE"),
         ],
     )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._B1SS, id="POST_SCALE_BIAS-B1SS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._BHSS, id="POST_SCALE_BIAS-BHSS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._11SS, id="POST_SCALE_BIAS-11SS"),
+        ],
+    )
     def _test_forward(
         b,
         s_q,
@@ -779,6 +788,13 @@ class TestFusedAttn:
         runner.test_forward()
 
     @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
     def test_backward(
         b,
         s_q,
