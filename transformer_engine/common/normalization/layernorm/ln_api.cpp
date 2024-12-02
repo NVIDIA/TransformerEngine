@@ -39,7 +39,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
 
-  if (workspace->data.shape.empty()) {
+  if (!workspace->data.shape.empty()) {
     CheckInputTensor(x, "x");
     CheckInputTensor(gamma, "gamma");
     CheckInputTensor(beta, "beta");
@@ -107,7 +107,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_CHECK(dbeta->data.shape == gamma.data.shape);
   NVTE_CHECK(dbeta->data.dtype == gamma.data.dtype);
 
-  if (workspace->data.shape.empty()) {
+  if (!workspace->data.shape.empty()) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(mu, "mu");
