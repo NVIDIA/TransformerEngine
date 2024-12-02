@@ -49,7 +49,7 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(5, 6, 7, 8, 9))
+@partial(jax.jit, static_argnums=(5, 6, 7, 9))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
@@ -124,12 +124,6 @@ def make_causal_mask(
         )
     inv_causal_mask = make_attention_mask(segment_pos_q, segment_pos_kv, jnp.greater_equal)
     return inv_causal_mask
-
-
-def print_mask(mask):
-    for row in mask[0].astype(jnp.int32):
-        print(" ".join(map(str, row)))
-    print("-" * 20)
 
 
 @partial(jax.jit, static_argnums=(4, 5))
@@ -223,8 +217,8 @@ def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
         query,
         key,
         value,
-        bias=bias,
-        mask=mask,
+        bias,
+        mask,
         deterministic=not kwargs["is_training"],
         scale_factor=kwargs["scaling_factor"],
         dropout_rate=kwargs["dropout_probability"],
@@ -325,11 +319,9 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
-        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout == QKVLayout.T3HD:
+        if self.qkv_layout.is_qkvpacked():
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
-
-        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout == QKVLayout.T3HD:
             if self.num_heads_q != self.num_heads_kv:
                 pytest.skip(f"{self.qkv_layout} requires num_heads_q == num_heads_kv")
 
@@ -486,6 +478,8 @@ class FusedAttnRunner:
                     self.num_segments_per_seq,
                     seed=2024,
                 )
+            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
+            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
@@ -495,7 +489,9 @@ class FusedAttnRunner:
                 self.batch_size, self.max_seqlen_kv, pad_ratio
             )
             self.segment_pos_q = self.segment_pos_kv = None
+            self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
 
+        # For reference code
         self.mask = make_mask(
             self.segment_ids_q,
             self.segment_ids_kv,
@@ -506,11 +502,8 @@ class FusedAttnRunner:
         )
 
         if self.qkv_layout.is_thd():
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
             self.mask_for_customcall = None  # THD format doesn't support mask
         else:
-            self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
             self.mask_for_customcall = self.mask
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
