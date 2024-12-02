@@ -101,14 +101,26 @@ def general_dot_product_attention(
     return context
 
 
-def make_causal_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
+def make_causal_mask(
+    segment_ids_q: ArrayLike,
+    segment_ids_kv: ArrayLike,
+    segment_pos_q: ArrayLike = None,
+    segment_pos_kv: ArrayLike = None,
+) -> Array:
     """
     Create inverse padded causal mask where `True` means allowing the corresponding
     position to participate in attention and `False` means masking out that position.
+    If segment_pos is not provided, aragne of the segment_ids will be applied.
     """
-    q_idxs = jnp.broadcast_to(jnp.arange(q_tokens.shape[-1], dtype=jnp.int32), q_tokens.shape)
-    kv_idxs = jnp.broadcast_to(jnp.arange(kv_tokens.shape[-1], dtype=jnp.int32), kv_tokens.shape)
-    inv_causal_mask = make_attention_mask(q_idxs, kv_idxs, jnp.greater_equal)
+    if segment_pos_q is None:
+        segment_pos_q = jnp.broadcast_to(
+            jnp.arange(segment_ids_q.shape[-1], dtype=jnp.int32), segment_ids_q.shape
+        )
+    if segment_pos_kv is None:
+        segment_pos_kv = jnp.broadcast_to(
+            jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
+        )
+    inv_causal_mask = make_attention_mask(segment_pos_q, segment_pos_kv, jnp.greater_equal)
     return inv_causal_mask
 
 
@@ -123,8 +135,6 @@ def make_mask(
     kv_token: ArrayLike,
     segment_pos_q: ArrayLike,
     segment_pos_kv: ArrayLike,
-    segment_pad_q: ArrayLike,
-    segment_pad_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
     window_size: Optional[Tuple[int, int]] = None,
 ) -> Array:
@@ -133,20 +143,18 @@ def make_mask(
     masking out the corresponding position and a `False` value means allowing
     that position to participate in attention.
     """
-
-    if segment_pad_q is not None:
-        q_token = jnp.where(segment_pad_q, 0, q_token)
-    if segment_pad_kv is not None:
-        kv_token = jnp.where(segment_pad_kv, 0, kv_token)
-
     inv_mask = make_attention_mask(
         q_token, kv_token, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
     if attn_mask_type.is_causal():
         if segment_pos_q is None:
-            segment_pos_q = jnp.broadcast_to(jnp.arange(q_token.shape[-1], dtype=jnp.int32), q_token.shape)
+            segment_pos_q = jnp.broadcast_to(
+                jnp.arange(q_token.shape[-1], dtype=jnp.int32), q_token.shape
+            )
         if segment_pos_kv is None:
-            segment_pos_kv = jnp.broadcast_to(jnp.arange(kv_token.shape[-1], dtype=jnp.int32), kv_token.shape)
+            segment_pos_kv = jnp.broadcast_to(
+                jnp.arange(kv_token.shape[-1], dtype=jnp.int32), kv_token.shape
+            )
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
@@ -164,10 +172,7 @@ def make_mask(
     return mask
 
 
-def get_seqlens_and_offsets(segment_ids, segment_pad=None):
-    if segment_pad is not None:
-        segment_ids = jnp.where(segment_pad, 0, segment_ids)
-
+def get_seqlens_and_offsets(segment_ids):
     batch, max_seqlen = segment_ids.shape
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
@@ -446,58 +451,45 @@ class FusedAttnRunner:
                     current_pos = segment_end
                     segment_id += 1
                 segment_pad[i, current_pos:sequence_length] = 1
+
+            segment_ids = jnp.where(segment_pad, 0, segment_ids)
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
-            self.token_q, self.segment_pos_q, self.segment_pad_q = generate_random_segment_ids(
+            self.token_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
-            # TODO(rewang): Check if qkvpacked supported different q/kv
-            # TODO(rewang): Causal with different q/kv segment_id fails
-            if self.qkv_layout == QKVLayout.T3HD: # or self.attn_mask_type.is_causal():
+            if self.qkv_layout == QKVLayout.T3HD:
                 self.token_kv = self.token_q
                 self.segment_pos_kv = self.segment_pos_q
-                self.segment_pad_kv = self.segment_pad_q
+                self.pad_kv = self.pad_q
             else:
-                self.token_kv, self.segment_pos_kv, self.segment_pad_kv = generate_random_segment_ids(
+                self.token_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
                     self.num_segments_per_seq,
                     seed=2024,
                 )
-            self.pad_q = self.segment_pad_q
-            self.pad_kv = self.segment_pad_kv
         else:
             self.num_segments_per_seq = 1
             self.token_q, self.pad_q = gen_valid(self.batch_size, self.max_seqlen_q, pad_ratio)
             self.token_kv, self.pad_kv = gen_valid(self.batch_size, self.max_seqlen_kv, pad_ratio)
             self.segment_pos_q = self.segment_pos_kv = None
-            self.segment_pad_q = self.segment_pad_kv = None
 
         self.mask = make_mask(
             self.token_q,
             self.token_kv,
             self.segment_pos_q,
             self.segment_pos_kv,
-            self.segment_pad_q,
-            self.segment_pad_kv,
             self.attn_mask_type,
             self.window_size,
         )
 
         if self.qkv_layout.is_thd():
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(
-                self.token_q, self.segment_pad_q
-            )
-            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(
-                self.token_kv, self.segment_pad_kv
-            )
+            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.token_q)
+            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.token_kv)
             self.mask_for_customcall = None  # THD format doesn't support mask
-            print(f'{self.seqlens_q=}')
-            print(f'{self.offsets_q=}')
-            print(f'{self.seqlens_kv=}')
-            print(f'{self.offsets_kv=}')
         else:
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
             self.mask_for_customcall = self.mask
