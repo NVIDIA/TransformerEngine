@@ -8,6 +8,7 @@
 
 #include "common.h"
 
+#include <bitset>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -35,16 +36,15 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-extern constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
-                                  DType itype, DType otype, DType ctype, uint64_t batch_size,
-                                  uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned) {
-  uint64_t type_key = static_cast<uint32_t>(wtype) | (static_cast<uint32_t>(itype) << 2) |
-                      (static_cast<uint32_t>(otype) << 4) | (static_cast<uint32_t>(ctype) << 6) |
-                      (uint32_t(NormType) << 8) | (uint32_t(NormStage)) << 9 |
-                      (uint32_t(zero_centered_gamma) << 10);
-  // We have 25 bits to hash batch_size or hidden_size. Undefined behavior when these sizes > 2^25
-  uint64_t key = hidden_size | (batch_size << 25) | (uint64_t(is_tuned) << 50) | (type_key << 51);
-  return key;
+TupleKeyType get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                     DType otype, DType ctype, uint64_t batch_size, uint64_t hidden_size,
+                     bool zero_centered_gamma, bool is_tuned) {
+  // TODO: Add scaling_mode to general_key is needed
+  uint64_t general_key = static_cast<uint32_t>(itype) | (static_cast<uint32_t>(otype) << 3) |
+                         (static_cast<uint32_t>(ctype) << 6) | (static_cast<uint32_t>(wtype) << 9) |
+                         (uint32_t(NormType) << 12) | (uint32_t(NormStage)) << 14 |
+                         (uint32_t(zero_centered_gamma) << 16);
+  return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
 }
 
 template <typename KernelParamsType>
@@ -63,7 +63,7 @@ TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     kernel_params.fp8_out = is_fp8_dtype(otype);
   }
   // TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
-  uint64_t key =
+  auto key =
       get_key(NormType, NormStage, wtype, itype, otype, ctype, 0, hidden_size, false, is_tuned);
   _kernel = KernelRegistry::getKernel(key);
 

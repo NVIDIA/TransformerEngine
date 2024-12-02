@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <stdexcept>
+#include <tuple>
 #include <typeindex>
 #include <unordered_map>
 #include <vector>
@@ -138,16 +139,28 @@ enum class NVTE_Norm_Backend { Te, Cudnn };
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
-constexpr uint64_t get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
-                           DType itype, DType otype, DType ctype, uint64_t batch_size,
-                           uint64_t hidden_size, bool zero_centered_gamma, bool is_tuned);
+using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
+struct TupleHash {
+  size_t operator()(const TupleKeyType& t) const {
+    size_t seed = 0;
+    std::hash<uint64_t> hasher;
+    seed ^= hasher(std::get<0>(t)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= hasher(std::get<1>(t)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    seed ^= hasher(std::get<2>(t)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+    return seed;
+  }
+};
+
+TupleKeyType get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                     DType otype, DType ctype, uint64_t batch_size, uint64_t hidden_size,
+                     bool zero_centered_gamma, bool is_tuned);
 
 template <typename KernelParamsType>
 class TeNormalizationRegistry {
  private:
   using Function = std::function<void(LaunchParams<KernelParamsType>&, const bool)>;
-  std::unordered_map<uint64_t, Function> tuned_function_map;
-  std::unordered_map<uint64_t, std::map<int64_t, Function>> general_function_map;
+  std::unordered_map<TupleKeyType, Function, TupleHash> tuned_function_map;
+  std::unordered_map<uint64_t, std::map<uint64_t, Function>> general_function_map;
 
   TeNormalizationRegistry() = default;
 
@@ -156,33 +169,29 @@ class TeNormalizationRegistry {
     return registry;
   }
 
-  static bool _is_tuned(const int64_t key) { return (key & (1ull << 50)); };
-  static uint64_t _get_hidden_size(const uint64_t key) { return (key & ((1ull << 25) - 1)); };
-  static uint64_t _get_general_key(const uint64_t key) { return ((key >> 51) << 51); };
-
  public:
-  static int registerFunction(uint64_t key,
+  static int registerFunction(TupleKeyType key,
                               void (*func)(LaunchParams<KernelParamsType>&, const bool)) {
-    if (_is_tuned(key))
+    auto [general_key, batch_size, hidden_size, is_tuned] = key;
+    if (is_tuned)
       getInstance().tuned_function_map.emplace(key, Function(func));
     else
-      getInstance().general_function_map[_get_general_key(key)].emplace(_get_hidden_size(key),
-                                                                        Function(func));
+      getInstance().general_function_map[general_key].emplace(hidden_size, Function(func));
     return 0;
   }
 
-  static Function getKernel(uint64_t key) {
+  static Function getKernel(TupleKeyType key) {
     auto& instance = getInstance();
-    if (_is_tuned(key)) {
+    auto [general_key, batch_size, hidden_size, is_tuned] = key;
+    if (is_tuned) {
       auto it = instance.tuned_function_map.find(key);
       if (it != instance.tuned_function_map.end()) return it->second;
     }
-    auto general_key = _get_general_key(key);
     if (instance.general_function_map.count(general_key) == 0) {
       NVTE_ERROR("Unavailable kernel for this normalization config.");
     }
     auto& general_func_map = instance.general_function_map.at(general_key);
-    auto func_iter = general_func_map.lower_bound(_get_hidden_size(key));
+    auto func_iter = general_func_map.lower_bound(hidden_size);
     if (func_iter == general_func_map.end()) {
       return general_func_map.rbegin()->second;  // Hidden size is too big, need to use multi-CTA
     } else {
@@ -293,7 +302,8 @@ class NormalizationPlanRegistry {
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlanBase>> normalizationPlanMap;
+  std::unordered_map<TupleKeyType, std::unique_ptr<NormalizationPlanBase>, TupleHash>
+      normalizationPlanMap;
 };
 
 using byte = uint8_t;
