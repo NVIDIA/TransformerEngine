@@ -112,9 +112,17 @@ def make_causal_mask(q_tokens: ArrayLike, kv_tokens: ArrayLike) -> Array:
     return inv_causal_mask
 
 
+def print_mask(mask):
+    for row in mask[0].astype(jnp.int32):
+        print(" ".join(map(str, row)))
+    print("-" * 20)
+
+
 def make_mask(
     q_token: ArrayLike,
     kv_token: ArrayLike,
+    segment_pos_q: ArrayLike,
+    segment_pos_kv: ArrayLike,
     segment_pad_q: ArrayLike,
     segment_pad_kv: ArrayLike,
     attn_mask_type: AttnMaskType,
@@ -125,17 +133,24 @@ def make_mask(
     masking out the corresponding position and a `False` value means allowing
     that position to participate in attention.
     """
+
+    if segment_pad_q is not None:
+        q_token = jnp.where(segment_pad_q, 0, q_token)
+    if segment_pad_kv is not None:
+        kv_token = jnp.where(segment_pad_kv, 0, kv_token)
+
     inv_mask = make_attention_mask(
         q_token, kv_token, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
     if attn_mask_type.is_causal():
-        inv_causal_mask = make_causal_mask(q_token, kv_token)
-        inv_mask = combine_masks(inv_causal_mask, inv_mask)
-    if segment_pad_q is not None and segment_pad_kv is not None:
-        inv_pad_mask = make_attention_mask(
-            segment_pad_q, segment_pad_kv, lambda x, y: jnp.logical_and(x != 1, y != 1)
+        if segment_pos_q is None:
+            segment_pos_q = jnp.broadcast_to(jnp.arange(q_token.shape[-1], dtype=jnp.int32), q_token.shape)
+        if segment_pos_kv is None:
+            segment_pos_kv = jnp.broadcast_to(jnp.arange(kv_token.shape[-1], dtype=jnp.int32), kv_token.shape)
+        inv_causal_mask = make_attention_mask(
+            segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
-        inv_mask = combine_masks(inv_pad_mask, inv_mask)
+        inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     if window_size is not None:
         max_seqlen_q = inv_mask.shape[-2]
@@ -149,7 +164,10 @@ def make_mask(
     return mask
 
 
-def get_seqlens_and_offsets(segment_ids, segment_pad):
+def get_seqlens_and_offsets(segment_ids, segment_pad=None):
+    if segment_pad is not None:
+        segment_ids = jnp.where(segment_pad, 0, segment_ids)
+
     batch, max_seqlen = segment_ids.shape
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
@@ -157,7 +175,7 @@ def get_seqlens_and_offsets(segment_ids, segment_pad):
 
     def _find_offsets(x):
         same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
-        first_column = jnp.ones((x.shape[0], 1), dtype=bool)
+        first_column = x[..., :1] != 0
         same_as_previous = jnp.hstack((first_column, same_as_previous))
         return jax.vmap(partial(jnp.argwhere, size=x.shape[1], fill_value=-1))(
             same_as_previous
@@ -165,13 +183,9 @@ def get_seqlens_and_offsets(segment_ids, segment_pad):
 
     offsets = _find_offsets(segment_ids)
     offsets = jnp.insert(offsets, -1, values=-1, axis=-1)
-    if segment_pad is not None:
-        segment_id_with_paddings = jnp.where(segment_pad, 0, segment_ids)
-        padding_aware_seqlen = bincount_vmap(segment_id_with_paddings)
-        output = jnp.insert(padding_aware_seqlen[..., 1:], -1, values=0, axis=-1)
-    else:
-        output = jnp.insert(seqlens, -1, values=0, axis=-1)
-    return output, offsets
+    seqlens = jnp.insert(seqlens, -1, values=0, axis=-1)
+    seqlens = jnp.where(seqlens, seqlens, -1)
+    return seqlens, offsets
 
 
 @jax.jit
@@ -294,7 +308,7 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
 
-        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout.is_thd():
+        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout == QKVLayout.T3HD:
             if self.max_seqlen_q != self.max_seqlen_kv:
                 pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
 
@@ -408,6 +422,8 @@ class FusedAttnRunner:
             rng = np.random.default_rng(seed=seed)
             # [1, 1, 1, 2, 2, 3, 3, 3, 3, 0, 0], 0 means pad
             segment_ids = np.zeros((batch_size, sequence_length), dtype=int)
+            segment_pos = np.zeros((batch_size, sequence_length), dtype=int)
+            # [0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 0]
             # [0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1], 1 means pad
             segment_pad = np.zeros((batch_size, sequence_length), dtype=int)
 
@@ -423,26 +439,28 @@ class FusedAttnRunner:
                         break
                     segment_end = current_pos + segment_size
                     segment_ids[i, current_pos:segment_end] = segment_id
+                    segment_pos[i, current_pos:segment_end] = np.arange(segment_size)
                     if with_segment_pad:
                         num_valid = rng.integers(1, segment_size + 1)
                         segment_pad[i, current_pos + num_valid : segment_end] = 1
                     current_pos = segment_end
                     segment_id += 1
                 segment_pad[i, current_pos:sequence_length] = 1
-            return segment_ids, segment_pad
+            return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
             self.num_segments_per_seq = 2
-            self.token_q, self.segment_pad_q = generate_random_segment_ids(
+            self.token_q, self.segment_pos_q, self.segment_pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
             # TODO(rewang): Check if qkvpacked supported different q/kv
             # TODO(rewang): Causal with different q/kv segment_id fails
-            if self.qkv_layout == QKVLayout.T3HD or self.attn_mask_type.is_causal():
+            if self.qkv_layout == QKVLayout.T3HD: # or self.attn_mask_type.is_causal():
                 self.token_kv = self.token_q
+                self.segment_pos_kv = self.segment_pos_q
                 self.segment_pad_kv = self.segment_pad_q
             else:
-                self.token_kv, self.segment_pad_kv = generate_random_segment_ids(
+                self.token_kv, self.segment_pos_kv, self.segment_pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
                     self.num_segments_per_seq,
@@ -454,11 +472,14 @@ class FusedAttnRunner:
             self.num_segments_per_seq = 1
             self.token_q, self.pad_q = gen_valid(self.batch_size, self.max_seqlen_q, pad_ratio)
             self.token_kv, self.pad_kv = gen_valid(self.batch_size, self.max_seqlen_kv, pad_ratio)
+            self.segment_pos_q = self.segment_pos_kv = None
             self.segment_pad_q = self.segment_pad_kv = None
 
         self.mask = make_mask(
             self.token_q,
             self.token_kv,
+            self.segment_pos_q,
+            self.segment_pos_kv,
             self.segment_pad_q,
             self.segment_pad_kv,
             self.attn_mask_type,
@@ -473,6 +494,10 @@ class FusedAttnRunner:
                 self.token_kv, self.segment_pad_kv
             )
             self.mask_for_customcall = None  # THD format doesn't support mask
+            print(f'{self.seqlens_q=}')
+            print(f'{self.offsets_q=}')
+            print(f'{self.seqlens_kv=}')
+            print(f'{self.offsets_kv=}')
         else:
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
             self.mask_for_customcall = self.mask
