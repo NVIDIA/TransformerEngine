@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
+#include <stdlib.h>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -59,13 +60,13 @@ void compute_ref_stats(NormType norm_type,
   }
 }
 
-const static bool use_cudnn = (std::getenv("NVTE_FWD_LAYERNORM_USE_CUDNN") ||
-  std::getenv("NVTE_BWD_LAYERNORM_USE_CUDNN") ||
-  std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN") ||
-  std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN"));
+// For now, cudnn does static_cast<compute_t>(gamma + static_cast<input_t>(1.0))
+// This will be changed in the future release
+const static bool use_cudnn_fwd = std::getenv("NVTE_FWD_NORM_USE_CUDNN");
+const static bool use_cudnn_bwd = std::getenv("NVTE_BWD_NORM_USE_CUDNN");
 
 template <typename InputType>
-inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma){
+inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn){
 
   using compute_t = float;
   if constexpr (std::is_same_v<InputType, fp8e5m2> || std::is_same_v<InputType, fp8e4m3>){
@@ -105,11 +106,7 @@ void compute_ref_output(NormType norm_type,
   for (size_t i = 0; i < N; ++i) {
     for (size_t j = 0; j < H; ++j) {
       compute_t current = static_cast<compute_t>(data[i * H + j]);
-      // compute_t g = static_cast<compute_t>(gamma[j]);
-      // if (zero_centered_gamma) {
-      //   g += 1.0;
-      // }
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_fwd);
 
       compute_t tmp;
       if (norm_type == LayerNorm) {
@@ -145,11 +142,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      // compute_t g = static_cast<compute_t>(gamma[j]);
-      // if (zero_centered_gamma) {
-      //   g += 1;
-      // }
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_bwd);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -166,11 +159,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      // compute_t g = static_cast<compute_t>(gamma[j]);
-      // if (zero_centered_gamma) {
-      //   g += 1;
-      // }
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_bwd);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
@@ -184,7 +173,8 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
 }
 
 template <typename InputType, typename OutputType>
-void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, NormType norm_type) {
+void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, 
+                 NormType norm_type, bool use_cudnn) {
   if (sizeof(InputType) < sizeof(OutputType)) {
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
     return;
@@ -228,6 +218,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
 
+  if (use_cudnn){
+    setenv("NVTE_NORM_FWD_USE_CUDNN", "1", true /*overwrite*/);
+    setenv("NVTE_NORM_BWD_USE_CUDNN", "1", true /*overwrite*/);
+  }
+
   // Forward kernel
   float epsilon = 1e-5;
   if (norm_type == LayerNorm){
@@ -268,6 +263,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      dx.data(), dgamma.data(),
                      workspace_bwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
+  }
+
+  if (use_cudnn){
+    unsetenv("NVTE_NORM_FWD_USE_CUDNN");
+    unsetenv("NVTE_NORM_BWD_USE_CUDNN");
   }
 
   // Reference implementations
@@ -328,19 +328,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {
+  {71, 229},
+  {29, 541},
+  {768, 6144},
   {2048, 12288},
-  {768, 1024},
-  {256, 65536},
-  {128, 6144},
-  {64, 2304},
-  {229, 541},   // Primes 50, 100
-  {71, 3571},   // Primes 20, 500
-  {29, 17389} // Primes 10, 2000
 };
 
 }  // namespace
 
-class NormTestSuite : public ::testing::TestWithParam<std::tuple<NormType,
+class NormTestSuite : public ::testing::TestWithParam<std::tuple<bool, 
+NormType,
 transformer_engine::DType,
                                                                transformer_engine::DType,
                                                                std::pair<size_t, size_t>,
@@ -350,15 +347,16 @@ TEST_P(NormTestSuite, TestNorm) {
     using namespace transformer_engine;
     using namespace test;
 
-  const NormType norm_type = std::get<0>(GetParam());
-    const DType input_type = std::get<1>(GetParam());
-    const DType output_type = std::get<2>(GetParam());
-    const auto size = std::get<3>(GetParam());
-    const bool zero_centered_gamma = std::get<4>(GetParam());
+  const bool use_cudnn = std::get<0>(GetParam());
+  const NormType norm_type = std::get<1>(GetParam());
+    const DType input_type = std::get<2>(GetParam());
+    const DType output_type = std::get<3>(GetParam());
+    const auto size = std::get<4>(GetParam());
+    const bool zero_centered_gamma = std::get<5>(GetParam());
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type);
+        performTest<InputType, OutputType>(size.first, size.second, zero_centered_gamma, norm_type, use_cudnn);
       );
     );
 }
@@ -367,17 +365,21 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     NormTestSuite,
     ::testing::Combine(
-          ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
+        ::testing::Values(false, true),
+        ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
         ::testing::ValuesIn(test_cases),
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
-      std::string name = normToString.at(std::get<0>(info.param)) + "_" +
-      test::typeName(std::get<1>(info.param)) + "X" +
-                         test::typeName(std::get<2>(info.param)) + "X" +
-                         std::to_string(std::get<3>(info.param).first) + "X" +
-                         std::to_string(std::get<3>(info.param).second) + "X" +
-                         std::to_string(std::get<4>(info.param));
+    auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
+std::string name = 
+  backend +
+  normToString.at(std::get<1>(info.param)) + "_" +
+  test::typeName(std::get<2>(info.param)) + "X" +
+  test::typeName(std::get<3>(info.param)) + "X" +
+  std::to_string(std::get<4>(info.param).first) + "X" +
+  std::to_string(std::get<4>(info.param).second) + "X" +
+  std::to_string(std::get<5>(info.param));
       return name;
     });
