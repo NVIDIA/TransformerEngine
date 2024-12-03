@@ -21,8 +21,8 @@
 #include <vector>
 
 #include "../common.h"
-#include "../util/system.h"
 #include "../cudnn_utils.h"
+#include "../util/system.h"
 
 namespace transformer_engine {
 

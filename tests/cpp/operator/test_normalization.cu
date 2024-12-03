@@ -173,7 +173,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
 }
 
 template <typename InputType, typename OutputType>
-void performTest(const size_t N, const size_t H, const bool zero_centered_gamma, 
+void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                  NormType norm_type, bool use_cudnn) {
   if (sizeof(InputType) < sizeof(OutputType)) {
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
@@ -336,7 +336,7 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
 
 }  // namespace
 
-class NormTestSuite : public ::testing::TestWithParam<std::tuple<bool, 
+class NormTestSuite : public ::testing::TestWithParam<std::tuple<bool,
 NormType,
 transformer_engine::DType,
                                                                transformer_engine::DType,
@@ -373,7 +373,7 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::Values(false, true)),
     [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
-std::string name = 
+std::string name =
   backend +
   normToString.at(std::get<1>(info.param)) + "_" +
   test::typeName(std::get<2>(info.param)) + "X" +

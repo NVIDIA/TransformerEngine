@@ -416,12 +416,8 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   return normalizationPlanMap[key].get();
 }
 
-bool use_cudnn_norm_fwd(){
-  return transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
-}
-bool use_cudnn_norm_bwd(){
-  return transformer_engine::getenv<bool>("NVTE_NORM_BWD_USE_CUDNN");
-}
+bool use_cudnn_norm_fwd() { return transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"); }
+bool use_cudnn_norm_bwd() { return transformer_engine::getenv<bool>("NVTE_NORM_BWD_USE_CUDNN"); }
 
 }  //  namespace normalization
 }  // namespace transformer_engine
