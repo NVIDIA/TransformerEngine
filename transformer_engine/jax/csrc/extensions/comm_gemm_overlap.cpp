@@ -17,7 +17,7 @@ namespace transformer_engine {
 namespace jax {
 
 Error_Type CublasltHandleInitFFI(Variadic_Buffer_Type args, Variadic_Result_Type rets,
-                              Dictionary attrs) {
+                                 Dictionary attrs) {
   cublasLtHandle_t handle;
   NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
   return ffi_with_cuda_error_check();
@@ -42,12 +42,13 @@ pybind11::object GetOverlapBuffer(const std::string &name, bool sharded) {
   return capsule;
 };
 
-void BootstrapCommGemmOverlap(
-    const std::vector<size_t> &buffer_shape, DType buffer_dtype, const std::string &name,
-    const std::string &method, CommOverlapType comm_type, int64_t myrank, int64_t numranks,
-    int64_t tp_size, int64_t num_splits, int64_t num_max_streams, int64_t comm_cga_size,
-    int64_t num_comm_sm, bool set_sm_margin, bool use_ce, bool atomic_gemm, bool aggregate,
-    bool pipeline_rs_overlap_first_gemm) {
+void BootstrapCommGemmOverlap(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                              const std::string &name, const std::string &method,
+                              CommOverlapType comm_type, int64_t myrank, int64_t numranks,
+                              int64_t tp_size, int64_t num_splits, int64_t num_max_streams,
+                              int64_t comm_cga_size, int64_t num_comm_sm, bool set_sm_margin,
+                              bool use_ce, bool atomic_gemm, bool aggregate,
+                              bool pipeline_rs_overlap_first_gemm) {
 #ifndef NVTE_UB_WITH_MPI
   NVTE_ERROR(
       std::string("Comm+GEMM overlap in TE/JAX requires bootstrapping Userbuffers with MPI. ") +
@@ -57,10 +58,10 @@ void BootstrapCommGemmOverlap(
   // Initialize overlap object -- this allocates the comm buffer
   NVTE_CHECK(_overlaps.find(name) == _overlaps.end(), name, " is already initialized!");
   if (method == "ring_exchange") {
-    _overlaps[name] = new CommOverlapP2PBase(
-        buffer_shape, buffer_dtype, myrank, numranks, -1, -1, -1, -1, tp_size, &_dummy_allgather,
-        &_dummy_barrier, comm_type, num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin,
-        use_ce, atomic_gemm, aggregate);
+    _overlaps[name] = new CommOverlapP2PBase(buffer_shape, buffer_dtype, myrank, numranks, -1, -1,
+                                             -1, -1, tp_size, &_dummy_allgather, &_dummy_barrier,
+                                             comm_type, num_max_streams, comm_cga_size, num_comm_sm,
+                                             set_sm_margin, use_ce, atomic_gemm, aggregate);
   } else {
     _overlaps[name] = new CommOverlapBase(
         buffer_shape, buffer_dtype, myrank, numranks, -1, -1, -1, -1, tp_size, &_dummy_allgather,
@@ -69,19 +70,21 @@ void BootstrapCommGemmOverlap(
   }
 };
 
-Error_Type BootstrapCommGemmOverlapFFI(
-    cudaStream_t, Buffer_Type sample_buffer, std::string_view name, std::string_view method,
-    int64_t comm_type_flag, int64_t myrank, int64_t numranks, int64_t tp_size, int64_t num_splits,
-    int64_t num_max_streams, int64_t cga_size, int64_t num_comm_sm, bool set_sm_margin,
-    bool use_ce, bool atomic_gemm, bool aggregate, bool pipeline_rs_overlap_first_gemm) {
-  auto buffer_shape = std::vector<size_t>(sample_buffer.dimensions().begin(),
-                                          sample_buffer.dimensions().end());
+Error_Type BootstrapCommGemmOverlapFFI(cudaStream_t, Buffer_Type sample_buffer,
+                                       std::string_view name, std::string_view method,
+                                       int64_t comm_type_flag, int64_t myrank, int64_t numranks,
+                                       int64_t tp_size, int64_t num_splits, int64_t num_max_streams,
+                                       int64_t cga_size, int64_t num_comm_sm, bool set_sm_margin,
+                                       bool use_ce, bool atomic_gemm, bool aggregate,
+                                       bool pipeline_rs_overlap_first_gemm) {
+  auto buffer_shape =
+      std::vector<size_t>(sample_buffer.dimensions().begin(), sample_buffer.dimensions().end());
   auto buffer_dtype = convert_ffi_datatype_to_te_dtype(sample_buffer.element_type());
-  BootstrapCommGemmOverlap(
-      buffer_shape, buffer_dtype, static_cast<std::string>(name), static_cast<std::string>(method),
-      static_cast<CommOverlapType>(comm_type_flag), myrank, numranks, tp_size, num_splits,
-      num_max_streams, cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate,
-      pipeline_rs_overlap_first_gemm);
+  BootstrapCommGemmOverlap(buffer_shape, buffer_dtype, static_cast<std::string>(name),
+                           static_cast<std::string>(method),
+                           static_cast<CommOverlapType>(comm_type_flag), myrank, numranks, tp_size,
+                           num_splits, num_max_streams, cga_size, num_comm_sm, set_sm_margin,
+                           use_ce, atomic_gemm, aggregate, pipeline_rs_overlap_first_gemm);
   return ffi_with_cuda_error_check();
 }
 
@@ -120,9 +123,7 @@ Error_Type DestroyCommGemmOverlapFFI(cudaStream_t stream, std::string_view name)
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(DestroyComMGemmOverlapHandler, DestroyCommGemmOverlapFFI,
-                              FFI::Bind()
-                                   .Ctx<FFI_Stream_Type>()
-                                   .Attr<std::string_view>("name"),
+                              FFI::Bind().Ctx<FFI_Stream_Type>().Attr<std::string_view>("name"),
                               FFI_CudaGraph_Traits);
 
 void CopyIntoOverlapBufferImpl(cudaStream_t stream, void *input_ptr,
@@ -205,14 +206,16 @@ void CommGemmOverlapImpl(void *lhs, const std::vector<size_t> &lhs_shape, DType 
   }
 }
 
-Error_Type CommGemmOverlapFFI(
-    cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
-    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input, Buffer_Type out,
-    Buffer_Type out_amax, Buffer_Type out_scale, Buffer_Type extra_out, Result_Type out_updated,
-    Result_Type out_amax_updated, Result_Type out_scale_updated, Result_Type pre_gelu_out,
-    Result_Type bias_grad, Result_Type extra_out_updated, Result_Type workspace, bool lhs_trans,
-    bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad, bool accumulate,
-    bool use_split_accumulator, int64_t comm_type_flag, std::string_view name) {
+Error_Type CommGemmOverlapFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv,
+                              Buffer_Type rhs, Buffer_Type rhs_scale_inv, Buffer_Type bias,
+                              Buffer_Type gelu_input, Buffer_Type out, Buffer_Type out_amax,
+                              Buffer_Type out_scale, Buffer_Type extra_out, Result_Type out_updated,
+                              Result_Type out_amax_updated, Result_Type out_scale_updated,
+                              Result_Type pre_gelu_out, Result_Type bias_grad,
+                              Result_Type extra_out_updated, Result_Type workspace, bool lhs_trans,
+                              bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad,
+                              bool accumulate, bool use_split_accumulator, int64_t comm_type_flag,
+                              std::string_view name) {
   // Inputs
   auto lhs_ptr = lhs.untyped_data();
   auto lhs_shape = std::vector<size_t>(lhs.dimensions().begin(), lhs.dimensions().end());
@@ -232,8 +235,8 @@ Error_Type CommGemmOverlapFFI(
 
   // Outputs
   auto out_updated_ptr = out_updated->untyped_data();
-  auto out_shape = std::vector<size_t>(out_updated->dimensions().begin(),
-                                       out_updated->dimensions().end());
+  auto out_shape =
+      std::vector<size_t>(out_updated->dimensions().begin(), out_updated->dimensions().end());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(out_updated->element_type());
   auto out_amax_updated_ptr = reinterpret_cast<float *>(out_amax_updated->untyped_data());
   auto out_scale_updated_ptr = reinterpret_cast<float *>(out_scale_updated->untyped_data());

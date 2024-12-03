@@ -176,9 +176,11 @@ def _gemm_fwd_rule(
     )
 
     final_out = out
-    if (comm_overlap_config is not None
+    if (
+        comm_overlap_config is not None
         and comm_overlap_config["method"] != "bulk"
-        and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+        and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS
+    ):
         # Non-bulk RS overlap output is in extra output, not usual output
         final_out = extra_out
 
@@ -213,8 +215,10 @@ def _gemm_bwd_rule(
     if comm_overlap_config is not None:
         dgrad_overlap_name = comm_overlap_config["name"].rstrip("_fprop") + "_dgrad"
         dgrad_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(dgrad_overlap_name, None)
-        if (dgrad_overlap_config["method"] == "bulk"
-            and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.AG):
+        if (
+            dgrad_overlap_config["method"] == "bulk"
+            and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.AG
+        ):
             # If DGRAD is bulk overlap, copy input X into comm buffer to be all-gathered in
             # preparation for WGRAD.
             wgrad_overlap_name = comm_overlap_config["name"].rstrip("_fprop") + "_wgrad"
@@ -260,9 +264,11 @@ def _gemm_bwd_rule(
         comm_overlap_config=dgrad_overlap_config,
     )
 
-    if (dgrad_overlap_config is not None
+    if (
+        dgrad_overlap_config is not None
         and dgrad_overlap_config["method"] != "bulk"
-        and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+        and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.RS
+    ):
         # Otherwise, if DGRAD overlap is RS overlap, DGRAD output is the extra output tensor
         dgrad = dgrad_extra_out
 
@@ -971,9 +977,11 @@ def initialize_comm_gemm_overlaps(
         # Check if both AG and RS overlaps use `atomic GEMM`` + `p2p ring-exchange`.
         # Using atomic GEMM + p2p ring-exchange in only one of the pair breaks functionality.
         global layers_atomic_ring_exchange
-        if (overlap_atomic_gemm
+        if (
+            overlap_atomic_gemm
             and overlap_method == "ring_exchange"
-            and overlap_name in ag_rs_pairs):
+            and overlap_name in ag_rs_pairs
+        ):
             layers_atomic_ring_exchange += [overlap_name, ag_rs_pairs[overlap_name]]
         if overlap_name in rs_ag_pairs:
             assert_message = (
@@ -987,9 +995,7 @@ def initialize_comm_gemm_overlaps(
                 assert overlap_atomic_gemm and overlap_method == "ring_exchange", assert_message
             else:
                 if overlap_atomic_gemm and overlap_method == "ring_exchange":
-                    assert (
-                        rs_ag_pairs[overlap_name] in layers_atomic_ring_exchange
-                    ), assert_message
+                    assert rs_ag_pairs[overlap_name] in layers_atomic_ring_exchange, assert_message
 
         # Reduce buffer shape to 2D here in case the user initialized with batch dims
         buffer_shape = (reduce(operator.mul, shape[:-1], 1), shape[-1])
@@ -1052,7 +1058,7 @@ def destroy_comm_gemm_overlaps():
 
 def get_comm_overlap_config(name):
     global _ACTIVE_COMM_GEMM_OVERLAPS
-    assert name in _ACTIVE_COMM_GEMM_OVERLAPS, (
-        f"Comm+GEMM overlap for '{name}' has not been initialized!"
-    )
+    assert (
+        name in _ACTIVE_COMM_GEMM_OVERLAPS
+    ), f"Comm+GEMM overlap for '{name}' has not been initialized!"
     return _ACTIVE_COMM_GEMM_OVERLAPS[name]
