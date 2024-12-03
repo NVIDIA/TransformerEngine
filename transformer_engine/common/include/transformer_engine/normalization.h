@@ -21,7 +21,7 @@ extern "C" {
  *
  * The formula used:
  * @f[
- * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}}\gamma) + \beta
+ * y = \frac{x - E[x]}{\sqrt{Var[x] + \varepsilon}} \gamma + \beta
  * @f]
  *
  * Calling this function with workspace set to empty tensor will not perform the operation,
