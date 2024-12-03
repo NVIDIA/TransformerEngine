@@ -22,7 +22,6 @@
 
 #include "../common.h"
 #include "../cudnn_utils.h"
-#include "../util/system.h"
 
 namespace transformer_engine {
 
@@ -289,7 +288,7 @@ class NormalizationPlanRegistry {
   static NormalizationPlanRegistry& getInstance() {
     static NormalizationPlanRegistry instance;
     return instance;
-  }
+  };
 
   NormalizationPlanBase* getNormalizationPlan(NVTE_Norm_Backend NormBackend,
                                               NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
@@ -370,8 +369,8 @@ bool is_ptr_aligned(const Args*... ptrs) {
   return ((reinterpret_cast<uintptr_t>(ptrs) % Alignment == 0) && ...);
 }
 
-bool use_cudnn_norm_fwd();
-bool use_cudnn_norm_bwd();
+static const bool use_cudnn_norm_fwd = getenv<bool>("NVTE_FWD_NORM_USE_CUDNN");
+static const bool use_cudnn_norm_bwd = getenv<bool>("NVTE_BWD_NORM_USE_CUDNN");
 
 }  // namespace normalization
 }  // namespace transformer_engine

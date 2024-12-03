@@ -16,7 +16,6 @@ from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import DType as TEDType
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
