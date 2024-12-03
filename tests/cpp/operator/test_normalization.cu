@@ -32,7 +32,7 @@ enum NormType {
 
 std::map<NormType, std::string> normToString = {
   {NormType::LayerNorm, "LayerNorm"},
-  {NormType::RMSNorm, "RMSNorm"}
+  {NormType::RMSNorm, "RmsNorm"}
 };
 
 template <typename InputType>
@@ -316,12 +316,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   }
   compareResults("output", z, ref_output.get(), atol, rtol);
 
-  double atol_bwd = 1e-3;
-  double rtol_bwd = 1e-3;
-  if (otype == DType::kBFloat16 || otype == DType::kFloat8E4M3){
-    atol_bwd = 8e-3;
-    rtol_bwd = 8e-3;
-  }
+  double atol_bwd = 5e-4;
+  double rtol_bwd = 5e-4;
   compareResults("dx", dx, ref_dx.get(), atol_bwd, rtol_bwd);
   compareResults("dgamma", dgamma, ref_dgamma.get(), atol_bwd, rtol_bwd);
   compareResults("dbeta", dbeta, ref_dbeta.get(), atol_bwd, rtol_bwd);
