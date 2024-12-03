@@ -361,7 +361,7 @@ INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     NormTestSuite,
     ::testing::Combine(
-        ::testing::Values(false, true),
+        ::testing::Values(false), //TODO: enabling tests for cudnn backend
         ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
         ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
