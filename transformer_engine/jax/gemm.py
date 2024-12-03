@@ -932,7 +932,9 @@ def initialize_comm_gemm_overlaps(
             "name": name,
             "method": method,
             "comm_type": (
-                tex.CommOverlapType.AG if name in layers_all_gather_overlap else tex.CommOverlap.RS
+                tex.CommOverlapType.AG
+                if name in layers_all_gather_overlap
+                else tex.CommOverlapType.RS
             ),
             "num_sm": 1 if method == "ring_exchange" else 16,
             "num_max_streams": _NUM_MAX_UB_STREAMS,

@@ -4,6 +4,7 @@
 """Comm+GEMM Overlap with TE/JAX"""
 
 import argparse
+import numpy as np
 
 from mpi4py import MPI
 
@@ -11,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
-import numpy as np
+
 import transformer_engine.jax as te
 from transformer_engine.jax.cpp_extensions import gemm_impl
 from transformer_engine.jax.gemm import (
