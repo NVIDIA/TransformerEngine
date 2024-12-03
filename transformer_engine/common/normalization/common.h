@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "../util/system.h"
 #include "../cudnn_utils.h"
 
 namespace transformer_engine {
@@ -368,6 +369,9 @@ template <size_t Alignment = 16, typename... Args>
 bool is_ptr_aligned(const Args*... ptrs) {
   return ((reinterpret_cast<uintptr_t>(ptrs) % Alignment == 0) && ...);
 }
+
+bool use_cudnn_norm_fwd();
+bool use_cudnn_norm_bwd();
 
 }  // namespace normalization
 }  // namespace transformer_engine
