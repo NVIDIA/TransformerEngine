@@ -10,7 +10,6 @@ from typing import Optional, Tuple, Union, Sequence
 import jax
 import jax.numpy as jnp
 from jax.typing import ArrayLike
-from jax.sharding import NamedSharding, PartitionSpec
 
 from transformer_engine import transformer_engine_jax as tex
 from .fp8 import FP8Helper, FP8MetaPackage
@@ -34,6 +33,7 @@ __all__ = [
     "type_safe_gemm",
     "initialize_comm_gemm_overlaps",
     "destroy_comm_gemm_overlap",
+    "get_comm_gemm_overlap_config",
 ]
 
 _NUM_MAX_UB_STREAMS = 3
@@ -83,7 +83,13 @@ def gemm(
     """
     comm_overlap_config = None
     if comm_overlap_name is not None:
-        comm_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(comm_overlap_name, None)
+        global _ACTIVE_COMM_GEMM_OVERLAPS
+        comm_overlap_layer = (
+            comm_overlap_name + "_fprop"
+            if comm_overlap_name not in ["ag_gemm", "gemm_rs"]
+            else comm_overlap_name
+        )
+        comm_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(comm_overlap_layer, None)
         if comm_overlap_config is None:
             warnings.warn(
                 f"Comm+GEMM overlap for {comm_overlap_name} has not been initialized! "
@@ -97,7 +103,7 @@ def gemm(
         ):
             if sanitize_dims(contracting_dims[0], x.ndim) != x.ndim - 1:
                 x = jnp.matrix_transpose(x)
-            copy_into_overlap_buffer(x, comm_overlap_name, tex.CommOverlapType.RS)
+            copy_into_overlap_buffer(x, comm_overlap_name, True)
 
     return _gemm(
         x,
@@ -151,11 +157,11 @@ def _gemm_fwd_rule(
 
     fuse_bias = bias is not None
 
-    # AG+GEMM:    ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) ------> ([B], M, N/P)
-    # (DP, TP, None) --(AG)--> (DP, None, None) x (None, TP) --> (DP, None, TP)
+    # AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) --> ([B], M, N/P)
     #
     # GEMM+AR: ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
-    #     (DP, None, TP) x (TP, None) --(AR)--> (DP, None, None)
+    #
+    # GEMM+RS: ([B], M, K/P) x (K/P, N) --(RS)--> ([B], M/P, N)
     out, pre_gelu_out, extra_out = gemm_impl(
         x,
         kernel,
@@ -169,20 +175,15 @@ def _gemm_fwd_rule(
         comm_overlap_config=comm_overlap_config,
     )
 
-    # Update returned and saved tensors based on comm+GEMM overlap
-    saved_x = x
     final_out = out
-    if comm_overlap_config is not None:
-        match comm_overlap_config.get("comm_type", None):
-            case tex.CommOverlapType.AG:
-                # AG overlap puts the all-gathered global LHS (X) into extra_out
-                saved_x = extra_out
-            case tex.CommOverlapType.RS:
-                # RS overlap puts the reduce-scattered sharded output into extra_out
-                final_out = extra_out
+    if (comm_overlap_config is not None
+        and comm_overlap_config["method"] != "bulk"
+        and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+        # Non-bulk RS overlap output is in extra output, not usual output
+        final_out = extra_out
 
     ctx = (
-        saved_x,
+        x,
         kernel,
         pre_gelu_out if fuse_gelu else None,
         fuse_bias,
@@ -207,26 +208,47 @@ def _gemm_bwd_rule(
     )
 
     dgrad_overlap_config = None
+    wgrad_overlap_config = None
+    dgrad_pre_rs = None
     if comm_overlap_config is not None:
         dgrad_overlap_name = comm_overlap_config["name"].rstrip("_fprop") + "_dgrad"
         dgrad_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(dgrad_overlap_name, None)
+        if (dgrad_overlap_config["method"] == "bulk"
+            and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.AG):
+            # If DGRAD is bulk overlap, copy input X into comm buffer to be all-gathered in
+            # preparation for WGRAD.
+            wgrad_overlap_name = comm_overlap_config["name"].rstrip("_fprop") + "_wgrad"
+            wgrad_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(wgrad_overlap_name, None)
+            assert wgrad_overlap_config is not None, "Internal TE error!"
+            copy_into_overlap_buffer(x, dgrad_overlap_name, True)
+
+            # Set DGRAD output buffer to the comm buffer of WGRAD GEMM in order to do the
+            # bulk RS overlap without an extra memcpy
+            dgrad_pre_rs = tex.get_overlap_buffer(wgrad_overlap_name, False)
 
     # FWD MODE:
     #     AG+GEMM: ([B], M/P, K) --(AG)--> ([B], M, K) x (K, N/P) ------> ([B], M, N/P)
-    #  (DP, TP, None) --(AG)--> (DP, None, None) x (None, TP) --> (DP, None, TP)
     #
     #     GEMM+AR: ([B], M, K/P) x (K/P, N) --(AR)--> ([B], M, N)
-    #         (DP, None, TP) x (TP, None) --(AR)--> (DP, None, None)
-
-    # DGRAD:
-    #    AG+GEMM: ([B], M, N/P) x (K, N/P)^T ----(AR)----> ([B], M, K)
-    #        (DP, None, TP) x (None, TP)^T --(AR)--> (DP, None, None)
     #
-    #    GEMM+AR:   ([B], M, N) x (K/P, N)^T ------> ([B], M, K/P)
-    #        (DP, None, None) x (TP, None)^T --> (DP, None, TP)
+    #     GEMM+RS: ([B], M, K/P) x (K/P, N) --(RS)--> ([B], M/P, N)
+
+    # DGRAD w/o Overlap:
+    #    AG+GEMM: ([B], M, N/P) x (K, N/P)^T ---(AR)---> ([B], M, K)
+    #
+    #    GEMM+AR: ([B], M, N) x (K/P, N)^T ----> ([B], M, K/P)
+    #
+    # DGRAD w/ Overlap:
+    #    AG+GEMM w/ DGRAD+RS Overlap: ([B], M, N/P) x (K, N/P)^T ---(RS)---> ([B], M/P, K)
+    #
+    #    AG+GEMM w/ Bulk AG Overlap: ([B], M, N/P) x (K, N/P)^T -----> ([B], M, K) (deferred RS)
+    #                                ([B], M, K/P) --(Bulk AG)--> ([B], M, K) (needed in WGRAD)
+    #
+    #    GEMM+RS: ([B], M/P, N) --(AG)--> ([B], M, N) x (K/P, N)^T ----> ([B], M, K/P)
     dgrad, dgelu, _, dgrad_extra_out = gemm_impl(
         grad,
         kernel,
+        out=dgrad_pre_rs,
         gelu_input=pre_gelu_out,
         batched_output=(x.ndim > 2),
         contracting_dims=(-1, kernel_outer_dim),
@@ -238,38 +260,25 @@ def _gemm_bwd_rule(
         comm_overlap_config=dgrad_overlap_config,
     )
 
-    # If dgrad overlapped reduce-scatter, set it to the RS output
-    if dgrad_overlap_config is not None:
-        if (
-            dgrad_overlap_config["method"] != "bulk"
-            and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.RS
-        ):
-            dgrad = dgrad_extra_out
+    if (dgrad_overlap_config is not None
+        and dgrad_overlap_config["method"] != "bulk"
+        and dgrad_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+        # Otherwise, if DGRAD overlap is RS overlap, DGRAD output is the extra output tensor
+        dgrad = dgrad_extra_out
 
-    # Collapse batch dimension for wgrad
-    wgrad_rhs = dgelu if fuse_gelu else grad
-    if x.ndim > 2:
-        # If x was originally transposed, we need to transpose it back in order to collapse
-        # the batch dims correctly.
-        if x_inner_dim == x.ndim - 2:
-            x = jnp.matrix_transpose(x)
-        batch_size = reduce(operator.mul, x.shape[:-2], 1)
-        x = jnp.reshape(x, (batch_size * x.shape[-2], x.shape[-1]))
-        wgrad_rhs = jnp.reshape(wgrad_rhs, (batch_size * wgrad_rhs.shape[-2], wgrad_rhs.shape[-1]))
-
-    # Recover comm+GEMM overlap config for wgrad
-    wgrad_overlap_config = None
-    if comm_overlap_config is not None:
-        wgrad_overlap_name = comm_overlap_config["name"].rstrip("_fprop") + "_wgrad"
-        wgrad_overlap_config = _ACTIVE_COMM_GEMM_OVERLAPS.get(wgrad_overlap_name, None)
-
-    # WGRAD:
+    # WGRAD w/o Overlap:
     #    AG+GEMM: ([B], M/P, K)^T --(AG)--> ([B], M, K)^T x ([B], M, N/P) --> (K, N/P)
-    #  (DP, 'tp', None)^T --(AG)-->(DP, None, None)^T x (DP, None, 'tp') --> (None, 'tp')
     #
-    #    GEMM+AR: ([B], M, K/P)^T --(AG)--> ([B], M, K)^T x ([B], M, N) ---------> (K/P, N)
-    #     (DP, None, 'tp')^T --(AG)--> (DP, None, None)^T x (DP, None, None) ----> (None, None)
-    wgrad_rhs = dgelu if fuse_gelu else grad
+    #    GEMM+AR: ([B], M, K/P)^T --(AG)--> ([B], M, K)^T x ([B], M, N) ---------> (K, N)
+    #
+    # WGRAD w/ Overlap:
+    #    AG+GEMM w/ DGRAD+RS Overlap: ([B], M/P, K)^T --(AG)--> ([B], M, K)^T x ([B], M, N/P) --> (K, N/P)
+    #
+    #    AG+GEMM w/ Bulk Overlaps: ([B], M, K)^T x ([B], M, N/P) --> (K, N/P)
+    #                              ([B], M, K) --(Bulk RS)--> ([B], M/P, K) (finalize DGRAD)
+    #
+    #    GEMM+RS: ([B], M, K/P)^T x ([B], M, N) --> (K/P, N) (re-use all-gathered GRAD from DGRAD)
+    wgrad_rhs = dgelu if fuse_gelu else (grad if comm_overlap_config is None else dgrad_extra_out)
     wgrad, _, bgrad, wgrad_extra_out = gemm_impl(
         x,
         wgrad_rhs,
@@ -284,13 +293,9 @@ def _gemm_bwd_rule(
         comm_overlap_config=wgrad_overlap_config,
     )
 
-    # If wgrad overlapped reduce-scatter, set it to the RS output
     if wgrad_overlap_config is not None:
-        if (
-            wgrad_overlap_config["method"] != "bulk"
-            and wgrad_overlap_config["comm_type"] == tex.CommOverlapType.RS
-        ):
-            wgrad = wgrad_extra_out
+        # DGRAD was reduce-scattered during WGRAD GEMM, so set DGRAD to WGRAD extra output here
+        dgrad = wgrad_extra_out
 
     if not fuse_bias:
         bgrad = None
@@ -362,7 +367,7 @@ def fp8_gemm(
             and comm_overlap_config["method"] != "bulk"
             and comm_overlap_config["comm_type"] == tex.CommOverlapType.AG
         ):
-            copy_into_overlap_buffer(x, comm_overlap_name, tex.CommOverlapType.RS)
+            copy_into_overlap_buffer(x, comm_overlap_name, True)
 
     return _fp8_gemm(
         x,
@@ -526,18 +531,12 @@ def _fp8_gemm_fwd_rule(
 
     # Update returned and saved arrays based on comm+GEMM overlap config
     final_out = out
-    saved_casted_x = casted_x
     if comm_overlap_config is not None:
-        match comm_overlap_config.get("comm_type", None):
-            case tex.CommOverlapType.AG:
-                # AG overlap puts all-gathered global LHS (X) array into extra_out
-                saved_casted_x = extra_out
-            case tex.CommOverlapType.RS:
-                # RS overlap puts the reduce-scattered sharded output into extra_out
-                final_out = extra_out
+        if comm_overlap_config["comm_type"] == tex.CommOverlapType.RS:
+            # RS overlap puts the reduce-scattered sharded output into extra_out
+            final_out = extra_out
 
     ctx = (
-        saved_casted_x,
         casted_x_t,
         casted_kernel,
         amax_list,
@@ -820,29 +819,59 @@ def type_safe_gemm(
 
 def initialize_comm_gemm_overlaps(
     buffer_shape: Sequence[int],
-    buffer_dtype: jnp.dtype,
-    mesh: Optional[jax.sharding.Mesh] = None,
-    tp_resource: Optional[str] = None,
-    use_fp8: bool = False,
-    overlap_configs: Optional[dict] = None,
+    mesh: jax.sharding.Mesh,
+    myrank: int,
+    numranks: int,
+    **kwargs: Optional[dict],
 ) -> None:
+    """
+    Initialize Comm+GEMM overlap communicators and buffers.
+
+    .. warning::
+       Communication buffer allocations for this functionality are outside the XLA memory pool
+       and can cause OOM errors if XLA's memory margin is not reduced.
+
+    Parameters
+    ----------
+    buffer_shape : Sequence[int]
+        Shape of the communication buffer. This should be sized to match the global shape of the
+        input/activation tensor.
+    mesh : jax.sharding.Mesh
+        JAX Mesh with a `tp_resource` axis.
+    myrank: int
+        Global rank of the calling process.
+    numranks: int
+        Global number of processes.
+    tp_resource : Optional[str] = None
+        Tensor-parallel mesh axis name. If not given, defaults to the TP resource in the global
+        te.sharding.MeshResource context.
+    tp_size : Optional[int] = None
+        Size of the tensor-parallel axis in the mesh. If not given, defaults to the size of the
+        tensor-parallel axis in `jax.interpreters.pxla.thread_resources`.
+    use_fp8 : bool = False
+        Flag for allocating an FP8 communication buffer. This is not supported for reduce-scatter
+        overlaps with the `pipeline` method.
+    overlap_configs: Optional[dict] = None,
+        Dictionary of configs for comm+GEMM overlaps by layer name.
+    """
     assert tex.ubuf_built_with_mpi(), (
         "Comm+GEMM overlap in TE/JAX requires Transformer Engine to be compiled with "
-        + "`NVTE_UB_WITH_MPI=1` and `MPI_HOME=/path/to/mpi` options."
+        + "`NVTE_UB_WITH_MPI=1` and `MPI_HOME=/path/to/mpi` variables."
     )
     if not tex.device_supports_multicast():
         assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
-            + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
+            + "CUDA Multicast. Launch with UB_SKIPMC=1 to try CUDA IPC instead."
         )
-
-    # Get # of devices in the mesh axis for comm+GEMM overlap
-    tp_resource = global_mesh_resource().tp_resource if tp_resource is None else tp_resource
-    tp_size = get_mesh_axis_size(tp_resource, mesh=mesh)
+    # Extract kwargs
+    tp_resource = kwargs.get("tp_resource", global_mesh_resource().tp_resource)
+    tp_size = kwargs.get("tp_size", get_mesh_axis_size(tp_resource, mesh=mesh))
+    use_fp8 = kwargs.get("use_fp8", False)
+    overlap_configs = kwargs.get("overlap_configs", None)
 
     # Layers that support comm+GEMM overlap
     layers_all_gather_overlap = [
-        "generic_ag",
+        "ag_gemm",
         "qkv_fprop",
         "qkv_dgrad",
         "proj_dgrad",
@@ -851,7 +880,7 @@ def initialize_comm_gemm_overlaps(
         "fc2_dgrad",
     ]
     layers_reduce_scatter_overlap = [
-        "generic_rs",
+        "gemm_rs",
         "proj_fprop",
         "fc2_fprop",
         "qkv_wgrad",
@@ -862,8 +891,8 @@ def initialize_comm_gemm_overlaps(
     # Default overlap methods for layers
     methods = {
         "ring_exchange": [
-            "generic_ag",
-            "generic_rs",
+            "ag_gemm",
+            "gemm_rs",
             "qkv_fprop",
             "fc1_fprop",
             "proj_dgrad",
@@ -874,7 +903,10 @@ def initialize_comm_gemm_overlaps(
     }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
-    ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
+    ag_rs_pairs = {
+        "qkv_fprop": "proj_fprop",
+        "fc1_fprop": "fc2_fprop",
+    }
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
@@ -888,11 +920,16 @@ def initialize_comm_gemm_overlaps(
     def get_default_config(name):
         method = get_method(name)
         default_cfg = {
+            "mesh": mesh,
+            "tp_resource": tp_resource,
+            "tp_size": tp_size,
+            "name": name,
             "method": method,
             "comm_type": (
                 tex.CommOverlapType.AG if name in layers_all_gather_overlap else tex.CommOverlap.RS
             ),
             "num_sm": 1 if method == "ring_exchange" else 16,
+            "num_max_streams": _NUM_MAX_UB_STREAMS,
             "cga_size": 1 if method == "ring_exchange" else 2,
             "set_sm_margin": False,
             "num_splits": 4 if method == "pipeline" else tp_size,
@@ -905,76 +942,75 @@ def initialize_comm_gemm_overlaps(
         return default_cfg
 
     def add_new_comm_gemm_overlap(
-        name: str,
-        method: str,
         shape: Sequence[int],
-        dtype: jnp.dtype,
-        comm_type: tex.CommOverlapType,
-        num_sm: int = 16,
-        cga_size: int = 2,
-        set_sm_margin: bool = False,
-        num_splits: int = 4,
-        aggregate: bool = False,
-        atomic_gemm: bool = False,
-        pipeline_rs_overlap_first_gemm: bool = False,
-        use_ce: bool = True,
-        fp8_buf: bool = False,
+        kwargs: dict,
     ) -> None:
+        overlap_name = kwargs["name"]
         assert (
-            name not in _ACTIVE_COMM_GEMM_OVERLAPS
-        ), "Duplicate initialization for `{name}` overlap!"
+            overlap_name not in _ACTIVE_COMM_GEMM_OVERLAPS
+        ), f"Duplicate initialization for `{overlap_name}` overlap!"
 
-        if atomic_gemm:
+        overlap_method = kwargs["method"]
+        overlap_atomic_gemm = kwargs["atomic_gemm"]
+        if overlap_atomic_gemm:
             warnings.warn(
                 "Atomic GEMM uses a beta API from cublas and is not tested for all use cases."
             )
             assert use_fp8, "Atomic GEMM overlap supported only for FP8 GEMM."
-            if method == "bulk":
+            if overlap_method == "bulk":
                 warnings.warn(
-                    f"At {name}, atoimic GEMM not is supported for a bulk overlap."
+                    f"At {overlap_name}, atoimic GEMM not is supported for a bulk overlap."
                     "Defaulting to `atomic_gemm=False`."
                 )
-                atomic_gemm = False
-        if method == "pipeline" and comm_type == tex.CommOverlapType.AG:
+                overlap_atomic_gemm = False
+        kwargs["atomic_gemm"] = overlap_atomic_gemm
+        if overlap_method == "pipeline" and kwargs["comm_type"] == tex.CommOverlapType.AG:
             raise ValueError(
-                f"At {name}, `pipeline` overlap method is not supported for AllGather."
+                f"At {overlap_name}, `pipeline` overlap method is not supported for AllGather."
             )
         # Check if both AG and RS overlaps use `atomic GEMM`` + `p2p ring-exchange`.
         # Using atomic GEMM + p2p ring-exchange in only one of the pair breaks functionality.
         global layers_atomic_ring_exchange
-        if atomic_gemm and method == "ring_exchange" and name in ag_rs_pairs:
-            layers_atomic_ring_exchange += [name, ag_rs_pairs[name]]
-        if name in rs_ag_pairs:
+        if (overlap_atomic_gemm
+            and overlap_method == "ring_exchange"
+            and overlap_name in ag_rs_pairs):
+            layers_atomic_ring_exchange += [overlap_name, ag_rs_pairs[overlap_name]]
+        if overlap_name in rs_ag_pairs:
             assert_message = (
-                f"At {name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM chunk "
-                "outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
+                f"At {overlap_name}, atomic AG-GEMM overlap with `ring_exchange` shuffles GEMM "
+                "chunk outputs, and  RS-GEMM overlap un-suffle them. When one of the GEMM-AG and "
                 "GEMM-RS overlaps forming a TP block (e.g., qkv_fprop and proj_fprop) uses "
                 "`atomic gemm` and `ring_exhcnage`, its pair must use the same overlap config "
                 "for functionality."
             )
-            if name in layers_atomic_ring_exchange:
-                assert atomic_gemm and method == "ring_exchange", assert_message
+            if overlap_name in layers_atomic_ring_exchange:
+                assert overlap_atomic_gemm and overlap_method == "ring_exchange", assert_message
             else:
-                if atomic_gemm and method == "ring_exchange":
-                    assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
+                if overlap_atomic_gemm and overlap_method == "ring_exchange":
+                    assert (
+                        rs_ag_pairs[overlap_name] in layers_atomic_ring_exchange
+                    ), assert_message
 
-        dtype = jnp.uint8 if (use_fp8 and fp8_buf) else dtype
+        # Reduce buffer shape to 2D here in case the user initialized with batch dims
+        buffer_shape = (reduce(operator.mul, shape[:-1], 1), shape[-1])
         tex.bootstrap_comm_gemm_overlap(
-            name,
-            method,
-            shape,
-            jax_dtype_to_te_dtype(dtype),
-            comm_type,
+            buffer_shape,
+            jax_dtype_to_te_dtype(jnp.uint8 if (use_fp8 and fp8_buf) else jnp.bfloat16),
+            overlap_name,
+            overlap_method,
+            kwargs["comm_type"],
+            myrank,
+            numranks,
             tp_size,
-            num_splits,
+            kwargs["num_splits"],
             _NUM_MAX_UB_STREAMS,
-            cga_size,
-            num_sm,
-            set_sm_margin,
-            use_ce,
-            atomic_gemm,
-            aggregate,
-            pipeline_rs_overlap_first_gemm,
+            kwargs["cga_size"],
+            kwargs["num_sm"],
+            kwargs["set_sm_margin"],
+            kwargs["use_ce"],
+            overlap_atomic_gemm,
+            kwargs["aggregate"],
+            kwargs["pipeline_rs_overlap_first_gemm"],
         )
 
     if overlap_configs is not None:
@@ -998,17 +1034,25 @@ def initialize_comm_gemm_overlaps(
     for name in methods["ring_exchange"] + methods["pipeline"] + methods["bulk"]:
         if overlap_configs is not None and name in overlap_configs:
             fp8_buf = (name in layers_all_gather_overlap) or (
-                overlap_configs[name].get("fp8_buf", False) and name in methods["pipeline"]
+                overlap_configs[name].get("fp8_buf", False) and name not in methods["pipeline"]
             )
-            default_config = get_default_config(name)
-            final_config = default_config.update(overlap_configs[name])
+            final_config = get_default_config(name)
+            final_config.update(overlap_configs[name])
             final_config["fp8_buf"] = fp8_buf
-            add_new_comm_gemm_overlap(name, buffer_shape, buffer_dtype, **final_config)
-            _ACTIVE_COMM_GEMM_OVERLAPS.update({name: final_config})
+            add_new_comm_gemm_overlap(buffer_shape, final_config)
+            _ACTIVE_COMM_GEMM_OVERLAPS[name] = final_config
 
 
 def destroy_comm_gemm_overlaps():
+    global _ACTIVE_COMM_GEMM_OVERLAPS
     for name in _ACTIVE_COMM_GEMM_OVERLAPS:
         tex.destroy_comm_gemm_overlap(name)
-        _ACTIVE_COMM_GEMM_OVERLAPS.pop(name)
     _ACTIVE_COMM_GEMM_OVERLAPS = dict()
+
+
+def get_comm_overlap_config(name):
+    global _ACTIVE_COMM_GEMM_OVERLAPS
+    assert name in _ACTIVE_COMM_GEMM_OVERLAPS, (
+        f"Comm+GEMM overlap for '{name}' has not been initialized!"
+    )
+    return _ACTIVE_COMM_GEMM_OVERLAPS[name]

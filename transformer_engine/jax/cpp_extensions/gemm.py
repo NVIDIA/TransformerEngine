@@ -27,15 +27,15 @@ from .misc import (
 )
 from ..sharding import (
     global_mesh_resource,
-    lax_paral_op,
     all_reduce_max_along_all_axes_except_PP,
-    get_mesh_axis_size,
 )
 
 
 __all__ = [
     "fp8_gemm_impl",
     "gemm_impl",
+    "copy_into_overlap_buffer",
+    "bootstrap_comm_gemm_overlap",
 ]
 
 _COMM_GEMM_OVERLAP_LAYERS = ["qkv", "proj", "fc1", "fc2"]
@@ -43,7 +43,7 @@ _COMM_GEMM_OVERLAP_NAMES = (
     [layer + "_fprop" for layer in _COMM_GEMM_OVERLAP_LAYERS]
     + [layer + "_dgrad" for layer in _COMM_GEMM_OVERLAP_LAYERS]
     + [layer + "_wgrad" for layer in _COMM_GEMM_OVERLAP_LAYERS if layer != "fc2"]
-    + ["generic_ag", "generic_rs"]
+    + ["ag_gemm", "gemm_rs"]
 )
 
 
@@ -68,7 +68,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
     """
 
     name = "te_gemm"
-    impl_static_args = (8, 9, 10, 11, 12, 13, 14, 15, 16)
+    impl_static_args = (10, 11, 12, 13, 14, 15, 16, 17, 18)
     multiple_results = True
     inner_primitive = None
     outer_primitive = None
@@ -81,9 +81,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_scale_inv_aval,
         bias_aval,
         gelu_input_aval,
+        out_aval,
         out_amax_aval,
         out_scale_aval,
-        out_dtype,
+        extra_out_aval,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -92,16 +93,19 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract,
     ):
         """
         cuBlasLt GEMM abstract
         """
-        del grad, accumulate, use_split_accumulator
+        if comm_overlap_config is not None:
+            assert tex.ubuf_built_with_mpi(), (
+                "Comm+GEMM overlap in TE/JAX requires Transformer Engine to be compiled with "
+                + "`NVTE_UB_WITH_MPI=1` and `MPI_HOME=/path/to/mpi` options."
+            )
+            assert is_ffi_enabled(), "Comm+GEMM overlap is supported only via XLA FFI."
 
-        assert tex.ubuf_built_with_mpi(), (
-            "Comm+GEMM overlap in TE/JAX requires Transformer Engine to be compiled with "
-            + "`NVTE_UB_WITH_MPI=1` and `MPI_HOME=/path/to/mpi` options."
-        )
+        del grad, accumulate, use_split_accumulator
 
         # Validate operand dtypes
         lhs_dtype = dtypes.canonicalize_dtype(lhs_aval.dtype)
@@ -120,13 +124,14 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 and dtypes.canonicalize_dtype(rhs_scale_inv_aval.dtype) == jnp.float32
             ), "Missing RHS operand scale inverse in FP8 GEMM."
 
-        # Validate operand layouts, adjusted for comm-overlap if necessary
+        # Validate operand layouts
         lhs_inner_dim, rhs_inner_dim = map(
             sanitize_dims, contracting_dims, (lhs_aval.ndim, rhs_aval.ndim)
         )
-        assert (
-            lhs_aval.shape[lhs_inner_dim] == rhs_aval.shape[rhs_inner_dim]
-        ), f"Incompatible contracting dimensions: {lhs_aval.shape} x {rhs_aval.shape}."
+        assert lhs_aval.shape[lhs_inner_dim] == rhs_aval.shape[rhs_inner_dim], (
+            "Incompatible operand sizes: "
+            + f"{lhs_aval.shape} @ idx {lhs_inner_dim} X {rhs_aval.shape} @ idx {rhs_inner_dim}."
+        )
 
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
         rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
@@ -137,80 +142,125 @@ class CollectiveGemmPrimitive(BasePrimitive):
             assert not lhs_trans, "FP8 GEMM does not support transposed LHS."
             assert rhs_trans, "FP8 GEMM requires transposed RHS."
 
-        # Validate output dtype
-        if jax_dtype_is_fp8(out_dtype):
-            assert jax_dtype_is_fp8(lhs_dtype) and jax_dtype_is_fp8(
-                rhs_dtype
-            ), "FP8 GEMM output requires FP8 inputs."
-            assert (
-                out_amax_aval.size == out_scale_aval.size == 1
-            ), "Invalid/missing output amax and scale."
-            out_amax_updated_dtype = dtypes.canonicalize_dtype(out_amax_aval.dtype)
-            out_scale_updated_dtype = dtypes.canonicalize_dtype(out_scale_aval.dtype)
-            assert (
-                out_amax_updated_dtype == out_scale_updated_dtype == jnp.float32
-            ), "Invalid output amax or scale dtype."
-        else:
-            out_dtype = lhs_dtype
-            out_amax_updated_dtype = jnp.float32
-            out_scale_updated_dtype = jnp.float32
-
         # Make sure leading dimensions of RHS is broadcast-compatible with LHS
         lhs_outer_dim, rhs_outer_dim = map(
             mirror_dim,
             (lhs_inner_dim, rhs_inner_dim),
             (lhs_aval.ndim, rhs_aval.ndim),
         )
-        lhs_bdims = [
-            dim for dim in range(lhs_aval.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]
-        ]
-        lhs_batch_shape = [lhs_aval.shape[dim] for dim in lhs_bdims]
-        lhs_batch_size = reduce(operator.mul, lhs_batch_shape, 1)
-
-        if rhs_aval.ndim > 2:
+        if lhs_aval.ndim > 2 and rhs_aval.ndim > 2:
+            assert not batched_output, (
+                "Batched output requires batched LHS and non-batched RHS operands."
+            )
+            lhs_bdims = [
+                dim for dim in range(lhs_aval.ndim) if dim not in [lhs_outer_dim, lhs_inner_dim]
+            ]
+            lhs_batch_shape = [lhs_aval.shape[dim] for dim in lhs_bdims]
+            lhs_batch_size = reduce(operator.mul, lhs_batch_shape, 1)
             rhs_bdims = [
                 dim for dim in range(rhs_aval.ndim) if dim not in [rhs_outer_dim, rhs_inner_dim]
             ]
             rhs_batch_shape = [rhs_aval.shape[dim] for dim in rhs_bdims]
-            rhs_batch_size = reduce(operator.mul, rhs_bdims, 1)
-            if rhs_batch_size > 1:
-                assert lhs_batch_size == rhs_batch_size, (
-                    f"Leading dimensins of RHS ({rhs_batch_shape=}) is not broadcast-compatible "
-                    + f"with the leading dimensions of LHS ({lhs_batch_shape=})."
-                )
+            rhs_batch_size = reduce(operator.mul, rhs_batch_shape, 1)
+            assert lhs_batch_size == rhs_batch_size, (
+                "Leading dimensions of LHS and RHS are not broadcast-compatible: "
+                + f"{lhs_aval.shape} @ idx {lhs_inner_dim} X {rhs_aval.shape} @ idx {rhs_inner_dim}"
+            )
 
-        # Infer output shape
-        if batched_output:
-            assert (
-                lhs_aval.ndim > 2 and rhs_aval.ndim == 2
-            ), "Batched output requires batched LHS and non-batched RHS operands."
-            out_shape = (
-                *lhs_batch_shape,
-                lhs_aval.shape[lhs_outer_dim],
-                rhs_aval.shape[rhs_outer_dim],
+        # Validate output dtypes
+        out_dtype = dtypes.canonicalize_dtype(out_aval.dtype)
+        if jax_dtype_is_fp8(out_dtype):
+            assert jax_dtype_is_fp8(lhs_dtype) and jax_dtype_is_fp8(rhs_dtype), (
+                "FP8 GEMM output requires FP8 inputs."
+            )
+            assert out_amax_aval.size == out_scale_aval.size == 1, (
+                "Invalid/missing output amax and scale."
+            )
+            out_amax_updated_dtype = dtypes.canonicalize_dtype(out_amax_aval.dtype)
+            out_scale_updated_dtype = dtypes.canonicalize_dtype(out_scale_aval.dtype)
+            assert out_amax_updated_dtype == out_scale_updated_dtype == jnp.float32, (
+                "Invalid output amax or scale dtype."
             )
         else:
-            assert (
-                lhs_aval.ndim == rhs_aval.ndim
-            ), "Non-batched output requires LHS and RHS operands with same number of dimensions."
-            if lhs_aval.ndim > 2:
-                rhs_bdims = [
-                    dim for dim in range(rhs_aval.ndim) if dim not in [rhs_outer_dim, rhs_inner_dim]
-                ]
-                rhs_batch_shape = [rhs_aval.shape[dim] for dim in rhs_bdims]
-                rhs_batch_size = reduce(operator.mul, rhs_batch_shape, 1)
-                assert lhs_batch_size == rhs_batch_size, (
-                    f"Leading dimensins of RHS ({rhs_aval.shape=}) is not broadcast-compatible "
-                    + f"with the leading dimensions of LHS ({lhs_aval.shape=})."
-                )
-            out_shape = (lhs_aval.shape[lhs_outer_dim], rhs_aval.shape[rhs_outer_dim])
+            assert out_dtype == lhs_dtype, (
+                "Output buffer has incorrect dtype: "
+                + f"expected {lhs_dtype} but found {out_dtype}"
+            )
+            out_amax_updated_dtype = jnp.float32
+            out_scale_updated_dtype = jnp.float32
 
-        # Validate bias/bias_grad shape against inferred output
+        # Validate output buffers
+        out_shape = out_aval.shape
+        expected_out_shape = [
+            *lhs_aval.shape[:-2],
+            lhs_aval.shape[lhs_outer_dim],
+            rhs_aval.shape[rhs_outer_dim]
+        ]
+        extra_out_shape = extra_out_aval.shape
+        expected_extra_out_shape = [0]
+        extra_out_dtype = dtypes.canonicalize_dtype(extra_out_aval.dtype)
+        expected_extra_out_dtype = jnp.bfloat16
+        if batched_output:
+            assert out_aval.ndim > 2, "Batched output buffer is missing batch dimensions."
+        else:
+            expected_out_shape = [reduce(operator.mul, expected_out_shape[:-1], 1),
+                                  expected_out_shape[-1]]
+
+        if (comm_overlap_config is not None
+            and comm_overlap_config["method"] != "bulk"):
+            comm_type = comm_overlap_config.get("comm_type", None)
+            assert comm_type is not None, "Missing comm type for comm+GEMM overlap."
+
+            tp_size = comm_overlap_config.get("tp_size", 1)
+            assert tp_size > 1, (
+                "Comm+GEMM overlap requires tensor-parallel mesh axis size greater than 1."
+            )
+
+            if comm_type == tex.CommOverlapType.AG:
+                expected_extra_out_shape = list(lhs_aval.shape).copy()
+            elif comm_type == tex.CommOverlapType.RS:
+                expected_extra_out_shape = list(expected_out_shape).copy()
+                expected_extra_out_dtype = lhs_dtype
+
+            if sharded_abstract:
+                if comm_type == tex.CommOverlapType.AG:
+                    expected_out_shape[-2] *= tp_size
+                    expected_extra_out_shape[-2] *= tp_size
+                else:
+                    expected_extra_out_shape[-2] = expected_extra_out_shape[-2] // tp_size
+
+        assert out_aval.ndim == len(expected_out_shape), (
+            "Output buffer has incorrect number of dimensions: "
+            + f"expected {len(expected_out_shape)} but found {out_aval.ndim}"
+        )
+        assert all([out_aval.shape[i] == expected_out_shape[i] for i in range(out_aval.ndim)]), (
+            "Output buffer has incorrect shape: "
+            + f"expected {expected_out_shape=} but found {out_aval.shape=}"
+        )
+
+        assert extra_out_dtype == expected_extra_out_dtype, (
+            "Extra output has incorrect dtype: "
+            + f"expected {expected_extra_out_dtype} but found {extra_out_dtype}"
+        )
+        assert extra_out_aval.ndim == len(expected_extra_out_shape), (
+            "Extra output buffer has incorrect number of dimensions: "
+            + f"expected {len(expected_extra_out_shape)} but found {extra_out_aval.ndim}"
+        )
+        assert all([extra_out_aval.shape[i] == expected_extra_out_shape[i]
+                    for i in range(extra_out_aval.ndim)]), (
+            "Extra output buffer has incorrect shape: "
+            + f"expected {expected_extra_out_shape=} but found {extra_out_aval.shape=}"
+        )
+
+        # Validate bias/bias_grad shape against output bufer
         bias_dtype = jnp.bfloat16 if jax_dtype_is_fp8(out_dtype) else out_dtype
         if fuse_bias:
             assert (
                 bias_aval.size > 0 and bias_aval.ndim == 1 and bias_aval.shape[0] == out_shape[-1]
-            ), "Incorrect bias shape."
+            ), (
+                "Incorrect bias shape: "
+                + f"expected ({out_shape[-1]}, ) but found ({bias_aval.shape[0]}, )"
+            )
             bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
         else:
             assert bias_aval.size == 0, "Internal TE error."
@@ -230,45 +280,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
         else:
             assert gelu_input_aval.size == 0, "Internal TE error."
 
-        # Adjust output sizes for comm-overlap
-        extra_out_shape = (0,)
-        extra_out_dtype = jnp.bfloat16
-        if comm_overlap_config is not None:
-            comm_overlap_type = comm_overlap_config.get("comm_type", None)
-            assert comm_overlap_type is not None, "Missing comm type for comm+GEMM overlap."
-            comm_overlap_name = comm_overlap_config.get("name", None)
-            assert (
-                comm_overlap_name in _COMM_GEMM_OVERLAP_NAMES
-            ), f"Unrecognized comm+GEMM overlap name: {comm_overlap_name=}"
-
-            mesh = comm_overlap_config.get("mesh", None)
-            tp_resource = comm_overlap_config.get("tp_resource", global_mesh_resource().tp_resource)
-            tp_size = get_mesh_axis_size(tp_resource, mesh=mesh)
-
-            match comm_overlap_type:
-                case tex.CommOverlapType.AG:
-                    # Extra output is all-gathered LHS copy
-                    extra_out_shape = list(lhs_aval.shape).copy()
-                    extra_out_shape[lhs_outer_dim] *= tp_size
-                    extra_out_dtype = lhs_dtype
-
-                case tex.CommOverlapType.RS:
-                    # FP8 GEMM output for RS overlap is always FP8
-                    if jax_dtype_is_fp8(lhs_dtype):
-                        assert jax_dtype_is_fp8(
-                            out_dtype
-                        ), "FP8 GEMM with reduce-scatter overlap requires FP8 output."
-                    # Extra output is reduce-scattered GEMM output
-                    extra_out_shape = list(out_shape).copy()
-                    extra_out_shape[-2] /= tp_size
-
-                case _:
-                    raise RuntimeError(
-                        f"Unrecognized comm type for comm+GEMM overlap: {comm_overlap_type=}"
-                    )
-
         # Create abstract arrays for all outputs
-        out_aval = lhs_aval.update(shape=out_shape, dtype=out_dtype)
+        out_updated_aval = out_aval.update(shape=out_shape, dtype=out_dtype)
         out_amax_updated_aval = out_amax_aval.update(
             shape=out_amax_aval.shape, dtype=out_amax_updated_dtype
         )
@@ -277,18 +290,18 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
         pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        extra_out_aval = jax.core.ShapedArray(shape=extra_out_shape, dtype=extra_out_dtype)
+        extra_out_updated_aval = extra_out_aval.update(shape=extra_out_shape, dtype=extra_out_dtype)
         workspace_aval = jax.core.ShapedArray(
             shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
         )
 
         return (
-            out_aval,
+            out_updated_aval,
             out_amax_updated_aval,
             out_scale_updated_aval,
             pre_gelu_out_aval,
             bias_grad_aval,
-            extra_out_aval,  # global LHS for AG overlap, or sharded output for RS overlap
+            extra_out_updated_aval,  # global LHS for AG overlap, or sharded output for RS overlap
             workspace_aval,
         )
 
@@ -324,10 +337,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
+        out,
         out_amax,
         out_scale,
+        extra_out,
         *,
-        out_dtype,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -336,11 +350,12 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract
     ):
         """
         Fused attention fwd lowering rules
         """
-        del batched_output
+        del batched_output, sharded_abstract
         lhs_aval, _, rhs_aval, _, bias_aval, *_ = ctx.avals_in
         lhs_inner_dim, rhs_inner_dim = map(
             sanitize_dims, contracting_dims, (lhs_aval.ndim, rhs_aval.ndim)
@@ -348,26 +363,31 @@ class CollectiveGemmPrimitive(BasePrimitive):
         lhs_trans = lhs_inner_dim != lhs_aval.ndim - 1
         rhs_trans = rhs_inner_dim == rhs_aval.ndim - 1
 
+        operands = [
+            lhs,
+            lhs_scale_inv,
+            rhs,
+            rhs_scale_inv,
+            bias,
+            gelu_input,
+            out,
+            out_amax,
+            out_scale,
+            extra_out,
+        ]
+
         operand_output_aliases = {
             4: 4,  # bias        <-->  bias_grad
             5: 3,  # gelu_input  <-->  pre_gelu_out
-            6: 1,  # out_amax    <-->  out_amax_updated
-            7: 2,  # out_scale   <-->  out_scale_updated
+            6: 0,  # out         <-->  out_updated
+            7: 1,  # out_amax    <-->  out_amax_updated
+            8: 2,  # out_scale   <-->  out_scale_updated
+            9: 5,  # extra_out   <-->  extra_out_updated
         }
 
         if is_ffi_enabled():
             name = "te_gemm_ffi"
-            ffi_args = (
-                ctx,
-                lhs,
-                lhs_scale_inv,
-                rhs,
-                rhs_scale_inv,
-                bias,
-                gelu_input,
-                out_amax,
-                out_scale,
-            )
+            ffi_args = (ctx, *operands)
             ffi_kwargs = dict(
                 lhs_trans=lhs_trans,
                 rhs_trans=rhs_trans,
@@ -380,23 +400,14 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
             if comm_overlap_config is not None:
                 name = "te_comm_gemm_overlap_ffi"
-                ffi_kwargs["comm_type"] = int(comm_overlap_config["comm_type"])
+                ffi_kwargs["comm_type_flag"] = int(comm_overlap_config["comm_type"])
                 ffi_kwargs["name"] = comm_overlap_config["name"]
 
             return ffi.ffi_lowering(name, operand_output_aliases=operand_output_aliases)(
                 *ffi_args, **ffi_kwargs
             )
+
         else:
-            operands = [
-                lhs,
-                lhs_scale_inv,
-                rhs,
-                rhs_scale_inv,
-                bias,
-                gelu_input,
-                out_amax,
-                out_scale,
-            ]
             operand_shapes = map(lambda x: ir.RankedTensorType(x.type).shape, operands)
             out_types = [
                 ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_dtype(output.dtype))
@@ -423,7 +434,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 k,
                 workspace_size,
                 operand_dtype,
-                jax_dtype_to_te_dtype(out_dtype),
+                jax_dtype_to_te_dtype(dtypes.canonicalize_dtype(ctx.avals_out[0].dtype)),
                 bias_dtype,
                 lhs_trans,
                 rhs_trans,
@@ -434,14 +445,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 use_split_accumulator,
             )
 
-            comm_overlap_type = comm_overlap_config.get("comm_type", None)
-            if comm_overlap_type is not None:
-                name = "te_comm_gemm_overlap"
-                descriptor_packer_fn = tex.pack_overlap_descriptor
-                descriptor_args += (
-                    comm_overlap_type,
-                    comm_overlap_config.get("name", None),
-                )
             opaque = descriptor_packer_fn(*descriptor_args)
 
             return custom_caller(
@@ -460,9 +463,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
+        out,
         out_amax,
         out_scale,
-        out_dtype,
+        extra_out,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -471,6 +475,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract,
     ):
         assert CollectiveGemmPrimitive.inner_primitive is not None
 
@@ -526,14 +531,33 @@ class CollectiveGemmPrimitive(BasePrimitive):
         else:
             contracting_dims_2d[1] = contracting_dims[1]
 
+        # Reshape output and extra output buffers into 2D as well
+        if out.ndim > 2:
+            out = jax.lax.reshape(out, (reduce(operator.mul, out.shape[:-1], 1), out.shape[-1]))
+        if extra_out.size > 0 and extra_out.ndim > 2:
+            extra_out = jax.lax.reshape(
+                extra_out, (reduce(operator.mul, extra_out.shape[:-1], 1), extra_out.shape[-1])
+            )
+
+        batched_extra_out = False
+        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
+            comm_type = comm_overlap_config["comm_type"]
+            if comm_type == tex.CommOverlapType.AG:
+                # Extra output is global LHS, we can collapse but need to recover batches later
+                batched_extra_out = len(lhs_batch_dims) > 0
+            elif comm_type == tex.CommOverlapType.RS:
+                # Extra output is scattered GEMM output, so we recover batches only if the output is
+                # batched
+                batched_extra_out = batched_output
+
         # Invoke GEMM with guaranteed 2D inputs, so batched_output=False
         (
-            out,
+            out_updated,
             out_amax_updated,
             out_scale_updated,
             pre_gelu_out,
             bias_grad,
-            extra_out,
+            extra_out_updated,
             _,
         ) = CollectiveGemmPrimitive.inner_primitive.bind(
             lhs,
@@ -542,9 +566,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
             rhs_scale_inv,
             bias,
             gelu_input,
+            out,
             out_amax,
             out_scale,
-            out_dtype=out_dtype,
+            extra_out,
             batched_output=False,
             contracting_dims=contracting_dims_2d,
             fuse_gelu=fuse_gelu,
@@ -553,21 +578,40 @@ class CollectiveGemmPrimitive(BasePrimitive):
             accumulate=accumulate,
             use_split_accumulator=use_split_accumulator,
             comm_overlap_config=comm_overlap_config,
+            sharded_abstract=sharded_abstract,
         )
 
         # Recover batched dimensions in the output
         if batched_output:
-            out_shape = (*lhs_batch_shape, out.shape[-2] // lhs_batch_size, out.shape[-1])
-            out = jax.lax.reshape(out, out_shape)
+            out_shape = (
+                *lhs_batch_shape,
+                out_updated.shape[-2] // lhs_batch_size,
+                out_updated.shape[-1]
+            )
+            out_updated = jax.lax.reshape(out_updated, out_shape)
 
-        return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad, extra_out
+        if batched_extra_out:
+            extra_out_shape = (
+                *lhs_batch_shape,
+                extra_out_updated.shape[-2] // lhs_batch_size,
+                extra_out_updated.shape[-1]
+            )
+            extra_out_updated = jax.lax.reshape(extra_out_updated, extra_out_shape)
+
+        return (
+            out_updated,
+            out_amax_updated,
+            out_scale_updated,
+            pre_gelu_out,
+            bias_grad,
+            extra_out_updated,
+        )
 
     @staticmethod
     def batcher(
         batched_args,
         batch_dims,
         *,
-        out_dtype,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -576,15 +620,23 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract,
     ):
         assert CollectiveGemmPrimitive.outer_primitive is not None
         check_valid_batch_dims(batch_dims)
-        lhs_bdims, *_, bias_bdims, gelu_input_bdims, out_amax_bdims, out_scale_bdims = batch_dims
+        (
+            *_,
+            bias_bdims,
+            gelu_input_bdims,
+            out_bdims,
+            out_amax_bdims,
+            out_scale_bdims,
+            extra_out_bdims,
+        ) = batch_dims
 
         return (
             CollectiveGemmPrimitive.outer_primitive.bind(
                 *batched_args,
-                out_dtype=out_dtype,
                 batched_output=batched_output,
                 contracting_dims=contracting_dims,
                 fuse_gelu=fuse_gelu,
@@ -592,13 +644,21 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 grad=grad,
                 accumulate=accumulate,
                 use_split_accumulator=use_split_accumulator,
+                comm_overlap_config=comm_overlap_config,
+                sharded_abstract=sharded_abstract,
             ),
-            (lhs_bdims, out_amax_bdims, out_scale_bdims, gelu_input_bdims, bias_bdims),
+            (
+                out_bdims,
+                out_amax_bdims,
+                out_scale_bdims,
+                gelu_input_bdims,
+                bias_bdims,
+                extra_out_bdims
+            ),
         )
 
     @staticmethod
     def infer_sharding_from_operands(
-        out_dtype,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -607,11 +667,12 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del out_dtype, accumulate, use_split_accumulator, result_infos
+        del accumulate, use_split_accumulator, sharded_abstract, result_infos
         lhs, _, rhs, *_ = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
 
@@ -625,7 +686,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
         # Modify operand specs
         lhs_spec_new = [spec for spec in lhs_spec]
         rhs_spec_new = [spec for spec in rhs_spec]
-        reduce_output = False
         if comm_overlap_config is None:
             # When comm overlap is not enabled:
             # - Always all-gather the outer dimension of LHS.
@@ -651,7 +711,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
                         + "communication overhead."
                     )
                 rhs_spec_new[rhs_outer_dim] = None
-                reduce_output = True
             else:
                 if lhs_spec_new[lhs_inner_dim] is None and rhs_spec_new[rhs_inner_dim] is not None:
                     warnings.warn(
@@ -667,12 +726,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
                             + "the contracting dimension of the RHS operand is unsharded. This "
                             + "will cause additional communication overhead."
                         )
-                lhs_spec_new[lhs_inner_dim] = None
-                rhs_spec_new[rhs_inner_dim] = None
-        else:
-            # When comm overlap is enabled, make sure both contracting dims are unsharded if one
-            # of them is unsharded.
-            if lhs_spec_new[lhs_inner_dim] is None or rhs_spec_new[rhs_inner_dim] is None:
                 lhs_spec_new[lhs_inner_dim] = None
                 rhs_spec_new[rhs_inner_dim] = None
         out_col_spec = rhs_spec_new[rhs_outer_dim]
@@ -698,37 +751,48 @@ class CollectiveGemmPrimitive(BasePrimitive):
         # Validate operand sharding for comm+GEMM overlap and adust extra output sharding
         extra_out_spec = [None]
         if comm_overlap_config is not None:
-            mesh = comm_overlap_config.get("mesh", None)
+            comm_type = comm_overlap_config.get("comm_type", None)
             tp_resource = comm_overlap_config.get("tp_resource", global_mesh_resource().tp_resource)
-            match comm_overlap_config.get("comm_type", None):
-                case tex.CommOverlapType.AG:
-                    # AG overlap requires the outer dimension of LHS to be sharded
-                    # over the TP resource
-                    assert lhs_spec[lhs_outer_dim] == tp_resource, (
-                        "AG+GEMM overlap requires the outer (sequence) dimension of the LHS "
-                        + f"operand to be sharded over the TP resource (mesh axis: {tp_resource=})."
-                    )
-                    extra_out_spec = list(lhs_spec).copy()
-                    extra_out_spec[lhs_outer_dim] = None
+            if comm_type == tex.CommOverlapType.AG:
+                # AG overlap requires the outer dimension of LHS to be sharded
+                # over the TP resource
+                assert lhs_spec[lhs_outer_dim] == tp_resource, (
+                    "AG+GEMM overlap requires the outer (sequence) dimension of the LHS "
+                    + f"operand to be sharded over the TP resource '{tp_resource=}'."
+                )
+                assert lhs_spec[lhs_inner_dim] is None, (
+                    "AG+GEMM overlap requires the contracting dimension of the LHS operand "
+                    + "to be unsharded."
+                )
+                assert rhs_spec[rhs_inner_dim] is None, (
+                    "AG+GEMM overlap requires the contracting dimension of the RHS operand "
+                    + "to be unsharded."
+                )
+                extra_out_spec = list(lhs_spec).copy()
+                extra_out_spec[lhs_outer_dim] = None
 
-                case tex.CommOverlapType.RS:
-                    # RS overlap requires the contracting dimensions of both LHS and RHS to be
-                    # sharded over the TP resource, and the outer dimension of LHS to be unsharded
-                    assert lhs_spec[lhs_outer_dim] is None, (
-                        "GEMM+RS overlap requires the outer (sequence) dimension of the LHS "
-                        + "operand to be un-sharded."
-                    )
-                    assert lhs_spec[lhs_inner_dim] == tp_resource, (
-                        "GEMM+RS overlap requires the contracting dimension of the LHS operand "
-                        + f"to be sharded over the TP resource (mesh axis: {tp_resource=})."
-                    )
-                    assert rhs_spec[rhs_inner_dim] == tp_resource, (
-                        "GEMM+RS overlap requires the contracting dimension of the RHS operand "
-                        + f"to be sharded over the TP resource (mesh axis: {tp_resource=})."
-                    )
-                    extra_out_spec = out_spec.copy()
-                    extra_out_spec[-2] = tp_resource
-
+            elif comm_type == tex.CommOverlapType.RS:
+                # RS overlap requires the contracting dimensions of both LHS and RHS to be
+                # sharded over the TP resource, and the outer dimensions of LHS and RHS to be
+                # unsharded.
+                assert lhs_spec[lhs_outer_dim] is None, (
+                    "GEMM+RS overlap requires the outer (sequence) dimension of the LHS "
+                    + "operand to be unsharded."
+                )
+                assert lhs_spec[lhs_inner_dim] == tp_resource, (
+                    "GEMM+RS overlap requires the contracting dimension of the LHS operand "
+                    + f"to be sharded over the TP resource '{tp_resource=}'."
+                )
+                assert rhs_spec[rhs_inner_dim] == tp_resource, (
+                    "GEMM+RS overlap requires the contracting dimension of the RHS operand "
+                    + f"to be sharded over the TP resource '{tp_resource=}'."
+                )
+                assert rhs_spec[rhs_outer_dim] is None, (
+                    "GEMM+RS overlap requires the outer dimension of the RHS operand to be "
+                    + "unsharded."
+                )
+                extra_out_spec = list(out_spec).copy()
+                extra_out_spec[-2] = tp_resource
         extra_out_sharding = NamedSharding(mesh, PartitionSpec(*extra_out_spec))
 
         return (
@@ -742,7 +806,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
     @staticmethod
     def partition(
-        out_dtype,
         batched_output,
         contracting_dims,
         fuse_gelu,
@@ -751,11 +814,12 @@ class CollectiveGemmPrimitive(BasePrimitive):
         accumulate,
         use_split_accumulator,
         comm_overlap_config,
+        sharded_abstract,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del result_infos
+        del sharded_abstract, result_infos
         lhs, _, rhs, *_ = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
 
@@ -783,12 +847,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
             else:
                 lhs_spec_new[lhs_inner_dim] = None
                 rhs_spec_new[rhs_inner_dim] = None
-        else:
-            # When comm overlap is enabled, make sure both contracting dims are unsharded if one
-            # of them is unsharded.
-            if lhs_spec_new[lhs_inner_dim] is None or rhs_spec_new[rhs_inner_dim] is None:
-                lhs_spec_new[lhs_inner_dim] = None
-                rhs_spec_new[rhs_inner_dim] = None
         out_col_spec = rhs_spec_new[rhs_outer_dim]
 
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_spec_new))
@@ -812,20 +870,17 @@ class CollectiveGemmPrimitive(BasePrimitive):
         gelu_spec = [None, out_col_spec] if fuse_gelu else [None]
         gelu_sharding = NamedSharding(mesh, PartitionSpec(*gelu_spec))
 
-        # Adjust extra output sharding for comm+GEMM overlap
+        # Extra output sharding for comm+GEMM overlap
         extra_out_spec = [None]
         if comm_overlap_config is not None:
-            mesh = comm_overlap_config.get("mesh", None)
-            tp_resource = comm_overlap_config.get("tp_resource", global_mesh_resource().tp_resource)
-            match comm_overlap_config.get("comm_type", None):
-                case tex.CommOverlapType.AG:
-                    extra_out_spec = list(lhs_spec).copy()
-                    extra_out_spec[lhs_outer_dim] = None
-
-                case tex.CommOverlapType.RS:
-                    extra_out_spec = out_spec.copy()
-                    extra_out_spec[-2] = tp_resource
-
+            comm_type = comm_overlap_config.get("comm_type", None)
+            if comm_type == tex.CommOverlapType.AG:
+                extra_out_spec = list(lhs_spec).copy()
+                extra_out_spec[lhs_outer_dim] = None
+            elif comm_type == tex.CommOverlapType.RS:
+                extra_out_spec = list(out_spec).copy()
+                extra_out_spec[-2] = comm_overlap_config.get("tp_resource",
+                                                             global_mesh_resource().tp_resource)
         extra_out_sharding = NamedSharding(mesh, PartitionSpec(*extra_out_spec))
 
         arg_shardings = (
@@ -835,8 +890,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
             fp8_meta_sharding,
             bias_sharding,
             gelu_sharding,
+            out_sharding,
             fp8_meta_sharding,
             fp8_meta_sharding,
+            extra_out_sharding,
         )
         out_shardings = (
             out_sharding,
@@ -848,15 +905,16 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
 
         def sharded_impl(
-            lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out_amax, out_scale
+            lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, out, out_amax, out_scale,
+            extra_out,
         ):
             (
-                out,
+                out_updated,
                 out_amax_updated,
                 out_scale_updated,
                 pre_gelu_out,
                 bias_grad,
-                extra_out,
+                extra_out_updated,
             ) = CollectiveGemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
@@ -864,9 +922,10 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 rhs_scale_inv,
                 bias,
                 gelu_input,
+                out,
                 out_amax,
                 out_scale,
-                out_dtype=out_dtype,
+                extra_out,
                 batched_output=batched_output,
                 contracting_dims=contracting_dims,
                 fuse_gelu=fuse_gelu,
@@ -875,6 +934,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 accumulate=accumulate,
                 use_split_accumulator=use_split_accumulator,
                 comm_overlap_config=comm_overlap_config,
+                sharded_abstract=True,
             )
 
             # FP8 amax reduction
@@ -882,15 +942,19 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 out_amax_updated = all_reduce_max_along_all_axes_except_PP(out_amax_updated, mesh)
 
             # All-reduce sum GEMM output when contracting dimensions are sharded
-            if comm_overlap_config is None:
-                if reduce_output:
-                    out = jax.lax.psum(out, global_mesh_resource().tp_resource)
-                    if fuse_gelu:
-                        pre_gelu_out = jax.lax.psum(
-                            pre_gelu_out, global_mesh_resource().tp_resource
-                        )
+            if comm_overlap_config is None and reduce_output:
+                out_updated = jax.lax.psum(out_updated, global_mesh_resource().tp_resource)
+                if fuse_gelu:
+                    pre_gelu_out = jax.lax.psum(pre_gelu_out, global_mesh_resource().tp_resource)
 
-            return out, out_amax_updated, out_scale_updated, pre_gelu_out, bias_grad, extra_out
+            return (
+                out_updated,
+                out_amax_updated,
+                out_scale_updated,
+                pre_gelu_out,
+                bias_grad,
+                extra_out_updated
+            )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
@@ -903,6 +967,8 @@ def gemm_impl(
     rhs: ArrayLike,
     bias: Optional[ArrayLike] = None,
     gelu_input: Optional[ArrayLike] = None,
+    out: Optional[ArrayLike] = None,
+    extra_out: Optional[ArrayLike] = None,
     batched_output: bool = False,
     contracting_dims: Tuple[int, int] = (-1, -2),
     fuse_gelu: bool = False,
@@ -917,7 +983,24 @@ def gemm_impl(
     lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
     lhs_outer_dim = lhs.ndim - 1 if lhs_inner_dim != lhs.ndim - 1 else lhs.ndim - 2
     rhs_outer_dim = rhs.ndim - 2 if rhs_inner_dim == rhs.ndim - 1 else rhs.ndim - 1
-    out_shape = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
+
+    out_shape_batched = (*lhs.shape[:-2], lhs.shape[lhs_outer_dim], rhs.shape[rhs_outer_dim])
+    out_shape_2d = (reduce(operator.mul, out_shape_batched[:-1], 1), out_shape_batched[-1])
+    out_shape = out_shape_batched if batched_output else out_shape_2d
+
+    if out is None:
+        out = jnp.zeros(out_shape, dtype=lhs.dtype)
+
+    if extra_out is None:
+        extra_out_shape = 0
+        if (comm_overlap_config is not None
+            and comm_overlap_config["method"] != "bulk"):
+            comm_type = comm_overlap_config["comm_type"]
+            if comm_type == tex.CommOverlapType.AG:
+                extra_out_shape = list(lhs.shape).copy()
+            elif comm_type == tex.CommOverlapType.RS:
+                extra_out_shape = list(out_shape).copy()
+        extra_out = jnp.zeros(extra_out_shape, dtype=lhs.dtype)
 
     if not fuse_bias:
         bias = jnp.zeros(0, dtype=lhs.dtype)
@@ -929,11 +1012,11 @@ def gemm_impl(
     if not fuse_gelu:
         gelu_input = jnp.zeros(0, dtype=lhs.dtype)
     elif grad:
-        assert (
-            gelu_input is not None
-        ), "Backward GEMM with dGELU epilogue requires pre-GELU output from forward GEMM."
+        assert gelu_input is not None, (
+            "Backward GEMM with dGELU epilogue requires pre-GELU output from forward GEMM."
+        )
     elif gelu_input is None:
-        gelu_input = jnp.zeros(out_shape, dtype=lhs.dtypes)
+        gelu_input = jnp.zeros(out_shape_2d, dtype=lhs.dtype)
 
     (
         out,
@@ -949,9 +1032,10 @@ def gemm_impl(
         dummy_fp8_meta,
         bias,
         gelu_input,
+        out,
         dummy_fp8_meta,
         dummy_fp8_meta,
-        out_dtype=lhs.dtype,
+        extra_out,
         batched_output=batched_output,
         contracting_dims=contracting_dims,
         fuse_gelu=fuse_gelu,
@@ -960,6 +1044,7 @@ def gemm_impl(
         accumulate=accumulate,
         use_split_accumulator=use_split_accumulator,
         comm_overlap_config=comm_overlap_config,
+        sharded_abstract=False,
     )
 
     if grad:
@@ -975,6 +1060,7 @@ def fp8_gemm_impl(
     rhs_scale_inv: ArrayLike,
     bias: Optional[ArrayLike] = None,
     gelu_input: Optional[ArrayLike] = None,
+    out: Optional[ArrayLike] = None,
     out_amax: Optional[ArrayLike] = None,
     out_scale: Optional[ArrayLike] = None,
     out_dtype: jnp.dtype = jnp.bfloat16,
@@ -986,7 +1072,27 @@ def fp8_gemm_impl(
     comm_overlap_config: Optional[dict] = None,
 ) -> Tuple[ArrayLike, ...]:
     """FP8 mat-mul with `nvte_cublas_gemm()` custom op."""
-    if out_dtype is not None and jax_dtype_is_fp8(out_dtype):
+    out_shape_batched = (*lhs.shape[:-2], lhs.shape[-1], rhs_t.shape[-1])
+    out_shape_2d = (reduce(operator.mul, out_shape_batched[:-1], 1), out_shape_batched[-1])
+    out_shape = out_shape_batched if batched_output else out_shape_2d
+
+    if out is None:
+        out = jnp.zeros(out_shape, dtype=out_dtype)
+    else:
+        out_dtype = out.dtype
+
+    if extra_out is None:
+        extra_out_shape = 0
+        if (comm_overlap_config is not None
+            and comm_overlap_config["method"] != "bulk"):
+            comm_type = comm_overlap_config["comm_type"]
+            if comm_type == tex.CommOverlapType.AG:
+                extra_out_shape = list(lhs.shape).copy()
+            elif comm_type == tex.CommOverlapType.RS:
+                extra_out_shape = list(out_shape).copy()
+        extra_out = jnp.zeros(extra_out_shape, dtype=jnp.bfloat16)
+
+    if jax_dtype_is_fp8(out_dtype):
         assert out_amax is not None and out_scale is not None, "Missing output amax and scale."
     else:
         out_amax = jnp.zeros(0, dtype=jnp.float32)
@@ -1000,8 +1106,7 @@ def fp8_gemm_impl(
     if not fuse_gelu:
         gelu_input = jnp.zeros(0, dtype=bias.dtype)
     elif gelu_input is None:
-        gelu_shape = (reduce(operator.mul, lhs.shape[:-1]), rhs_t.shape[-1])
-        gelu_input = jnp.zeros(gelu_shape, dtype=bias.dtype)
+        gelu_input = jnp.zeros(out_shape_2d, dtype=bias.dtype)
 
     (out, out_amax, out_scale, pre_gelu_out, _, extra_out) = (  # bias_grad in non-FP8 GEMM
         CollectiveGemmPrimitive.outer_primitive.bind(
@@ -1011,9 +1116,10 @@ def fp8_gemm_impl(
             lhs_scale_inv,
             bias,
             gelu_input,
+            out,
             out_amax,
             out_scale,
-            out_dtype=out_dtype,
+            extra_out,
             batched_output=batched_output,
             contracting_dims=(-1, -1),
             fuse_gelu=fuse_gelu,
@@ -1022,10 +1128,116 @@ def fp8_gemm_impl(
             accumulate=accumulate,
             use_split_accumulator=use_split_accumulator,
             comm_overlap_config=comm_overlap_config,
+            sharded_abstract=False,
         )
     )
 
     return out, out_amax, out_scale, pre_gelu_out, extra_out
+
+
+class BootstrapCommGemmOverlapPrimitive(BasePrimitive):
+    """
+    Initialize Comm+GEMM overlap communicators and buffers
+    """
+
+    name = "te_bootstrap_comm_gemm_overlap_ffi"
+    impl_static_args = (1,)
+    multiple_results = False
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(buffer_aval, myrank, numranks, comm_overlap_config):
+        del myrank, numranks
+        assert is_ffi_enabled(), "Comm+GEMM overlap is supported only via XLA FFI."
+        overlap_name = comm_overlap_config.get("name", None)
+        assert overlap_name in _COMM_GEMM_OVERLAP_NAMES, (
+            f"Unrecognized comm+GEMM overlap name: {overlap_name=}"
+        )
+        assert buffer_aval.size > 0, "Cannot initialize a zero-size communication buffer."
+        return jax.core.ShapedArray(shape=(0,), dtype=dtypes.canonicalize_dtype(buffer_aval.dtype))
+
+    @staticmethod
+    def lowering(ctx, buffer, *, myrank, numranks, comm_overlap_config):
+        return ffi.ffi_lowering(BootstrapCommGemmOverlapPrimitive.name)(
+            ctx,
+            buffer,
+            name=comm_overlap_config["name"],
+            method=comm_overlap_config["method"],
+            myrank=myrank,
+            numranks=numranks,
+            tp_size=comm_overlap_config["tp_size"],
+            num_splits=comm_overlap_config["num_splits"],
+            num_max_streams=comm_overlap_config["num_max_streams"],
+            cga_size=comm_overlap_config["cga_size"],
+            num_comm_sm=comm_overlap_config["num_sm"],
+            set_sm_margin=comm_overlap_config["set_sm_margin"],
+            use_ce=comm_overlap_config["use_ce"],
+            atomic_gemm=comm_overlap_config["atomic_gemm"],
+            aggregate=comm_overlap_config["aggregate"],
+            pipeline_rs_overlap_first_gemm=comm_overlap_config["pipeline_rs_overlap_first_gemm"],
+        )
+
+    @staticmethod
+    def impl(buffer, myrank, numranks, comm_overlap_config):
+        assert BootstrapCommGemmOverlapPrimitive.inner_primitive is not None
+        buffer = jax.lax.reshape(
+            buffer, (reduce(operator.mul, buffer.shape[:-1], 1), buffer.shape[-1])
+        )
+        return BootstrapCommGemmOverlapPrimitive.inner_primitive.bind(
+            buffer, myrank=myrank, numranks=numranks, comm_overlap_config=comm_overlap_config,
+        )
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, myrank, numranks, comm_overlap_config):
+        assert BootstrapCommGemmOverlapPrimitive.inner_primitive is not None
+        check_valid_batch_dims(batch_dims)
+        return (
+            BootstrapCommGemmOverlapPrimitive.inner_primitive.bind(
+                *batched_args, myrank=myrank, numranks=numranks, comm_overlap_config=comm_overlap_config
+            ),
+            None,
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(myrank, numranks, comm_overlap_config, mesh, arg_infos,
+                                     result_infos):
+        del myrank, numranks, comm_overlap_config, result_infos
+        buffer_spec = get_padded_spec(arg_infos[0])
+        assert all([spec is None for spec in buffer_spec]), "Sample buffer must be unsharded."
+        return NamedSharding(mesh, PartitionSpec(None))
+
+    @staticmethod
+    def partition(myrank, numranks, comm_overlap_config, mesh, arg_infos, result_infos):
+        del arg_infos, result_infos
+        arg_shardings = (NamedSharding(mesh, PartitionSpec(None)),)
+        out_sharding = NamedSharding(mesh, PartitionSpec(None))
+        return (
+            mesh,
+            partial(BootstrapCommGemmOverlapPrimitive.impl,
+                    myrank=myrank,
+                    numranks=numranks,
+                    comm_overlap_config=comm_overlap_config),
+            out_sharding,
+            arg_shardings,
+        )
+
+
+register_primitive(BootstrapCommGemmOverlapPrimitive)
+
+
+def bootstrap_comm_gemm_overlap(
+    buffer: ArrayLike,
+    myrank: int,
+    numranks: int,
+    comm_overlap_config: dict
+):
+    _ = BootstrapCommGemmOverlapPrimitive.outer_primitive.bind(
+        buffer,
+        myrank=myrank,
+        numranks=numranks,
+        comm_overlap_config=comm_overlap_config
+    )
 
 
 class CopyIntoOverlapBufferPrimitive(BasePrimitive):
@@ -1033,75 +1245,73 @@ class CopyIntoOverlapBufferPrimitive(BasePrimitive):
     Copy JAX array data into comm+GEMM overlap buffer
     """
 
-    name = "te_copy_into_overlap_buffer"
+    name = "te_copy_into_overlap_buffer_ffi"
     impl_static_args = (1, 2)
     multiple_results = False
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(inp_aval, name, comm_type):
+    def abstract(inp_aval, name, sharded):
+        del sharded
+        assert is_ffi_enabled(), "Comm+GEMM overlap is supported only via XLA FFI."
         assert name in _COMM_GEMM_OVERLAP_NAMES, f"Unrecognized comm+GEMM overlap name: {name=}"
-        assert comm_type in [
-            tex.CommOverlapType.AG,
-            tex.CommOverlapType.RS,
-        ], "Invalid comm+GEMM overlap type."
         assert inp_aval.size > 0, "Cannot copy a zero-size array into overlap buffer."
-        assert inp_aval.ndim == 2, "Cannot copy more than 2 dimensions!"
         return jax.core.ShapedArray(shape=(0,), dtype=dtypes.canonicalize_dtype(inp_aval.dtype))
 
     @staticmethod
-    def lowering(ctx, inp, *, name, comm_type):
-        if is_ffi_enabled():
-            name = "te_copy_into_overlap_buffer_ffi"
-            return ffi.ffi_lowering(name)(
-                ctx,
-                inp,
-                name=name,
-                comm_type=int(comm_type),
-            )
-        else:
-            operands = [inp]
-            operand_shapes = [ir.RankedTensorType(inp.type).shape]
-            out_types = []
-            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
-            opaque = tex.pack_buffer_descriptor(
-                name, inp.shape, jax_dtype_to_te_dtype(inp.dtype), comm_type
-            )
-            return custom_caller(CopyIntoOverlapBufferPrimitive.name, args, opaque, False)
-
-    @staticmethod
-    def impl(inp, name, comm_type):
-        assert CopyIntoOverlapBufferPrimitive.inner_primitive is not None
-        return CopyIntoOverlapBufferPrimitive.inner_primitive.bind(
-            inp, name=name, comm_type=comm_type
+    def lowering(ctx, inp, *, name, sharded):
+        return ffi.ffi_lowering(name)(
+            ctx,
+            inp,
+            name=name,
+            sharded=sharded,
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, name, comm_type):
+    def impl(inp, name, sharded):
+        assert CopyIntoOverlapBufferPrimitive.inner_primitive is not None
+        inp_2d = jax.lax.reshape(inp, (reduce(operator.mul, inp.shape[:-1], 1), inp.shape[-1]))
+        return CopyIntoOverlapBufferPrimitive.inner_primitive.bind(
+            inp_2d, name=name, sharded=sharded
+        )
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, name, sharded):
         assert CopyIntoOverlapBufferPrimitive.inner_primitive is not None
         check_valid_batch_dims(batch_dims)
         return (
             CopyIntoOverlapBufferPrimitive.inner_primitive.bind(
-                *batched_args, name=name, comm_type=comm_type
+                *batched_args, name=name, sharded=sharded
             ),
             None,
         )
 
     @staticmethod
-    def infer_sharding_from_operands(name, comm_type, mesh, arg_infos, result_infos):
-        del name, comm_type, arg_infos, result_infos
+    def infer_sharding_from_operands(name, sharded, mesh, arg_infos, result_infos):
+        del name, result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
+        if sharded:
+            assert inp_spec[-2] is not None, (
+                "Leading dimension of input tensor must be sharded in order to copy into a "
+                + "sharded communication tensor (e.g. preparing for bulk all-gather overlap)."
+            )
+        else:
+            assert inp_spec[-2] is None, (
+                "Leading dimension of input tensor cannot be sharded when copying into an "
+                + "unsharded communication tensor (e.g. preparing for bulk reduce-scatter overlap)."
+            )
         return NamedSharding(mesh, PartitionSpec(None))
 
     @staticmethod
-    def partition(name, comm_type, mesh, arg_infos, result_infos):
-        del name, comm_type, result_infos
-        inp_spec = arg_infos[0]
+    def partition(name, sharded, mesh, arg_infos, result_infos):
+        del name, sharded, result_infos
+        inp_spec = get_padded_spec(arg_infos[0])
         arg_shardings = (NamedSharding(mesh, PartitionSpec(*inp_spec)),)
         out_sharding = NamedSharding(mesh, PartitionSpec(None))
         return (
             mesh,
-            partial(CopyIntoOverlapBufferPrimitive.impl, name=name, comm_type=comm_type),
+            partial(CopyIntoOverlapBufferPrimitive.impl, name=name, sharded=sharded),
             out_sharding,
             arg_shardings,
         )
@@ -1110,5 +1320,5 @@ class CopyIntoOverlapBufferPrimitive(BasePrimitive):
 register_primitive(CopyIntoOverlapBufferPrimitive)
 
 
-def copy_into_overlap_buffer(inp: ArrayLike, name: str, comm_type: tex.CommOverlapType) -> None:
-    _ = CollectiveGemmPrimitive.outer_primitive.bind(inp, name=name, comm_type=comm_type)
+def copy_into_overlap_buffer(inp: ArrayLike, name: str, sharded: bool) -> None:
+    _ = CopyIntoOverlapBufferPrimitive.outer_primitive.bind(inp, name=name, sharded=sharded)

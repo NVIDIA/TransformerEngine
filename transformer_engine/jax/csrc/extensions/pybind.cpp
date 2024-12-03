@@ -54,8 +54,6 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward"] = EncapsulateFunction(FusedAttnForward);
   dict["te_fused_attn_backward"] = EncapsulateFunction(FusedAttnBackward);
   dict["te_gemm"] = EncapsulateFunction(Gemm);
-  dict["te_copy_into_overlap_buffer"] = EncapsulateFunction(CopyIntoOverlapBuffer);
-  dict["te_comm_gemm_overlap"] = EncapsulateFunction(CommGemmOverlap);
 
   // Transpose
   dict["te_transpose_ffi"] = EncapsulateFFI(TransposeHandler);
@@ -106,9 +104,18 @@ pybind11::dict Registrations() {
   fused_attn_backward_ffi["execute"] = EncapsulateFFI(FusedAttnBackwardHandler);
   dict["te_fused_attn_backward_ffi"] = fused_attn_backward_ffi;
 
-  dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
+  pybind11::dict gemm_ffi;
+  gemm_ffi["prepare"] = EncapsulateFFI(CublasltHandleInitHandler);
+  gemm_ffi["execute"] = EncapsulateFFI(GemmHandler);
+  dict["te_gemm_ffi"] = gemm_ffi;
+
+  dict["te_bootstrap_comm_gemm_overlap_ffi"] = EncapsulateFFI(BootstrapCommGemmOverlapHandler);
   dict["te_copy_into_overlap_buffer_ffi"] = EncapsulateFFI(CopyIntoOverlapBufferHandler);
-  dict["te_comm_gemm_overlap_ffi"] = EncapsulateFFI(CommGemmOverlapHandler);
+
+  pybind11::dict comm_gemm_overlap_ffi;
+  comm_gemm_overlap_ffi["prepare"] = EncapsulateFFI(CublasltHandleInitHandler);
+  comm_gemm_overlap_ffi["execute"] = EncapsulateFFI(CommGemmOverlapHandler);
+  dict["te_comm_gemm_overlap_ffi"] = comm_gemm_overlap_ffi;
   return dict;
 }
 
@@ -125,8 +132,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("pack_softmax_descriptor", &PackCustomCallSoftmaxDescriptor);
   m.def("pack_fused_attn_descriptor", &PackCustomCallFusedAttnDescriptor);
   m.def("pack_gemm_descriptor", &PackCustomCallGemmDescriptor);
-  m.def("pack_buffer_descriptor", &PackCustomCallBufferDescriptor);
-  m.def("pack_overlap_descriptor", &PackCustomCallOverlapDescriptor);
   m.def("get_fused_attn_backend", &GetFusedAttnBackend);
   m.def("get_cuda_version", &GetCudaRuntimeVersion);
   m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
@@ -140,7 +145,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("bootstrap_comm_gemm_overlap", &BootstrapCommGemmOverlap);
-  m.def("destroy_comm_gemm_overlaps", &DestroyCommGemmOverlap);
+  m.def("destroy_comm_gemm_overlap", &DestroyCommGemmOverlap);
   m.def("set_buffer_scale_inv", &SetOverlapBufferScaleInverse, pybind11::arg(), pybind11::arg(),
         pybind11::arg("grad") = false);
   m.def("get_overlap_buffer", &GetOverlapBuffer);

@@ -53,21 +53,24 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
   auto *rhs_scale_inv = reinterpret_cast<float *>(buffers[3]);
   auto *bias = buffers[4];
   auto *gelu_input = buffers[5];
-  auto *out_amax = reinterpret_cast<float *>(buffers[6]);
-  auto *out_scale = reinterpret_cast<float *>(buffers[7]);
+  auto *out = buffers[6];
+  auto *out_amax = reinterpret_cast<float *>(buffers[7]);
+  auto *out_scale = reinterpret_cast<float *>(buffers[8]);
+  // buffers[9] is the extra output bufer for comm+GEMM overlap, not used here
 
   // Outputs
-  auto *out = buffers[8];
-  auto *out_amax_updated = reinterpret_cast<float *>(buffers[9]);
-  auto *out_scale_updated = reinterpret_cast<float *>(buffers[10]);
-  auto *pre_gelu_out = buffers[11];
-  auto *bias_grad = buffers[12];
-  // buffers[13] is the extra output for comm+GEMM overlap, not used here
-  auto *workspace = buffers[14];
+  auto *out_updated = buffers[10];
+  auto *out_amax_updated = reinterpret_cast<float *>(buffers[11]);
+  auto *out_scale_updated = reinterpret_cast<float *>(buffers[12]);
+  auto *pre_gelu_out = buffers[13];
+  auto *bias_grad = buffers[14];
+  // buffers[15] is the updated extra output for comm+GEMM overlap, not used here
+  auto *workspace = buffers[16];
 
   // Operand aliasing
   NVTE_CHECK(bias == bias_grad, "bias not bound to bias_grad in TE/JAX GEMM");
   NVTE_CHECK(gelu_input == pre_gelu_out, "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
+  NVTE_CHECK(out == out_updated, "out not bound to out_updated in TE/JAX GEMM");
   NVTE_CHECK(out_amax == out_amax_updated, "out_amax not bound to out_amax_updated in TE/JAX GEMM");
   NVTE_CHECK(out_scale == out_scale_updated,
              "out_scale not bound to out_scale_updated in TE/JAX GEMM");
@@ -85,13 +88,15 @@ void Gemm(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque
            desc.fuse_bias, desc.grad, desc.accumulate, desc.use_split_accumulator);
 }
 
-Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
-                   Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
-                   Buffer_Type out_amax, Buffer_Type out_scale, Result_Type out,
-                   Result_Type out_amax_updated, Result_Type out_scale_updated,
-                   Result_Type pre_gelu_out, Result_Type bias_grad, Result_Type dummy_out,
-                   Result_Type workspace, bool lhs_trans, bool rhs_trans, bool fuse_gelu,
-                   bool fuse_bias, bool grad, bool accumulate, bool use_split_accumulator) {
+Error_Type GemmFFI(
+    cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input, Buffer_Type out,
+    Buffer_Type out_amax, Buffer_Type out_scale, Buffer_Type dummy_in, Result_Type out_updated,
+    Result_Type out_amax_updated, Result_Type out_scale_updated, Result_Type pre_gelu_out,
+    Result_Type bias_grad, Result_Type dummy_out, Result_Type workspace, bool lhs_trans,
+    bool rhs_trans, bool fuse_gelu, bool fuse_bias, bool grad, bool accumulate,
+    bool use_split_accumulator
+) {
   // Inputs
   auto lhs_ptr = lhs.untyped_data();
   auto lhs_scale_inv_ptr = reinterpret_cast<float *>(lhs_scale_inv.untyped_data());
@@ -101,17 +106,19 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto bias_ptr = bias.untyped_data();
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
   auto gelu_input_ptr = gelu_input.untyped_data();
+  auto out_ptr = out.untyped_data();
   auto out_amax_ptr = reinterpret_cast<float *>(out_amax.untyped_data());
   auto out_scale_ptr = reinterpret_cast<float *>(out_scale.untyped_data());
+  // dummy_in is the extra output buffer for comm+GEMM overlap, not used here
 
   // Outputs
-  auto out_ptr = out->untyped_data();
+  auto out_updated_ptr = out_updated->untyped_data();
   auto out_amax_updated_ptr = reinterpret_cast<float *>(out_amax_updated->untyped_data());
   auto out_scale_updated_ptr = reinterpret_cast<float *>(out_scale_updated->untyped_data());
-  auto out_dtype = convert_ffi_datatype_to_te_dtype(out->element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(out_updated->element_type());
   auto pre_gelu_out_ptr = pre_gelu_out->untyped_data();
   auto bias_grad_ptr = bias_grad->untyped_data();
-  // dummy_out is the extra output for comm+GEMM overlap, not used here
+  // dummy_out is the updated extra output for comm+GEMM overlap, not used here
   auto workspace_ptr = workspace->untyped_data();
   auto workspace_size = workspace->dimensions().back();
 
@@ -119,6 +126,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   NVTE_CHECK(bias_ptr == bias_grad_ptr, "bias not bound to bias_grad in TE/JAX GEMM");
   NVTE_CHECK(gelu_input_ptr == pre_gelu_out_ptr,
              "gelu_input not bound to pre_gelu_out in TE/JAX GEMM");
+  NVTE_CHECK(out_ptr == out_updated_ptr, "out not bound to out_updated in TE/JAX GEMM");
   NVTE_CHECK(out_amax_ptr == out_amax_updated_ptr,
              "out_amax not bound to out_amax_updated in TE/JAX GEMM");
   NVTE_CHECK(out_scale_ptr == out_scale_updated_ptr,
@@ -146,9 +154,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_scale_inv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // gelu_input
+                                  .Arg<Buffer_Type>()      // out
                                   .Arg<Buffer_Type>()      // out_amax
                                   .Arg<Buffer_Type>()      // out_scale
-                                  .Ret<Buffer_Type>()      // out
+                                  .Arg<Buffer_Type>()      // dummy_in
+                                  .Ret<Buffer_Type>()      // out_updated
                                   .Ret<Buffer_Type>()      // out_amax_updated
                                   .Ret<Buffer_Type>()      // out_scale_updated
                                   .Ret<Buffer_Type>()      // pre_gelu_out
