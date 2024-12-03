@@ -14,7 +14,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 
 import transformer_engine.jax as te
-from transformer_engine.jax.cpp_extensions import gemm_impl
+from transformer_engine.jax.cpp_extensions import gemm_impl, copy_into_overlap_buffer
 from transformer_engine.jax.gemm import (
     initialize_comm_gemm_overlaps,
     destroy_comm_gemm_overlaps,
@@ -124,14 +124,15 @@ initialize_comm_gemm_overlaps(
 if myrank == 0:
     print(
         f"{myrank}: INPUTS {lhs.shape} x {rhs.shape}\n"
-        + f"{myrank}:    LHS sharding: {lhs.sharding}\n"
-        + f"{myrank}:    RHS sharding: {rhs.sharding}\n",
+        + f"{myrank}:    LHS sharding: {lhs.sharding.spec}\n"
+        + f"{myrank}:    RHS sharding: {rhs.sharding.spec}\n",
         flush=True,
     )
 
 
 @jax.jit
 def te_gemm(A, B):
+    copy_into_overlap_buffer(A, overlap_name, True)
     return gemm_impl(
         A,
         jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),
@@ -145,10 +146,9 @@ with te.sharding.global_shard_guard(mesh_resource):
 
 if myrank == 0:
     print(
-        f"{myrank}: {'AG -> GEMM' if args.comm_type == 'AG' else 'GEMM -> RS'} OUTPUTS:\n"
-        + f"{myrank}:    GEMM output: {output.shape} | {output.sharding}\n"
-        + f"{myrank}:    {'Gathered LHS' if args.comm_type == 'AG' else 'Scattered output:'}: "
-        + f"{extra_out.shape} | {extra_out.sharding}\n",
+        f"{myrank}: {'AG -> GEMM' if args.comm_type == 'AG' else 'GEMM -> RS'} OUTPUT "
+        + f"{output.shape}\n"
+        + f"{myrank}:    Sharding: {output.sharding.spec}\n",
         flush=True,
     )
 
