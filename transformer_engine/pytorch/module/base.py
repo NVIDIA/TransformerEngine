@@ -234,6 +234,7 @@ def initialize_ub(
                 ranks_per_domain_list, backend=bootstrap_backend
             )
             local_rank = torch.distributed.get_rank(intra_domain_group)
+            intra_domain_ranks = torch.distributed.get_process_group_ranks(intra_domain_group)
 
             inter_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
                 [list(ranks) for ranks in zip(*ranks_per_domain_list)],
@@ -761,9 +762,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
 
             if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
-                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                    self.fp8_meta, fp8_weights=self._get_fp8_params()
-                )
+                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
             # Activation recomputation is used and this is the first forward phase.
             if self.fp8 and self.training and is_fp8_activation_recompute_enabled():

@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../common.h"
+#include "../cudnn_utils.h"
 #include "../util/system.h"
 #include "fused_attn_fp8.h"
 #include "utils.h"

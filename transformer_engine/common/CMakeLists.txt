@@ -30,14 +30,14 @@ endif()
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
 if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
+            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
             "Try running 'git submodule update --init --recursive' "
             "within the Transformer Engine source.")
 endif()
-include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
@@ -46,7 +46,7 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
-     pycudnn.cpp
+     cudnn_utils.cpp
      transformer_engine.cpp
      common.cu
      transpose/cast_transpose.cu
@@ -61,6 +61,7 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
+     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      layer_norm/ln_api.cpp

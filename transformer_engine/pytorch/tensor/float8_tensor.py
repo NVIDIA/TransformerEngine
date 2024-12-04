@@ -74,30 +74,6 @@ class _FromFloat8Func(torch.autograd.Function):
         return grad, None
 
 
-def post_optimizer_step_fwd_amax_reduction(param: Float8Tensor) -> None:
-    """Amax scale and update when there is at least 1 trainable FP8 parameter."""
-    param_id = id(param._data)
-
-    if param_id not in FP8GlobalStateManager.fp8_param_to_autocast:
-        return
-
-    autocast_key = FP8GlobalStateManager.fp8_param_to_autocast[param_id]
-
-    if autocast_key not in FP8GlobalStateManager.autocast_to_fp8_params:
-        return
-
-    if autocast_key in updated_fp8_params:
-        updated_fp8_params[autocast_key].add(param_id)
-    else:
-        updated_fp8_params[autocast_key] = {param_id}
-
-    current_fp8_params_set = FP8GlobalStateManager.autocast_to_fp8_params[autocast_key]
-    # All FP8 trainable parameters have been updated.
-    if updated_fp8_params[autocast_key] == current_fp8_params_set:
-        FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True, fp8_weights=True)
-        del updated_fp8_params[autocast_key]
-
-
 class _ToFloat8Func(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
 
@@ -109,10 +85,12 @@ class _ToFloat8Func(torch.autograd.Function):
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
+        data: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
+        data_transpose: Optional[torch.Tensor] = None,
     ) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -125,7 +103,8 @@ class _ToFloat8Func(torch.autograd.Function):
             device = torch.device("cuda")
 
         # FP8 data buffer
-        data = torch.empty(tensor.size(), dtype=torch.uint8, device=device)
+        if data is None:
+            data = torch.empty(tensor.size(), dtype=torch.uint8, device=device)
 
         # Check scale
         if scale is None and fp8_meta is None:
@@ -140,8 +119,7 @@ class _ToFloat8Func(torch.autograd.Function):
             scale_inv = scale_inv.to(device=device, dtype=torch.float32)
 
         # Transpose cache
-        data_transpose = None
-        if with_transpose_cache:
+        if data_transpose is None and with_transpose_cache:
             data_transpose = torch.empty(
                 (data.size(-1), data.numel() // data.size(-1)),
                 dtype=torch.uint8,
@@ -172,7 +150,7 @@ class _ToFloat8Func(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
-        return grad, None, None, None, None, None, None, None
+        return grad, None, None, None, None, None, None, None, None, None
 
 
 class _IdentityFunc(torch.autograd.Function):
@@ -674,9 +652,6 @@ class Float8Tensor(QuantizedTensor):
             )
             dst._transpose_invalid = False
 
-        # Callback hook to perform amax reduction after optimizer step
-        post_optimizer_step_fwd_amax_reduction(self)
-
         return self
 
     @classmethod
@@ -688,10 +663,12 @@ class Float8Tensor(QuantizedTensor):
         fp8_meta_forward: bool = True,
         fp8_meta_index: Optional[int] = None,
         fp8_dtype: TE_DType = TE_DType.kFloat8E4M3,
+        data: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
         amax: Optional[torch.Tensor] = None,
         scale_inv: Optional[torch.Tensor] = None,
         with_transpose_cache: bool = False,
+        data_transpose: Optional[torch.Tensor] = None,
     ):
         """Construct Float8Tensor from plain PyTorch tensor"""
         return _ToFloat8Func.apply(
@@ -700,10 +677,12 @@ class Float8Tensor(QuantizedTensor):
             fp8_meta_forward,
             fp8_meta_index,
             fp8_dtype,
+            data,
             scale,
             amax,
             scale_inv,
             with_transpose_cache,
+            data_transpose,
         )
 
     def detach(self) -> Float8Tensor:

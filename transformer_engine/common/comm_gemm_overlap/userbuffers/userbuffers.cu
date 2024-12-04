@@ -1366,6 +1366,28 @@ __global__ void __launch_bounds__(MAX_THREADS)
   cfg.attrs = attribute_ub;                                                          \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
 
+#if (CUDART_VERSION >= 12030)
+#define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
+  attribute_ub[2].id = cudaLaunchAttributeLaunchCompletionEvent;     \
+  attribute_ub[2].val.launchCompletionEvent.event = comm_launch_event;
+#define NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH 3
+#else
+#define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event)
+#define NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH 2
+#endif
+
+#define SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, threads, stream, comm_launch_event) \
+  cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                             \
+  cudaLaunchAttribute attribute_ub[NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH] = {};              \
+  ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event)                             \
+  attribute_ub[1].id = cudaLaunchAttributeClusterDimension;                                \
+  attribute_ub[1].val.clusterDim.x = sms % comm->cga_size == 0 ? comm->cga_size : 1;       \
+  attribute_ub[1].val.clusterDim.y = 1;                                                    \
+  attribute_ub[1].val.clusterDim.z = 1;                                                    \
+  attribute_ub[0].id = cudaLaunchAttributeCooperative;                                     \
+  cfg.attrs = attribute_ub;                                                                \
+  cfg.numAttrs = NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH;
+
 #define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
     int arg1 = op - NVTE_MAX_OPS,                                                                  \
@@ -1753,7 +1775,8 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
 }
 
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                 communicator *comm, cudaStream_t stream) {
+                                 communicator *comm, cudaStream_t stream,
+                                 cudaEvent_t comm_launch_event) {
   const int op = userbuffers_allreduceop_nonsharp2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
@@ -1766,11 +1789,20 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-    callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+  if (comm_launch_event) {
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+    } else {
+      callranks_ag(2) callranks_ag(4) callranks_ag(8)
+    }
   } else {
-    callranks_ag(2) callranks_ag(4) callranks_ag(8)
+    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+    } else {
+      callranks_ag(2) callranks_ag(4) callranks_ag(8)
+    }
   }
 }
 
@@ -1790,7 +1822,8 @@ void allgather2_userbuff_inplace_sliced(const int handler, const int offset, con
 }
 
 void reducescatter2_userbuff_inplace(const int handler, const int offset, const int elements,
-                                     communicator *comm, cudaStream_t stream) {
+                                     communicator *comm, cudaStream_t stream,
+                                     cudaEvent_t comm_launch_event) {
   const int op = userbuffers_allreduceop_nonsharp2;
   const int ar_firstgpu =
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
@@ -1803,17 +1836,26 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-    callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+  if (comm_launch_event) {
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+    } else {
+      callranks_rs(2) callranks_rs(4) callranks_rs(8)
+    }
   } else {
-    callranks_rs(2) callranks_rs(4) callranks_rs(8)
+    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+    } else {
+      callranks_rs(2) callranks_rs(4) callranks_rs(8)
+    }
   }
 }
 void reducescatter2_userbuff_stridedoutput(void *output, const int handler, const int offset,
                                            const int rowelements, const int colelements,
                                            const int strideelements, communicator *comm,
-                                           cudaStream_t stream) {
+                                           cudaStream_t stream, cudaEvent_t comm_launch_event) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
   const int ar_firstgpu =
@@ -1827,23 +1869,35 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-    callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
+  if (comm_launch_event) {
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
+    } else {
+      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+    }
   } else {
-    callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
+      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
+    } else {
+      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+    }
   }
 }
 void reducescatter2_userbuff(void *output, const int handler, const int offset, const int elements,
-                             communicator *comm, cudaStream_t stream) {
-  reducescatter2_userbuff_stridedoutput(output, handler, offset, elements, 1, 0, comm, stream);
+                             communicator *comm, cudaStream_t stream,
+                             cudaEvent_t comm_launch_event) {
+  reducescatter2_userbuff_stridedoutput(output, handler, offset, elements, 1, 0, comm, stream,
+                                        comm_launch_event);
 }
 
 template <typename fp8type>
 void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const int handler,
                                                const int offset, const int rowelements,
                                                const int colelements, const int strideelements,
-                                               communicator *comm, cudaStream_t stream) {
+                                               communicator *comm, cudaStream_t stream,
+                                               cudaEvent_t comm_launch_event) {
   const int elements = rowelements * colelements;
   const int op = userbuffers_allreduceop_nonsharp2;
   const int ar_firstgpu =
@@ -1857,33 +1911,43 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
   int warps = comm->threads / 32;
   if (warps < ar_nvsize) warps = ar_nvsize;
 
-  SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
+  if (comm_launch_event) {
+    SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
+    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
+  } else {
+    SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
+    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
+  }
 }
 
 template void reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e5m2>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
-    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream);
+    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream,
+    cudaEvent_t comm_launch_event);
 
 template void reducescatter2_userbuff_stridedoutput_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,
-    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream);
+    const int colelements, const int strideelements, communicator *comm, cudaStream_t stream,
+    cudaEvent_t comm_launch_event);
 
 template <typename fp8type>
 void reducescatter2_userbuff_fp8(void *output, float *scale, const int handler, const int offset,
-                                 const int elements, communicator *comm, cudaStream_t stream) {
+                                 const int elements, communicator *comm, cudaStream_t stream,
+                                 cudaEvent_t comm_launch_event) {
   reducescatter2_userbuff_stridedoutput_fp8<fp8type>(output, scale, handler, offset, elements, 1, 0,
-                                                     comm, stream);
+                                                     comm, stream, comm_launch_event);
 }
 
 template void reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream);
+                                                         cudaStream_t stream,
+                                                         cudaEvent_t comm_launch_event);
 template void reducescatter2_userbuff_fp8<__nv_fp8_e4m3>(void *output, float *scale,
                                                          const int handler, const int offset,
                                                          const int elements, communicator *comm,
-                                                         cudaStream_t stream);
+                                                         cudaStream_t stream,
+                                                         cudaEvent_t comm_launch_event);
 
 template void reducescatter2_userbuff_strided_atomic_fp8<__nv_fp8_e4m3>(
     void *output, float *scale, const int handler, const int offset, const int rowelements,

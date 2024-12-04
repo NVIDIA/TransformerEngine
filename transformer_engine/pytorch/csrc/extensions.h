@@ -212,6 +212,12 @@ std::vector<at::Tensor> fused_cast_transpose_bgrad_dgelu(at::Tensor grad_output,
                                                          int scale_offset = 0, int amax_offset = 0,
                                                          int scale_inv_offset = 0);
 
+void fused_dswiglu_cast_transpose(at::Tensor grad_output, at::Tensor input, at::Tensor grad_input,
+                                  at::Tensor grad_input_transpose, at::Tensor scale,
+                                  at::Tensor amax, at::Tensor scale_inv,
+                                  transformer_engine::DType otype, int scale_offset = 0,
+                                  int amax_offset = 0, int scale_inv_offset = 0);
+
 void fused_multi_cast_transpose(std::vector<at::Tensor> input_list,
                                 std::vector<at::Tensor> scale_list,
                                 std::vector<at::Tensor> cast_output_list,
