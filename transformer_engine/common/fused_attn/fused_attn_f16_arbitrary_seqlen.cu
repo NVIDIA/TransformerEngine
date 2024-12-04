@@ -472,7 +472,8 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
                           (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   if (is_bottom_right && s_q == s_kv && !is_padding) {
     is_causal = true;
     is_bottom_right = false;
@@ -634,7 +635,9 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         k->set_ragged_offset(offset_k);
         v->set_ragged_offset(offset_v);
         o->set_ragged_offset(offset_o);
+        dO->set_ragged_offset(offset_o);
       }
+
       stats = mha_graph->tensor(fe::graph::Tensor_attributes()
                                     .set_name("stats")
                                     .set_dim({b, h, s_q, 1})
@@ -667,6 +670,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
       if (is_ragged && cudnn_runtime_version >= 90600) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
+        sdpa_backward_options.set_max_total_seq_len_q(s_kv);
       }
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {

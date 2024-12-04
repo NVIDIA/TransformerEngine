@@ -483,6 +483,11 @@ def get_attention_backend(
     # FusedAttention             | non-paged/paged | FP16/BF16
     # UnfusedDotProductAttention | non-paged/paged | FP32/FP16/BF16
     if inference_params is not None:
+        if context_parallel:
+            logger.debug("Disabling all backends as KV caching is not supported for context parallelism")
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
             logger.debug("Disabling all backends as FP8 KV caching is not yet implemented")
             use_flash_attention = False
@@ -494,6 +499,11 @@ def get_attention_backend(
                     "Disabling FusedAttention as paged KV caching requires cuDNN 9.5+"
                 )
                 use_fused_attention = False
+            if use_flash_attention and not _use_flash_attn_3 and not _flash_attn_2_5_7_plus:
+                logger.debug(
+                    "Disabling FlashAttention as paged KV caching requires flash-attn 2.5.7+ or v3"
+                )
+                use_flash_attention = False
 
     # Filter: Head dimension
     if use_flash_attention and head_dim_qk != head_dim_v:
@@ -6900,6 +6910,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias,
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
+                None,
+                None,
                 fp8_meta["scaling_fwd"].scale_inv,  # d_scale_qkv
                 META_QKV,  # d_scale_qkv_offset
                 fp8_meta["scaling_fwd"].scale_inv,  # d_scale_s

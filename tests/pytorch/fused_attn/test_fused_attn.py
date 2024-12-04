@@ -1984,21 +1984,18 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv[:, :, 2, :, :] if cudnn_frontend_version == 1 else qkv[:, 2, :, :],
             fp8_dtype_forward,
             FusedAttnBackend["FP8"],
-            None,
-            None,
-            None,
-            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_qkv
-            META_QKV,  # d_scale_qkv_offset
-            fp8_meta["scaling_fwd"].scale_inv,  # d_scale_s
-            META_S,  # d_scale_s_offset
-            fp8_meta["scaling_fwd"].scale,  # q_scale_s
-            META_S,  # q_scale_s_offset
-            fp8_meta["scaling_fwd"].scale,  # q_scale_o
-            META_O,  # q_scale_o_offset
-            fp8_meta["scaling_fwd"].amax_history,  # amax_s
-            META_S,  # amax_s_offset
-            fp8_meta["scaling_fwd"].amax_history,  # amax_o
-            META_O,  # amax_o_offset
+            d_scale_qkv=fp8_meta["scaling_fwd"].scale_inv,
+            d_scale_qkv_offset=META_QKV,
+            d_scale_s=fp8_meta["scaling_fwd"].scale_inv,
+            d_scale_s_offset=META_S,
+            q_scale_s=fp8_meta["scaling_fwd"].scale,
+            q_scale_s_offset=META_S,
+            q_scale_o=fp8_meta["scaling_fwd"].scale,
+            q_scale_o_offset=META_O,
+            amax_s=fp8_meta["scaling_fwd"].amax_history,
+            amax_s_offset=META_S,
+            amax_o=fp8_meta["scaling_fwd"].amax_history,
+            amax_o_offset=META_O,
             attn_scale=None,
             dropout=p_dropout,
             fast_zero_fill=fast_zero_fill,
@@ -2070,18 +2067,16 @@ class _custom_mha_fp8(torch.autograd.Function):
                 fp8_dtype_backward,
                 ctx.aux_ctx_tensors,
                 FusedAttnBackend["FP8"],
-                None,
-                None,
-                fwd_scale_inverses[META_QKV],  # d_scale_qkv,
-                fwd_scale_inverses[META_S],  # d_scale_s,
-                fwd_scale_inverses[META_O],  # d_scale_o,
-                ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO],  # d_scale_do
-                ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP],  # d_scale_dp
-                fwd_scales[META_S],  # q_scale_s
-                ctx.fp8_meta["scaling_bwd"].scale[META_DP],  # q_scale_dp
-                ctx.fp8_meta["scaling_bwd"].scale[META_DQKV],  # q_scale_dqkv
-                ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP],  # amax_dp
-                ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV],  # amax_dqkv
+                d_scale_qkv=fwd_scale_inverses[META_QKV],
+                d_scale_s=fwd_scale_inverses[META_S],
+                d_scale_o=fwd_scale_inverses[META_O],
+                d_scale_do=ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO],
+                d_scale_dp=ctx.fp8_meta["scaling_bwd"].scale_inv[META_DP],
+                q_scale_s=fwd_scales[META_S],
+                q_scale_dp=ctx.fp8_meta["scaling_bwd"].scale[META_DP],
+                q_scale_dqkv=ctx.fp8_meta["scaling_bwd"].scale[META_DQKV],
+                amax_dp=ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DP],
+                amax_dqkv=ctx.fp8_meta["scaling_bwd"].amax_history[0][META_DQKV],
                 attn_scale=None,
                 dropout=ctx.p_dropout,
                 fast_zero_fill=ctx.fast_zero_fill,
