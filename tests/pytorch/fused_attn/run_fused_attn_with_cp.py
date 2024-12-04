@@ -42,7 +42,7 @@ def run_dpa_with_cp(
         "causal",
         "no_mask",
     ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-    if kernel_backend == "FusedAttention" and qkv_format == "thd":
+    if qkv_format == "thd":
         if "causal" in config.attn_mask_type:
             config.attn_mask_type = "padding_causal"
         else:

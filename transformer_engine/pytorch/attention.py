@@ -7878,6 +7878,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ), f"Values have head_dim = {value_layer.shape[-1]}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
 
+            if qkv_format is None:
+                qkv_format = self.qkv_format
+
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
@@ -7903,9 +7906,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     graph_safe_rng_available()
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
-
-            if qkv_format is None:
-                qkv_format = self.qkv_format
 
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
