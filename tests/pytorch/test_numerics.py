@@ -35,7 +35,6 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
-from transformer_engine.pytorch.attention import _cu_seqlens_cache
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
