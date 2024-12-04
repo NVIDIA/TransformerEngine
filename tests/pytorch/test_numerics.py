@@ -1939,7 +1939,9 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("backend", backends_inference)
 @pytest.mark.parametrize("is_paged", [False, True])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
-def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged, is_cuda_graph):
+def test_kv_cache_accuracy(
+    dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged, is_cuda_graph
+):
     reset_rng_states()
 
     if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
@@ -1998,22 +2000,22 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         )
 
     inference_params = InferenceParams(
-            max_batch_size=B_max,
-            max_seqlen_kv=S_max,
-            num_heads_kv=H,
-            head_dim_k=head_size,
-            dtype=dtype,
-            is_paged=is_paged,
-            total_num_pages=4,
-            page_size=256,
-            is_cuda_graph=is_cuda_graph,
-            num_heads_q=H,
-            head_dim_q=head_size,
-            )
+        max_batch_size=B_max,
+        max_seqlen_kv=S_max,
+        num_heads_kv=H,
+        head_dim_k=head_size,
+        dtype=dtype,
+        is_paged=is_paged,
+        total_num_pages=4,
+        page_size=256,
+        is_cuda_graph=is_cuda_graph,
+        num_heads_q=H,
+        head_dim_q=head_size,
+    )
 
     rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
 
-    inference_params.step_dict = OrderedDict(zip(list(range(B)), [1]*B))
+    inference_params.step_dict = OrderedDict(zip(list(range(B)), [1] * B))
 
     input = torch.randn((S, B, D), dtype=dtype, device="cuda")
     if input_format == "bshd":
@@ -2034,28 +2036,29 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
         cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        seqlens_kv = (i+1) * torch.ones(B, dtype=torch.int32, device="cuda")
+        seqlens_kv = (i + 1) * torch.ones(B, dtype=torch.int32, device="cuda")
         cu_seqlens_kv = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
 
         mask_type = "padding"
-        kwargs={}
+        kwargs = {}
         if module == "TransformerLayer":
-            kwargs['self_attn_mask_type']=mask_type
+            kwargs["self_attn_mask_type"] = mask_type
         else:
-            kwargs['attn_mask_type']=mask_type
+            kwargs["attn_mask_type"] = mask_type
         line_output = model(
             hidden_states=incremental_input,
             inference_params=inference_params,
             rotary_pos_emb=rotary_freqs if use_RoPE else None,
             **kwargs,
-            max_seqlen_q=1, max_seqlen_kv=S,
+            max_seqlen_q=1,
+            max_seqlen_kv=S,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
         )
 
         if input_format == "sbhd":
-            incremental_output[i,:,:] = line_output.view(B, D)
+            incremental_output[i, :, :] = line_output.view(B, D)
         else:
             incremental_output[:, i, :] = line_output.view(B, D)
 

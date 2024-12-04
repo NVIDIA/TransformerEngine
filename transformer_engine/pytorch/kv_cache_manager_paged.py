@@ -12,6 +12,7 @@ import torch
 
 class Page(object):
     """A single page"""
+
     def __init__(self, page_id: int):
         self.page_id = page_id
         self.allocated = 0
@@ -22,23 +23,26 @@ class Page(object):
     def deallocate_page(self):
         self.allocated = False
 
+
 class PagedKVCacheManager(object):
     """
     Paged KV cache manager. It supports a set of utilities including adding and removing
     sequences, and copying new key/value tokens to the cache. Users can overwrite this class
     for more custom implementations.
     """
-    def __init__(self,
-                 total_num_pages: int,
-                 page_size: int,
-                 num_heads: int,
-                 head_dim_k: int,
-                 dtype: torch.dtype,
-                 max_batch_size: int,
-                 max_seqlen: int,
-                 head_dim_v: Optional[int] = None,
-                 is_cuda_graph: bool = False,
-                 ):
+
+    def __init__(
+        self,
+        total_num_pages: int,
+        page_size: int,
+        num_heads: int,
+        head_dim_k: int,
+        dtype: torch.dtype,
+        max_batch_size: int,
+        max_seqlen: int,
+        head_dim_v: Optional[int] = None,
+        is_cuda_graph: bool = False,
+    ):
         """Initialize the KV cache"""
         self.total_num_pages = total_num_pages
         self.page_size = page_size
@@ -65,27 +69,44 @@ class PagedKVCacheManager(object):
     def allocate_memory(self, layer_number):
         """Allocate memory for the KV cache"""
         k_cache = torch.empty(
-                self.total_num_pages, self.page_size, self.num_heads, self.head_dim_k,
-                dtype=self.dtype, device=torch.cuda.current_device())
+            self.total_num_pages,
+            self.page_size,
+            self.num_heads,
+            self.head_dim_k,
+            dtype=self.dtype,
+            device=torch.cuda.current_device(),
+        )
         v_cache = torch.empty(
-                self.total_num_pages, self.page_size, self.num_heads, self.head_dim_v,
-                dtype=self.dtype, device=torch.cuda.current_device())
+            self.total_num_pages,
+            self.page_size,
+            self.num_heads,
+            self.head_dim_v,
+            dtype=self.dtype,
+            device=torch.cuda.current_device(),
+        )
         self.cache[layer_number] = (k_cache, v_cache)
         for i in range(self.total_num_pages):
             self.free_pages.append(Page(i))
         if self.is_cuda_graph:
             self.page_table = torch.zeros(
-                self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device='cuda')
+                self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device="cuda"
+            )
 
     def print_cache(self):
         """Print KV cache status"""
         used_pages = [self.get_page_count(seq) for seq in self.sequences]
         logger = logging.getLogger("PagedAttention")
         logger.debug("cache status:")
-        logger.debug(f"  total pages:     {self.total_num_pages} (used {sum(used_pages)}, free {len(self.free_pages)})")
+        logger.debug(
+            f"  total pages:     {self.total_num_pages} (used {sum(used_pages)}, free"
+            f" {len(self.free_pages)})"
+        )
         logger.debug(f"  total sequences: {self.get_sequence_count()}")
         for i, seq in enumerate(self.sequences):
-            logger.debug(f"  >> batch index {i}: seq_id {seq}, num_tokens {self.get_sequence_lengths()[i]}, num_pages {self.get_page_count(seq)}, page_list {self.get_page_list(seq)}")
+            logger.debug(
+                f"  >> batch index {i}: seq_id {seq}, num_tokens {self.get_sequence_lengths()[i]},"
+                f" num_pages {self.get_page_count(seq)}, page_list {self.get_page_list(seq)}"
+            )
 
     def get_sequence_count(self):
         """Get the total number of sequences in the KV cache"""
@@ -115,13 +136,16 @@ class PagedKVCacheManager(object):
 
     def get_page_table(self, sequences: List[int]):
         """Get the page table, in shape [batch_size, max_pages_per_seq]"""
-        page_table = torch.Tensor([self.get_page_list(seq) + \
-                [0]*(self.max_pages_per_seq-self.get_page_count(seq)) \
-                for seq in sequences]).to(dtype=torch.int32, device='cpu')
+        page_table = torch.Tensor(
+            [
+                self.get_page_list(seq) + [0] * (self.max_pages_per_seq - self.get_page_count(seq))
+                for seq in sequences
+            ]
+        ).to(dtype=torch.int32, device="cpu")
         if self.is_cuda_graph:
-            self.page_table[:self.get_sequence_count()].copy_(page_table)
+            self.page_table[: self.get_sequence_count()].copy_(page_table)
         else:
-            self.page_table = page_table.to(device='cuda')
+            self.page_table = page_table.to(device="cuda")
         return self.page_table
 
     def allocate_page(self, seq: int):
@@ -148,7 +172,14 @@ class PagedKVCacheManager(object):
                 self.free_pages.append(page)
         self.allocated_pages.pop(seq)
 
-    def step(self, layer_number: int, k: torch.Tensor, v: torch.Tensor, step_dict: OrderedDict, qkv_format: str):
+    def step(
+        self,
+        layer_number: int,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        step_dict: OrderedDict,
+        qkv_format: str,
+    ):
         """
         Update the paged KV cache for a given inference iteration.
         For more details, please refer to InferenceParams.update_cache().
@@ -175,7 +206,7 @@ class PagedKVCacheManager(object):
         """
         batch_size = len(step_dict)
         step_lens = list(step_dict.values())
-        cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1,batch_size+1)]
+        cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
 
         # Remove finished sequences and advance unfinished sequences
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
@@ -184,8 +215,7 @@ class PagedKVCacheManager(object):
             self.sequences.pop(seq)
             self.deallocate_sequence(seq)
         for seq in unfinished_seqs:
-            if (self.sequences[seq] % self.page_size == 0
-                    and self.sequences[seq] < self.max_seqlen):
+            if self.sequences[seq] % self.page_size == 0 and self.sequences[seq] < self.max_seqlen:
                 self.allocate_page(seq)
             self.sequences[seq] += 1
 
@@ -200,41 +230,43 @@ class PagedKVCacheManager(object):
         packed_k = torch.Tensor([]).to(dtype=k.dtype, device=k.device)
         packed_v = torch.Tensor([]).to(dtype=v.dtype, device=v.device)
         for i in range(batch_size):
-            if qkv_format == 'bshd':
-                packed_k = torch.cat([packed_k, k[i, :step_lens[i], :, :]], dim=0)
-                packed_v = torch.cat([packed_v, v[i, :step_lens[i], :, :]], dim=0)
-            if qkv_format == 'sbhd':
-                packed_k = torch.cat([packed_k, k[:step_lens[i], i, :, :]], dim=0)
-                packed_v = torch.cat([packed_v, v[:step_lens[i], i, :, :]], dim=0)
-        if qkv_format == 'thd':
+            if qkv_format == "bshd":
+                packed_k = torch.cat([packed_k, k[i, : step_lens[i], :, :]], dim=0)
+                packed_v = torch.cat([packed_v, v[i, : step_lens[i], :, :]], dim=0)
+            if qkv_format == "sbhd":
+                packed_k = torch.cat([packed_k, k[: step_lens[i], i, :, :]], dim=0)
+                packed_v = torch.cat([packed_v, v[: step_lens[i], i, :, :]], dim=0)
+        if qkv_format == "thd":
             packed_k = k
             packed_v = v
         k_cache, v_cache = self.cache[layer_number]
-        for i,seq in enumerate(step_dict.keys()):
+        for i, seq in enumerate(step_dict.keys()):
             page_list = self.get_page_list(seq)
-            start_page, start_token = self.get_page_token_offsets(
-                seqlens[i]-step_lens[i])
-            end_page, end_token = self.get_page_token_offsets(
-                seqlens[i])
+            start_page, start_token = self.get_page_token_offsets(seqlens[i] - step_lens[i])
+            end_page, end_token = self.get_page_token_offsets(seqlens[i])
             if start_page == end_page:
                 page_id = page_list[start_page]
-                k_cache[page_id,start_token:end_token,:,:] = \
-                        packed_k[cu_seqlens[i]:cu_seqlens[i+1],:,:]
-                v_cache[page_id,start_token:end_token,:,:] = \
-                        packed_v[cu_seqlens[i]:cu_seqlens[i+1],:,:]
+                k_cache[page_id, start_token:end_token, :, :] = packed_k[
+                    cu_seqlens[i] : cu_seqlens[i + 1], :, :
+                ]
+                v_cache[page_id, start_token:end_token, :, :] = packed_v[
+                    cu_seqlens[i] : cu_seqlens[i + 1], :, :
+                ]
             else:
                 start_offset = 0
                 end_offset = 0
-                for j in range(start_page, end_page+1):
+                for j in range(start_page, end_page + 1):
                     if not (j == end_page and end_token == 0):
                         start_token_j = start_token if j == start_page else 0
                         end_token_j = end_token if j == end_page else self.page_size
                         page_id = page_list[start_page]
                         end_offset = end_token_j - start_token_j
-                        k_cache[page_id,start_token_j:end_token_j,:,:] = \
-                            packed_k[cu_seqlens[i]+start_offset:cu_seqlens[i]+end_offset,:,:]
-                        v_cache[page_id,start_token_j:end_token_j,:,:] = \
-                            packed_v[cu_seqlens[i]+start_offset:cu_seqlens[i]+end_offset,:,:]
+                        k_cache[page_id, start_token_j:end_token_j, :, :] = packed_k[
+                            cu_seqlens[i] + start_offset : cu_seqlens[i] + end_offset, :, :
+                        ]
+                        v_cache[page_id, start_token_j:end_token_j, :, :] = packed_v[
+                            cu_seqlens[i] + start_offset : cu_seqlens[i] + end_offset, :, :
+                        ]
                         start_offset = start_offset + end_offset
 
         # Get page table

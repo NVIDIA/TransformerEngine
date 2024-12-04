@@ -7,19 +7,22 @@ from collections import OrderedDict
 from typing import List, Optional
 import torch
 
+
 class NonPagedKVCacheManager:
     """
     The non-paged KV cache manager.
     """
-    def __init__(self,
-            max_batch_size: int,
-            max_seqlen: int,
-            num_heads: int,
-            head_dim_k: int,
-            dtype: torch.dtype,
-            head_dim_v: Optional[int] = None,
-            is_cuda_graph: bool = False,
-            ):
+
+    def __init__(
+        self,
+        max_batch_size: int,
+        max_seqlen: int,
+        num_heads: int,
+        head_dim_k: int,
+        dtype: torch.dtype,
+        head_dim_v: Optional[int] = None,
+        is_cuda_graph: bool = False,
+    ):
         """Initialize the KV cache"""
         self.max_batch_size = max_batch_size
         self.max_seqlen = max_seqlen
@@ -54,7 +57,14 @@ class NonPagedKVCacheManager:
         )
         self.cache[layer_number] = (k_cache, v_cache)
 
-    def step(self, layer_number, k: torch.Tensor, v: torch.Tensor, step_dict: OrderedDict, qkv_format: str):
+    def step(
+        self,
+        layer_number,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        step_dict: OrderedDict,
+        qkv_format: str,
+    ):
         """
         Update the non-paged KV cache for a given inference iteration.
         For more details, please refer to InferenceParams.update_cache().
@@ -86,10 +96,13 @@ class NonPagedKVCacheManager:
         # Reorder cache
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs
-        unfinished_indices = [i for i,j in enumerate(self.sequences) if j in unfinished_seqs]
-        finished_indices = [i for i,j in enumerate(self.sequences) if j in finished_seqs]
-        batch_indices = unfinished_indices + finished_indices \
-                + list(range(prev_batch_size, self.max_batch_size))
+        unfinished_indices = [i for i, j in enumerate(self.sequences) if j in unfinished_seqs]
+        finished_indices = [i for i, j in enumerate(self.sequences) if j in finished_seqs]
+        batch_indices = (
+            unfinished_indices
+            + finished_indices
+            + list(range(prev_batch_size, self.max_batch_size))
+        )
         new_k_cache = k_cache[batch_indices, :]
         new_v_cache = v_cache[batch_indices, :]
         new_k_cache = new_k_cache.contiguous()
@@ -110,19 +123,19 @@ class NonPagedKVCacheManager:
 
         # Copy new key/value tokens to cache
         step_lens = list(step_dict.values())
-        cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1,batch_size+1)]
-        for i,seq in enumerate(self.sequences):
-            seq_s = self.sequences[seq]  - step_dict[seq]
+        cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
+        for i, seq in enumerate(self.sequences):
+            seq_s = self.sequences[seq] - step_dict[seq]
             seq_e = self.sequences[seq]
-            if qkv_format == 'bshd':
-                new_k_cache[i, seq_s:seq_e, :, :] = k[i, :step_dict[seq], :, :]
-                new_v_cache[i, seq_s:seq_e, :, :] = v[i, :step_dict[seq], :, :]
-            if qkv_format == 'sbhd':
-                new_k_cache[i, seq_s:seq_e, :, :] = k[:step_dict[seq], i, :, :]
-                new_v_cache[i, seq_s:seq_e, :, :] = v[:step_dict[seq], i, :, :]
-            if qkv_format == 'thd':
-                new_k_cache[i, seq_s:seq_e, :, :] = k[cu_seqlens[i]:cu_seqlens[i+1], :, :]
-                new_v_cache[i, seq_s:seq_e, :, :] = v[cu_seqlens[i]:cu_seqlens[i+1], :, :]
+            if qkv_format == "bshd":
+                new_k_cache[i, seq_s:seq_e, :, :] = k[i, : step_dict[seq], :, :]
+                new_v_cache[i, seq_s:seq_e, :, :] = v[i, : step_dict[seq], :, :]
+            if qkv_format == "sbhd":
+                new_k_cache[i, seq_s:seq_e, :, :] = k[: step_dict[seq], i, :, :]
+                new_v_cache[i, seq_s:seq_e, :, :] = v[: step_dict[seq], i, :, :]
+            if qkv_format == "thd":
+                new_k_cache[i, seq_s:seq_e, :, :] = k[cu_seqlens[i] : cu_seqlens[i + 1], :, :]
+                new_v_cache[i, seq_s:seq_e, :, :] = v[cu_seqlens[i] : cu_seqlens[i + 1], :, :]
         self.cache[layer_number] = (new_k_cache, new_v_cache)
 
         # Return full key/value tensors for attention calculation

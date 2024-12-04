@@ -28,27 +28,27 @@ extern "C" {
  *   different lengths in a batch. `Paged_KV`-based layouts are used for paged attention.
  */
 enum NVTE_QKV_Layout {
-  NVTE_SB3HD = 0,                  /*!< SB3HD layout */
-  NVTE_SBH3D = 1,                  /*!< SBH3D layout */
-  NVTE_SBHD_SB2HD = 2,             /*!< SBHD_SB2HD layout */
-  NVTE_SBHD_SBH2D = 3,             /*!< SBHD_SBH2D layout */
-  NVTE_SBHD_SBHD_SBHD = 4,         /*!< SBHD_SBHD_SBHD layout */
-  NVTE_BS3HD = 5,                  /*!< BS3HD layout */
-  NVTE_BSH3D = 6,                  /*!< BSH3D layout */
-  NVTE_BSHD_BS2HD = 7,             /*!< BSHD_BS2HD layout */
-  NVTE_BSHD_BSH2D = 8,             /*!< BSHD_BSH2D layout */
-  NVTE_BSHD_BSHD_BSHD = 9,         /*!< BSHD_BSHD_BSHD layout */
-  NVTE_T3HD = 10,                  /*!< T3HD layout */
-  NVTE_TH3D = 11,                  /*!< TH3D layout */
-  NVTE_THD_T2HD = 12,              /*!< THD_T2HD layout */
-  NVTE_THD_TH2D = 13,              /*!< THD_TH2D layout */
-  NVTE_THD_THD_THD = 14,           /*!< THD_THD_THD layout */
-  NVTE_Paged_KV_BSHD_2BSHD = 15,   /*!< Paged_KV_BSHD_2BSHD layout */
-  NVTE_Paged_KV_BSHD_2SBHD = 16,   /*!< Paged_KV_BSHD_2SBHD layout */
-  NVTE_Paged_KV_SBHD_2BSHD = 17,   /*!< Paged_KV_SBHD_2BSHD layout */
-  NVTE_Paged_KV_SBHD_2SBHD = 18,   /*!< Paged_KV_SBHD_2SBHD layout */
-  NVTE_Paged_KV_THD_2BSHD = 19,    /*!< Paged_KV_THD_2BSHD layout */
-  NVTE_Paged_KV_THD_2SBHD = 20,    /*!< Paged_KV_THD_2SBHD layout */
+  NVTE_SB3HD = 0,                /*!< SB3HD layout */
+  NVTE_SBH3D = 1,                /*!< SBH3D layout */
+  NVTE_SBHD_SB2HD = 2,           /*!< SBHD_SB2HD layout */
+  NVTE_SBHD_SBH2D = 3,           /*!< SBHD_SBH2D layout */
+  NVTE_SBHD_SBHD_SBHD = 4,       /*!< SBHD_SBHD_SBHD layout */
+  NVTE_BS3HD = 5,                /*!< BS3HD layout */
+  NVTE_BSH3D = 6,                /*!< BSH3D layout */
+  NVTE_BSHD_BS2HD = 7,           /*!< BSHD_BS2HD layout */
+  NVTE_BSHD_BSH2D = 8,           /*!< BSHD_BSH2D layout */
+  NVTE_BSHD_BSHD_BSHD = 9,       /*!< BSHD_BSHD_BSHD layout */
+  NVTE_T3HD = 10,                /*!< T3HD layout */
+  NVTE_TH3D = 11,                /*!< TH3D layout */
+  NVTE_THD_T2HD = 12,            /*!< THD_T2HD layout */
+  NVTE_THD_TH2D = 13,            /*!< THD_TH2D layout */
+  NVTE_THD_THD_THD = 14,         /*!< THD_THD_THD layout */
+  NVTE_Paged_KV_BSHD_2BSHD = 15, /*!< Paged_KV_BSHD_2BSHD layout */
+  NVTE_Paged_KV_BSHD_2SBHD = 16, /*!< Paged_KV_BSHD_2SBHD layout */
+  NVTE_Paged_KV_SBHD_2BSHD = 17, /*!< Paged_KV_SBHD_2BSHD layout */
+  NVTE_Paged_KV_SBHD_2SBHD = 18, /*!< Paged_KV_SBHD_2SBHD layout */
+  NVTE_Paged_KV_THD_2BSHD = 19,  /*!< Paged_KV_THD_2BSHD layout */
+  NVTE_Paged_KV_THD_2SBHD = 20,  /*!< Paged_KV_THD_2SBHD layout */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -477,7 +477,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor Bias, NVTETensor S, NVTETensor O,
                          NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+                         const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
