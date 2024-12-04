@@ -13,11 +13,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
-from einops import rearrange
 
 from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
+from einops import rearrange
 
 import torch
 import torch.nn.functional as F
@@ -1134,18 +1134,18 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
     def print(self):
         """Print InferenceParams parameters"""
         logger = logging.getLogger("InferenceParams")
-        logger.debug(f"InferenceParams:")
-        logger.debug(f"  dtype:               {self.dtype}")
-        logger.debug(f"  is_paged:            {self.is_paged}")
+        logger.debug("InferenceParams:")
+        logger.debug("  dtype:               %s", self.dtype)
+        logger.debug("  is_paged:            %s", self.is_paged)
         if not self.is_paged:
-            logger.debug(f"  max_batch_size:      {self.max_batch_size}")
-            logger.debug(f"  max_seqlen_kv:       {self.max_seqlen_kv}")
+            logger.debug("  max_batch_size:      %s", self.max_batch_size)
+            logger.debug("  max_seqlen_kv:       %s", self.max_seqlen_kv)
         else:
-            logger.debug(f"  total_num_pages:     {self.total_num_pages}")
-            logger.debug(f"  page_size:           {self.page_size}")
-        logger.debug(f"  num_heads_kv:        {self.num_heads_kv}")
-        logger.debug(f"  head_dim:            k: {self.head_dim_k}, v: {self.head_dim_v}")
-        logger.debug(f"  layer_numbers:       {self.layer_numbers}")
+            logger.debug("  total_num_pages:     %s", self.total_num_pages)
+            logger.debug("  page_size:           %s", self.page_size)
+        logger.debug("  num_heads_kv:        %s", self.num_heads_kv)
+        logger.debug("  head_dim:            k: %s, v: %s", self.head_dim_k, self.head_dim_v)
+        logger.debug("  layer_numbers:       %s", self.layer_numbers)
 
     def allocate_memory(self, layer_number):
         """
@@ -1190,7 +1190,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         self,
         q: torch.Tensor,
         source_qkv_format: str,
-        target_qkv_format: str,
+        target_qkv_format: str, # pylint: disable=unused-argument
         layer_number: Optional[int] = None,
     ):
         """
@@ -1230,31 +1230,31 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
 
             # bshd: [actual_batch_size, batch_wide_max_seqlen_q, num_heads_q, head_dim_q]
             return q
-        else:
-            assert (
-                layer_number is not None and layer_number in self.layer_numbers
-            ), "layer_number must be an integer and must exist in InferenceParams.layer_numbers!"
-            q_buffer = self.q_buffer[layer_number]
-            for i in range(actual_batch_size):
-                if source_qkv_format == "bshd":
-                    q_buffer[i, : seqlens_q[i], :, :] = q[i, : seqlens_q[i], :, :]
-                if source_qkv_format == "sbhd":
-                    q_buffer[i, : seqlens_q[i], :, :] = q[: seqlens_q[i], i, :, :]
-                if source_qkv_format == "thd":
-                    q_buffer[i, : seqlens_q[i], :, :] = q[
-                        cu_seqlens_q[i] : cu_seqlens_q[i + 1], :, :
-                    ]
-                q_buffer[i, seqlens_q[i] :, :, :].fill_(0)
 
-            cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (
-                self.max_batch_size - actual_batch_size
-            )
-            self.cu_seqlens_q_buffer.copy_(
-                torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
-            )
+        assert (
+            layer_number is not None and layer_number in self.layer_numbers
+        ), "layer_number must be an integer and must exist in InferenceParams.layer_numbers!"
+        q_buffer = self.q_buffer[layer_number]
+        for i in range(actual_batch_size):
+            if source_qkv_format == "bshd":
+                q_buffer[i, : seqlens_q[i], :, :] = q[i, : seqlens_q[i], :, :]
+            if source_qkv_format == "sbhd":
+                q_buffer[i, : seqlens_q[i], :, :] = q[: seqlens_q[i], i, :, :]
+            if source_qkv_format == "thd":
+                q_buffer[i, : seqlens_q[i], :, :] = q[
+                    cu_seqlens_q[i] : cu_seqlens_q[i + 1], :, :
+                ]
+            q_buffer[i, seqlens_q[i] :, :, :].fill_(0)
 
-            # bshd: [self.max_batch_size, self.max_seqlen_kv, num_heads_q, head_dim_q]
-            return q_buffer
+        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (
+            self.max_batch_size - actual_batch_size
+        )
+        self.cu_seqlens_q_buffer.copy_(
+            torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
+        )
+
+        # bshd: [self.max_batch_size, self.max_seqlen_kv, num_heads_q, head_dim_q]
+        return q_buffer
 
     def convert_paged_to_nonpaged(self, layer_number: int, qkv_format: str):
         """
@@ -1379,16 +1379,10 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         page_table: torch.Tensor
             The page table if is_paged = True; else `None`
         """
-        outputs = self.cache_manager.step(layer_number, k, v, self.step_dict, qkv_format)
+        k_cache, v_cache, page_table = self.cache_manager.step(layer_number, k, v, self.step_dict, qkv_format)
+        self.page_table = page_table
         self.seq_ids = list(self.cache_manager.sequences.keys())
         self.seqlens = list(self.cache_manager.sequences.values())
-
-        if not self.is_paged:
-            k_cache, v_cache = outputs
-            page_table = None
-        else:
-            k_cache, v_cache, page_table = outputs
-            self.page_table = page_table
 
         if self.is_cuda_graph:
             actual_batch_size = len(self.seqlens)
@@ -8818,7 +8812,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if inference_params is not None:
                 batch_size = len(inference_params.step_dict)
-                seqlen = inference_params.seqlens[0]
                 step_lens = list(inference_params.step_dict.values())
                 max_seqlen_q = max(list(inference_params.step_dict.values()))
                 if orig_qkv_format == "bshd":
@@ -9569,6 +9562,7 @@ class MultiheadAttention(torch.nn.Module):
                         f"qkv_format={self.qkv_format} is not supported for KV caching and RoPE."
                     )
 
+                # pylint: disable=fixme
                 # TODO: consider cases where sequences have different seqlens
                 sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length

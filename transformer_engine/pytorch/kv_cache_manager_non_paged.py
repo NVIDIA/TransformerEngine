@@ -4,7 +4,7 @@
 
 """Non-Paged KV Cache Manager."""
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Optional
 import torch
 
 
@@ -141,9 +141,9 @@ class NonPagedKVCacheManager:
         # Return full key/value tensors for attention calculation
         if self.is_cuda_graph:
             # [max_batch_size, max_seqlen_kv, num_heads_kv, head_dim_kv]
-            return new_k_cache, new_v_cache
-        else:
-            # [actual_batch_size, max_seqlen_kv, num_heads_kv, head_dim_kv]
-            new_k_cache = new_k_cache[:batch_size].contiguous()
-            new_v_cache = new_v_cache[:batch_size].contiguous()
-            return new_k_cache, new_v_cache
+            return new_k_cache, new_v_cache, None
+
+        # [actual_batch_size, max_seqlen_kv, num_heads_kv, head_dim_kv]
+        new_k_cache = new_k_cache[:batch_size].contiguous()
+        new_v_cache = new_v_cache[:batch_size].contiguous()
+        return new_k_cache, new_v_cache, None

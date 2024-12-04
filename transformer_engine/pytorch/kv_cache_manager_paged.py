@@ -10,21 +10,24 @@ import logging
 import torch
 
 
-class Page(object):
+class Page:
     """A single page"""
 
     def __init__(self, page_id: int):
+        """Initialize a page"""
         self.page_id = page_id
         self.allocated = 0
 
     def allocate_page(self):
+        """Allocate a page"""
         self.allocated = True
 
     def deallocate_page(self):
+        """Deallocate a page"""
         self.allocated = False
 
 
-class PagedKVCacheManager(object):
+class PagedKVCacheManager:
     """
     Paged KV cache manager. It supports a set of utilities including adding and removing
     sequences, and copying new key/value tokens to the cache. Users can overwrite this class
@@ -98,14 +101,12 @@ class PagedKVCacheManager(object):
         logger = logging.getLogger("PagedAttention")
         logger.debug("cache status:")
         logger.debug(
-            f"  total pages:     {self.total_num_pages} (used {sum(used_pages)}, free"
-            f" {len(self.free_pages)})"
+            "  total pages:     %s (used %s, free %s)", self.total_num_pages, sum(used_pages), len(self.free_pages)
         )
-        logger.debug(f"  total sequences: {self.get_sequence_count()}")
+        logger.debug("  total sequences: %s", self.get_sequence_count())
         for i, seq in enumerate(self.sequences):
             logger.debug(
-                f"  >> batch index {i}: seq_id {seq}, num_tokens {self.get_sequence_lengths()[i]},"
-                f" num_pages {self.get_page_count(seq)}, page_list {self.get_page_list(seq)}"
+                "  >> batch index %s: seq_id %s, num_tokens %s, num_pages %s, page_list %s", i, seq, self.get_sequence_lengths()[i], self.get_page_count(seq), self.get_page_list(seq)
             )
 
     def get_sequence_count(self):
