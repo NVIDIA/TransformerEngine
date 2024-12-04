@@ -1190,7 +1190,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         self,
         q: torch.Tensor,
         source_qkv_format: str,
-        target_qkv_format: str, # pylint: disable=unused-argument
+        target_qkv_format: str,  # pylint: disable=unused-argument
         layer_number: Optional[int] = None,
     ):
         """
@@ -1241,14 +1241,10 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             if source_qkv_format == "sbhd":
                 q_buffer[i, : seqlens_q[i], :, :] = q[: seqlens_q[i], i, :, :]
             if source_qkv_format == "thd":
-                q_buffer[i, : seqlens_q[i], :, :] = q[
-                    cu_seqlens_q[i] : cu_seqlens_q[i + 1], :, :
-                ]
+                q_buffer[i, : seqlens_q[i], :, :] = q[cu_seqlens_q[i] : cu_seqlens_q[i + 1], :, :]
             q_buffer[i, seqlens_q[i] :, :, :].fill_(0)
 
-        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (
-            self.max_batch_size - actual_batch_size
-        )
+        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (self.max_batch_size - actual_batch_size)
         self.cu_seqlens_q_buffer.copy_(
             torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
         )
@@ -1379,7 +1375,9 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         page_table: torch.Tensor
             The page table if is_paged = True; else `None`
         """
-        k_cache, v_cache, page_table = self.cache_manager.step(layer_number, k, v, self.step_dict, qkv_format)
+        k_cache, v_cache, page_table = self.cache_manager.step(
+            layer_number, k, v, self.step_dict, qkv_format
+        )
         self.page_table = page_table
         self.seq_ids = list(self.cache_manager.sequences.keys())
         self.seqlens = list(self.cache_manager.sequences.values())

@@ -101,12 +101,20 @@ class PagedKVCacheManager:
         logger = logging.getLogger("PagedAttention")
         logger.debug("cache status:")
         logger.debug(
-            "  total pages:     %s (used %s, free %s)", self.total_num_pages, sum(used_pages), len(self.free_pages)
+            "  total pages:     %s (used %s, free %s)",
+            self.total_num_pages,
+            sum(used_pages),
+            len(self.free_pages),
         )
         logger.debug("  total sequences: %s", self.get_sequence_count())
         for i, seq in enumerate(self.sequences):
             logger.debug(
-                "  >> batch index %s: seq_id %s, num_tokens %s, num_pages %s, page_list %s", i, seq, self.get_sequence_lengths()[i], self.get_page_count(seq), self.get_page_list(seq)
+                "  >> batch index %s: seq_id %s, num_tokens %s, num_pages %s, page_list %s",
+                i,
+                seq,
+                self.get_sequence_lengths()[i],
+                self.get_page_count(seq),
+                self.get_page_list(seq),
             )
 
     def get_sequence_count(self):
