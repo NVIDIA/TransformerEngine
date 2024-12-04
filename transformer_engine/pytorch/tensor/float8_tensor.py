@@ -24,6 +24,18 @@ from .quantized_tensor import QuantizedTensor
 aten = torch.ops.aten
 updated_fp8_params = {}
 
+_ops_to_preserve_subclass_in_fsdp2 = {
+    torch.ops.aten.empty_like.default,
+    torch.ops.aten.new_zeros.default,
+    torch.ops.aten.slice.Tensor,
+    torch.ops.aten.copy_.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten.as_strided.default,
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten._pin_memory.default,
+    torch.ops.aten.split.Tensor,
+    torch.ops.aten.clone.default,
+}
 
 def _make_fp8_attr_property_funcs(name: str) -> Any:
     """Make accessors for an FP8 attribute
@@ -430,12 +442,9 @@ class Float8Tensor(QuantizedTensor):
 
         return self
     
-    # TODO: might be care about self._scale_inv
     def fsdp_pre_all_gather(self, mesh):
-        # return (self._data,), (self._scale_inv,)
         return (self._data,), (self,)
 
-    # TODO: might be care about self._scale_inv
     def fsdp_post_all_gather(
         self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
@@ -447,6 +456,7 @@ class Float8Tensor(QuantizedTensor):
             (data,) = all_gather_outputs
             (sample,) = metadata
             if out is not None:
+                assert isinstance(out, Float8Tensor), f"{type(out)}"
                 return
             return Float8Tensor.make_like(sample, data=data), all_gather_outputs
 
@@ -923,7 +933,6 @@ class Float8Tensor(QuantizedTensor):
             return Float8Tensor.make_like(tensor, data=data_view)
         
         # Related to FSDP2
-        # print(f'__torch_dispatch__ call from TE FP8 func:{func}\ntypes:{types}\nargs:{args}\nkwargs:{kwargs}\n')
         if func == aten.split.Tensor:
             tensor = args[0]
             data = tensor._data
@@ -934,7 +943,7 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
-        if func == aten.new_zeros.default:
+        elif func == aten.new_zeros.default:
             tensor = args[0]
             data = tensor._data
             func_out = data.__torch_dispatch__(
@@ -944,8 +953,22 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=func_out)
+        elif func == torch.ops.aten.as_strided.default:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(tensor, data=func_out)
+        elif func == torch.ops.aten.detach.default:
+            return cls.detach(args[0])
+        elif func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
         
-        # Default case
+        # print(f'Default __torch_dispatch__ call from TE FP8 func:{func}\ntypes:{types}\nargs:{args}\nkwargs:{kwargs}\n')
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @classmethod
