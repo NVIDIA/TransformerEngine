@@ -781,6 +781,8 @@ std::vector<at::Tensor> fused_attn_fwd(
     const at::Tensor K, const at::Tensor V, const transformer_engine::DType qkv_type,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k,
+    const c10::optional<at::Tensor> page_table_v,
     const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
     const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
     const c10::optional<at::Tensor> scale_S, const int scale_S_offset,
@@ -808,6 +810,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   TensorWrapper te_Q, te_K, te_V, te_S, te_O, te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
+  TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     auto h = q_shape[q_shape.size() - 2];
@@ -879,6 +882,19 @@ std::vector<at::Tensor> fused_attn_fwd(
                                                           nullptr, nullptr, nullptr);
   }
 
+  if ((page_table_k.has_value()) && (page_table_v.has_value())) {
+    auto page_table_k_sizes = page_table_k.value().sizes().vec();
+    std::vector<size_t> page_table_k_shape{page_table_k_sizes.begin(), page_table_k_sizes.end()};
+    auto page_table_v_sizes = page_table_v.value().sizes().vec();
+    std::vector<size_t> page_table_v_shape{page_table_v_sizes.begin(), page_table_v_sizes.end()};
+    te_page_table_k = makeTransformerEngineTensor(page_table_k.value().data_ptr(),
+                                                  page_table_k_shape, DType::kInt32,
+                                                  nullptr, nullptr, nullptr);
+    te_page_table_v = makeTransformerEngineTensor(page_table_v.value().data_ptr(),
+                                                  page_table_v_shape, DType::kInt32,
+                                                  nullptr, nullptr, nullptr);
+  }
+
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
@@ -899,7 +915,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
+                      te_cu_seqlens_kv_padded.data(), te_page_table_k.data(), te_page_table_v.data(), te_rng_state.data(), max_seqlen_q,
                       max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
                       attn_mask_type, window_size[0], window_size[1], workspace.data(),
                       at::cuda::getCurrentCUDAStream());
@@ -941,7 +957,7 @@ std::vector<at::Tensor> fused_attn_fwd(
   nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
                       te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
                       te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
+                      te_cu_seqlens_kv_padded.data(), te_page_table_k.data(), te_page_table_v.data(), te_rng_state.data(), max_seqlen_q,
                       max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
                       attn_mask_type, window_size[0], window_size[1], workspace.data(),
                       at::cuda::getCurrentCUDAStream());

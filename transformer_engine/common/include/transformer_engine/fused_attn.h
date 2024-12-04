@@ -25,24 +25,30 @@ extern "C" {
  *   head size, and the total number of tokens in a batch, i.e. `t = sum(s_i) for i = 0...b-1`.
  *   `SBHD` and `BSHD`-based layouts are used when sequences in a batch are of equal length
  *   or padded to the same length, and `THD`-based layouts are used when sequences have
- *   different lengths in a batch.
+ *   different lengths in a batch. `Paged_KV`-based layouts are used for paged attention.
  */
 enum NVTE_QKV_Layout {
-  NVTE_SB3HD = 0,          /*!< SB3HD layout */
-  NVTE_SBH3D = 1,          /*!< SBH3D layout */
-  NVTE_SBHD_SB2HD = 2,     /*!< SBHD_SB2HD layout */
-  NVTE_SBHD_SBH2D = 3,     /*!< SBHD_SBH2D layout */
-  NVTE_SBHD_SBHD_SBHD = 4, /*!< SBHD_SBHD_SBHD layout */
-  NVTE_BS3HD = 5,          /*!< BS3HD layout */
-  NVTE_BSH3D = 6,          /*!< BSH3D layout */
-  NVTE_BSHD_BS2HD = 7,     /*!< BSHD_BS2HD layout */
-  NVTE_BSHD_BSH2D = 8,     /*!< BSHD_BSH2D layout */
-  NVTE_BSHD_BSHD_BSHD = 9, /*!< BSHD_BSHD_BSHD layout */
-  NVTE_T3HD = 10,          /*!< T3HD layout */
-  NVTE_TH3D = 11,          /*!< TH3D layout */
-  NVTE_THD_T2HD = 12,      /*!< THD_T2HD layout */
-  NVTE_THD_TH2D = 13,      /*!< THD_TH2D layout */
-  NVTE_THD_THD_THD = 14,   /*!< THD_THD_THD layout */
+  NVTE_SB3HD = 0,                  /*!< SB3HD layout */
+  NVTE_SBH3D = 1,                  /*!< SBH3D layout */
+  NVTE_SBHD_SB2HD = 2,             /*!< SBHD_SB2HD layout */
+  NVTE_SBHD_SBH2D = 3,             /*!< SBHD_SBH2D layout */
+  NVTE_SBHD_SBHD_SBHD = 4,         /*!< SBHD_SBHD_SBHD layout */
+  NVTE_BS3HD = 5,                  /*!< BS3HD layout */
+  NVTE_BSH3D = 6,                  /*!< BSH3D layout */
+  NVTE_BSHD_BS2HD = 7,             /*!< BSHD_BS2HD layout */
+  NVTE_BSHD_BSH2D = 8,             /*!< BSHD_BSH2D layout */
+  NVTE_BSHD_BSHD_BSHD = 9,         /*!< BSHD_BSHD_BSHD layout */
+  NVTE_T3HD = 10,                  /*!< T3HD layout */
+  NVTE_TH3D = 11,                  /*!< TH3D layout */
+  NVTE_THD_T2HD = 12,              /*!< THD_T2HD layout */
+  NVTE_THD_TH2D = 13,              /*!< THD_TH2D layout */
+  NVTE_THD_THD_THD = 14,           /*!< THD_THD_THD layout */
+  NVTE_Paged_KV_BSHD_2BSHD = 15,   /*!< Paged_KV_BSHD_2BSHD layout */
+  NVTE_Paged_KV_BSHD_2SBHD = 16,   /*!< Paged_KV_BSHD_2SBHD layout */
+  NVTE_Paged_KV_SBHD_2BSHD = 17,   /*!< Paged_KV_SBHD_2BSHD layout */
+  NVTE_Paged_KV_SBHD_2SBHD = 18,   /*!< Paged_KV_SBHD_2SBHD layout */
+  NVTE_Paged_KV_THD_2BSHD = 19,    /*!< Paged_KV_THD_2BSHD layout */
+  NVTE_Paged_KV_THD_2SBHD = 20,    /*!< Paged_KV_THD_2SBHD layout */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -59,17 +65,21 @@ enum NVTE_QKV_Layout_Group {
   NVTE_HD_H2D = 3,
   /*! HD_HD_HD QKV layouts, i.e. BSHD_BSHD_BSHD, SBHD_SBHD_SBHD, THD_THD_THD */
   NVTE_HD_HD_HD = 4,
+  /*! Paged_KV_2BSHD QKV layouts, e.g. Paged_KV_THD_2BSHD */
+  NVTE_Paged_KV_2BSHD = 5,
+  /*! Paged_KV_2SBHD QKV layouts, e.g. Paged_KV_BSHD_2SBHD */
+  NVTE_Paged_KV_2SBHD = 6,
 };
 
 /*! \enum NVTE_QKV_Format
  *  \brief QKV formats
  */
 enum NVTE_QKV_Format {
-  /*! SBHD QKV format, i.e. SB3HD, SBH3D, SBHD_SB2HD, SBHD_SBH2D, SBHD_SBHD_SBHD */
+  /*! SBHD QKV format, i.e. SB3HD, SBH3D, SBHD_SB2HD, SBHD_SBH2D, SBHD_SBHD_SBHD, Paged_KV_SBHD_2BSHD, Paged_KV_SBHD_2SBHD */
   NVTE_SBHD = 0,
-  /*! BSHD QKV format, i.e. BS3HD, BSH3D, BSHD_BS2HD, BSHD_BSH2D, BSHD_BSHD_BSHD */
+  /*! BSHD QKV format, i.e. BS3HD, BSH3D, BSHD_BS2HD, BSHD_BSH2D, BSHD_BSHD_BSHD, Paged_KV_BSHD_2BSHD, Paged_KV_BSHD_2SBHD */
   NVTE_BSHD = 1,
-  /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD */
+  /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD, Paged_KV_THD_2BSHD, Paged_KV_THD_2SBHD */
   NVTE_THD = 2,
 };
 
@@ -445,6 +455,8 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     cu_seqlens_kv             Cumulative sequence lengths for K and V, [batch_size + 1].
  *  \param[in]     cu_seqlens_q_padded       Cumulative sequence offsets for Q, [batch_size + 1].
  *  \param[in]     cu_seqlens_kv_padded      Cumulative sequence offsets for KV, [batch_size + 1].
+ *  \param[in]     page_table_k              Page table for K cache, [batch_size, max_pages_per_seq_k].
+ *  \param[in]     page_table_v              Page table for V cache, [batch_size, max_pages_per_seq_v].
  *  \param[in]     rng_state                 Seed and offset of CUDA random number generator.
  *  \param[in]     max_seqlen_q              Max sequence length used for computing for Q.
  *                                           it may be >= max(seqlen_q_i) for i=0,...batch_size-1.
@@ -465,7 +477,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor Bias, NVTETensor S, NVTETensor O,
                          NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
                          const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
-                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor rng_state,
+                         const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,

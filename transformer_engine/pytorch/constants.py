@@ -52,6 +52,12 @@ QKVLayouts = (
     "thd_t2hd",
     "thd_th2d",
     "thd_thd_thd",
+    "paged_kv_bshd_2bshd",
+    "paged_kv_bshd_2sbhd",
+    "paged_kv_sbhd_2bshd",
+    "paged_kv_sbhd_2sbhd",
+    "paged_kv_thd_2bshd",
+    "paged_kv_thd_2sbhd",
 )
 
 LayerTypes = ("encoder", "decoder")

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+from collections import OrderedDict
 import math
 import os
 from typing import Dict, List, Optional
@@ -34,6 +35,7 @@ from transformer_engine.pytorch import (
     Fp8Padding,
     Fp8Unpadding,
 )
+from transformer_engine.pytorch.attention import _cu_seqlens_cache
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
@@ -72,7 +74,7 @@ model_configs_inference = {
     # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
     "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
 }
-backends_inference = ["FlashAttention", "UnfusedAttention"]
+backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
@@ -1935,14 +1937,24 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("input_format", input_formats_inference)
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
-def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+@pytest.mark.parametrize("is_paged", [False, True])
+@pytest.mark.parametrize("is_cuda_graph", [False, True])
+def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged, is_cuda_graph):
+    reset_rng_states()
+
+    if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
+        pytest.skip("FusedAttention and FlashAttention do not support FP32")
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
 
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     elif backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    elif backend == "UnfusedAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
 
     config = model_configs_inference[model_key]
 
@@ -1955,7 +1967,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     # Limits the max size of KV-cache
     B_max = B
-    S_max = S + 2
+    S_max = S
 
     if module == "TransformerLayer":
         model = TransformerLayer(
@@ -1985,8 +1997,23 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
             .eval()
         )
 
-    inference_params = InferenceParams(max_batch_size=B_max, max_sequence_length=S_max)
+    inference_params = InferenceParams(
+            max_batch_size=B_max,
+            max_seqlen_kv=S_max,
+            num_heads_kv=H,
+            head_dim_k=head_size,
+            dtype=dtype,
+            is_paged=is_paged,
+            total_num_pages=4,
+            page_size=256,
+            is_cuda_graph=is_cuda_graph,
+            num_heads_q=H,
+            head_dim_q=head_size,
+            )
+
     rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
+
+    inference_params.step_dict = OrderedDict(zip(list(range(B)), [1]*B))
 
     input = torch.randn((S, B, D), dtype=dtype, device="cuda")
     if input_format == "bshd":
@@ -2004,16 +2031,31 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         else:
             incremental_input = input[:, i, :].view(B, 1, D)
 
+        seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
+        cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
+        cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
+        seqlens_kv = (i+1) * torch.ones(B, dtype=torch.int32, device="cuda")
+        cu_seqlens_kv = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
+        cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+
+        mask_type = "padding"
+        kwargs={}
+        if module == "TransformerLayer":
+            kwargs['self_attn_mask_type']=mask_type
+        else:
+            kwargs['attn_mask_type']=mask_type
         line_output = model(
             hidden_states=incremental_input,
             inference_params=inference_params,
             rotary_pos_emb=rotary_freqs if use_RoPE else None,
+            **kwargs,
+            max_seqlen_q=1, max_seqlen_kv=S,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
         )
 
-        inference_params.sequence_len_offset += 1
-
         if input_format == "sbhd":
-            incremental_output[i] = line_output.view(B, D)
+            incremental_output[i,:,:] = line_output.view(B, D)
         else:
             incremental_output[:, i, :] = line_output.view(B, D)
 

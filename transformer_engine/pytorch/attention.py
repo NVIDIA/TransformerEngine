@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
+from einops import rearrange
 
 from dataclasses import dataclass, fields
 import numpy as np
@@ -85,6 +86,8 @@ from transformer_engine.pytorch.distributed import (
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.kv_cache_manager_paged import PagedKVCacheManager
+from transformer_engine.pytorch.kv_cache_manager_non_paged import NonPagedKVCacheManager
 
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
@@ -271,6 +274,8 @@ class AttentionParams:
         Whether `DotProductAttention` is in an `fp8_autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
         The FP8 metadata tensor of `DotProductAttention`.
+    inference_params: Optional[object], default = `None`
+        Inference-related parameters. See InferenceParams for details.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -296,6 +301,7 @@ class AttentionParams:
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
+    inference_params: Optional[object] = None
 
 
 _alibi_cache = {
@@ -365,6 +371,7 @@ def get_attention_backend(
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
+    inference_params = attention_params.inference_params
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -469,6 +476,25 @@ def get_attention_backend(
             logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
             use_unfused_attention = False
 
+    # Filter: KV cache
+    #    backend                 | non-paged/paged | precision
+    # ---------------------------------------------------------------------------------
+    # FlashAttention             | non-paged/paged | FP16/BF16
+    # FusedAttention             | non-paged/paged | FP16/BF16
+    # UnfusedDotProductAttention | non-paged/paged | FP32/FP16/BF16
+    if inference_params is not None:
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            logger.debug("Disabling all backends as FP8 KV caching is not yet implemented")
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
+        if inference_params.is_paged:
+            if use_fused_attention and cudnn_version < (9, 5, 0):
+                logger.debug(
+                    "Disabling FusedAttention as paged KV caching requires cuDNN 9.5+"
+                )
+                use_fused_attention = False
+
     # Filter: Head dimension
     if use_flash_attention and head_dim_qk != head_dim_v:
         if _flash_attn_is_installed:
@@ -499,7 +525,7 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: QKV layout
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+    qkv_format = "".join([i for i in qkv_layout.replace("paged_kv_","").split("_")[0] if i.isalpha()])
     if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
@@ -980,7 +1006,8 @@ def get_attention_backend(
 class InferenceParams:  # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
-    to efficiently calculate and store the context during inference.
+    to efficiently calculate and store the context and previously generated tokens
+    during inference.
 
     Parameters
     ----------
@@ -988,39 +1015,351 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
                     maximum batch size during inference.
     max_sequence_length : int
                          maximum sequence length during inference.
+    num_heads: int
+              number of attention heads in key/value tensor.
+    head_dim_k: int
+               head size for the key tensor.
+    dtype: torch.dtype
+          data type for the KV cache.
+    head_dim_v: Optional[int], default = None
+               head size for the value tensor. If None, it will be set to head_dim_k.
+    is_paged: bool, default = False
+             whether the KV cache is paged or non-paged (contiguous).
+    total_num_pages: Optional[int], default = None
+                    total number of pages in the K cache or V cache if is_paged = True.
+    page_size: Optional[int], default = None
+              page size in number of tokens if is_paged = True.
     """
 
-    def __init__(self, max_batch_size, max_sequence_length):
-        self.max_sequence_length = max_sequence_length
+    def __init__(self,
+            max_batch_size: int,
+            max_seqlen_kv: int,
+            num_heads_kv: int,
+            head_dim_k: int,
+            dtype: torch.dtype,
+            head_dim_v: Optional[int] = None,
+            is_paged: bool = False,
+            total_num_pages: Optional[int] = None,
+            page_size: Optional[int] = None,
+            is_cuda_graph: bool = False,
+            num_heads_q: Optional[int] = None,
+            head_dim_q: Optional[int] = None,
+            ):
         self.max_batch_size = max_batch_size
-        self.sequence_len_offset = 0
-        self.batch_size_offset = 0
-        self.key_value_memory_dict = {}
+        self.max_seqlen_kv = max_seqlen_kv
+        self.num_heads_kv = num_heads_kv
+        self.head_dim_k = head_dim_k
+        assert (
+            dtype in [torch.float32, torch.float16, torch.bfloat16]
+            ), "Supported InferenceParams.dtype = {torch.float32, torch.float16, torch.bfloat16}. Found {dtype}."
+        self.dtype = dtype
+        self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
+        self.is_paged = is_paged
+        self.is_cuda_graph = is_cuda_graph
+        self.page_table = None
 
-    def swap_key_value_dict(self, batch_indices):
+        if not self.is_paged:
+            self.cache_manager = NonPagedKVCacheManager(
+                max_batch_size=self.max_batch_size,
+                max_seqlen=self.max_seqlen_kv,
+                num_heads=self.num_heads_kv,
+                head_dim_k=self.head_dim_k,
+                dtype=self.dtype,
+                head_dim_v=self.head_dim_v,
+                is_cuda_graph=self.is_cuda_graph,
+                )
+        else:
+            assert page_size is not None, "page_size is required when is_paged=True!"
+            assert total_num_pages is not None, "total_num_pages is required when is_paged=True!"
+            self.page_size = page_size
+            self.max_seqlen_kv = self.max_seqlen_kv if self.max_seqlen_kv >= self.page_size else int((self.max_seqlen_kv + self.page_size -1)//self.page_size * self.page_size)
+            self.total_num_pages = total_num_pages
+            self.cache_manager = PagedKVCacheManager(
+                total_num_pages=self.total_num_pages,
+                page_size=self.page_size,
+                num_heads=self.num_heads_kv,
+                head_dim_k=self.head_dim_k,
+                dtype=self.dtype,
+                max_batch_size=self.max_batch_size,
+                max_seqlen=self.max_seqlen_kv,
+                head_dim_v=self.head_dim_v,
+                is_cuda_graph=self.is_cuda_graph,
+                )
+
+        if self.is_cuda_graph:
+            assert num_heads_q is not None, "num_heads_q is required when is_cuda_graph=True!"
+            assert head_dim_q is not None, "head_dim_q is required when is_cuda_graph=True!"
+            self.num_heads_q = num_heads_q
+            self.head_dim_q = head_dim_q
+
+        # memory format for the cache; at the moment, only 'bshd' is supported
+        self.qkv_format = 'bshd'
+        # layer numbers that we have kv cache for
+        self.layer_numbers = []
+        # sequence ids that are stored in the cache
+        self.seq_ids = []
+        # the full sequence lengths for sequences in seq_ids
+        self.seqlens = [0] * self.max_batch_size
+        # the {seq_id: step_len} information for a new inference step
+        # e.g. inference_params.step_dict = {2: 1, 3: 1, 4: 10}, if in this iteration,
+        # we have three sequences in the batch: sequences 2 and 3 are in generation phase
+        # with step_len = 1 and sequence 4 is in context phase with 10 new tokens
+        self.step_dict = collections.OrderedDict()
+        # the query buffer when is_cuda_graph = True
+        if self.is_cuda_graph:
+            self.q_buffer = {}
+            self.cu_seqlens_q_buffer = []
+            self.cu_seqlens_kv_buffer = []
+
+    def print(self):
+        """Print InferenceParams parameters"""
+        logger = logging.getLogger("InferenceParams")
+        logger.debug(f"InferenceParams:")
+        logger.debug(f"  dtype:               {self.dtype}")
+        logger.debug(f"  is_paged:            {self.is_paged}")
+        if not self.is_paged:
+            logger.debug(f"  max_batch_size:      {self.max_batch_size}")
+            logger.debug(f"  max_seqlen_kv:       {self.max_seqlen_kv}")
+        else:
+            logger.debug(f"  total_num_pages:     {self.total_num_pages}")
+            logger.debug(f"  page_size:           {self.page_size}")
+        logger.debug(f"  num_heads_kv:        {self.num_heads_kv}")
+        logger.debug(f"  head_dim:            k: {self.head_dim_k}, v: {self.head_dim_v}")
+        logger.debug(f"  layer_numbers:       {self.layer_numbers}")
+
+
+    def allocate_memory(self, layer_number):
         """
-        Reorders the KV cache using the specified batch indices.
+        Allocate memory for the KV cache for the layer #layer_number.
+        Both K cache and V cache are in 'bshd' format.
+          - non-paged:
+            - K cache: [max_batch_size, max_seqlen_kv, num_heads_kv, head_dim_k]
+            - V cache: [max_batch_size, max_seqlen_kv, num_heads_kv, head_dim_v]
+          - paged:
+            - K cache: [total_num_pages, page_size, num_heads_kv, head_dim_k]
+            - V cache: [total_num_pages, page_size, num_heads_kv, head_dim_v]
+        If is_cuda_graph = True, several buffers are also allocated.
+          - Q buffer: [max_batch_size, max_seqlen_kv, num_heads_q, head_dim_q]
+          - cu_seqlens_q buffer: [max_batch_size + 1]
+          - cu_seqlens_kv buffer: [max_batch_size + 1]
+        """
+        self.layer_numbers.append(layer_number)
+        self.cache_manager.allocate_memory(layer_number)
+
+        if self.is_cuda_graph:
+            self.max_seqlen_q = self.max_seqlen_kv
+            self.q_buffer[layer_number] = torch.zeros(
+                self.max_batch_size,
+                self.max_seqlen_q,
+                self.num_heads_q,
+                self.head_dim_q,
+                dtype=self.dtype,
+                device=torch.cuda.current_device(),
+            )
+            self.cu_seqlens_q_buffer = torch.zeros(
+                self.max_batch_size + 1,
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
+            )
+            self.cu_seqlens_kv_buffer = torch.zeros(
+                self.max_batch_size + 1,
+                dtype=torch.int32,
+                device=torch.cuda.current_device(),
+            )
+
+    def reshape_and_copy_q(self,
+            q: torch.Tensor,
+            source_qkv_format: str,
+            target_qkv_format: str,
+            layer_number: Optional[int] = None,
+            ):
+        """
+        Convert the new query tokens from 'source_qkv_format' to 'target_qkv_format',
+        so that it is consistent with the KV cache format. At the moment, only 'bshd' format
+        is supported for target_qkv_format. If is_cuda_graph = True, also copy the new query
+        tensor to the appropriate q_buffer.
+        """
+        actual_batch_size = len(self.step_dict)
+        seqlens_q = list(self.step_dict.values())
+        cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size+1)]
+        batch_wide_max_seqlen_q = int((max(seqlens_q) + 63)//64 * 64)
+        if not self.is_cuda_graph:
+            if source_qkv_format == 'bshd':
+                q = q.contiguous()
+            if source_qkv_format == 'sbhd':
+                q = q.transpose(0,1).contiguous()
+            if source_qkv_format == 'thd':
+                padded_q = torch.zeros(
+                    actual_batch_size, batch_wide_max_seqlen_q, q.shape[-2], q.shape[-1],
+                    dtype=q.dtype, device='cuda')
+                for i in range(actual_batch_size):
+                    padded_q[i, :seqlens_q[i], :, :] = q[cu_seqlens_q[i]:cu_seqlens_q[i+1], :, :]
+                q = padded_q
+
+            if source_qkv_format in ['bshd', 'sbhd']:
+                self.max_seqlen_q = q.shape[1]
+            else:
+                self.max_seqlen_q = batch_wide_max_seqlen_q
+
+            # bshd: [actual_batch_size, batch_wide_max_seqlen_q, num_heads_q, head_dim_q]
+            return q
+        else:
+            assert (
+                layer_number is not None and layer_number in self.layer_numbers
+            ), "layer_number must be an integer and must exist in InferenceParams.layer_numbers!"
+            q_buffer = self.q_buffer[layer_number]
+            for i in range(actual_batch_size):
+                if source_qkv_format == 'bshd':
+                    q_buffer[i, :seqlens_q[i], :, :] = q[i, :seqlens_q[i], :, :]
+                if source_qkv_format == 'sbhd':
+                    q_buffer[i, :seqlens_q[i], :, :] = q[:seqlens_q[i], i, :, :]
+                if source_qkv_format == 'thd':
+                    q_buffer[i, :seqlens_q[i], :, :] = q[cu_seqlens_q[i]:cu_seqlens_q[i+1], :, :]
+                q_buffer[i, seqlens_q[i]:, :, :].fill_(0)
+
+            cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]]*(self.max_batch_size - actual_batch_size)
+            self.cu_seqlens_q_buffer.copy_(torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device='cpu'))
+
+            # bshd: [self.max_batch_size, self.max_seqlen_kv, num_heads_q, head_dim_q]
+            return q_buffer
+
+    def convert_paged_to_nonpaged(self, layer_number: int, qkv_format: str):
+        """
+        Convert the k cache and v cache from paged to non-paged format. This function
+        can be used for debugging purposes or for backends that do not have paged attention
+        support yet, for example, UnfusedDotProductAttention.
+
+        It can be called after update_cache(). Based on the page table, it re-indexes the cache
+        tensors and returns the contiguous, non-paged, key and value tensors. The kv cache tensors
+        are assumed to be in 'bshd' format (see self.allocate_memory), and the returned key and
+        value tensors will be in :attr:`qkv_format` to be consistent with the original inputs.
 
         Parameters
         ----------
-        batch_indices : List[int]
-                       Sequence of indices to reorder along the batch dimensions of
-                       the KV cache. Must have a length equal to the batch size.
-        """
-        if len(self.key_value_memory_dict) == 0:
-            raise ValueError("should not swap when dict in empty")
+        layer_number: int
+            The layer number of the kv cache
+        qkv_format: str
+            The format of the returned key and value tensors, {'bshd', 'sbhd', 'thd'}
 
-        for layer_number, inference_memory in self.key_value_memory_dict.items():
-            inference_key_memory, inference_value_memory = inference_memory
-            assert (
-                len(batch_indices) == inference_key_memory.shape[1]
-            )  # make sure batch size is the same
-            new_inference_key_memory = inference_key_memory[:, batch_indices]
-            new_inference_value_memory = inference_value_memory[:, batch_indices]
-            self.key_value_memory_dict[layer_number] = (
-                new_inference_key_memory,
-                new_inference_value_memory,
+        Returns
+        -------
+        k_cache: torch.Tensor
+            Non-paged key cache tensor
+        v_cache: torch.Tensor
+            Non-paged value cache tensor
+        """
+        k_cache, v_cache = self.cache_manager.cache[layer_number]
+        page_table = self.cache_manager.page_table
+        batch_size = page_table.shape[0]
+        actual_batch_size = len(self.step_dict)
+        new_k_cache = rearrange(
+            k_cache[page_table.flatten()],
+            "(b npages) page_size ... -> b (npages page_size) ...",
+            b=batch_size,
             )
+        new_v_cache = rearrange(
+            v_cache[page_table.flatten()],
+            "(b npages) page_size ... -> b (npages page_size) ...",
+            b=batch_size,
+            )
+        for i in range(actual_batch_size):
+            new_k_cache[i, self.seqlens[i]:,:,:].fill_(0)
+            new_v_cache[i, self.seqlens[i]:,:,:].fill_(0)
+        if qkv_format == 'bshd':
+            new_k_cache = new_k_cache.contiguous()
+            new_v_cache = new_v_cache.contiguous()
+        if qkv_format == 'sbhd':
+            new_k_cache = new_k_cache.transpose(0,1).contiguous()
+            new_v_cache = new_v_cache.transpose(0,1).contiguous()
+        if qkv_format == 'thd':
+            packed_k_cache = torch.Tensor().to(dtype=k_cache.dtype,device=k_cache.device)
+            packed_v_cache = torch.Tensor().to(dtype=v_cache.dtype,device=v_cache.device)
+            for i in range(batch_size):
+                packed_k_cache = torch.cat([packed_k_cache, new_k_cache[i,:self.seqlens[i],:,:]], dim=0)
+                packed_v_cache = torch.cat([packed_v_cache, new_v_cache[i,:self.seqlens[i],:,:]], dim=0)
+            new_k_cache = packed_k_cache.contiguous()
+            new_v_cache = packed_v_cache.contiguous()
+        return new_k_cache, new_v_cache
+
+    def update_cache(self,
+            layer_number: int,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            qkv_format: str,
+            ):
+        """
+        Update KV cache with the new key/value tokens for a given inference iteration.
+
+        NonPagedKVCacheManager and PagedKVCacheManager are two examples of the cache manager.
+        Users can write their own cache manager with their own step() function.
+
+        If the inference iteration has only generation sequences, :attr:`k` and :attr:`v` tensors
+        should have shape:
+          - [batch_size, 1, num_heads, head_dim] for :attr:`qkv_format` = 'bshd',
+          - [1, batch_size, num_heads, head_dim] for :attr:`qkv_format` = 'sbhd', and
+          - [batch_size, num_heads, head_dim] for :attr:`qkv_format` = 'thd'.
+
+        If the inference iteration has both generation sequences and context sequences, :attr:`k`
+        and :attr:`v` should be arranged in a way so that the sequences in generation phase come
+        before the sequences in context phase, in the tensor. They should have the following shape.
+          - [batch_size, max_seqlen, num_heads, head_dim] for :attr:`qkv_format` = 'bshd'
+          - [max_seqlen, batch_size, num_heads, head_dim] for :attr:`qkv_format` = 'sbhd', and
+          - [total_num_new_tokens, num_heads, head_dim] for :attr:`qkv_format` = 'thd'.
+        Here, max_seqlen is the maximum sequence length for the new tokens in the batch, and it may
+        be smaller than InferenceParams.max_seqlen_kv.
+
+        Take a batch of 4, with seq_ids = [0, 1, 2, 3], as an example. At iteration t, all 4 sequences
+        are processed, after which, sequence 2 is determined to be 'finished'. For iteration t+1, there
+        may or may not be a new sequence added to the batch.
+
+        If no new sequence is added, input tensors :attr:`k` and :attr:`v` should have shape
+        [3, 1, num_heads, head_dim] for :attr:`qkv_format` = 'bshd', [1, 3, num_heads, head_dim] for
+        :attr:`qkv_format` = 'sbhd', and [3, num_heads, head_dim] for :attr:`qkv_format` = 'thd'.
+
+        If one new sequence is added, for example, sequence 8 with 10 context tokens, then input tensors
+        :attr:`k` and :attr:`v` should be in [4, 10, num_heads, head_dim] shape if
+        :attr:`qkv_format` = 'bshd', [10, 4, num_heads, head_dim] if :attr:`qkv_format` = 'sbhd',
+        or [13, num_heads, head_dim] if :attr:`qkv_format` = 'thd'.
+
+        Parameters
+        ----------
+        layer_number: int
+            The layer number of the kv cache
+        k: torch.Tensor
+            The new key tokens for the current iteration
+        v: torch.Tensor
+            The new value tokens for the current iteration
+        qkv_format: str
+            The format of the new key/value tensors, {'bshd', 'sbhd', 'thd'}
+
+        Returns
+        -------
+        k_cache: torch.Tensor
+            The key cache tensor, containing tokens from both previous and current iterations
+        v_cache: torch.Tensor
+            The value cache tensor, containing tokens from both previous and current iterations
+        page_table: torch.Tensor
+            The page table if is_paged = True; else `None`
+        """
+        outputs = self.cache_manager.step(layer_number, k, v, self.step_dict, qkv_format)
+        self.seq_ids = list(self.cache_manager.sequences.keys())
+        self.seqlens = list(self.cache_manager.sequences.values())
+
+        if not self.is_paged:
+            k_cache, v_cache = outputs
+            page_table = None
+        else:
+            k_cache, v_cache, page_table = outputs
+            self.page_table = page_table
+
+        if self.is_cuda_graph:
+            actual_batch_size = len(self.seqlens)
+            cu_seqlens_kv = [0] + [sum(self.seqlens[:i]) for i in range(1, actual_batch_size+1)]
+            cu_seqlens_kv = cu_seqlens_kv + [cu_seqlens_kv[-1]]*(self.max_batch_size - actual_batch_size)
+            self.cu_seqlens_kv_buffer.copy_(torch.Tensor(cu_seqlens_kv).to(dtype=torch.int32, device='cpu'))
+
+        # k_cache and v_cache are in InferenceParams.qkv_format format
+        return k_cache, v_cache, page_table
 
 
 @torch.no_grad()
@@ -4736,12 +5075,17 @@ class UnfusedDotProductAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+
+        qkv_format = "".join([i for i in qkv_layout.replace("paged_kv_","").split("_")[0] if i.isalpha()])
+        if inference_params is not None and inference_params.is_paged:
+            key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number, qkv_format)
+
         if qkv_format == "bshd":
             # convert to sbhd and use sbhd implementation for now
             query_layer, key_layer, value_layer = [
@@ -4754,6 +5098,24 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
         if "padding" in attn_mask_type:
             if self.attention_type == "self":
+                if attention_mask is None:
+                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+                    for i in range(batch_size):
+                        attention_mask_q = torch.cat(
+                            [
+                                attention_mask_q,
+                                torch.Tensor(
+                                    [False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i])
+                                )
+                                .to(dtype=torch.bool)
+                                .unsqueeze(0)
+                                .unsqueeze(0)
+                                .unsqueeze(0),
+                            ],
+                            dim=0,
+                        )
+                    attention_mask = attention_mask_q.to(device="cuda")
                 assert attention_mask.shape == (
                     batch_size,
                     1,
@@ -4764,6 +5126,43 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     attention_mask.squeeze(1).unsqueeze(3), attention_mask
                 )
             else:
+                if attention_mask is None:
+                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+                    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+                    for i in range(batch_size):
+                        attention_mask_q = torch.cat(
+                            [
+                                attention_mask_q,
+                                torch.Tensor(
+                                    [False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i])
+                                )
+                                .to(dtype=torch.bool)
+                                .unsqueeze(0)
+                                .unsqueeze(0)
+                                .unsqueeze(0),
+                            ],
+                            dim=0,
+                        )
+                        attention_mask_kv = torch.cat(
+                            [
+                                attention_mask_kv,
+                                torch.Tensor(
+                                    [False] * seqlens_kv[i]
+                                    + [True] * (max_seqlen_kv - seqlens_kv[i])
+                                )
+                                .to(dtype=torch.bool)
+                                .unsqueeze(0)
+                                .unsqueeze(0)
+                                .unsqueeze(0),
+                            ],
+                            dim=0,
+                        )
+                    attention_mask = (
+                        attention_mask_q.to(device="cuda"),
+                        attention_mask_kv.to(device="cuda"),
+                    )
                 assert (
                     len(attention_mask) == 2
                     and attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q)
@@ -5228,9 +5627,9 @@ class FlashAttention(torch.nn.Module):
         cp_comm_type: str = "p2p",
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """flash-attn fprop"""
-
         assert all(
             x.dtype in [torch.float16, torch.bfloat16] or isinstance(x, Float8Tensor)
             for x in [query_layer, key_layer, value_layer]
@@ -5250,7 +5649,7 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+        qkv_format = "".join([i for i in qkv_layout.replace("paged_kv_","").split("_")[0] if i.isalpha()])
 
         if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
             if qkv_format == "sbhd":
@@ -5295,39 +5694,52 @@ class FlashAttention(torch.nn.Module):
 
             if "padding" in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
-                # [b * s, h, d]
-                query_layer, key_layer, value_layer = [
-                    x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
-                    for x in [query_layer, key_layer, value_layer]
-                ]
 
-                if self.attention_type == "self":
-                    assert (
-                        max_seqlen_q == max_seqlen_kv
-                    ), "Maximum sequence length for Q and KV should be the same."
+                if inference_params is None or (inference_params is not None and not inference_params.is_paged):
+                    # [b * s, h, d]
+                    query_layer, key_layer, value_layer = [
+                        x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
+                        for x in [query_layer, key_layer, value_layer]
+                    ]
+
+                    if self.attention_type == "self":
+                        assert (
+                            max_seqlen_q == max_seqlen_kv
+                        ), "Maximum sequence length for Q and KV should be the same."
+                        if cu_seqlens_q is None:
+                            assert (
+                                attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                            cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                        else:
+                            indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                        cu_seqlens_kv = cu_seqlens_q
+                        query_layer, key_layer, value_layer = PackTensors.apply(
+                            indices_q, query_layer, key_layer, value_layer
+                        )
+                    else:
+                        if cu_seqlens_q is None or cu_seqlens_kv is None:
+                            assert (
+                                attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                            cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
+                            cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
+                        else:
+                            indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                            indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
+                        query_layer = PackTensors.apply(indices_q, query_layer)
+                        key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
+                else:
+                    # [b * s, h, d]
+                    query_layer = query_layer.reshape(query_layer.shape[0] * query_layer.shape[1], *query_layer.shape[2:])
                     if cu_seqlens_q is None:
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask if self.attention_type == "self" else attention_mask[0])
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                    cu_seqlens_kv = cu_seqlens_q
-                    query_layer, key_layer, value_layer = PackTensors.apply(
-                        indices_q, query_layer, key_layer, value_layer
-                    )
-                else:
-                    if cu_seqlens_q is None or cu_seqlens_kv is None:
-                        assert (
-                            attention_mask is not None
-                        ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
-                        cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
-                    else:
-                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                        indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
                     query_layer = PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
@@ -5406,6 +5818,8 @@ class FlashAttention(torch.nn.Module):
                 else:
                     if _flash_attn_2_5_7_plus:
                         fa_optional_forward_kwargs["block_table"] = None
+                        if inference_params is not None:
+                            fa_optional_forward_kwargs["block_table"] = inference_params.page_table
                     func = (
                         flash_attn_varlen_func
                         if not _use_flash_attn_3
@@ -5589,7 +6003,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
             fused_attention_backend = FusedAttnBackend["FP8"]
             fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
             # 1: qkv packed, 2: kv packed, 3: qkv separate
-            qkv_group = len(qkv_layout.split("_"))
+            qkv_group = len(qkv_layout.replace("paged_kv_","").split("_"))
             assert (
                 qkv_group == 1
             ), f"qkv layout should conform to 3hd or h3d, e.g. sb3hd, but found {qkv_layout}."
@@ -5983,7 +6397,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
                 q_fp8, kv_fp8 = q._data, kv._data
             else:
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
-                qkv_group = len(qkv_layout.split("_"))
+                qkv_group = len(qkv_layout.replace("paged_kv_","").split("_"))
                 assert qkv_group == 2, (
                     "qkv layout should conform to hd_2hd or hd_h2d, e.g. sbhd_sb2hd, "
                     f"but found {qkv_layout}."
@@ -6404,6 +6818,8 @@ class FusedAttnFunc(torch.autograd.Function):
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
         q,
         k,
         v,
@@ -6438,7 +6854,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q._data, k._data, v._data
             else:
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
-                qkv_group = len(qkv_layout.split("_"))
+                qkv_group = len(qkv_layout.replace("paged_kv_","").split("_"))
                 if qkv_group == 1:
                     dim = qkv_layout.find("3")
                     qkv = _combine_tensors([q, k, v], dim)
@@ -6452,7 +6868,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     q_fp8 = cast_to_fp8(
                         q, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward
                     ).view(q.shape)
-                    dim = qkv_layout.split("_")[1].find("2")
+                    dim = qkv_layout.replace("paged_kv_","").split("_")[1].find("2")
                     kv = _combine_tensors([k, v], dim)
                     kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
                     kv_fp8 = cast_to_fp8(
@@ -6527,7 +6943,7 @@ class FusedAttnFunc(torch.autograd.Function):
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
                 if is_input_fp8:
-                    qkv_group = len(qkv_layout.split("_"))
+                    qkv_group = len(qkv_layout.replace("paged_kv_","").split("_"))
                     if qkv_group == 1:
                         dim = qkv_layout.find("3")
                         qkv = _combine_tensors([q, k, v], dim)
@@ -6549,7 +6965,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             fp8_dtype_forward,
                             TE_DType[q.dtype],
                         ).view(q.shape)
-                        dim = qkv_layout.split("_")[1].find("2")
+                        dim = qkv_layout.replace("paged_kv_","").split("_")[1].find("2")
                         kv = _combine_tensors([k, v], dim)
                         kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
                         kv_no_fp8 = cast_from_fp8(
@@ -6615,6 +7031,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias,
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
+                page_table_k,
+                page_table_v,
                 None,  # d_scale_qkv
                 0,  # d_scale_qkv_offset
                 None,  # d_scale_s
@@ -6827,7 +7245,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             dtype=d_out_f8tensor.dtype,
                         )
                     else:
-                        qkv_group = len(ctx.qkv_layout.split("_"))
+                        qkv_group = len(ctx.qkv_layout.replace("paged_kv_","").split("_"))
                         if qkv_group == 1:
                             dim = ctx.qkv_layout.find("3")
                             dqkv_fp8 = _combine_tensors([dq_fp8, dk_fp8, dv_fp8], dim)
@@ -6851,7 +7269,7 @@ class FusedAttnFunc(torch.autograd.Function):
                                 fp8_dtype_backward,
                                 ctx.qkv_dtype,
                             ).view(dq_fp8.shape)
-                            dim = ctx.qkv_layout.split("_")[1].find("2")
+                            dim = ctx.qkv_layout.replace("paged_kv_","").split("_")[1].find("2")
                             dkv_fp8 = _combine_tensors([dk_fp8, dv_fp8], dim)
                             dkv_c_fp8 = dkv_fp8.view(
                                 -1, dkv_fp8.shape[-3] * dkv_fp8.shape[-2] * dkv_fp8.shape[-1]
@@ -6936,6 +7354,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
+                None,
                 dq,
                 dk,
                 dv,
@@ -6959,6 +7379,8 @@ class FusedAttnFunc(torch.autograd.Function):
             )
         # else, return (dqkv, dbias)
         return (
+            None,
+            None,
             None,
             None,
             None,
@@ -7070,6 +7492,8 @@ class FusedAttention(torch.nn.Module):
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         cu_seqlens_q_padded: Optional[torch.Tensor] = None,
         cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
+        page_table_k: Optional[torch.Tensor] = None,
+        page_table_v: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         attn_mask_type: str = "causal",
@@ -7109,21 +7533,17 @@ class FusedAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+        qkv_format = "".join([i for i in qkv_layout.replace("paged_kv_","").split("_")[0] if i.isalpha()])
 
         if qkv_format in ["sbhd", "bshd"]:
             if qkv_format == "sbhd":
-                batch_size, max_seqlen_q, max_seqlen_kv = (
-                    query_layer.shape[1],
-                    query_layer.shape[0],
-                    key_layer.shape[0],
-                )
+                batch_size = query_layer.shape[1]
+                max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
+                max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
             if qkv_format == "bshd":
-                batch_size, max_seqlen_q, max_seqlen_kv = (
-                    query_layer.shape[0],
-                    query_layer.shape[1],
-                    key_layer.shape[1],
-                )
+                batch_size = query_layer.shape[0]
+                max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
+                max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
             max_seqlen_q *= cp_size
             max_seqlen_kv *= cp_size
             if "padding" in attn_mask_type:
@@ -7233,6 +7653,8 @@ class FusedAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     cu_seqlens_q_padded,
                     cu_seqlens_kv_padded,
+                    page_table_k,
+                    page_table_v,
                     query_layer,
                     key_layer,
                     value_layer,
@@ -7875,10 +8297,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
-            if qkv_format == "thd":
-                assert (
-                    "padding" in attn_mask_type
-                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
 
             if window_size is None:
                 window_size = self.window_size
@@ -7895,52 +8313,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             if qkv_format is None:
                 qkv_format = self.qkv_format
 
-            if inference_params is not None:
-                assert self.layer_number is not None, "Layer number must be set!"
-
-                # convert causal to causal_bottom_right in inference when KV-caching is in use
-                # so users can run with the same attn_mask_type for training and inference
-                if attn_mask_type in ["causal", "padding_causal"]:
-                    attn_mask_type = attn_mask_type + "_bottom_right"
-
-                if qkv_format == "bshd":
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-
-                (
-                    inference_key_memory,
-                    inference_value_memory,
-                ) = inference_params.key_value_memory_dict[self.layer_number]
-
-                batch_start = inference_params.batch_size_offset
-                batch_end = batch_start + key_layer.size(1)
-                assert batch_end <= inference_key_memory.size(1)
-
-                sequence_start = inference_params.sequence_len_offset
-                sequence_end = sequence_start + key_layer.size(0)
-                assert sequence_end <= inference_key_memory.size(0)
-
-                # Copy keys and values into KV-cache
-                inference_key_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = (
-                    key_layer
-                )
-                inference_value_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = (
-                    value_layer
-                )
-                key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-                value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-
-                if qkv_format == "bshd":
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-
-                key_layer = key_layer.contiguous()
-                value_layer = value_layer.contiguous()
-
-            assert (
-                key_layer.shape[-2] == self.num_gqa_groups_per_partition
-                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
-            ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
             assert qkv_format in [
                 "sbhd",
                 "bshd",
@@ -7976,6 +8348,65 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
+            page_table = None
+            if inference_params is not None:
+                assert self.layer_number is not None, "Layer number must be set!"
+
+                # remember original format for output purposes
+                orig_qkv_format = qkv_format
+
+                # convert causal to causal_bottom_right in inference when KV-caching is in use
+                # so users can run with the same attn_mask_type for training and inference
+                if attn_mask_type in ["causal", "padding_causal"]:
+                    attn_mask_type = attn_mask_type + "_bottom_right"
+
+                # convert to cross attention type when KV cache is in use
+                self.attention_type = "cross"
+                self.flash_attention.attention_type = self.attention_type
+                self.fused_attention.attention_type = self.attention_type
+                self.unfused_attention.attention_type = self.attention_type
+
+                # force tensors to be contiguous if not already
+                query_layer, key_layer, value_layer = [
+                    x.contiguous() if not x.is_contiguous() else x for x in [
+                        query_layer, key_layer, value_layer]]
+
+                # reshape the query tensor
+                # cuDNN paged attention supports bshd_2bshd and sbhd_2bshd, but
+                # flash-attention and unfused attention will need q/k/v in the
+                # same qkv_format
+                target_qkv_format = inference_params.qkv_format
+                query_layer = inference_params.reshape_and_copy_q(
+                        query_layer, qkv_format, target_qkv_format, self.layer_number)
+
+                # update KV cache and return the full key/value tensors 
+                # full key/value tensors are in inference_params.qkv_format format
+                key_layer, value_layer, page_table = inference_params.update_cache(
+                    self.layer_number,
+                    key_layer,
+                    value_layer,
+                    qkv_format,
+                    )
+
+                # update cu_seqlens tensors
+                if inference_params.is_cuda_graph:
+                    cu_seqlens_q = inference_params.cu_seqlens_q_buffer
+                    cu_seqlens_kv = inference_params.cu_seqlens_kv_buffer
+                    max_seqlen_q = inference_params.max_seqlen_q
+                    max_seqlen_kv = inference_params.max_seqlen_kv
+
+                # query tensor is now in inference_params.qkv_format
+                qkv_format = target_qkv_format
+
+            if qkv_format == "thd":
+                assert (
+                    "padding" in attn_mask_type
+                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
+            assert (
+                key_layer.shape[-2] == self.num_gqa_groups_per_partition
+                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
+            ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups_per_partition} heads! Found {key_layer.shape[-2]} in key_layer and {value_layer.shape[-2]} in value_layer."
+
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
@@ -7998,18 +8429,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     batch_size = query_layer.shape[0]
                 max_seqlen_q *= cp_size
                 max_seqlen_kv *= cp_size
-                if cu_seqlens_q is not None:
-                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    assert all(
-                        seqlens_q <= max_seqlen_q
-                    ), """Sequence lengths indicated by cu_seqlens_q must be no greater than
-                        the sequence dimension in 'query_layer'!"""
-                if cu_seqlens_kv is not None:
-                    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    assert all(
-                        seqlens_kv <= max_seqlen_kv
-                    ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
-                        the sequence dimension in 'key_layer' and 'value_layer'!"""
                 if cu_seqlens_q is None or cu_seqlens_kv is None:
                     if "padding" in attn_mask_type:
                         assert (
@@ -8045,6 +8464,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
                     query_layer, key_layer, value_layer, qkv_format=qkv_format
                 )
+            # convert qkv layout to its corresponding paged attention layout
+            if inference_params is not None and inference_params.is_paged:
+                qkv_layout = "paged_kv_"+qkv_format+"_2"+inference_params.qkv_format
 
             global _alibi_cache
             if alibi_slopes is not None:
@@ -8126,6 +8548,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
+                inference_params=inference_params,
             )
             global _attention_backends, _use_flash_attn_3
             if (
@@ -8161,6 +8584,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fused_attention_backend = _attention_backends["fused_attention_backend"]
                 use_unfused_attention = _attention_backends["use_unfused_attention"]
 
+            if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
+                raise ValueError("No dot product attention support for the provided inputs!")
+
+            output = None
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(
@@ -8169,7 +8596,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                return self.flash_attention(
+                output = self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -8188,6 +8615,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_seqlen_kv=max_seqlen_kv,
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
+                    inference_params=inference_params,
                 )
 
             if use_fused_attention:
@@ -8206,7 +8634,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    output = self._checkpointed_attention_forward(
                         self.fused_attention,
                         query_layer,
                         key_layer,
@@ -8216,6 +8644,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cu_seqlens_kv=cu_seqlens_kv,
                         cu_seqlens_q_padded=cu_seqlens_q_padded,
                         cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                        page_table_k=page_table,
+                        page_table_v=page_table,
                         max_seqlen_q=max_seqlen_q,
                         max_seqlen_kv=max_seqlen_kv,
                         attn_mask_type=attn_mask_type,
@@ -8232,7 +8662,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
                     )
-                return self.fused_attention(
+                output = self.fused_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -8241,6 +8671,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_kv=cu_seqlens_kv,
                     cu_seqlens_q_padded=cu_seqlens_q_padded,
                     cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+                    page_table_k=page_table,
+                    page_table_v=page_table,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
                     attn_mask_type=attn_mask_type,
@@ -8274,7 +8706,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask
                     )
                 if checkpoint_core_attention:
-                    return self._checkpointed_attention_forward(
+                    output = self._checkpointed_attention_forward(
                         self.unfused_attention,
                         query_layer,
                         key_layer,
@@ -8287,8 +8719,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
+                        inference_params=inference_params,
                     )
-                return self.unfused_attention(
+                output = self.unfused_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -8300,9 +8733,25 @@ class DotProductAttention(TransformerEngineBaseModule):
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
+                    inference_params=inference_params,
                 )
 
-            raise ValueError("No dot product attention support for the provided inputs!")
+            if inference_params is not None:
+                batch_size = len(inference_params.step_dict)
+                seqlen = inference_params.seqlens[0]
+                step_lens = list(inference_params.step_dict.values())
+                max_seqlen_q = max(list(inference_params.step_dict.values()))
+                if orig_qkv_format == "bshd":
+                    output = output[:batch_size, :max_seqlen_q].contiguous()
+                if orig_qkv_format == "sbhd":
+                    output = output[:batch_size, :max_seqlen_q].transpose(0,1).contiguous()
+                if orig_qkv_format == "thd":
+                    packed_output = torch.Tensor().to(dtype=output.dtype,device=output.device)
+                    for i in range(batch_size):
+                        packed_output = torch.cat([packed_output, output[i,:step_lens[i]]], dim=0)
+                    output = packed_output.contiguous()
+
+            return output
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -8486,7 +8935,7 @@ class MultiheadAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = check_set_window_size(attn_mask_type, window_size)
-        self.layer_number = layer_number
+        self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -8855,28 +9304,8 @@ class MultiheadAttention(torch.nn.Module):
         # Pre-allocate memory for key-values for inference
         # =================================================
 
-        if inference_params and self.layer_number is not None:
-            assert (
-                self.qkv_format != "thd"
-            ), "qkv_format == thd is not supported for an inference with KV-cache!"
-            if self.layer_number not in inference_params.key_value_memory_dict:
-                inf_max_seq_len = inference_params.max_sequence_length
-                inf_max_batch_size = inference_params.max_batch_size
-                inference_key_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
-                inference_value_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
-                inference_params.key_value_memory_dict[self.layer_number] = (
-                    inference_key_memory,
-                    inference_value_memory,
-                )
-            else:
-                (
-                    inference_key_memory,
-                    inference_value_memory,
-                ) = inference_params.key_value_memory_dict[self.layer_number]
+        if inference_params is not None and self.layer_number not in inference_params.layer_numbers:
+            inference_params.allocate_memory(self.layer_number)
 
         # ======================
         # Query, Key, and Value
@@ -9056,9 +9485,10 @@ class MultiheadAttention(torch.nn.Module):
                 elif self.qkv_format == "bshd":
                     sequence_length = key_layer.size(1)
                 else:
-                    raise ValueError(f"QKV format {self.qkv_format} not supported for KV caching.")
+                    raise ValueError(f"qkv_format={self.qkv_format} is not supported for KV caching and RoPE.")
 
-                sequence_start = inference_params.sequence_len_offset
+                # TODO: consider cases where sequences have different seqlens
+                sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]

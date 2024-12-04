@@ -50,6 +50,12 @@ QKVLayout = {
     "thd_t2hd": NVTE_QKV_Layout.NVTE_THD_T2HD,
     "thd_th2d": NVTE_QKV_Layout.NVTE_THD_TH2D,
     "thd_thd_thd": NVTE_QKV_Layout.NVTE_THD_THD_THD,
+    "paged_kv_bshd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_2BSHD,
+    "paged_kv_bshd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_2SBHD,
+    "paged_kv_sbhd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_2BSHD,
+    "paged_kv_sbhd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_2SBHD,
+    "paged_kv_thd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_2BSHD,
+    "paged_kv_thd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_2SBHD,
 }
 
 AttnBiasType = {
@@ -900,6 +906,8 @@ def fused_attn_fwd(
     attn_bias: torch.Tensor = None,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
+    page_table_k: torch.Tensor = None,
+    page_table_v: torch.Tensor = None,
     d_scale_qkv: torch.Tensor = None,
     d_scale_qkv_offset: int = META_QKV,
     d_scale_s: torch.Tensor = None,
@@ -957,6 +965,10 @@ def fused_attn_fwd(
                 cumulative sequence offsets for Q; shape [batch_size + 1]
     cu_seqlens_kv_padded: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
+    page_table_k: torch.Tensor, default = None
+                page table for K cache; shape [batch_size, max_pages_per_seq_k]
+    page_table_v: torch.Tensor, default = None
+                page table for V cache; shape [batch_size, max_pages_per_seq_v]
     d_scale_qkv: torch.Tensor, default = None
                 input tensor for the dequantization of QKV in FP8 computations
     d_scale_qkv_offset: int, default = META_QKV
@@ -1098,6 +1110,8 @@ def fused_attn_fwd(
         qkv_dtype,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
         d_scale_qkv,
         d_scale_qkv_offset,
         d_scale_s,

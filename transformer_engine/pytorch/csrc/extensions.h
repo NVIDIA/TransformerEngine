@@ -110,6 +110,8 @@ std::vector<at::Tensor> fused_attn_fwd(
     const at::Tensor K, const at::Tensor V, const transformer_engine::DType qkv_type,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
     const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k,
+    const c10::optional<at::Tensor> page_table_v,
     const c10::optional<at::Tensor> descale_QKV, const int descale_QKV_offset,
     const c10::optional<at::Tensor> descale_S, const int descale_S_offset,
     const c10::optional<at::Tensor> scale_S, const int scale_S_offset,

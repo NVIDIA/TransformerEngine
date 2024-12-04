@@ -25,6 +25,7 @@ from transformer_engine.pytorch.attention import (
     check_set_window_size,
     AttentionParams,
     _attention_backends,
+    InferenceParams,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -89,6 +90,7 @@ class ModelConfig:
         num_layers: int = 1,
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        total_requests: int = 1,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -107,6 +109,7 @@ class ModelConfig:
         self.num_layers = num_layers
         self.bias_shape = bias_shape
         self.window_size = window_size
+        self.total_requests = total_requests
 
 
 @contextmanager
@@ -129,6 +132,7 @@ def _get_attention_backends(
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
+    inference_params: Optional[InferenceParams] = None,
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
@@ -183,6 +187,7 @@ def _get_attention_backends(
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
+            inference_params=inference_params,
         )
         _, _, fused_attention_backend, _, available_backends = get_attention_backend(
             attention_params
@@ -1299,7 +1304,7 @@ def _run_transformer_layer(
 
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_9": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_9": ModelConfig(2, 12, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
     "fp8_11": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
     "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
