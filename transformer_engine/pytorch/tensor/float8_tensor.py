@@ -977,6 +977,8 @@ class Float8Tensor(QuantizedTensor):
                 f"A function call({func}) in {cls} may not return {cls} tensor as an output. It"
                 " might cause an error in torch FSDP2!"
             )
+        else:
+            pass
 
         return super().__torch_dispatch__(func, types, args, kwargs)
 
