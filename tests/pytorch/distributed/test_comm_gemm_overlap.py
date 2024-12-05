@@ -86,7 +86,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, fp8, fp8_init):
+def _run_layer_with_overlap(layer_type, rs_dgrad_overlap, fp8, fp8_init, fp8_buf):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -104,6 +104,9 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
         test_cmd.append("--fp8")
         if fp8_init:
             test_cmd.append("--fp8-init")
+
+    if rs_dgrad_overlap:
+        test_cmd.append(f"--rs-dgrad-overlap")
 
     os.environ["PYTORCH_JIT"] = "0"
     os.environ["NVTE_TORCH_COMPILE"] = "0"
@@ -245,25 +248,47 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 
 
 @pytest.mark.parametrize(
-    "layer_type",
-    [layer.__name__ for layer in TE_LAYERS],
-    ids=[(" " + layer.__name__ + " ") for layer in TE_LAYERS],
+    "layer_type,rs_dgrad_overlap",
+    [
+        (te.Linear.__name__, False),
+        (te.LayerNormLinear.__name__, False),
+        (te.LayerNormMLP.__name__, False),
+        (te.MultiheadAttention.__name__, False),
+        (te.TransformerLayer.__name__, False),
+        # (te.LayerNormLinear.__name__, True),
+        # (te.LayerNormMLP.__name__, True),
+        # (te.MultiheadAttention.__name__, True),
+        # (te.TransformerLayer.__name__, True),
+    ],
+    ids=[
+        f" {te.Linear.__name__} ",
+        f" {te.LayerNormLinear.__name__} - BULK DGRAD/WGRAD ",
+        f" {te.LayerNormMLP.__name__} - BULK DGRAD/WGRAD ",
+        f" {te.MultiheadAttention.__name__} - BULK DGRAD/WGRAD ",
+        f" {te.TransformerLayer.__name__} - BULK DGRAD/WGRAD ",
+        # f" {te.LayerNormLinear.__name__} - RS DGRAD ",
+        # f" {te.LayerNormMLP.__name__} - RS DGRAD ",
+        # f" {te.MultiheadAttention.__name__} - RS DGRAD ",
+        # f" {te.TransformerLayer.__name__} - RS DGRAD ",
+    ],
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
     [
         (False, False),
         (True, False),
-        (True, True),
+        (True, True)
     ],
     ids=[
         " BF16 GEMM - BF16 PARAMS ",
         " FP8  GEMM - BF16 PARAMS ",
+        " FP8  GEMM - BF16 PARAMS ",
+        " FP8  GEMM - FP8  PARAMS ",
         " FP8  GEMM - FP8  PARAMS ",
     ],
 )
-def test_layers_with_overlap(layer_type, fp8, fp8_init):
+def test_layers_with_overlap(layer_type, rs_dgrad_overlap, fp8, fp8_init):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, fp8, fp8_init)
+    _run_layer_with_overlap(layer_type, rs_dgrad_overlap, fp8, fp8_init)

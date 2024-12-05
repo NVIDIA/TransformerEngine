@@ -58,8 +58,9 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
         kwargs["ub_name"] = "proj"
     else:
         input_shape[0] = config.seq_length // tp_size
-        kwargs["ub_bulk_wgrad"] = not reference
-        kwargs["ub_bulk_dgrad"] = not reference
+        kwargs["ub_overlap_rs_dgrad"] = not reference and config.rs_dgrad_overlap
+        kwargs["ub_bulk_wgrad"] = not reference and not config.rs_dgrad_overlap
+        kwargs["ub_bulk_dgrad"] = not reference and not config.rs_dgrad_overlap
         if config.layer_type is te.LayerNormLinear:
             args.append(3 * hidden_size)
             kwargs["parallel_mode"] = "column"
@@ -83,33 +84,45 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
     return args, kwargs, input_shape
 
 
-def _get_ub_cfg(layer_type):
+def _get_ub_cfg(config):
     ub_cfg = dict()
-    if layer_type in [te.LayerNormLinear, te.MultiheadAttention, te.TransformerLayer]:
+    if config.layer_type in [te.LayerNormLinear, te.MultiheadAttention, te.TransformerLayer]:
         ub_cfg.update(
             {
                 "qkv_fprop": dict(),
-                "qkv_dgrad": dict(),
-                "qkv_wgrad": dict(),
+                "qkv_dgrad": {
+                    "method": "pipeline" if config.rs_dgrad_overlap else "bulk",
+                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False
+                },
             }
         )
-    if layer_type in [te.Linear, te.MultiheadAttention, te.TransformerLayer]:
+        if not config.rs_dgrad_overlap:
+            ub_cfg.update({"qkv_wgrad": dict()})
+    if config.layer_type in [te.Linear, te.MultiheadAttention, te.TransformerLayer]:
         ub_cfg.update(
             {
-                "proj_fprop": dict(),
+                "proj_fprop": {
+                    "fp8_buf": True if config.fp8_buf else False
+                },
                 "proj_dgrad": dict(),
             }
         )
-    if layer_type in [te.LayerNormMLP, te.TransformerLayer]:
+    if config.layer_type in [te.LayerNormMLP, te.TransformerLayer]:
         ub_cfg.update(
             {
                 "fc1_fprop": dict(),
-                "fc1_dgrad": dict(),
-                "fc1_wgrad": dict(),
-                "fc2_fprop": dict(),
+                "fc1_dgrad": {
+                    "method": "pipeline" if config.rs_dgrad_overlap else "bulk",
+                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False
+                },
+                "fc2_fprop": {
+                    "fp8_buf": True if config.fp8_buf else False,
+                },
                 "fc2_dgrad": dict(),
             }
         )
+        if not config.rs_dgrad_overlap:
+            ub_cfg.update({"fc1_wgrad": dict()})
     return ub_cfg
 
 
@@ -132,6 +145,18 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
+    )
+    parser.add_argument(
+        "--fp8-buf",
+        action="store_true",
+        default=False,
+        help="Allocate FP8 communication buffers for layers that support it."
+    )
+    parser.add_argument(
+        "--rs-dgrad-overlap",
+        action="store_true",
+        default=False,
+        help="Enable reduce-scatter overlap for DGRAD if the layer supports it.",
     )
     parser.add_argument(
         "--tcp-init",
@@ -266,7 +291,7 @@ def _train(opts):
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
-        ub_cfgs=_get_ub_cfg(opts.layer_type),
+        ub_cfgs=_get_ub_cfg(opts),
     )
 
     # Initialize the Transformer Engine layer with overlap
