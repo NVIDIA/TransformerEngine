@@ -443,7 +443,9 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def fsdp_pre_all_gather(self, mesh):  # pylint: disable=unused-argument
+    def fsdp_pre_all_gather(self, mesh):  
+        # pylint: disable=missing-function-docstring
+
         return (self._data,), (self,)
 
     def fsdp_post_all_gather(
@@ -454,6 +456,7 @@ class Float8Tensor(QuantizedTensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
+        # pylint: disable=unused-argument
         (data,) = all_gather_outputs
         (sample,) = metadata
         if out is not None:
