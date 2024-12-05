@@ -452,7 +452,7 @@ class Float8Tensor(QuantizedTensor):
         self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
         metadata: Any,
-        param_dtype: torch.dtype, # unused
+        param_dtype: torch.dtype,  # unused
         *,
         out: Optional[torch.Tensor] = None,
     ):
