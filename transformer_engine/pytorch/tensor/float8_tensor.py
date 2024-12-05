@@ -967,8 +967,13 @@ class Float8Tensor(QuantizedTensor):
             return cls.detach(args[0])
         elif func == torch.ops.aten.clone.default:
             return cls.clone(args[0])
+        elif func == torch.ops.aten.copy_.default:
+            # Implementation in the superclass (QuantizedTensor) returns a proper output
+            pass
+        elif func in _ops_to_preserve_subclass_in_fsdp2:
+            # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
+            warnings.warn(f"A function call({func}) in {cls} may not return {cls} tensor as an output. It might cause an error in torch FSDP2!")
         
-        # print(f'Default __torch_dispatch__ call from TE FP8 func:{func}\ntypes:{types}\nargs:{args}\nkwargs:{kwargs}\n')
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @classmethod
