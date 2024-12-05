@@ -274,11 +274,7 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
-    [
-        (False, False),
-        (True, False),
-        (True, True)
-    ],
+    [(False, False), (True, False), (True, True)],
     ids=[
         " BF16 GEMM - BF16 PARAMS ",
         " FP8  GEMM - BF16 PARAMS ",
