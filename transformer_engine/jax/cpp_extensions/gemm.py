@@ -1074,6 +1074,7 @@ def fp8_gemm_impl(
     bias: Optional[ArrayLike] = None,
     gelu_input: Optional[ArrayLike] = None,
     out: Optional[ArrayLike] = None,
+    extra_out: Optional[ArrayLike] = None,
     out_amax: Optional[ArrayLike] = None,
     out_scale: Optional[ArrayLike] = None,
     out_dtype: jnp.dtype = jnp.bfloat16,
