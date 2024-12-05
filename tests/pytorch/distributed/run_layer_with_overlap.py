@@ -92,7 +92,7 @@ def _get_ub_cfg(config):
                 "qkv_fprop": dict(),
                 "qkv_dgrad": {
                     "method": "pipeline" if config.rs_dgrad_overlap else "bulk",
-                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False
+                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False,
                 },
             }
         )
@@ -101,9 +101,7 @@ def _get_ub_cfg(config):
     if config.layer_type in [te.Linear, te.MultiheadAttention, te.TransformerLayer]:
         ub_cfg.update(
             {
-                "proj_fprop": {
-                    "fp8_buf": True if config.fp8_buf else False
-                },
+                "proj_fprop": {"fp8_buf": True if config.fp8_buf else False},
                 "proj_dgrad": dict(),
             }
         )
@@ -113,7 +111,7 @@ def _get_ub_cfg(config):
                 "fc1_fprop": dict(),
                 "fc1_dgrad": {
                     "method": "pipeline" if config.rs_dgrad_overlap else "bulk",
-                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False
+                    "fp8_buf": True if config.fp8_buf and config.rs_dgrad_overlap else False,
                 },
                 "fc2_fprop": {
                     "fp8_buf": True if config.fp8_buf else False,
@@ -150,7 +148,7 @@ def _parse_args(argv=None, namespace=None):
         "--fp8-buf",
         action="store_true",
         default=False,
-        help="Allocate FP8 communication buffers for layers that support it."
+        help="Allocate FP8 communication buffers for layers that support it.",
     )
     parser.add_argument(
         "--rs-dgrad-overlap",
