@@ -447,6 +447,7 @@ class Float8Tensor(QuantizedTensor):
         """
         A hook function used in torch fsdp2, called before all-gather
         return (all-gather input), (metadata)
+        Ref: https://github.com/pytorch/pytorch/pull/122908
 
         """
 
@@ -463,6 +464,7 @@ class Float8Tensor(QuantizedTensor):
         """
         A hook function used in torch fsdp2, called after all-gather
         return (Float8Tensor class instance of all-gathered input), (Things to free after forward)
+        Ref: https://github.com/pytorch/pytorch/pull/122908
 
         """
         (data,) = all_gather_outputs
