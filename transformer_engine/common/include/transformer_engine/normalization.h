@@ -142,6 +142,13 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
                       NVTETensor workspace, const int multiprocessorCount,
                       const bool zero_centered_gamma, cudaStream_t stream);
 
+/*! \brief Helper to enable cuDNN backend for normalization
+ *
+ *  \param[in]     bool              Enable if True
+ */
+void nvte_enable_cudnn_norm_fwd(bool enable);
+void nvte_enable_cudnn_norm_bwd(bool enable);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

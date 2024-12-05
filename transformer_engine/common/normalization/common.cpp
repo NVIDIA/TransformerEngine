@@ -14,6 +14,8 @@
 #include <iostream>
 #include <numeric>
 
+#include "transformer_engine/normalization.h"
+
 /*
 
 Supported Type combinations:
@@ -416,8 +418,28 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   return normalizationPlanMap[key].get();
 }
 
-bool use_cudnn_norm_fwd() { return transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN"); }
-bool use_cudnn_norm_bwd() { return transformer_engine::getenv<bool>("NVTE_NORM_BWD_USE_CUDNN"); }
+bool& _cudnn_norm_fwd_flag() {
+  static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN");
+  return flag;
+}
+
+bool& _cudnn_norm_bwd_flag() {
+  static bool flag = transformer_engine::getenv<bool>("NVTE_NORM_BWD_USE_CUDNN");
+  return flag;
+}
+
+bool use_cudnn_norm_fwd() { return _cudnn_norm_fwd_flag(); }
+bool use_cudnn_norm_bwd() { return _cudnn_norm_bwd_flag(); }
 
 }  //  namespace normalization
 }  // namespace transformer_engine
+
+void nvte_enable_cudnn_norm_fwd(bool enable) {
+  NVTE_API_CALL(nvte_enable_cudnn_norm_fwd);
+  transformer_engine::normalization::_cudnn_norm_fwd_flag() = enable;
+}
+
+void nvte_enable_cudnn_norm_bwd(bool enable) {
+  NVTE_API_CALL(nvte_enable_cudnn_norm_bwd);
+  transformer_engine::normalization::_cudnn_norm_bwd_flag() = enable;
+}

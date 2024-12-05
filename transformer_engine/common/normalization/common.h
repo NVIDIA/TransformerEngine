@@ -376,6 +376,7 @@ bool use_cudnn_norm_fwd();
 bool use_cudnn_norm_bwd();
 
 }  // namespace normalization
+
 }  // namespace transformer_engine
 
 #endif

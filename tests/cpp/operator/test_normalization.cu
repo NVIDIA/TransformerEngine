@@ -62,9 +62,6 @@ void compute_ref_stats(NormType norm_type,
 
 // For now, cudnn does static_cast<compute_t>(gamma + static_cast<input_t>(1.0))
 // This will be changed in the future release
-const static bool use_cudnn_fwd = std::getenv("NVTE_FWD_NORM_USE_CUDNN");
-const static bool use_cudnn_bwd = std::getenv("NVTE_BWD_NORM_USE_CUDNN");
-
 template <typename InputType>
 inline auto compute_gamma(InputType gamma, const bool zero_centered_gamma, const bool use_cudnn){
 
@@ -100,13 +97,13 @@ void compute_ref_output(NormType norm_type,
                         OutputType* output,
                         const float *mu, const float *rsigma,
                         const size_t N, const size_t H,
-                        float *amax, float scale, const bool zero_centered_gamma) {
+                        float *amax, float scale, const bool zero_centered_gamma, const bool use_cudnn) {
   using compute_t = float;
   compute_t current_max = -1e100;
   for (size_t i = 0; i < N; ++i) {
     for (size_t j = 0; j < H; ++j) {
       compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_fwd);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
 
       compute_t tmp;
       if (norm_type == LayerNorm) {
@@ -130,7 +127,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
                           InputType *data_grad,
                           InputType *gamma_grad, InputType *beta_grad,
                           const size_t N, const size_t H,
-                          const bool zero_centered_gamma) {
+                          const bool zero_centered_gamma, const bool use_cudnn) {
   using compute_t = float;
   std::vector<compute_t> dgamma(H, 0.f);
   std::vector<compute_t> dbeta(H, 0.f);
@@ -142,7 +139,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_bwd);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       dgamma[j] += y * dz;
@@ -159,7 +156,7 @@ void compute_ref_backward(const NormType norm_type, const OutputType *output_gra
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = (x - local_mu) * rsigma[i];
-      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn_bwd);
+      compute_t g = compute_gamma(gamma[j], zero_centered_gamma, use_cudnn);
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
       const compute_t dx = rsigma[i] * (dy - mdyy * y - mdy);
@@ -219,8 +216,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   cudaGetDeviceProperties(&prop, 0);
 
   if (use_cudnn){
-    setenv("NVTE_NORM_FWD_USE_CUDNN", "1", true /*overwrite*/);
-    setenv("NVTE_NORM_BWD_USE_CUDNN", "1", true /*overwrite*/);
+    nvte_enable_cudnn_norm_fwd(true);
+    nvte_enable_cudnn_norm_bwd(true);
   }
 
   // Forward kernel
@@ -266,8 +263,8 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   }
 
   if (use_cudnn){
-    unsetenv("NVTE_NORM_FWD_USE_CUDNN");
-    unsetenv("NVTE_NORM_BWD_USE_CUDNN");
+    nvte_enable_cudnn_norm_fwd(false);
+    nvte_enable_cudnn_norm_bwd(false);
   }
 
   // Reference implementations
@@ -287,12 +284,14 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      N, H,
                      &ref_amax,
                      ref_scale,
-                     zero_centered_gamma);
+                     zero_centered_gamma,
+                     use_cudnn);
   compute_ref_backward(norm_type, dz.cpu_dptr<WeightType>(), input.cpu_dptr<InputType>(),
                        mu.cpu_dptr<float>(), rsigma.cpu_dptr<float>(),
                        gamma.cpu_dptr<WeightType>(),
                        ref_dx.get(), ref_dgamma.get(), ref_dbeta.get(),
-                       N, H, zero_centered_gamma);
+                       N, H, zero_centered_gamma,
+                       use_cudnn);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
