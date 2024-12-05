@@ -37,6 +37,7 @@ _ops_to_preserve_subclass_in_fsdp2 = {
     torch.ops.aten.clone.default,
 }
 
+
 def _make_fp8_attr_property_funcs(name: str) -> Any:
     """Make accessors for an FP8 attribute
 
@@ -441,7 +442,7 @@ class Float8Tensor(QuantizedTensor):
         self._transpose_invalid = self._transpose is None
 
         return self
-    
+
     def fsdp_pre_all_gather(self, mesh):
         return (self._data,), (self,)
 
@@ -452,13 +453,13 @@ class Float8Tensor(QuantizedTensor):
         param_dtype: torch.dtype,
         *,
         out: Optional[torch.Tensor] = None,
-        ):
-            (data,) = all_gather_outputs
-            (sample,) = metadata
-            if out is not None:
-                assert isinstance(out, Float8Tensor), f"{type(out)}"
-                return
-            return Float8Tensor.make_like(sample, data=data), all_gather_outputs
+    ):
+        (data,) = all_gather_outputs
+        (sample,) = metadata
+        if out is not None:
+            assert isinstance(out, Float8Tensor), f"{type(out)}"
+            return
+        return Float8Tensor.make_like(sample, data=data), all_gather_outputs
 
     @classmethod
     def make_like(
@@ -931,7 +932,7 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=data_view)
-        
+
         # Related to FSDP2
         if func == aten.split.Tensor:
             tensor = args[0]
@@ -972,8 +973,11 @@ class Float8Tensor(QuantizedTensor):
             pass
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
-            warnings.warn(f"A function call({func}) in {cls} may not return {cls} tensor as an output. It might cause an error in torch FSDP2!")
-        
+            warnings.warn(
+                f"A function call({func}) in {cls} may not return {cls} tensor as an output. It"
+                " might cause an error in torch FSDP2!"
+            )
+
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @classmethod
