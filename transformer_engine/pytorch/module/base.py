@@ -404,6 +404,7 @@ def initialize_ub(
                 layers_reduce_scatter_overlap.remove(wgrad_name)
                 layers_all_gather_overlap.remove(name)
                 layers_reduce_scatter_overlap.append(name)
+                final_cfg["is_reduce_scatter"] = True
 
                 methods["bulk"].remove(name)
                 methods["bulk"].remove(wgrad_name)
