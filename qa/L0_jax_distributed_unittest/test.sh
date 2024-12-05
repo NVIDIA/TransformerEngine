@@ -4,6 +4,8 @@
 
 set -xe
 
+: ${TE_PATH:=/opt/transformerengine}
+
 pip install -r $TE_PATH/examples/jax/encoder/requirements.txt
 
 # Make encoder tests to have run-to-run deterministic to have the stable CI results
