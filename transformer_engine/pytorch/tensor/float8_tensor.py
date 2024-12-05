@@ -443,7 +443,7 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def fsdp_pre_all_gather(self, mesh):  
+    def fsdp_pre_all_gather(self, mesh):
         # pylint: disable=missing-function-docstring
 
         return (self._data,), (self,)
