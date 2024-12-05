@@ -443,7 +443,7 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def fsdp_pre_all_gather(self, mesh): # pylint: disable=unused-argument
+    def fsdp_pre_all_gather(self, mesh):  # pylint: disable=unused-argument
         return (self._data,), (self,)
 
     def fsdp_post_all_gather(
