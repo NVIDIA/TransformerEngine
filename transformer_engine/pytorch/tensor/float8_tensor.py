@@ -443,7 +443,7 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def fsdp_pre_all_gather(self, mesh):  
+    def fsdp_pre_all_gather(self, mesh):  # unused
         # pylint: disable=missing-function-docstring
 
         return (self._data,), (self,)
@@ -452,7 +452,7 @@ class Float8Tensor(QuantizedTensor):
         self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
         metadata: Any,
-        param_dtype: torch.dtype,
+        param_dtype: torch.dtype, # unused
         *,
         out: Optional[torch.Tensor] = None,
     ):
@@ -947,7 +947,7 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
-        elif func == aten.new_zeros.default:
+        if func == aten.new_zeros.default:
             tensor = args[0]
             data = tensor._data
             func_out = data.__torch_dispatch__(
@@ -957,7 +957,7 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=func_out)
-        elif func == torch.ops.aten.as_strided.default:
+        if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
             func_out = data.__torch_dispatch__(
@@ -967,11 +967,11 @@ class Float8Tensor(QuantizedTensor):
                 kwargs,
             )
             return Float8Tensor.make_like(tensor, data=func_out)
-        elif func == torch.ops.aten.detach.default:
+        if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
-        elif func == torch.ops.aten.clone.default:
+        if func == torch.ops.aten.clone.default:
             return cls.clone(args[0])
-        elif func == torch.ops.aten.copy_.default:
+        if func == torch.ops.aten.copy_.default:
             # Implementation in the superclass (QuantizedTensor) returns a proper output
             pass
         elif func in _ops_to_preserve_subclass_in_fsdp2:
