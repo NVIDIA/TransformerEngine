@@ -443,7 +443,7 @@ class Float8Tensor(QuantizedTensor):
 
         return self
 
-    def fsdp_pre_all_gather(self, mesh):  # unused
+    def fsdp_pre_all_gather(self, mesh):  # pylint: disable=unused-argument
         # pylint: disable=missing-function-docstring
 
         return (self._data,), (self,)
@@ -452,7 +452,7 @@ class Float8Tensor(QuantizedTensor):
         self,
         all_gather_outputs: Tuple[torch.Tensor, ...],
         metadata: Any,
-        param_dtype: torch.dtype,  # unused
+        param_dtype: torch.dtype,  # pylint: disable=unused-argument
         *,
         out: Optional[torch.Tensor] = None,
     ):
@@ -461,7 +461,7 @@ class Float8Tensor(QuantizedTensor):
         (sample,) = metadata
         if out is not None:
             assert isinstance(out, Float8Tensor), f"{type(out)}"
-            return
+            return None
         return Float8Tensor.make_like(sample, data=data), all_gather_outputs
 
     @classmethod
