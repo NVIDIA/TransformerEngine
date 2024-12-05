@@ -14,6 +14,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
 
 import transformer_engine.jax as te
+from transformer_engine import transformer_engine_jax as tex
 from transformer_engine.jax.cpp_extensions import gemm_impl, copy_into_overlap_buffer
 from transformer_engine.jax.gemm import (
     initialize_comm_gemm_overlaps,
@@ -118,7 +119,18 @@ initialize_comm_gemm_overlaps(
     myrank,
     numranks,
     tp_resource="tp",
-    overlap_configs={overlap_name: dict()},
+    overlap_configs={
+        overlap_name: {
+            "method": "ring_exchange",   # "pipeline" for collective kernels instead of send/recv
+            "comm_type": tex.CommOverlapType if args.comm_type == "AG" else tex.CommOverlapType.RS,
+            "num_splits": args.tp_size,   # independent of TP size for "pipeline"
+            "cga_size": 1,   # default is 2 for "pipeline"
+            "num_sm": 1,   # ignored for "ring_exchange", must be tuned for "pipeline"
+            "set_sm_margin": False,   # set to True for "pipeline"
+            "atomic_gemm": False,   # more performant when not using CUDA Graphs
+            "use_ce": True,   # ignored (always False) for "pipeline" method
+        }
+    },
 )
 
 if myrank == 0:
@@ -132,17 +144,25 @@ if myrank == 0:
 
 @jax.jit
 def te_gemm(A, B):
+    # LHS needs to be copied into the comm. buffer before GEMM. This can usually be circumvented by
+    # extracting the comm. buffer as a JAX array via
+    # `buffer = jax.dlpack.from_dlpack(tex.get_overlap_buffer(overlap_name: str, sharded: bool))`
+    # and directly writing the result of a preceding operation into it (e.g.. LayerNorm output
+    # written directly into the communication buffer before AG+GEMM in a QKV projection)
     copy_into_overlap_buffer(A, overlap_name, True)
     return gemm_impl(
         A,
-        jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),
-        batched_output=True,
+        jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),   # all-gather FSDP weights
+        batched_output=True,   # internal option, will be hidden by the FWD/BWD wrapper
         comm_overlap_config=get_comm_overlap_config(overlap_name),
     )
 
 
 with te.sharding.global_shard_guard(mesh_resource):
     output, _, extra_out = te_gemm(lhs, rhs)
+
+if args.comm_type == "RS":
+    output = extra_out
 
 if myrank == 0:
     print(
