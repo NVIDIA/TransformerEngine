@@ -143,6 +143,8 @@ enum class NVTE_Norm_Stage { Forward, Backward };
 using TupleKeyType = std::tuple<uint64_t, uint64_t, uint64_t, bool>;
 struct TupleHash {
   size_t operator()(const TupleKeyType& t) const {
+    // Generate a hash for a tuple by combining the hashes of its entries 
+    // See: https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
     size_t seed = 0;
     std::hash<uint64_t> hasher;
     seed ^= hasher(std::get<0>(t)) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
