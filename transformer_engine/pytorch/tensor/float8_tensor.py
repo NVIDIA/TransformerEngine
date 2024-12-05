@@ -444,7 +444,11 @@ class Float8Tensor(QuantizedTensor):
         return self
 
     def fsdp_pre_all_gather(self, mesh):  # pylint: disable=unused-argument
-        # pylint: disable=missing-function-docstring
+        """
+        A hook function used in torch fsdp2, called before all-gather
+        return (all-gather input), (metadata)
+
+        """
 
         return (self._data,), (self,)
 
@@ -456,7 +460,11 @@ class Float8Tensor(QuantizedTensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        # pylint: disable=unused-argument
+        """
+        A hook function used in torch fsdp2, called after all-gather
+        return (Float8Tensor class instance of all-gathered input), (Things to free after forward)
+
+        """
         (data,) = all_gather_outputs
         (sample,) = metadata
         if out is not None:
