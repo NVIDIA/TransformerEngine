@@ -130,7 +130,7 @@ class Linear(TransformerEngineBaseLayer):
     out_features: int = 512
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = True
-    bias_init: WeightInit = field(default_factory = WeightInit.Constant(0.0))
+    bias_init: WeightInit = field(default_factory=WeightInit.Constant(0.0))
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
