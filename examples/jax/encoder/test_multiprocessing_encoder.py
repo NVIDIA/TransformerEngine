@@ -561,6 +561,7 @@ def query_gpu(q):
     num_gpus = len(subprocess.check_output(["nvidia-smi", "-L"]).decode().strip().split("\n"))
     q.put([num_gpus, gpu_has_fp8, gpu_has_bf16])
 
+
 def unittest_query_gpu():
     r"""
     It is only used by TestEncoder.
