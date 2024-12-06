@@ -164,6 +164,7 @@ if __name__ == "__main__":
                         "transformer_engine/jax/csrc",
                         current_file_path / "transformer_engine" / "jax" / "csrc",
                         current_file_path / "transformer_engine",
+                        current_file_path / "3rdparty",
                     )
                 )
             if "paddle" in frameworks:
