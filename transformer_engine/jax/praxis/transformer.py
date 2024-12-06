@@ -6,7 +6,7 @@ Praxis Modules related Transformer
 """
 from functools import partial
 from typing import Optional, Sequence, Tuple
-from dataclasses import field
+from dataclasses import field, dataclass
 import warnings
 
 from praxis import pax_fiddle
@@ -22,6 +22,7 @@ from ..flax.transformer import TransformerLayer as flax_TransformerLayer
 from ..attention import AttnBiasType, AttnMaskType
 
 
+@dataclass
 class RelativePositionBiases(TransformerEngineBaseLayer):
     """RelativePositionBiases"""
 
@@ -67,6 +68,7 @@ class RelativePositionBiases(TransformerEngineBaseLayer):
         return self.relative_position_bias(q_seqlen, k_seqlen, bidirectional)
 
 
+@dataclass
 class DotProductAttention(TransformerEngineBaseLayer):
     """DotProductAttention"""
 
@@ -125,6 +127,7 @@ class DotProductAttention(TransformerEngineBaseLayer):
         )
 
 
+@dataclass
 class MultiHeadAttention(TransformerEngineBaseLayer):
     """MultiHeadAttention"""
 
@@ -258,6 +261,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         )
 
 
+@dataclass
 class TransformerLayer(TransformerEngineBaseLayer):
     """TransformerLayer"""
 

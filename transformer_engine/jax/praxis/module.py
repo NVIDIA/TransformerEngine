@@ -6,7 +6,7 @@ Praxis Modules
 """
 from functools import partial
 from typing import Callable, Iterable, Sequence, Tuple, Union
-from dataclasses import field
+from dataclasses import field, dataclass
 
 from praxis import pax_fiddle
 from praxis.base_layer import init_var
@@ -28,6 +28,7 @@ def _generate_ln_scale_init(scale_init):
     return scale_init
 
 
+@dataclass
 class TransformerEngineBaseLayer(BaseLayer):
     """TransformerEngineBaseLayer"""
 
@@ -67,6 +68,7 @@ class TransformerEngineBaseLayer(BaseLayer):
         self.create_child(name, flax_module_p.clone())
 
 
+@dataclass
 class LayerNorm(TransformerEngineBaseLayer):
     """LayerNorm"""
 
@@ -103,6 +105,7 @@ class LayerNorm(TransformerEngineBaseLayer):
         return self.layer_norm(x)
 
 
+@dataclass
 class FusedSoftmax(TransformerEngineBaseLayer):
     """FusedSoftmax"""
 
@@ -124,6 +127,7 @@ class FusedSoftmax(TransformerEngineBaseLayer):
         return self.fused_softmax(x, mask, bias)
 
 
+@dataclass
 class Linear(TransformerEngineBaseLayer):
     """Linear"""
 
@@ -165,6 +169,7 @@ class Linear(TransformerEngineBaseLayer):
         return self.linear(x)
 
 
+@dataclass
 class LayerNormLinear(TransformerEngineBaseLayer):
     """LayerNormLinear"""
 
@@ -228,6 +233,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         return self.ln_linear(x)
 
 
+@dataclass
 class LayerNormMLP(TransformerEngineBaseLayer):
     """LayerNormMLP"""
 
