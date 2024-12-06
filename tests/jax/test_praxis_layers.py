@@ -42,6 +42,17 @@ ENABLE_FP8 = [False, True]
 FP8_FORMATS = [Format.E4M3, Format.HYBRID]
 
 
+@pytest.fixture(autouse=True, scope="module")
+def set_deterministic_algo():
+    """
+    test_praxis_layers will run both flax and praxis interface and expect the results are the same.
+    We need to enable the deterministic algo to ensure the results are exactly the same.
+    """
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    yield
+    del os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"]
+
+
 def compare_dict(ref_fd, test_fd, rtol=1e-05, atol=1e-08):
     for key in ref_fd:
         assert key in test_fd, f"{key} not found in test dict {test_fd}"
