@@ -8,7 +8,14 @@ from transformer_engine.transformer_engine_jax import get_device_compute_capabil
 
 
 @lru_cache
-def is_bf16_supported():
+def is_bf16_supported() -> bool:
     """Return if BF16 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     return gpu_arch >= 80
+
+
+@lru_cache
+def is_fp8_available() -> bool:
+    """Return if FP8 support is available"""
+    gpu_arch = get_device_compute_capability(0)
+    return gpu_arch >= 90
