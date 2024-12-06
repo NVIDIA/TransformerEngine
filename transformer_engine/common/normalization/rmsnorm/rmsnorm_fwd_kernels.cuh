@@ -10,15 +10,15 @@
 #include <cfloat>
 #include <cstdio>
 
-#include "../utils.cuh"
+#include "../../utils.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
-namespace rmsnorm {
-using namespace transformer_engine;
+namespace normalization {
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_kernel(
-    FwdParams params) {
+    ForwardKernelParams params) {
   enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
   enum { WARPS_N = Ktraits::WARPS_N };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -143,7 +143,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_ke
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_kernel(
-    FwdParams params) {
+    ForwardKernelParams params) {
   enum { LDGS = Ktraits::LDGS };
   enum { NUM_ELTS = Ktraits::NUM_ELTS };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -291,7 +291,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_
   }
 }
 
-}  // namespace rmsnorm
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
