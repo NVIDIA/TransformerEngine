@@ -86,10 +86,11 @@ class FP8MetaPackage:
     A container that contains all required meta data for FP8
     """
 
-    NUM_OF_META: int = 3
+    NUM_OF_META: int = 4
     INPUT_IDX: int = 0
     WEIGHT_IDX: int = 1
     GRAD_IDX: int = 2
+    OUTPUT_IDX: int = 3
 
     def __init__(
         self,
@@ -99,6 +100,8 @@ class FP8MetaPackage:
         weight_scale: jnp.ndarray,
         grad_amax: jnp.ndarray,
         grad_scale: jnp.ndarray,
+        output_amax: jnp.ndarray,
+        output_scale: jnp.ndarray,
     ) -> None:
 
         self._amax_list = [None] * FP8MetaPackage.NUM_OF_META
@@ -110,6 +113,8 @@ class FP8MetaPackage:
         self._scale_list[FP8MetaPackage.WEIGHT_IDX] = weight_scale
         self._amax_list[FP8MetaPackage.GRAD_IDX] = grad_amax
         self._scale_list[FP8MetaPackage.GRAD_IDX] = grad_scale
+        self._amax_list[FP8MetaPackage.OUTPUT_IDX] = output_amax
+        self._scale_list[FP8MetaPackage.OUTPUT_IDX] = output_scale
 
     @property
     def amax_list(self) -> List[jnp.ndarray]:
