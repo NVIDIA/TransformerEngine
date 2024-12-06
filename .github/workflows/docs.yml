@@ -27,7 +27,7 @@ jobs:
           cd docs
           make html
       - name: 'Upload docs'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: te_docs
           path: docs/_build/html
