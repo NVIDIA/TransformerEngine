@@ -21,6 +21,7 @@ from transformer_engine.jax.gemm import (
     destroy_comm_gemm_overlaps,
     get_comm_overlap_config,
 )
+from transformer_engine.jax.sharding import get_padded_spec
 
 jax.clear_caches()
 
@@ -122,7 +123,11 @@ initialize_comm_gemm_overlaps(
     overlap_configs={
         overlap_name: {
             "method": "ring_exchange",   # "pipeline" for collective kernels instead of send/recv
-            "comm_type": tex.CommOverlapType if args.comm_type == "AG" else tex.CommOverlapType.RS,
+            "comm_type": (
+                tex.CommOverlapType.AG
+                if args.comm_type == "AG"
+                else tex.CommOverlapType.RS
+            ),
             "num_splits": args.tp_size,   # independent of TP size for "pipeline"
             "cga_size": 1,   # default is 2 for "pipeline"
             "num_sm": 1,   # ignored for "ring_exchange", must be tuned for "pipeline"
@@ -144,31 +149,34 @@ if myrank == 0:
 
 @jax.jit
 def te_gemm(A, B):
-    # LHS needs to be copied into the comm. buffer before GEMM. This can usually be circumvented by
-    # extracting the comm. buffer as a JAX array via
+    # For AG overlap, LHS needs to be copied into the comm. buffer before GEMM. This can usually
+    # be circumvented by extracting the comm. buffer as a JAX array via
     # `buffer = jax.dlpack.from_dlpack(tex.get_overlap_buffer(overlap_name: str, sharded: bool))`
     # and directly writing the result of a preceding operation into it (e.g.. LayerNorm output
     # written directly into the communication buffer before AG+GEMM in a QKV projection)
-    copy_into_overlap_buffer(A, overlap_name, True)
+    if args.comm_type == "AG":
+        copy_into_overlap_buffer(A, overlap_name, True)
+        return_idx = 0
+    else:
+        # For RS overlap, the scattered output is in the `extra_out` array.
+        return_idx = -1
+
     return gemm_impl(
         A,
         jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),   # all-gather FSDP weights
         batched_output=True,   # internal option, will be hidden by the FWD/BWD wrapper
         comm_overlap_config=get_comm_overlap_config(overlap_name),
-    )
+    )[return_idx]
 
 
 with te.sharding.global_shard_guard(mesh_resource):
-    output, _, extra_out = te_gemm(lhs, rhs)
-
-if args.comm_type == "RS":
-    output = extra_out
+    output = te_gemm(lhs, rhs)
 
 if myrank == 0:
     print(
         f"{myrank}: {'AG -> GEMM' if args.comm_type == 'AG' else 'GEMM -> RS'} OUTPUT "
         + f"{output.shape}\n"
-        + f"{myrank}:    Sharding: {output.sharding.spec}\n",
+        + f"{myrank}:    Sharding: {get_padded_spec(output.sharding.spec, output.ndim)}\n",
         flush=True,
     )
 
