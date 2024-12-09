@@ -122,20 +122,18 @@ initialize_comm_gemm_overlaps(
     tp_resource="tp",
     overlap_configs={
         overlap_name: {
-            "method": "ring_exchange",   # "pipeline" for collective kernels instead of send/recv
+            "method": "ring_exchange",  # "pipeline" for collective kernels instead of send/recv
             "comm_type": (
-                tex.CommOverlapType.AG
-                if args.comm_type == "AG"
-                else tex.CommOverlapType.RS
+                tex.CommOverlapType.AG if args.comm_type == "AG" else tex.CommOverlapType.RS
             ),
-            "num_splits": args.tp_size,   # independent of TP size for "pipeline"
-            "cga_size": 1,   # default is 2 for "pipeline"
-            "num_sm": 1,   # ignored for "ring_exchange", must be tuned for "pipeline"
-            "set_sm_margin": False,   # set to True for "pipeline"
-            "atomic_gemm": False,   # more performant when not using CUDA Graphs
-            "use_ce": True,   # ignored (always False) for "pipeline" method
+            "num_splits": args.tp_size,  # independent of TP size for "pipeline"
+            "cga_size": 1,  # default is 2 for "pipeline"
+            "num_sm": 1,  # ignored for "ring_exchange", must be tuned for "pipeline"
+            "set_sm_margin": False,  # set to True for "pipeline"
+            "atomic_gemm": False,  # more performant when not using CUDA Graphs
+            "use_ce": True,  # ignored (always False) for "pipeline" method
         },
-    }
+    },
 )
 
 if myrank == 0:
