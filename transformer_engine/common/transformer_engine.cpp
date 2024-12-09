@@ -93,7 +93,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   return ret;
 }
 
-size_t nvte_tensor_ndim(const NVTETensor tensor) {
+size_t nvte_tensor_ndims(const NVTETensor tensor) {
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   return t.data.shape.size();
 }
