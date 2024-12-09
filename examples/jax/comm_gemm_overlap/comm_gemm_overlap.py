@@ -134,8 +134,8 @@ initialize_comm_gemm_overlaps(
             "set_sm_margin": False,   # set to True for "pipeline"
             "atomic_gemm": False,   # more performant when not using CUDA Graphs
             "use_ce": True,   # ignored (always False) for "pipeline" method
-        }
-    },
+        },
+    }
 )
 
 if myrank == 0:
@@ -163,8 +163,8 @@ def te_gemm(A, B):
 
     return gemm_impl(
         A,
-        jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),   # all-gather FSDP weights
-        batched_output=True,   # internal option, will be hidden by the FWD/BWD wrapper
+        jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),  # all-gather FSDP weights
+        batched_output=True,  # internal option, will be hidden by the FWD/BWD wrapper
         comm_overlap_config=get_comm_overlap_config(overlap_name),
     )[return_idx]
 
