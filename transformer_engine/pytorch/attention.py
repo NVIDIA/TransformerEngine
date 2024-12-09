@@ -1729,17 +1729,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         fused_attn_qkv_dtype = None
         fused_attn_backend = None
         amax_per_step = None
+        qkv_dtype = q.dtype
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
+        is_input_fp8 = False
+        is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if fp8_meta["recipe"].fp8_mha:
-                    assert (
-                        isinstance(q, Float8Tensor)
-                        and isinstance(k, Float8Tensor)
-                        and isinstance(v, Float8Tensor)
-                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                assert isinstance(k, q.__class__) and isinstance(
+                    v, q.__class__
+                ), "q, k, and v must have the same type."
+                is_input_fp8 = isinstance(q, Float8Tensor)
+                if is_input_fp8:
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
@@ -1778,7 +1781,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
             if not fp8:
                 q_f16 = q
-            elif not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+            elif not is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q_f16 = q
                 q = cast_to_fp8(q_f16, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
 
@@ -1880,11 +1883,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             batch_p2p_comm,
                         )
 
-                    if (
-                        not fp8
-                        or fp8_meta["recipe"].fp8_mha
-                        or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
-                    ):
+                    if not fp8 or is_input_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                         kv_inputs[i % 2] = p2p_comm_buffers[i]
                     else:
                         # KV exchange is in BF16/FP16, cast received KV in each step
@@ -2436,18 +2435,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             fp8_meta["scaling_fwd"].amax_history[0][META_O_CP] = amax_cp_fwd[1]
 
         out_fp8 = None
-        out_f16 = out.to(q_fp8.dtype if fp8 and fp8_meta["recipe"].fp8_mha else q_f16.dtype)
-        if fp8 and (fp8_meta["recipe"].fp8_mha or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
+        out_f16 = out.to(qkv_dtype)
+        if fp8 and (is_output_fp8 or int(os.getenv("NVTE_FP8_DPA_BWD", "1"))):
             out_fp8 = cast_to_fp8(out_f16, fp8_meta["scaling_fwd"], META_O, fp8_dtype_forward)
 
-        if fp8 and fp8_meta["recipe"].fp8_mha:
+        if fp8 and is_output_fp8:
             out_ret = Float8Tensor(
                 data=out_fp8,
                 fp8_meta=fp8_meta,
                 fp8_meta_forward=True,
                 fp8_meta_index=META_O,
                 fp8_dtype=fp8_dtype_forward,
-                dtype=q_fp8.dtype,
+                dtype=qkv_dtype,
             )
         else:
             out_ret = out_f16
@@ -2456,7 +2455,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             q_save, kv_save, out_save = q, kv, out_fp8
             fp8_fwd_scales = fp8_meta["scaling_fwd"].scale.clone()
             fp8_fwd_scale_invs = fp8_meta["scaling_fwd"].scale_inv.clone()
-        elif fp8 and fp8_meta["recipe"].fp8_mha:
+        elif fp8 and is_input_fp8:
             q_fp8 = Float8Tensor(
                 data=q,
                 fp8_meta=fp8_meta,
@@ -2513,6 +2512,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
+        ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         return out_ret
 
     @staticmethod
@@ -2527,12 +2528,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         recv_src = ctx.cp_global_ranks[(rank + 1) % cp_size * cp_size_a2a + rank_a2a]
         batch_p2p_comm = int(os.getenv("NVTE_BATCH_MHA_P2P_COMM", "0")) or (cp_size == 2)
 
-        (q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded) = ctx.saved_tensors[:6]
-        (fp8_fwd_scales, fp8_fwd_scale_invs) = ctx.saved_tensors[6:8]
-        cu_seqlens_q_per_step = ctx.saved_tensors[8 : 8 + cp_size]
-        cu_seqlens_kv_per_step = ctx.saved_tensors[8 + cp_size : 8 + cp_size * 2]
-        rng_states = ctx.saved_tensors[8 + cp_size * 2 : 8 + cp_size * 3]
-        attn_biases = ctx.saved_tensors[8 + cp_size * 3 : 8 + cp_size * 4]
+        (*saved_tensors,) = ctx.saved_tensors
+        (q, kv, out, softmax_lse, cu_seqlens_q_padded, cu_seqlens_kv_padded) = saved_tensors[:6]
+        (fp8_fwd_scales, fp8_fwd_scale_invs) = saved_tensors[6:8]
+        cu_seqlens_q_per_step = saved_tensors[8 : 8 + cp_size]
+        cu_seqlens_kv_per_step = saved_tensors[8 + cp_size : 8 + cp_size * 2]
+        rng_states = saved_tensors[8 + cp_size * 2 : 8 + cp_size * 3]
+        attn_biases = saved_tensors[8 + cp_size * 3 : 8 + cp_size * 4]
 
         causal = "causal" in ctx.attn_mask_type
         padding = "padding" in ctx.attn_mask_type
@@ -2595,7 +2597,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
                 dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
-                if ctx.fp8_meta["recipe"].fp8_mha:
+                if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout = dout._data
@@ -2617,7 +2619,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.fp8_meta is not None and ctx.is_input_fp8:
                 q, kv = [x.from_float8(x.dtype) for x in [q, kv]]
                 if cp_size_a2a == 1:
                     dout = dout.from_float8(dout_dtype)
@@ -2653,7 +2655,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 ctx.cp_stream,
                 True,
             )
-            if not ctx.fp8 and ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if not ctx.fp8 and ctx.fp8_meta is not None and ctx.is_output_fp8:
                 dout = cast_from_fp8(
                     dout,
                     None,
@@ -3260,7 +3262,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dkv_[:, cu_seqlens_kv_padded[-1] :].fill_(0)
             dkv = dkv_
 
-        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.fp8 and ctx.is_input_fp8:
             dq, dkv = [
                 cast_to_fp8(x, ctx.fp8_meta["scaling_bwd"], META_DQKV, fp8_dtype_backward)
                 for x in [dq, dkv]
@@ -3283,7 +3285,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             elif ctx.qkv_format == "sbhd":
                 dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
-        if ctx.fp8 and ctx.fp8_meta["recipe"].fp8_mha:
+        if ctx.fp8 and ctx.is_input_fp8:
             dq, dk, dv = [
                 Float8Tensor(
                     data=x,
@@ -3576,11 +3578,12 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
 
-        (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = ctx.saved_tensors[:5]
-        cu_seqlens_kv_per_step = ctx.saved_tensors[5:7]
-        out_per_step = ctx.saved_tensors[7:9]
-        softmax_lse_per_step = ctx.saved_tensors[9:11]
-        rng_states = ctx.saved_tensors[11:13]
+        (*saved_tensors,) = ctx.saved_tensors
+        (q, k, v, cu_seqlens_q, cu_seqlens_q_padded) = saved_tensors[:5]
+        cu_seqlens_kv_per_step = saved_tensors[5:7]
+        out_per_step = saved_tensors[7:9]
+        softmax_lse_per_step = saved_tensors[9:11]
+        rng_states = saved_tensors[11:13]
         kv_seq_range_per_step = ctx.kv_seq_range_per_step
         window_size_per_step = ctx.window_size_per_step
 
@@ -3852,19 +3855,22 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             q.shape[seq_dim] % 2 == 0 and k.shape[seq_dim] % 2 == 0
         ), "Sequence length per GPU needs to be divisible by 2!"
 
+        qkv_dtype = q.dtype
         fused_attn_backend = None
         fused_attn_qkv_dtype = None
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
+        is_input_fp8 = False
+        is_output_fp8 = fp8_meta is not None and fp8_meta["recipe"].fp8_mha
         if fp8:
             if use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if fp8_meta["recipe"].fp8_mha:
-                    assert (
-                        isinstance(q, Float8Tensor)
-                        and isinstance(k, Float8Tensor)
-                        and isinstance(v, Float8Tensor)
-                    ), "q/k/v must be Float8Tensors for FP8 MHA!"
+                assert isinstance(k, q.__class__) and isinstance(
+                    v, q.__class__
+                ), "q, k, and v must have the same type."
+                is_input_fp8 = isinstance(q, Float8Tensor)
+                if is_input_fp8:
                     fp8_meta["scaling_fwd"].scale_inv[META_QKV] = q._scale_inv
                     q_fp8, k_fp8, v_fp8 = q, k, v
                     q, k, v = q_fp8._data, k_fp8._data, v_fp8._data
@@ -3900,7 +3906,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             [q, k, v], chunk_ids_for_a2a, seq_dim, cp_size, cp_group, cp_stream, True
         )
 
-        if fp8 and not fp8_meta["recipe"].fp8_mha and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
+        if fp8 and not is_input_fp8 and not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_f16, k_f16, v_f16 = q, k, v
             q, k, v = [
                 cast_to_fp8(x, fp8_meta["scaling_fwd"], META_QKV, fp8_dtype_forward)
@@ -3965,14 +3971,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 out = out.view(-1, batch_size, *out.shape[-2:])
 
         if fp8:
-            if fp8_meta["recipe"].fp8_mha:
+            if is_output_fp8:
                 out_fp8 = Float8Tensor(
                     data=out,
                     fp8_meta=fp8_meta,
                     fp8_meta_forward=True,
                     fp8_meta_index=META_O,
                     fp8_dtype=fp8_dtype_forward,
-                    dtype=q_fp8.dtype,
+                    dtype=qkv_dtype,
                 )
                 out = out_fp8._data
                 out_ret = out_fp8
@@ -3991,7 +3997,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if fp8:
             if int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 q_save, k_save, v_save, out_save = q, k, v, out
-            elif fp8_meta["recipe"].fp8_mha:
+            elif is_input_fp8:
                 q_fp8, k_fp8, v_fp8 = [
                     Float8Tensor(
                         data=x,
@@ -4043,6 +4049,8 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.use_fused_attention = use_fused_attention
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
+        ctx.is_input_fp8 = is_input_fp8
+        ctx.is_output_fp8 = is_output_fp8
         return out_ret
 
     @staticmethod
@@ -4050,12 +4058,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         cp_size = get_distributed_world_size(ctx.cp_group)
 
-        q, k, v, out = ctx.saved_tensors[:4]
-        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = ctx.saved_tensors[
-            4:8
-        ]
-        fp8_fwd_scales, fp8_fwd_scale_invs = ctx.saved_tensors[8:10]
-        aux_ctx_tensors = ctx.saved_tensors[10:]
+        (*saved_tensors,) = ctx.saved_tensors
+        q, k, v, out = saved_tensors[:4]
+        cu_seqlens_q, cu_seqlens_kv, cu_seqlens_q_padded, cu_seqlens_kv_padded = saved_tensors[4:8]
+        fp8_fwd_scales, fp8_fwd_scale_invs = saved_tensors[8:10]
+        aux_ctx_tensors = saved_tensors[10:]
 
         qkv_layout = ctx.qkv_format + "_" + ctx.qkv_format + "_" + ctx.qkv_format
         causal = "causal" in ctx.attn_mask_type
@@ -4064,6 +4071,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         fused_attn_backend = None
         fused_attn_dqkv_dtype = None
         fused_attn_qkv_dtype = None
+        dout_dtype = dout.dtype
         if ctx.fp8:
             if ctx.use_fused_attention:
                 fp8_dtype_forward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=True)
@@ -4071,7 +4079,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 fused_attn_qkv_dtype = fp8_dtype_forward
                 fused_attn_dqkv_dtype = fp8_dtype_backward
                 fused_attn_backend = FusedAttnBackend["FP8"]
-                if ctx.fp8_meta["recipe"].fp8_mha:
+                if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.fp8_meta["scaling_bwd"].scale_inv[META_DO] = dout._scale_inv
                     dout_fp8 = dout
@@ -4097,7 +4105,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
-            if ctx.fp8_meta is not None and ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.fp8_meta is not None and ctx.is_output_fp8:
                 assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                 q, k, v, out, dout = [x.from_float8(x.dtype) for x in [q, k, v, out, dout]]
             if ctx.use_fused_attention:
@@ -4194,7 +4202,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq, dk, dv = [x.view(-1, ctx.batch_size, *x.shape[-2:]) for x in [dq, dk, dv]]
 
         if ctx.fp8:
-            if ctx.fp8_meta["recipe"].fp8_mha:
+            if ctx.is_input_fp8:
                 dq, dk, dv = [
                     Float8Tensor(
                         data=x,
@@ -4202,7 +4210,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         fp8_meta_forward=False,
                         fp8_meta_index=META_DQKV,
                         fp8_dtype=fp8_dtype_backward,
-                        dtype=dout_fp8.dtype,
+                        dtype=dout_dtype,
                     )
                     for x in [dq, dk, dv]
                 ]
@@ -4213,7 +4221,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                         ctx.fp8_meta["scaling_bwd"],
                         META_DQKV,
                         fp8_dtype_backward,
-                        TE_DType[dout_f16.dtype],
+                        TE_DType[dout_dtype],
                     )
                     for x in [dq, dk, dv]
                 ]
@@ -5434,11 +5442,12 @@ class FlashAttention(torch.nn.Module):
                             )
                             return out
 
-                        if fp8_meta["recipe"].fp8_mha:
-                            assert all(
-                                isinstance(x, Float8Tensor)
-                                for x in [query_layer, key_layer, value_layer]
-                            ), "q/k/v must be Float8Tensors for FP8 MHA."
+                        # "fp8_mha" decides outputs in fp8, while inputs are inferred from
+                        # the real dtype
+                        assert isinstance(key_layer, query_layer.__class__) and isinstance(
+                            value_layer, query_layer.__class__
+                        ), "q, k, and v must have the same type."
+                        if isinstance(query_layer, Float8Tensor):
                             fp8_meta["scaling_fwd"].scale_inv[META_QKV] = query_layer._scale_inv
                         else:
                             query_layer, key_layer, value_layer = (
@@ -5580,6 +5589,7 @@ class FusedAttnFunc_qkvpacked(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -5970,6 +5980,7 @@ class FusedAttnFunc_kvpacked(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -6424,6 +6435,7 @@ class FusedAttnFunc(torch.autograd.Function):
         deterministic,
     ):
         # pylint: disable=missing-function-docstring
+        # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha
         if fp8:
@@ -7673,6 +7685,60 @@ class DotProductAttention(TransformerEngineBaseModule):
             based on its internal logic. These optimizations trade memory for performance
             and should be used with care.
 
+        .. note::
+            .. _cu_seqlens note:
+
+            When training data has variable sequence lengths, users have two options.
+
+            1. Manipulate the data and pad all sequences to the same length. Use
+               :attr:`qkv_format` = {"bshd", "sbhd"} and
+               :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
+               Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`
+               (which will be converted to :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`), to provide
+               the real sequence length information. For example, a batch of 3 sequences
+               [a a a b b c c c c] can be padded to [a a a PAD b b PAD PAD c c c c], and the cumulative
+               sequence length tensors would be
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+
+            2. Do not perform padding on training data. Use :attr:`qkv_format` = "thd" and
+               :attr:`attn_mask_type` = {"padding", "padding_causal", "padding_causal_bottom_right"}.
+               Pass in :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`, or :attr:`attention_mask`,
+               as in option 1. For example, a batch of 3 sequences [a a a b b c c c c] can be processed
+               without any padding, and the sequence length tensors would be
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9] for self-attention.
+
+               In certain use cases, a varying number of identifier tokens are inserted between
+               sequences. These tokens do not participate in the attention calculation.
+               :attr:`cu_seqlens_q_padded` and :attr:`cu_seqlens_kv_padded` must be specified
+               in such cases to correctly identify the start and end of each sequence in a batch.
+               For example, a batch of 3 sequences [a a a 1 b b 2 2 c c c c 3] would have
+               :attr:`cu_seqlens_q` = :attr:`cu_seqlens_kv` = [0, 3, 5, 9], and
+               :attr:`cu_seqlens_q_padded` = :attr:`cu_seqlens_kv_padded` = [0, 4, 8, 13]
+               for self-attention.
+
+        .. note::
+            .. _max_seqlen note:
+
+            When :attr:`qkv_format` = {"bshd", "sbhd"}, sequences are of equal length in a batch.
+            :attr:`max_seqlen_q` and :attr:`max_seqlen_kv` should be the same as the "s" dimension of
+            :attr:`query_layer` and :attr:`key_layer` tensors. When unset, Transformer Engine will
+            infer them as such.
+
+            When :attr:`qkv_format` = "thd", sequences have varying lengths. :attr:`max_seqlen_q` and
+            :attr:`max_seqlen_kv` should be the maximum query and key/value sequence length in a batch.
+            When unset, Transformer Engine deduces them from :attr:`cu_seqlens_q` and :attr:`cu_seqlens_kv`.
+            This deduction costs a small kernel and some CPU-GPU synchronization, and to avoid this
+            overhead, users are recommended to obtain the maximum sequence lengths from the data loaders
+            and pass them in.
+
+            - As the maximum sequence lengths, batch size, and number of tokens change from batch to batch,
+              dynamic shapes need to be supported for tensor construction. FlashAttention and
+              UnfusedDotProductAttention naturally do so, while FusedAttention requires parameters to be static
+              to create graphs before performance heuristics analysis. To reduce the number of graphs created
+              per run, Transformer Engine 1.13+ quantizes relevant parameters: for cuDNN < 9.6, {batch size,
+              :attr:`max_seqlen_q`, :attr:`max_seqlen_kv`}, and for cuDNN >= 9.6, {"t" dimension of
+              :attr:`query_layer`, "t" dimension of :attr:`key_layer`}.
+
         Parameters
         ----------
         query_layer : torch.Tensor
@@ -7695,25 +7761,29 @@ class DotProductAttention(TransformerEngineBaseModule):
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
+                   See :ref:`note<cu_seqlens note>` for more details.
         cu_seqlens_kv: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
+                   See :ref:`note<cu_seqlens note>` for more details.
         cu_seqlens_q_padded: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (with offset) in a batch for
                    `query_layer`, with shape [batch_size + 1] and dtype torch.int32.
                    When there is no padding between sequences in a batch,
                    `cu_seqlens_q_padded = cu_seqlens_q`.
+                   See :ref:`note<cu_seqlens note>` for more details.
         cu_seqlens_kv_padded: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (with offset) in a batch for `key_layer`
                    and `value_layer`, with shape [batch_size + 1] and dtype torch.int32.
                    When there is no padding between sequences in a batch,
                    `cu_seqlens_kv_padded = cu_seqlens_kv`.
+                   See :ref:`note<cu_seqlens note>` for more details.
         max_seqlen_q: Optional[int], default = `None`
                       Maximum sequence length in `query_layer`.
-                      Calculated from `cu_seqlens_q` if not provided.
+                      See :ref:`note<max_seqlen note>` for more details.
         max_seqlen_kv: Optional[int], default = `None`
                        Maximum sequence length in `key_layer` and `value_layer`.
-                       Calculated from `cu_seqlens_kv` if not provided.
+                       See :ref:`note<max_seqlen note>` for more details.
         attn_mask_type: {'no_mask', 'padding', 'causal', 'padding,causal', 'causal,padding',
                        'padding_causal', 'causal_bottom_right', 'padding_causal_bottom_right',
                        'arbitrary'}, default = `None`. Type of attention mask passed into
@@ -7882,7 +7952,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 key_layer.shape[-2] == self.num_gqa_groups_per_partition
                 and value_layer.shape[-2] == self.num_gqa_groups_per_partition
-            ), f"Keys and values must have num_gqa_group = {self.num_gqa_groups} heads!"
+            ), (
+                "Keys and values must have num_gqa_group ="
+                f" {self.num_gqa_groups_per_partition} heads!"
+            )
             assert qkv_format in [
                 "sbhd",
                 "bshd",
@@ -7904,6 +7977,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     cu_seqlens_q.dtype == torch.int32 and cu_seqlens_kv.dtype == torch.int32
                 ), "cu_seqlens_q and cu_seqlens_q must both be in dtype torch.int32!"
+                batch_size = len(cu_seqlens_q) - 1
                 if max_seqlen_q is None:
                     if cu_seqlens_q_padded is not None:
                         seqlens_q = cu_seqlens_q_padded[1:] - cu_seqlens_q_padded[:-1]
@@ -7916,7 +7990,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     else:
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
-                batch_size = len(cu_seqlens_q) - 1
 
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
@@ -7931,10 +8004,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                     len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
                 ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
                 if qkv_format == "sbhd":
-                    max_seqlen_q, max_seqlen_kv = (query_layer.shape[0], key_layer.shape[0])
+                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
                     batch_size = query_layer.shape[1]
                 else:
-                    max_seqlen_q, max_seqlen_kv = (query_layer.shape[1], key_layer.shape[1])
+                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
                     batch_size = query_layer.shape[0]
                 max_seqlen_q *= cp_size
                 max_seqlen_kv *= cp_size
@@ -7943,13 +8018,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     assert all(
                         seqlens_q <= max_seqlen_q
                     ), """Sequence lengths indicated by cu_seqlens_q must be no greater than
-                        the sequence dimention in 'query_layer'!"""
+                        the sequence dimension in 'query_layer'!"""
                 if cu_seqlens_kv is not None:
                     seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     assert all(
                         seqlens_kv <= max_seqlen_kv
                     ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
-                        the sequence dimention in 'key_layer' and 'value_layer'!"""
+                        the sequence dimension in 'key_layer' and 'value_layer'!"""
                 if cu_seqlens_q is None or cu_seqlens_kv is None:
                     if "padding" in attn_mask_type:
                         assert (

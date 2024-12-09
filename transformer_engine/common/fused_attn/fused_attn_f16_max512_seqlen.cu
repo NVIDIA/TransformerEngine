@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "../common.h"
+#include "../cudnn_utils.h"
 #include "fused_attn_f16_max512_seqlen.h"
 #include "utils.h"
 
@@ -746,7 +747,7 @@ void fused_attn_max_512_fwd_impl(
     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
     void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-        b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+        b, b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
         static_cast<const int32_t *>(devPtrCuSeqlenKV), static_cast<int32_t *>(devActualSeqlenQ),
         static_cast<int32_t *>(devActualSeqlenK));
     NVTE_CHECK_CUDA(cudaGetLastError());
@@ -1169,7 +1170,7 @@ void fused_attn_max_512_bwd_impl(int64_t b, int64_t h, int64_t s_q, int64_t s_kv
     void *devActualSeqlenQ = static_cast<int8_t *>(workspace) + plan_workspace_size;
     void *devActualSeqlenK = static_cast<int8_t *>(devActualSeqlenQ) + b * sizeof(int32_t);
     cu_seqlens_to_actual_seqlens<<<grid, nthreads_per_block, 0, stream>>>(
-        b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
+        b, b, static_cast<const int32_t *>(devPtrCuSeqlenQ),
         static_cast<const int32_t *>(devPtrCuSeqlenKV), static_cast<int32_t *>(devActualSeqlenQ),
         static_cast<int32_t *>(devActualSeqlenK));
     NVTE_CHECK_CUDA(cudaGetLastError());

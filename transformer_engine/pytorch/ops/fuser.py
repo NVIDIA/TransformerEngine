@@ -5,12 +5,12 @@
 """Manager class for a pipeline of fusible operations."""
 
 from __future__ import annotations
+from collections.abc import Callable
 from typing import Any, Optional
 
 import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.graph import is_graph_capturing
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -20,12 +20,32 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_backward_linear_add,
     fuse_forward_linear_bias_activation,
     fuse_forward_linear_bias_add,
+    fuse_userbuffers_backward_linear,
+    fuse_userbuffers_forward_linear,
 )
 
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:
     """Split tuple at index"""
     return t[:idx], t[idx:]
+
+
+# Lazily imported function used in _is_graph_capturing
+_is_graph_capturing_function: Optional[Callable[[], bool]] = None
+
+
+def _is_graph_capturing() -> bool:
+    """Whether function is called within `make_graphed_callables`
+
+    Avoid circular import with lazy import.
+
+    """
+    global _is_graph_capturing_function
+    if _is_graph_capturing_function is None:
+        from ..graph import is_graph_capturing
+
+        _is_graph_capturing_function = is_graph_capturing
+    return _is_graph_capturing_function()
 
 
 class _OperationFuserAutogradFunction(torch.autograd.Function):
@@ -39,12 +59,13 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
     # pylint: disable=unused-argument
     @staticmethod
     def forward(
-        func_ctx: torch.autograd.function.FunctionCtx,
+        func_ctx: Optional[torch.autograd.function.FunctionCtx],
         input_: torch.Tensor,
         forward_ops: list[tuple[FusibleOperation, list[int]]],
         backward_ops: list[tuple[FusibleOperation, list[int]]],
         basic_ops: list[BasicOperation],
         basic_op_kwargs: list[dict[str, Any]],
+        is_grad_enabled: bool,
         num_params: int,
         num_extra_inputs: int,
         *params_and_extra_inputs: torch.nn.Parameter,
@@ -102,9 +123,23 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
 
         # Apply forward ops
         x = input_
-        requires_grad = x.requires_grad
+        requires_grad = is_grad_enabled and x.requires_grad
         extra_outputs = [None for _ in range(len(basic_ops))]
         for op, basic_op_idxs in forward_ops:
+
+            # Check if backward op is required
+            if is_grad_enabled:
+                if not requires_grad:
+                    requires_grad = any(param.requires_grad for param in op.parameters())
+                if not requires_grad:
+                    requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
+            for idx in basic_op_idxs:
+                basic_op_ctxs[idx].requires_grad = requires_grad
+            if requires_grad != x.requires_grad:
+                if requires_grad:
+                    x.requires_grad_()
+                else:
+                    x = x.detach()
 
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]
@@ -120,17 +155,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 basic_op_next_ops=next_ops,
                 basic_op_kwargs=[basic_op_kwargs[idx] for idx in basic_op_idxs],
             )
-            for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
-                extra_outputs[idx] = ys
-
-            # Check if backward op is required
-            if not requires_grad:
-                requires_grad = any(param.requires_grad for param in op.parameters())
-            if not requires_grad:
-                requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
-            for idx in basic_op_idxs:
-                basic_op_ctxs[idx]._requires_grad = requires_grad
             x.requires_grad_(requires_grad=requires_grad)
+            for idx, ys in zip(basic_op_idxs, fused_op_extra_outputs):
+                for y in ys:
+                    y.requires_grad_(requires_grad=requires_grad)
+                extra_outputs[idx] = ys
 
         # Flatten list of extra outputs
         extra_outputs_flat = []
@@ -145,25 +174,28 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                 )
             extra_outputs_flat.extend(ys)
 
-        # Flatten list of saved tensors
-        to_save = []
-        for ctx in basic_op_ctxs:
-            range_start = len(to_save)
-            if ctx.to_save is not None:
-                to_save.extend(ctx.to_save)
-            range_end = len(to_save)
-            ctx.to_save = None
-            ctx._saved_tensors_range = (range_start, range_end)
-        func_ctx.save_for_backward(*to_save)
+        # Save context for backward pass
+        if is_grad_enabled:
 
-        # Other context for backward pass
-        func_ctx.backward_ops = backward_ops
-        func_ctx.basic_ops = basic_ops
-        func_ctx.basic_op_ctxs = basic_op_ctxs
-        func_ctx.num_params = num_params
-        func_ctx.num_extra_inputs = num_extra_inputs
-        func_ctx.num_extra_outputs = len(extra_outputs_flat)
-        func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
+            # Flatten list of saved tensors
+            to_save = []
+            for ctx in basic_op_ctxs:
+                range_start = len(to_save)
+                if ctx.to_save is not None:
+                    to_save.extend(ctx.to_save)
+                range_end = len(to_save)
+                ctx.to_save = None
+                ctx._saved_tensors_range = (range_start, range_end)
+            func_ctx.save_for_backward(*to_save)
+
+            # Other context
+            func_ctx.backward_ops = backward_ops
+            func_ctx.basic_ops = basic_ops
+            func_ctx.basic_op_ctxs = basic_op_ctxs
+            func_ctx.num_params = num_params
+            func_ctx.num_extra_inputs = num_extra_inputs
+            func_ctx.num_extra_outputs = len(extra_outputs_flat)
+            func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
 
         if extra_outputs_flat:
             return x, *extra_outputs_flat
@@ -206,7 +238,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
         for op, basic_op_idxs in backward_ops:
 
             # Stop if no more gradients are required
-            if all(not basic_op_ctxs[idx]._requires_grad for idx in basic_op_idxs):
+            if all(not basic_op_ctxs[idx].requires_grad for idx in basic_op_idxs):
                 dx = None
                 break
 
@@ -255,7 +287,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             grad_extra_inputs_flat.extend(dxs)
 
         # Update FP8 scaling factors
-        if func_ctx.is_first_module and not is_graph_capturing():
+        if func_ctx.is_first_module and not _is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
 
         return (
@@ -264,6 +296,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             None,  # backward_ops
             None,  # basic_ops
             None,  # basic_op_kwargs
+            None,  # is_grad_enabled
             None,  # num_params
             None,  # num_extra_inputs
             *grad_params_flat,
@@ -318,6 +351,7 @@ class OperationFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in forward pass"""
+        ops = fuse_userbuffers_forward_linear(ops)
         ops = fuse_forward_linear_bias_add(ops)
         ops = fuse_forward_linear_bias_activation(ops)
         return ops
@@ -328,6 +362,7 @@ class OperationFuser:
         ops: list[tuple[FusibleOperation, list[int]]],
     ) -> list[tuple[FusibleOperation, list[int]]]:
         """Attempt to fuse operations in backward pass"""
+        ops = fuse_userbuffers_backward_linear(ops)
         ops = fuse_backward_linear_add(ops)
         return ops
 
@@ -355,14 +390,23 @@ class OperationFuser:
         params = [param for op in self._basic_ops for param in op.parameters()]
 
         # Fuser forward pass
-        return _OperationFuserAutogradFunction.apply(
+        is_grad_enabled = torch.is_grad_enabled()
+        if is_grad_enabled:
+            forward_func = _OperationFuserAutogradFunction.apply
+            args = []
+        else:
+            forward_func = _OperationFuserAutogradFunction.forward
+            args = [None]
+        args += (
             input,
             self._forward_ops,
             self._backward_ops,
             self._basic_ops,
             basic_op_kwargs,
+            is_grad_enabled,
             len(params),
             self._num_extra_inputs,
             *params,
             *extra_inputs,
         )
+        return forward_func(*args)

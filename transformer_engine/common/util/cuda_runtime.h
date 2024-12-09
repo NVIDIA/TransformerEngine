@@ -38,6 +38,14 @@ int sm_arch(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
+/* \brief CUDA Multicast support status for device
+ *
+ * \param[in] device_id CUDA device (default is current device)
+ *
+ * \return CUDA multicast support flag
+ */
+bool supports_multicast(int device_id = -1);
+
 /* \brief Path to CUDA Toolkit headers
  *
  * The path can be configured by setting NVTE_CUDA_INCLUDE_DIR in the
