@@ -75,7 +75,9 @@ class LayerNorm(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
 
@@ -130,7 +132,9 @@ class Linear(TransformerEngineBaseLayer):
     out_features: int = 512
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = True
-    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -175,11 +179,15 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=1.0))
+    ln_bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=1.0)
+    )
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -238,12 +246,16 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=1.0))
+    ln_bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=1.0)
+    )
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes_1: Tuple[str, ...] = ()
     kernel_axes_2: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes_1: Tuple[str, ...] = ()
     bias_axes_2: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
