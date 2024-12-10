@@ -4,6 +4,7 @@
 """
 Praxis Modules
 """
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Callable, Iterable, Sequence, Tuple, Union
 
@@ -27,6 +28,7 @@ def _generate_ln_scale_init(scale_init):
     return scale_init
 
 
+@dataclass
 class TransformerEngineBaseLayer(BaseLayer):
     """TransformerEngineBaseLayer"""
 
@@ -66,6 +68,7 @@ class TransformerEngineBaseLayer(BaseLayer):
         self.create_child(name, flax_module_p.clone())
 
 
+@dataclass
 class LayerNorm(TransformerEngineBaseLayer):
     """LayerNorm"""
 
@@ -74,7 +77,7 @@ class LayerNorm(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     bias_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
 
@@ -102,6 +105,7 @@ class LayerNorm(TransformerEngineBaseLayer):
         return self.layer_norm(x)
 
 
+@dataclass
 class FusedSoftmax(TransformerEngineBaseLayer):
     """FusedSoftmax"""
 
@@ -123,13 +127,14 @@ class FusedSoftmax(TransformerEngineBaseLayer):
         return self.fused_softmax(x, mask, bias)
 
 
+@dataclass
 class Linear(TransformerEngineBaseLayer):
     """Linear"""
 
     out_features: int = 512
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = True
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -164,6 +169,7 @@ class Linear(TransformerEngineBaseLayer):
         return self.linear(x)
 
 
+@dataclass
 class LayerNormLinear(TransformerEngineBaseLayer):
     """LayerNormLinear"""
 
@@ -174,11 +180,11 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = WeightInit.Constant(1.0)
+    ln_bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=1.0))
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -227,6 +233,7 @@ class LayerNormLinear(TransformerEngineBaseLayer):
         return self.ln_linear(x)
 
 
+@dataclass
 class LayerNormMLP(TransformerEngineBaseLayer):
     """LayerNormMLP"""
 
@@ -237,12 +244,12 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = WeightInit.Constant(1.0)
+    ln_bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=1.0))
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes_1: Tuple[str, ...] = ()
     kernel_axes_2: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     bias_axes_1: Tuple[str, ...] = ()
     bias_axes_2: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False

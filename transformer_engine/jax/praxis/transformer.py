@@ -4,6 +4,7 @@
 """
 Praxis Modules related Transformer
 """
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Optional, Sequence, Tuple
 import warnings
@@ -21,6 +22,7 @@ from ..flax.transformer import TransformerLayer as flax_TransformerLayer
 from ..attention import AttnBiasType, AttnMaskType
 
 
+@dataclass
 class RelativePositionBiases(TransformerEngineBaseLayer):
     """RelativePositionBiases"""
 
@@ -66,6 +68,7 @@ class RelativePositionBiases(TransformerEngineBaseLayer):
         return self.relative_position_bias(q_seqlen, k_seqlen, bidirectional)
 
 
+@dataclass
 class DotProductAttention(TransformerEngineBaseLayer):
     """DotProductAttention"""
 
@@ -124,6 +127,7 @@ class DotProductAttention(TransformerEngineBaseLayer):
         )
 
 
+@dataclass
 class MultiHeadAttention(TransformerEngineBaseLayer):
     """MultiHeadAttention"""
 
@@ -138,7 +142,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     return_layernorm_output: bool = False
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     attn_mask_type: str = "causal"
     attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
@@ -257,6 +261,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
         )
 
 
+@dataclass
 class TransformerLayer(TransformerEngineBaseLayer):
     """TransformerLayer"""
 
@@ -275,7 +280,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     dropout_rng_name: str = "dropout"
     mlp_activations: Sequence[str] = ("relu",)
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(default_factory=partial(WeightInit.Constant, scale=0.0))
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     float32_attention_logits: bool = False
