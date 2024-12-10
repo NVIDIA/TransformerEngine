@@ -7,16 +7,15 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_
 
-#include "../utils.cuh"
-#include "ln.h"
+#include "../../utils.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
-namespace layer_norm {
-using namespace transformer_engine;
+namespace normalization {
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_tuned_kernel(
-    layer_norm::BwdParams params) {
+    BackwardKernelParams params) {
   enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
   enum { WARPS_M = Ktraits::WARPS_M };
   enum { WARPS_N = Ktraits::WARPS_N };
@@ -119,8 +118,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_tuned_kernel(
     }
 
     reduce_t result = reducer.allreduce({mdy_local, mdyy_local}, sum);
-    mdy_local = layer_norm::Get<0>::of<reduce_t, compute_t>(result) * rn;
-    mdyy_local = layer_norm::Get<1>::of<reduce_t, compute_t>(result) * rn;
+    mdy_local = Get<0>::of<reduce_t, compute_t>(result) * rn;
+    mdyy_local = Get<1>::of<reduce_t, compute_t>(result) * rn;
 
     Ivec dx[LDGS];
     idx = row * Ktraits::VEC_COLS + c;
@@ -203,7 +202,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_tuned_kernel(
 
 template <typename Kernel_traits>
 __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void ln_bwd_finalize_tuned_kernel(
-    BwdParams params) {
+    BackwardKernelParams params) {
   using compute_t = typename Kernel_traits::compute_t;
   using weight_t = typename Kernel_traits::weight_t;
   using index_t = typename Kernel_traits::index_t;
@@ -323,7 +322,7 @@ __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void ln_bwd_finaliz
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_general_kernel(
-    layer_norm::BwdParams params) {
+    BackwardKernelParams params) {
   enum { LDGS = Ktraits::LDGS };
   enum { NUM_ELTS = Ktraits::ELTS_PER_LDG };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -424,8 +423,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_bwd_general_kerne
 
     // Reduce over row
     reduce_t result = reducer.allreduce({mdy, mdyy}, sum);
-    mdy = layer_norm::Get<0>::of<reduce_t, compute_t>(result) * rn;
-    mdyy = layer_norm::Get<1>::of<reduce_t, compute_t>(result) * rn;
+    mdy = Get<0>::of<reduce_t, compute_t>(result) * rn;
+    mdyy = Get<1>::of<reduce_t, compute_t>(result) * rn;
 
 // Compute dx
 #pragma unroll
@@ -507,7 +506,7 @@ template <typename weight_t, typename compute_t, uint32_t WARPS_M, uint32_t WARP
           uint32_t BYTES_PER_LDG, uint32_t THREADS_PER_WARP>
 __global__
 __launch_bounds__(WARPS_M *WARPS_N *THREADS_PER_WARP) void ln_bwd_finalize_general_kernel(
-    layer_norm::BwdParams params) {
+    BackwardKernelParams params) {
   enum { NUM_ELTS = BYTES_PER_LDG / sizeof(compute_t) };
   using Wvec = Vec<weight_t, NUM_ELTS>;
   using Cvec = Vec<compute_t, NUM_ELTS>;
@@ -573,7 +572,7 @@ __launch_bounds__(WARPS_M *WARPS_N *THREADS_PER_WARP) void ln_bwd_finalize_gener
   }
 }
 
-}  // namespace layer_norm
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_BWD_KERNELS_CUH_

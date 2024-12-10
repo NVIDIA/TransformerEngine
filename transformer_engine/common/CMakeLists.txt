@@ -64,13 +64,14 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp

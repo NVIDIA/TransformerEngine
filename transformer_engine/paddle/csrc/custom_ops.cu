@@ -353,24 +353,23 @@ std::vector<paddle::Tensor> te_layernorm_fwd_fp8(const paddle::Tensor &input,
       const_cast<void *>(GetDataPtr<float>(scale, index)), GetDataPtr<float>(scale_inv, index));
   auto mu_cu = MakeNvteTensor(mu);
   auto rsigma_cu = MakeNvteTensor(rsigma);
-  TensorWrapper workspace, barrier;
+  TensorWrapper workspace;
 
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
-  // This call populates workspace and barrier tensors with the required config
-  const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+  // This call populates workspace tensor with the required config
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(), num_sm - sm_margin,
+                     zero_centered_gamma, input.stream());
 
-  // Fill workspace and barrier
+  // Fill workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), input.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), input.place(), true);
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
 
   // Actual call to fwd kernel
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(), num_sm - sm_margin,
+                     zero_centered_gamma, input.stream());
 
   return {ln_out, mu, rsigma};
 }
@@ -394,24 +393,23 @@ std::vector<paddle::Tensor> te_layernorm_fwd(const paddle::Tensor &input,
   auto z_cu = MakeNvteTensor(ln_out.data(), {N, H}, Int2NvteDType(otype));
   auto mu_cu = MakeNvteTensor(mu);
   auto rsigma_cu = MakeNvteTensor(rsigma);
-  TensorWrapper workspace, barrier;
+  TensorWrapper workspace;
 
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
-  // This call populates workspace and barrier tensors with the required config
-  const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+  // This call populates workspace tensor with the required config
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(), num_sm - sm_margin,
+                     zero_centered_gamma, input.stream());
 
-  // Fill workspace and barrier
+  // Fill workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), input.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), input.place(), true);
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
 
   // Actual call to fwd kernel
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(), num_sm - sm_margin,
+                     zero_centered_gamma, input.stream());
 
   return {ln_out, mu, rsigma};
 }
@@ -424,7 +422,7 @@ std::vector<paddle::Tensor> te_layernorm_bwd(const paddle::Tensor &dz, const pad
   auto dgamma = paddle::empty_like(gamma, gamma.dtype(), gamma.place());
   auto dbeta = paddle::empty_like(gamma, gamma.dtype(), gamma.place());
 
-  TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
+  TensorWrapper workspace;
 
   auto dz_cu = MakeNvteTensor(dz);
   auto x_cu = MakeNvteTensor(x);
@@ -438,25 +436,18 @@ std::vector<paddle::Tensor> te_layernorm_bwd(const paddle::Tensor &dz, const pad
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
   // This call populates tensors with the required config.
-  const auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
-  bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(), dbeta_part.data(), dz.stream(),
-          num_sm - sm_margin, workspace.data(), barrier.data());
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
+                     num_sm - sm_margin, zero_centered_gamma, dz.stream());
 
   // Alloc space for Tensors.
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), x.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), x.place(), true);
-  auto dgamma_part_data = AllocateSpace(dgamma_part.shape(), dgamma_part.dtype(), x.place());
-  auto dbeta_part_data = AllocateSpace(dbeta_part.shape(), dbeta_part.dtype(), x.place());
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
-  dgamma_part = MakeNvteTensor(dgamma_part_data.data(), dgamma_part.shape(), dgamma_part.dtype());
-  dbeta_part = MakeNvteTensor(dbeta_part_data.data(), dbeta_part.shape(), dbeta_part.dtype());
 
   // Actual call to bwd kernel.
-  bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(), dbeta_part.data(), dz.stream(),
-          num_sm - sm_margin, workspace.data(), barrier.data());
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
+                     num_sm - sm_margin, zero_centered_gamma, dz.stream());
 
   return {dx, dgamma, dbeta};
 }
@@ -477,24 +468,21 @@ std::vector<paddle::Tensor> te_rmsnorm_fwd(const paddle::Tensor &input,
   auto gamma_cu = MakeNvteTensor(weight);
   auto z_cu = MakeNvteTensor(ln_out.data(), {N, H}, Int2NvteDType(otype));
   auto rsigma_cu = MakeNvteTensor(rsigma);
-  TensorWrapper workspace, barrier;
+  TensorWrapper workspace;
 
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
-  // This call populates workspace and barrier tensors with the required config
-
+  // This call populates workspace tensor with the required config
   nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-                   input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+                   workspace.data(), num_sm - sm_margin, zero_centered_gamma, input.stream());
 
-  // Fill workspace and barrier
+  // Fill workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), input.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), input.place(), true);
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
 
   // Actual call to fwd kernel
   nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-                   input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+                   workspace.data(), num_sm - sm_margin, zero_centered_gamma, input.stream());
 
   return {ln_out, rsigma};
 }
@@ -521,23 +509,21 @@ std::vector<paddle::Tensor> te_rmsnorm_fwd_fp8(const paddle::Tensor &input,
       ln_out.data(), {N, H}, Int2NvteDType(otype), GetDataPtr<float>(amax, index),
       const_cast<void *>(GetDataPtr<float>(scale, index)), GetDataPtr<float>(scale_inv, index));
   auto rsigma_cu = MakeNvteTensor(rsigma);
-  TensorWrapper workspace, barrier;
+  TensorWrapper workspace;
 
   auto num_sm = cudaDevicePropertiesManager::Instance().GetMultiProcessorCount();
 
-  // This call populates workspace and barrier tensors with the required config
+  // This call populates workspace tensor with the required config
   nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-                   input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+                   workspace.data(), num_sm - sm_margin, zero_centered_gamma, input.stream());
 
-  // Fill workspace and barrier
+  // Fill workspace
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), input.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), input.place(), true);
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
 
   // Actual call to fwd kernel
   nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-                   input.stream(), num_sm - sm_margin, workspace.data(), barrier.data());
+                   workspace.data(), num_sm - sm_margin, zero_centered_gamma, input.stream());
 
   return {ln_out, rsigma};
 }
@@ -550,7 +536,7 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
   auto dx = paddle::empty_like(x, x.dtype(), x.place());
   auto dgamma = paddle::empty_like(gamma, gamma.dtype(), gamma.place());
 
-  TensorWrapper workspace, barrier, dgamma_part;
+  TensorWrapper workspace;
 
   auto dz_cu = MakeNvteTensor(dz);
   auto x_cu = MakeNvteTensor(x);
@@ -563,21 +549,17 @@ std::vector<paddle::Tensor> te_rmsnorm_bwd(const paddle::Tensor &dz, const paddl
 
   // This call populates tensors with the required config.
   nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-                   dgamma_cu.data(), dgamma_part.data(), dz.stream(), num_sm - sm_margin,
-                   workspace.data(), barrier.data());
+                   dgamma_cu.data(), workspace.data(), num_sm - sm_margin, zero_centered_gamma,
+                   dz.stream());
 
   // Alloc space for Tensors.
   auto workspace_data = AllocateSpace(workspace.shape(), workspace.dtype(), x.place());
-  auto barrier_data = AllocateSpace(barrier.shape(), barrier.dtype(), x.place(), true);
-  auto dgamma_part_data = AllocateSpace(dgamma_part.shape(), dgamma_part.dtype(), x.place());
   workspace = MakeNvteTensor(workspace_data.data(), workspace.shape(), workspace.dtype());
-  barrier = MakeNvteTensor(barrier_data.data(), barrier.shape(), barrier.dtype());
-  dgamma_part = MakeNvteTensor(dgamma_part_data.data(), dgamma_part.shape(), dgamma_part.dtype());
 
   // Actual call to bwd kernel.
   nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-                   dgamma_cu.data(), dgamma_part.data(), dz.stream(), num_sm - sm_margin,
-                   workspace.data(), barrier.data());
+                   dgamma_cu.data(), workspace.data(), num_sm - sm_margin, zero_centered_gamma,
+                   dz.stream());
 
   return {dx, dgamma};
 }
