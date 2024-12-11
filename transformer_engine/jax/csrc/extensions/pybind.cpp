@@ -83,12 +83,30 @@ pybind11::dict Registrations() {
       EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
 
   // Normalization
-  dict["te_layernorm_forward_ffi"] = EncapsulateFFI(LayerNormForwardHandler);
-  dict["te_layernorm_forward_fp8_ffi"] = EncapsulateFFI(LayerNormForwardFP8Handler);
-  dict["te_layernorm_backward_ffi"] = EncapsulateFFI(LayerNormBackwardHandler);
-  dict["te_rmsnorm_forward_ffi"] = EncapsulateFunction(RMSNormForwardHandler);
-  dict["te_rmsnorm_forward_fp8_ffi"] = EncapsulateFunction(RMSNormForwardFP8Handler);
-  dict["te_rmsnorm_backward_ffi"] = EncapsulateFunction(RMSNormBackwardHandler);
+  dict["te_layernorm_forward_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(LayerNormForwardHandler)
+  );
+  dict["te_layernorm_forward_fp8_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(LayerNormForwardFP8Handler)
+  );
+  dict["te_layernorm_backward_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(LayerNormBackwardHandler)
+  );
+  dict["te_rmsnorm_forward_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(RMSNormForwardHandler)
+  );
+  dict["te_rmsnorm_forward_fp8_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(RMSNormForwardFP8Handler)
+  );
+  dict["te_rmsnorm_backward_ffi"] = pybind11::dict(
+    pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
+    pybind11::arg("execute") = EncapsulateFFI(RMSNormBackwardHandler)
+  );
 
   // Attention
   pybind11::dict fused_attn_forward_ffi;
