@@ -10,12 +10,17 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import torch
 from packaging.version import Version as PkgVersion
 
+
 def get_torch_version():
     """Get pytorch version from __version__"""
+
     def get_torch_version_str():
         import torch
+
         return str(torch.__version__)
+
     return PkgVersion(get_torch_version_str())
+
 
 if torch.cuda.device_count() < 4:
     pytest.skip("FSDP2 test requires at least 4 GPUs.")
@@ -51,12 +56,12 @@ def _run_test(fp_init, sharding_dims):
 
 
 all_boolean = [True, False]
-sharding_dims =[[NUM_PROCS], [2, NUM_PROCS//2]]
+sharding_dims = [[NUM_PROCS], [2, NUM_PROCS // 2]]
+
 
 @pytest.mark.parametrize("sharding_dims", sharding_dims)
 @pytest.mark.parametrize("fp8_init", all_boolean)
-def test_distributed(fp8_init,sharding_dims):
+def test_distributed(fp8_init, sharding_dims):
     if fp8_init and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    _run_test(fp8_init,sharding_dims)
-
+    _run_test(fp8_init, sharding_dims)
