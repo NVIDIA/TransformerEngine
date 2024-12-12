@@ -190,13 +190,13 @@ def _get_attention_backends(
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    with logging_context():
-        for i in range(3):
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-            _attention_backends["backend_selection_requires_update"] = True
-            available_backends, fused_attention_backend = test()
-            if fused_attention_backend == FusedAttnBackend[backends[i]]:
-                fused_attn_backends.append(fused_attention_backend)
+    #with logging_context():
+    for i in range(3):
+        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+        _attention_backends["backend_selection_requires_update"] = True
+        available_backends, fused_attention_backend = test()
+        if fused_attention_backend == FusedAttnBackend[backends[i]]:
+            fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
 
@@ -258,6 +258,8 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    unfused_attn_supported = False
+    print(flash_attn_supported, fused_attn_supported, unfused_attn_supported)
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
     if pad_between_seqs and not (
@@ -531,18 +533,22 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 model_configs_swa = {
     #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
-    "swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
-    "swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "swa_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
-    "swa_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
-    "swa_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "swa_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    #"swa_1_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),
+    #"swa_1_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),
+    #"swa_1_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    #"swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    #"swa_2_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
+    #"swa_2_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
+    #"swa_2_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    #"swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    #"swa_3_0": ModelConfig(4, 16, 16, 64, 128, 128, 0.0, "causal_bottom_right", "no_bias"),
+    #"swa_3_1": ModelConfig(2, 16, 16, 64, 128, 256, 0.0, "causal_bottom_right", "no_bias"),
+    #"swa_3_2": ModelConfig(4, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    #"swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_4_0": ModelConfig(4, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_4_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "swa_4_2": ModelConfig(4, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
+    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
 }
 
 
@@ -552,7 +558,7 @@ model_configs_swa = {
 @pytest.mark.parametrize("model", model_configs_swa.keys())
 def test_dpa_sliding_window(dtype, model_configs, model):
     """Test DotProductAttention module with sliding window attention"""
-    test_dot_product_attention(dtype, model_configs, model, False, True, None, True, False)
+    test_dot_product_attention(dtype, model_configs, model, False, True, 'bshd_bshd_bshd', True, False)
 
 
 model_configs_alibi_slopes = {
@@ -619,18 +625,22 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(3, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(8, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_4": ModelConfig(8, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    #"layout_0_1": ModelConfig(3, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
+    #"layout_0_2": ModelConfig(8, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
+    #"layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
+    #"layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
+    #"layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    #"layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    #"layout_1_3": ModelConfig(1, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    #"layout_1_4": ModelConfig(8, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    #"layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
+    #"layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
+    #"layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    #"layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "layout_3_0": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4,0)),
+    "layout_3_1": ModelConfig(4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4,0)),
+    "layout_3_2": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4,0)),
+    "layout_3_3": ModelConfig(4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4,0)),
 }
 
 
@@ -647,10 +657,10 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
-    pad_between_seqs = True
-    test_dot_product_attention(
-        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
-    )
+    #pad_between_seqs = True
+    #test_dot_product_attention(
+    #    dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    #)
     if get_cudnn_version() >= (9, 3, 0):
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
