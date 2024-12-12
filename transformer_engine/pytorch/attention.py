@@ -4280,14 +4280,6 @@ def attn_forward_func_with_cp(
     assert (
         qkv_format != "sbhd" or use_fused_attention
     ), "FlashAttention does not support sbhd format!"
-    assert (
-        qkv_format != "thd"
-        or not use_fused_attention
-        or attn_mask_type in ["padding", "padding_causal"]
-    ), (
-        f"Context parallelism is not supported for {attn_mask_type} mask type and "
-        f"{qkv_format} format with {'FusedAttention' if use_fused_attention else 'FlashAttention'}!"
-    )
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
         """Attention bias is only supported with FusedAttention and "causal" """
         """or "no_mask" mask types!"""
@@ -7849,6 +7841,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ), f"Values have head_dim = {value_layer.shape[-1]}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
 
+            if qkv_format is None:
+                qkv_format = self.qkv_format
+
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
@@ -7874,9 +7869,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert (
                     graph_safe_rng_available()
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
-
-            if qkv_format is None:
-                qkv_format = self.qkv_format
 
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
