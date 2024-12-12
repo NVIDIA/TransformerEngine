@@ -178,9 +178,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           max_seqlen_q <= max_seqlen_kv && dropout == 0.0) ||
          ((cudnn_runtime_version >= 90500) &&
           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-          dropout == 0.0)) &&
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
            (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
