@@ -715,13 +715,13 @@ def get_attention_backend(
                     attn_mask_type,
                 )
                 use_fused_attention = False
-#            elif "padding" in attn_mask_type:
-#                logger.debug(
-#                    "Disabling FusedAttention as it does not support sliding window attention "
-#                    "with attn_mask_type = %s",
-#                    attn_mask_type,
-#                )
-#                use_fused_attention = False
+        #            elif "padding" in attn_mask_type:
+        #                logger.debug(
+        #                    "Disabling FusedAttention as it does not support sliding window attention "
+        #                    "with attn_mask_type = %s",
+        #                    attn_mask_type,
+        #                )
+        #                use_fused_attention = False
         if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
             if _use_flash_attn_3:
                 logger.debug(
