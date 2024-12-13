@@ -33,10 +33,12 @@ def _row_id_map_pass_1_kernel(
     expert_token_mask = tl.load(
         routing_map_ptr + pid_m * stride_routing_map_expert + offset * stride_routing_map_token,
         mask=(offset < num_tokens),
-        other=0
+        other=0,
     ).to(tl.int64)
     expert_token_cumsum = tl.cumsum(expert_token_mask) * expert_token_mask
-    tl.store(row_id_map_ptr + pid_m * num_tokens + offset, expert_token_cumsum, mask=offset < num_tokens)
+    tl.store(
+        row_id_map_ptr + pid_m * num_tokens + offset, expert_token_cumsum, mask=offset < num_tokens
+    )
     expert_token_sum = tl.sum(expert_token_mask)
     tl.store(workspace_ptr + pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n, expert_token_sum)
 
@@ -54,12 +56,10 @@ def _row_id_map_pass_2_kernel(
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
-    chunk_idx = pid_m *  tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n
+    chunk_idx = pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n
     offset = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     chunk_cumsum = tl.load(
-        row_id_map_ptr + pid_m * num_tokens + offset,
-        mask=(offset < num_tokens),
-        other=0
+        row_id_map_ptr + pid_m * num_tokens + offset, mask=(offset < num_tokens), other=0
     )
 
     workspace_off = tl.arange(0, WORKSPACE_LOAD_WIDTH)
@@ -78,14 +78,10 @@ def make_row_id_map(
     num_experts: int,
 ):
     # pylint: disable=missing-function-docstring
-    row_id_map = torch.empty(
-        (num_experts, num_tokens), dtype=torch.int64, device='cuda'
-    )
+    row_id_map = torch.empty((num_experts, num_tokens), dtype=torch.int64, device="cuda")
     block_size = 256
     grid = (num_experts, triton.cdiv(num_tokens, block_size))
-    workspace_tensor = torch.empty(
-        grid, dtype=torch.int64, device='cuda'
-    )
+    workspace_tensor = torch.empty(grid, dtype=torch.int64, device="cuda")
     # block cumsum
     _row_id_map_pass_1_kernel[grid](
         routing_map,
@@ -109,13 +105,13 @@ def make_row_id_map(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
     ],
-    key=['hidden_size'],
+    key=["hidden_size"],
 )
 @triton.jit
 def _permute_kernel(
@@ -159,9 +155,7 @@ def permute_with_mask_map(
     hidden_size: int,
 ):
     # pylint: disable=missing-function-docstring
-    output = torch.empty(
-        (num_out_tokens, hidden_size), dtype=inp.dtype, device='cuda'
-    )
+    output = torch.empty((num_out_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     grid = (num_tokens,)
     _permute_kernel[grid](
         inp,
@@ -180,13 +174,13 @@ def permute_with_mask_map(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
     ],
-    key=['hidden_size'],
+    key=["hidden_size"],
 )
 @triton.jit
 def _unpermute_kernel(
@@ -211,11 +205,11 @@ def _unpermute_kernel(
     FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == 'e5m2':
+    if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
         data_type = tl.float8e5
         pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == 'e4m3':
+    elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
         data_type = tl.float8e4nv
         pytorch_tensor_dtype = tl.uint8
@@ -263,14 +257,12 @@ def unpermute_with_mask_map(
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = 'e5m2'
+        fp8_dtype = "e5m2"
     elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = 'e4m3'
+        fp8_dtype = "e4m3"
     else:
         fp8_dtype = None
-    output = torch.empty(
-        (num_tokens, hidden_size), dtype=inp.dtype, device='cuda'
-    )
+    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     grid = (num_tokens,)
     _unpermute_kernel[grid](
         inp,
@@ -294,13 +286,13 @@ def unpermute_with_mask_map(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
     ],
-    key=['hidden_size'],
+    key=["hidden_size"],
 )
 @triton.jit
 def _unpermute_bwd_with_probs_kernel(
@@ -330,11 +322,11 @@ def _unpermute_bwd_with_probs_kernel(
     FP8_DTYPE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    if FP8_DTYPE == 'e5m2':
+    if FP8_DTYPE == "e5m2":
         compute_type = tl.float16
         data_type = tl.float8e5
         pytorch_tensor_dtype = tl.uint8
-    elif FP8_DTYPE == 'e4m3':
+    elif FP8_DTYPE == "e4m3":
         compute_type = tl.float16
         data_type = tl.float8e4nv
         pytorch_tensor_dtype = tl.uint8
@@ -351,7 +343,10 @@ def _unpermute_bwd_with_probs_kernel(
             while current_start < hidden_size:
                 current_offset = current_start + tl.arange(0, BLOCK_SIZE)
                 mask = current_offset < hidden_size
-                input_off = pid * stride_fwd_output_grad_token + current_offset * stride_fwd_output_grad_hidden
+                input_off = (
+                    pid * stride_fwd_output_grad_token
+                    + current_offset * stride_fwd_output_grad_hidden
+                )
                 inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
                 if FP8_DTYPE is not None:
                     inp = inp.to(data_type, bitcast=True).to(compute_type)
@@ -360,10 +355,15 @@ def _unpermute_bwd_with_probs_kernel(
                 output = inp * prob
                 if FP8_DTYPE is not None:
                     output = output.to(data_type).to(pytorch_tensor_dtype, bitcast=True)
-                output_off = dst_row * stride_fwd_input_grad_token + current_offset * stride_fwd_input_grad_hidden
+                output_off = (
+                    dst_row * stride_fwd_input_grad_token
+                    + current_offset * stride_fwd_input_grad_hidden
+                )
                 tl.store(fwd_input_grad_ptr + output_off, output, mask=mask)
 
-                fwd_input_off = dst_row * stride_fwd_input_token + current_offset * stride_fwd_input_hidden
+                fwd_input_off = (
+                    dst_row * stride_fwd_input_token + current_offset * stride_fwd_input_hidden
+                )
                 fwd_input = tl.load(fwd_input_ptr + fwd_input_off, mask=mask)
                 if FP8_DTYPE is not None:
                     fwd_input = fwd_input.to(data_type, bitcast=True)
@@ -390,17 +390,15 @@ def unpermute_with_mask_map_bwd_with_probs(
 ):
     # pylint: disable=missing-function-docstring
     if fp8_dtype == TE_DType.kFloat8E5M2:
-        fp8_dtype = 'e5m2'
+        fp8_dtype = "e5m2"
     elif fp8_dtype == TE_DType.kFloat8E4M3:
-        fp8_dtype = 'e4m3'
+        fp8_dtype = "e4m3"
     else:
         fp8_dtype = None
     act_grad = torch.empty(
-        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device='cuda'
+        (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
     )
-    probs_grad = torch.empty(
-        (num_tokens, num_experts), dtype=probs.dtype, device='cuda'
-    )
+    probs_grad = torch.empty((num_tokens, num_experts), dtype=probs.dtype, device="cuda")
     grid = (num_tokens,)
     _unpermute_bwd_with_probs_kernel[grid](
         fwd_output_grad,
@@ -429,13 +427,13 @@ def unpermute_with_mask_map_bwd_with_probs(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
     ],
-    key=['hidden_size'],
+    key=["hidden_size"],
 )
 @triton.jit
 def _sort_chunks_by_idxs_kernel(
@@ -512,10 +510,8 @@ def sort_chunks_by_idx(
     num_splits: int,
 ):
     # pylint: disable=missing-function-docstring
-    row_id_map = torch.empty((num_tokens,), dtype=torch.int64, device='cuda')
-    output = torch.empty(
-        (num_tokens, hidden_size), dtype=inp.dtype, device='cuda'
-    )
+    row_id_map = torch.empty((num_tokens,), dtype=torch.int64, device="cuda")
+    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     grid = (num_tokens,)
     _sort_chunks_by_idxs_kernel[grid](
         inp,
@@ -536,13 +532,13 @@ def sort_chunks_by_idx(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE': 64}),
-        triton.Config({'BLOCK_SIZE': 128}),
-        triton.Config({'BLOCK_SIZE': 256}),
-        triton.Config({'BLOCK_SIZE': 512}),
-        triton.Config({'BLOCK_SIZE': 1024}),
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
     ],
-    key=['hidden_size'],
+    key=["hidden_size"],
 )
 @triton.jit
 def _sort_chunks_by_map(
@@ -570,7 +566,9 @@ def _sort_chunks_by_map(
         input_token_idx = dst_row if MAP_FOR_INPUT else pid
         output_token_idx = pid if MAP_FOR_INPUT else dst_row
         input_offsets = input_token_idx * stride_input_token + current_offset * stride_input_hidden
-        output_offsets = output_token_idx * stride_output_token + current_offset * stride_output_hidden
+        output_offsets = (
+            output_token_idx * stride_output_token + current_offset * stride_output_hidden
+        )
         inp = tl.load(input_ptr + input_offsets, mask=mask)
         tl.store(output_ptr + output_offsets, inp, mask=mask)
         current_start += BLOCK_SIZE
@@ -584,9 +582,7 @@ def sort_chunks_by_map(
     map_for_input: bool,
 ):
     # pylint: disable=missing-function-docstring
-    output = torch.empty(
-        (num_tokens, hidden_size), dtype=inp.dtype, device='cuda'
-    )
+    output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     grid = (num_tokens,)
     _sort_chunks_by_map[grid](
         inp,

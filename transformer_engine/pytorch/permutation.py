@@ -266,9 +266,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
             hidden_size,
         )
         if fp8:
-            output = Float8Tensor(
-                data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
-            )
+            output = Float8Tensor(data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv)
 
         ctx.save_for_backward(row_id_map)
         ctx.num_experts = num_experts
@@ -289,7 +287,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
 
         act_grad = None
         if ctx.needs_input_grad[0]:
-            row_id_map, = ctx.saved_tensors
+            (row_id_map,) = ctx.saved_tensors
             if ctx.fp8:
                 assert isinstance(
                     permuted_act_grad, Float8Tensor
@@ -306,11 +304,13 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 ctx.num_tokens,
                 ctx.num_experts,
                 ctx.hidden_size,
-                fp8_dtype
+                fp8_dtype,
             )
             if ctx.fp8:
                 act_grad = Float8Tensor(
-                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv * ctx.num_experts
+                    data=act_grad,
+                    fp8_dtype=fp8_dtype,
+                    fp8_scale_inv=fp8_scale_inv * ctx.num_experts,
                 )
         return act_grad, None, None
 
@@ -398,7 +398,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             if ctx.with_probs:
                 fwd_input, row_id_map, probs = ctx.saved_tensors
             else:
-                row_id_map, = ctx.saved_tensors
+                (row_id_map,) = ctx.saved_tensors
 
             if ctx.fp8:
                 assert isinstance(
@@ -433,7 +433,9 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 )
 
             if ctx.fp8:
-                act_grad = Float8Tensor(data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv)
+                act_grad = Float8Tensor(
+                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
+                )
 
         if not ctx.needs_input_grad[2]:
             probs_grad = None
@@ -445,7 +447,7 @@ def moe_permute(
     routing_map: torch.Tensor,
     num_out_tokens: int = -1,
     max_token_num: int = -1,
-    map_type: str = 'mask',
+    map_type: str = "mask",
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens based on the routing_map. Token with the same index will be grouped together.
@@ -471,9 +473,9 @@ def moe_permute(
         Type of the routing map tensor.
         Options are: 'mask', 'indice'.
     """
-    if map_type == 'indice':
+    if map_type == "indice":
         return _moe_permute_indice_map.apply(inp, routing_map, num_out_tokens, max_token_num)
-    if map_type == 'mask':
+    if map_type == "mask":
         return _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens)
     raise ValueError("map_type should be one of 'mask' or 'indice'")
 
@@ -483,7 +485,7 @@ def moe_unpermute(
     row_id_map: torch.Tensor,
     probs: torch.Tensor = None,
     restore_shape: torch.Tensor = None,
-    map_type: str = 'mask',
+    map_type: str = "mask",
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -506,9 +508,9 @@ def moe_unpermute(
         Type of the routing map tensor. Should be the same as the value passed to moe_permute.
         Options are: 'mask', 'indice'.
     """
-    if map_type == 'indice':
+    if map_type == "indice":
         return _moe_unpermute_indice_map.apply(inp, row_id_map, probs)
-    if map_type == 'mask':
+    if map_type == "mask":
         return _moe_unpermute_mask_map.apply(inp, row_id_map, probs, restore_shape)
     raise ValueError("map_type should be one of 'mask' or 'indice'")
 
@@ -549,9 +551,7 @@ class _moe_chunk_permute(torch.autograd.Function):
             num_splits,
         )
         if fp8:
-            output = Float8Tensor(
-                data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
-            )
+            output = Float8Tensor(data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv)
 
         ctx.save_for_backward(row_id_map)
         ctx.num_tokens = num_tokens
@@ -571,7 +571,7 @@ class _moe_chunk_permute(torch.autograd.Function):
 
         act_grad = None
         if ctx.needs_input_grad[0]:
-            row_id_map, = ctx.saved_tensors
+            (row_id_map,) = ctx.saved_tensors
             if ctx.fp8:
                 assert isinstance(
                     permuted_act_grad, Float8Tensor
@@ -623,9 +623,7 @@ class _moe_chunk_unpermute(torch.autograd.Function):
             True,
         )
         if fp8:
-            output = Float8Tensor(
-                data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
-            )
+            output = Float8Tensor(data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv)
 
         ctx.save_for_backward(row_id_map)
         ctx.num_tokens = num_tokens
@@ -644,7 +642,7 @@ class _moe_chunk_unpermute(torch.autograd.Function):
 
         act_grad = None
         if ctx.needs_input_grad[0]:
-            row_id_map, = ctx.saved_tensors
+            (row_id_map,) = ctx.saved_tensors
             if ctx.fp8:
                 assert isinstance(
                     unpermuted_act_grad, Float8Tensor
