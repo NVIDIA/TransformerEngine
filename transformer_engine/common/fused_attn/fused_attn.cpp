@@ -84,12 +84,13 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
   auto cudnn_runtime_version = cudnnGetVersion();
 
+  const bool is_ragged = (qkv_format == NVTE_THD);
   // For ragged offsets we only support 32-bit prior to cuDNN 9.5
   // Only used when THD format is requested.
   const bool requires_64bit_ragged_offset =
-      (qkv_format == NVTE_THD && fused_attn::get_ragged_offset_dtype(
-                                     layout_group, num_attn_heads, num_gqa_groups, max_seqlen_q,
-                                     max_seqlen_kv, head_dim_qk, head_dim_v) == DType::kInt64);
+      (is_ragged && fused_attn::get_ragged_offset_dtype(layout_group, num_attn_heads,
+                                                        num_gqa_groups, max_seqlen_q, max_seqlen_kv,
+                                                        head_dim_qk, head_dim_v) == DType::kInt64);
   const bool supported_ragged_offset_size =
       (!requires_64bit_ragged_offset || cudnn_runtime_version >= 90500);
 
@@ -99,9 +100,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         (max_seqlen_q == max_seqlen_kv) && (max_seqlen_q <= 512) && (head_dim_qk == 64) &&
         (head_dim_v == 64) && (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK)) ||
        ((cudnn_runtime_version >= 90201) && (max_seqlen_q % 128 == 0) &&
-        (max_seqlen_kv % 128 == 0) && (head_dim_qk == 128) && (head_dim_v == 128) &&
-        ((qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
-         (qkv_format == NVTE_QKV_Format::NVTE_SBHD)) &&
+        (max_seqlen_kv % 128 == 0) && (head_dim_qk == 128) && (head_dim_v == 128) && (!is_ragged) &&
         ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
          (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)))) &&
       !requires_64bit_ragged_offset) {
@@ -173,8 +172,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          ((cudnn_runtime_version >= 90300) &&
           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
           max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 &&
-          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-          (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && (!is_ragged) &&
           max_seqlen_q <= max_seqlen_kv && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
@@ -182,22 +180,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
            bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)) &&
         // qkv format
-        ((qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
-         (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
-          ((cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
-           (cudnn_runtime_version >= 90600)))) &&
+        ((!is_ragged) || (is_ragged && sm_arch_ >= 90 &&
+                          ((cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
+                           (cudnn_runtime_version >= 90600)))) &&
         // sliding window
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
           (window_size_right == -1 || window_size_right == 0)) ||
          (cudnn_runtime_version >= 90200 &&
           ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
            ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
-            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+            ((!is_ragged && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
+             (is_ragged && attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               max_seqlen_q == max_seqlen_kv)) &&
-            dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-            (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_SBHD))))) &&
+            dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS)))) &&
         // check 64-bit ragged offset support
         (supported_ragged_offset_size)) {
       flag_arb = true;
