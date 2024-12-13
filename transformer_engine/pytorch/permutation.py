@@ -16,6 +16,7 @@ from transformer_engine.pytorch.float8_tensor import Float8Tensor
 __all__ = [
     "moe_permute",
     "moe_unpermute",
+    "moe_sort_chunks_by_indices",
 ]
 
 
