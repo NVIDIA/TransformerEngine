@@ -81,9 +81,10 @@ def general_gemm(
     bias: Optional[torch.Tensor] = None,
     use_split_accumulator: bool = False,
     grad: bool = False,
-    ub_algo: tex.CommOverlapAlgo = None,
     ub: Union[tex.CommOverlap, tex.CommOverlapP2P] = None,
-    ub_buffer: Optional[torch.Tensor] = None,
+    ub_type: tex.CommOverlapType = None,
+    extra_output: Optional[torch.Tensor] = None,
+    bulk_overlap: bool = False,
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
@@ -91,15 +92,25 @@ def general_gemm(
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     # assert quantization_params is None, "FP8 output not supported yet"
+
+    if ub_type is not None:
+        assert ub is not None, (
+            f"{'AG+GEMM' if ub_type == tex.CommOverlapType.AG else 'GEMM+RS'} overlap requires"
+            + "a valid `ub` communicator object."
+        )
+
+    if ub is not None:
+        assert ub_type is not None, f"Comm+GEMM overlap requires a valid `comm_type` argument."
+        if ub_type == tex.CommOverlapType.RS:
+            if not (bulk_overlap and not ub.is_fp8_ubuf()):
+                assert extra_output is not None, "GEMM+RS overlap requires extra output tensor."
+
     if out is not None:
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
     # Use bfloat16 as default bias_dtype
-    bias_dtype = torch.bfloat16 if bias is None else bias.dtype
-    bias_dtype = TE_DType[bias_dtype]
-    if bias is None and not grad:
-        bias = _empty_tensor()
+    bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
     args = (
         A,
@@ -119,105 +130,21 @@ def general_gemm(
         accumulate,
         use_split_accumulator,
     )
+    kwargs = {
+        'comm_overlap': ub,
+        'comm_type': ub_type,
+        'extra_output': extra_output,
+        'bulk_overlap': bulk_overlap,
+    }
 
-    fn = tex.generic_gemm
-    if ub_algo is not None:
-        raise ValueError("Not implemented yet!")
-        if ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_AG:
-            fn = ub.bulk_overlap
-            extra_output_tensor = (
-                empty_tensor if extra_output_tensor is None else extra_output_tensor
-            )
-            args = tuple(
-                args
-                + (
-                    tex.CommOverlapType.AG,
-                    extra_output_tensor,
-                )
-            )
-        elif ub_algo == tex.CommOverlapAlgo.BULK_OVERLAP_RS:
-            fn = ub.bulk_overlap
-            extra_output_tensor = (
-                empty_tensor if extra_output_tensor is None else extra_output_tensor
-            )
-            args = tuple(
-                args
-                + (
-                    tex.CommOverlapType.RS,
-                    extra_output_tensor,
-                )
-            )
-        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
-            fn = ub.split_overlap_ag_p2p
-            extra_output_tensor = (
-                empty_tensor if extra_output_tensor is None else extra_output_tensor
-            )
-            args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P:
-            assert A_scaling_mode == [-1, -1, 1] and B_scaling_mode == [
-                -1,
-                -1,
-                1,
-            ], "Block scaling unsupported for atomic GEMM."
-            fn = ub.atomic_gemm_overlap_ag_p2p
-            extra_output_tensor = (
-                empty_tensor if extra_output_tensor is None else extra_output_tensor
-            )
-            args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
-            fn = ub.split_overlap_rs
-            assert (
-                extra_output_tensor is not None
-            ), "SPLIT_PIPELINED_RS requires extra output tensor"
-            args = tuple(
-                args
-                + (
-                    True,
-                    extra_output_tensor,
-                )
-            )
-        elif ub_algo == tex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
-            fn = ub.split_overlap_rs_p2p
-            assert (
-                extra_output_tensor is not None
-            ), "SPLIT_PIPELINED_RS_P2P requires extra output tensor"
-            args = tuple(args + (extra_output_tensor,))
-        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_RS:
-            assert A_scaling_mode == [-1, -1, 1] and B_scaling_mode == [
-                -1,
-                -1,
-                1,
-            ], "Block scaling unsupported for atomic GEMM."
-            fn = ub.atomic_gemm_overlap_rs
-            assert extra_output_tensor is not None, "ATOMIC_GEMM_RS requires extra output tensor"
-            args = tuple(
-                args
-                + (
-                    True,
-                    extra_output_tensor,
-                )
-            )
-        elif ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_RS_P2P:
-            assert A_scaling_mode == [-1, -1, 1] and B_scaling_mode == [
-                -1,
-                -1,
-                1,
-            ], "Block scaling unsupported for atomic GEMM."
-            fn = ub.atomic_gemm_overlap_rs_p2p
-            assert (
-                extra_output_tensor is not None
-            ), "ATOMIC_GEMM_RS_P2P requires extra output tensor"
-            args = tuple(args + (extra_output_tensor,))
-    if ub_algo is not None and ub_algo == tex.CommOverlapAlgo.ATOMIC_GEMM_AG_P2P:
-        out = fn(*args)
-        gelu_input = None
-        bias_grad = None
+    if ub_type == tex.CommOverlapType.AG and ub.is_p2p_overlap():
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         original_scale_inverses = swizzle_inputs(A, B, layout)
-        out, bias_grad, gelu_input = fn(*args)
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
         reset_swizzled_inputs(A, B, original_scale_inverses)
 
-    return out, bias_grad, gelu_input
+    return out, bias_grad, gelu_input, extra_output
 
 
 def general_grouped_gemm(

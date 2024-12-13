@@ -172,7 +172,7 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   at::Tensor rowwise_data1, columnwise_data, rowwise_scale_inv,
       columnwise_scale_inv;  // TODO(pgadzinski) - change
   opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
-  auto last_dim = torch_shape.back();
+  auto last_dim = static_cast<size_t>(torch_shape.back());
 
   at::Tensor data;
   if (rowwise_usage) {
@@ -181,7 +181,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     } else {
       data = at::empty(torch_shape, opts);
     }
-    rowwise_scale_inv = at::empty({numel / last_dim, last_dim / MXFP8_BLOCK_SIZE}, opts);
+    rowwise_scale_inv = at::empty({static_cast<int64_t>(numel / last_dim),
+                                   static_cast<int64_t>(last_dim / MXFP8_BLOCK_SIZE)}, opts);
     tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(
         rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
@@ -190,7 +191,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   }
   if (columnwise_usage) {
     columnwise_data = at::empty(torch_shape, opts);
-    columnwise_scale_inv = at::empty({numel / (last_dim * MXFP8_BLOCK_SIZE), last_dim}, opts);
+    columnwise_scale_inv = at::empty({static_cast<int64_t>(numel / (last_dim * MXFP8_BLOCK_SIZE)),
+                                      static_cast<int64_t>(last_dim)}, opts);
 
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(
