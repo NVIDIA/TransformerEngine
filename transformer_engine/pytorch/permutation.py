@@ -451,6 +451,8 @@ def moe_permute(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens based on the routing_map. Token with the same index will be grouped together.
+    Tokens with the same designated expert will be grouped together.
+    The routing_map indicates which experts were selected by each token.
 
     Parameters
     ----------
@@ -515,7 +517,7 @@ def moe_unpermute(
     raise ValueError("map_type should be one of 'mask' or 'indice'")
 
 
-class _moe_chunk_permute(torch.autograd.Function):
+class _moe_chunk_sort(torch.autograd.Function):
     """functional MoE chunk permute"""
 
     @staticmethod
@@ -557,13 +559,12 @@ class _moe_chunk_permute(torch.autograd.Function):
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
         ctx.fp8 = fp8
-        return output, row_id_map
+        return output
 
     @staticmethod
     def backward(
         ctx,
         permuted_act_grad: torch.Tensor,
-        _,
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
@@ -584,7 +585,6 @@ class _moe_chunk_permute(torch.autograd.Function):
                 row_id_map,
                 ctx.num_tokens,
                 ctx.hidden_size,
-                True,
             )
             if ctx.fp8:
                 act_grad = Float8Tensor(
@@ -593,84 +593,15 @@ class _moe_chunk_permute(torch.autograd.Function):
         return act_grad, None, None
 
 
-class _moe_chunk_unpermute(torch.autograd.Function):
-    """functional MoE chunk unpermute"""
-
-    @staticmethod
-    def forward(
-        ctx,
-        inp: torch.Tensor,
-        row_id_map: torch.Tensor,
-    ) -> torch.Tensor:
-        # pylint: disable=missing-function-docstring
-        if not inp.numel():
-            return inp, torch.tensor([], device=inp.device)
-
-        assert inp.is_cuda, "TransformerEngine needs CUDA."
-
-        num_tokens, hidden_size = inp.shape
-
-        fp8 = isinstance(inp, Float8Tensor)
-        if fp8:
-            fp8_dtype = inp._fp8_dtype
-            fp8_scale_inv = inp._scale_inv
-            inp = inp._data
-        output = triton_permuataion.sort_chunks_by_map(
-            inp,
-            row_id_map,
-            num_tokens,
-            hidden_size,
-            True,
-        )
-        if fp8:
-            output = Float8Tensor(data=output, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv)
-
-        ctx.save_for_backward(row_id_map)
-        ctx.num_tokens = num_tokens
-        ctx.hidden_size = hidden_size
-        ctx.fp8 = fp8
-        return output
-
-    @staticmethod
-    def backward(
-        ctx,
-        unpermuted_act_grad: torch.Tensor,
-    ) -> Tuple[torch.Tensor, ...]:
-        # pylint: disable=missing-function-docstring
-        if not unpermuted_act_grad.numel():
-            return unpermuted_act_grad, None, None
-
-        act_grad = None
-        if ctx.needs_input_grad[0]:
-            (row_id_map,) = ctx.saved_tensors
-            if ctx.fp8:
-                assert isinstance(
-                    unpermuted_act_grad, Float8Tensor
-                ), "Grad of the output must be in Float8Tensor type for FP8 moe_chunk_unpermute."
-                fp8_dtype = unpermuted_act_grad._fp8_dtype
-                fp8_scale_inv = unpermuted_act_grad._scale_inv
-                unpermuted_act_grad = unpermuted_act_grad._data
-            act_grad = triton_permuataion.sort_chunks_by_map(
-                unpermuted_act_grad,
-                row_id_map,
-                ctx.num_tokens,
-                ctx.hidden_size,
-                False,
-            )
-            if ctx.fp8:
-                act_grad = Float8Tensor(
-                    data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
-                )
-        return act_grad, None
-
-
-def moe_chunk_permute(
+def moe_sort_chunks_by_indices(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
-    sorted_idxs: torch.Tensor,
+    sorted_indices: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Split and sort the input tensor based on the split_sizes and sorted indices.
+    The inp tensor is splitted along dim-0 according to the split_sizes list and then sorted
+    according to the sorted_indices.
 
     Parameters
     ----------
@@ -678,25 +609,7 @@ def moe_chunk_permute(
         Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
     split_sizes: torch.Tensor
         Chunk sizes of the inp tensor along the 0-th dimension.
-    sorted_idxs: torch.Tensor
+    sorted_indices: torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    return _moe_chunk_permute.apply(inp, split_sizes, sorted_idxs)
-
-
-def moe_chunk_unpermute(
-    inp: torch.Tensor,
-    row_id_map: torch.Tensor = None,
-) -> torch.Tensor:
-    """
-    Split and unsort the input tensor based on the row_id_map returned by moe_chunk_permute.
-
-    Parameters
-    ----------
-    inp: torch.Tensor
-        Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
-    row_id_map: torch.Tensor
-        Indicate the indices in the permuted tensor of each token.
-        This tensor is produced by moe_chunk_permute.
-    """
-    return _moe_chunk_unpermute.apply(inp, row_id_map)
+    return _moe_chunk_sort.apply(inp, split_sizes, sorted_indices)

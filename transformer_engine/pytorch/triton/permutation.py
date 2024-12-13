@@ -440,7 +440,7 @@ def _sort_chunks_by_idxs_kernel(
     # pointers
     input_ptr,
     split_sizes_ptr,
-    sorted_idxs_ptr,
+    sorted_indices_ptr,
     output_ptr,
     dst_rows_ptr,
     # sizes
@@ -458,7 +458,9 @@ def _sort_chunks_by_idxs_kernel(
     pid = tl.program_id(0)
 
     load_split_offset = tl.arange(0, IDX_LOAD_WIDTH)
-    sorted_idxs = tl.load(sorted_idxs_ptr + load_split_offset, mask=load_split_offset < num_splits)
+    sorted_indices = tl.load(
+        sorted_indices_ptr + load_split_offset, mask=load_split_offset < num_splits
+    )
 
     # get chunk idx of the current token in the input tensor
     input_chunk_idx = -1
@@ -477,14 +479,14 @@ def _sort_chunks_by_idxs_kernel(
     output_chunk_idx = 0
     cursor = 0
     while cursor < num_splits:
-        cur_input_idx = tl.load(sorted_idxs_ptr + cursor)
+        cur_input_idx = tl.load(sorted_indices_ptr + cursor)
         if cur_input_idx == input_chunk_idx:
             output_chunk_idx = cursor
         cursor += 1
 
     # make row_id_map
     output_split_sizes = tl.load(
-        split_sizes_ptr + sorted_idxs, mask=load_split_offset < num_splits
+        split_sizes_ptr + sorted_indices, mask=load_split_offset < num_splits
     ).to(tl.int64)
     output_pre_split_sizes = tl.where(load_split_offset < output_chunk_idx, output_split_sizes, 0)
     dst_row = tl.sum(output_pre_split_sizes) + in_chunk_offset
@@ -504,7 +506,7 @@ def _sort_chunks_by_idxs_kernel(
 def sort_chunks_by_idx(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
-    sorted_idxs: torch.Tensor,
+    sorted_indices: torch.Tensor,
     num_tokens: int,
     hidden_size: int,
     num_splits: int,
@@ -516,7 +518,7 @@ def sort_chunks_by_idx(
     _sort_chunks_by_idxs_kernel[grid](
         inp,
         split_sizes,
-        sorted_idxs,
+        sorted_indices,
         output,
         row_id_map,
         num_splits,
@@ -554,7 +556,6 @@ def _sort_chunks_by_map(
     stride_output_token,
     stride_output_hidden,
     # metas
-    MAP_FOR_INPUT: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -563,12 +564,8 @@ def _sort_chunks_by_map(
     while current_start < hidden_size:
         current_offset = current_start + tl.arange(0, BLOCK_SIZE)
         mask = current_offset < hidden_size
-        input_token_idx = dst_row if MAP_FOR_INPUT else pid
-        output_token_idx = pid if MAP_FOR_INPUT else dst_row
-        input_offsets = input_token_idx * stride_input_token + current_offset * stride_input_hidden
-        output_offsets = (
-            output_token_idx * stride_output_token + current_offset * stride_output_hidden
-        )
+        input_offsets = dst_row * stride_input_token + current_offset * stride_input_hidden
+        output_offsets = pid * stride_output_token + current_offset * stride_output_hidden
         inp = tl.load(input_ptr + input_offsets, mask=mask)
         tl.store(output_ptr + output_offsets, inp, mask=mask)
         current_start += BLOCK_SIZE
@@ -579,7 +576,6 @@ def sort_chunks_by_map(
     row_id_map: torch.Tensor,
     num_tokens: int,
     hidden_size: int,
-    map_for_input: bool,
 ):
     # pylint: disable=missing-function-docstring
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
@@ -593,6 +589,5 @@ def sort_chunks_by_map(
         inp.stride(1),
         output.stride(0),
         output.stride(1),
-        map_for_input,
     )
     return output

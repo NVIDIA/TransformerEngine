@@ -77,8 +77,7 @@ from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,
     moe_unpermute,
-    moe_chunk_permute,
-    moe_chunk_unpermute,
+    moe_sort_chunks_by_indices,
 )
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
