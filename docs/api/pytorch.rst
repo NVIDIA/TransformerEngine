@@ -52,6 +52,10 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
+.. autoapifunction:: transformer_engine.pytorch.moe_chunk_permute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_chunk_unpermute
+
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
 .. autoapifunction:: transformer_engine.pytorch.destroy_ub
