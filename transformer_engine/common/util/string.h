@@ -13,15 +13,34 @@
 
 namespace transformer_engine {
 
-/*! \brief Convert to C-style or C++-style string */
+inline const std::string &to_string_like(const std::string &val) noexcept { return val; }
+
+constexpr const char *to_string_like(const char *val) noexcept { return val; }
+
+/* \brief Convert arithmetic type to string */
 template <typename T, typename = typename std::enable_if<std::is_arithmetic<T>::value>::type>
 inline std::string to_string_like(const T &val) {
   return std::to_string(val);
 }
 
-inline const std::string &to_string_like(const std::string &val) noexcept { return val; }
-
-constexpr const char *to_string_like(const char *val) noexcept { return val; }
+/* \brief Convert container to string */
+template <typename T, typename = typename std::enable_if<!std::is_arithmetic<T>::value>::type,
+          typename = decltype(std::declval<T>().begin())>
+inline std::string to_string_like(const T &container) {
+  std::string str;
+  str.reserve(1024);  // Assume strings are <1 KB
+  str += "(";
+  bool first = true;
+  for (const auto &val : container) {
+    if (!first) {
+      str += ",";
+    }
+    str += to_string_like(val);
+    first = false;
+  }
+  str += ")";
+  return str;
+}
 
 /*! \brief Convert arguments to strings and concatenate */
 template <typename... Ts>

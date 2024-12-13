@@ -90,6 +90,23 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
   cudaEventCreateWithFlags(&_stop_compute, 0);
   cudaEventCreateWithFlags(&_start_comm, 0);
   cudaEventCreateWithFlags(&_stop_comm, 0);
+
+  /*
+    Defining the launcher order between the communication and GEMM kernels
+    using Fast Dependent Launch when CUDA_DEVICE_MAX_CONNECTIONS>1.
+    The event is used to schedule the communication kernel before the GEMM.
+    This is needed only for Hopper, which uses persistent CTA execution.
+  */
+  int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
+  int runtime_version = 0;
+  cudaRuntimeGetVersion(&runtime_version);
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0);
+  if (runtime_version >= 12030 && deviceProp.major == 9 && max_connection > 1) {
+    cudaEventCreateWithFlags(&_comm_launch_event, cudaEventDisableTiming);
+  } else {
+    _comm_launch_event = 0;
+  }
 }
 
 CommOverlapCore::~CommOverlapCore() {
@@ -97,6 +114,7 @@ CommOverlapCore::~CommOverlapCore() {
   cudaEventDestroy(_start_comm);
   cudaEventDestroy(_stop_compute);
   cudaEventDestroy(_start_compute);
+  if (_comm_launch_event) cudaEventDestroy(_comm_launch_event);
 
   if (_atomic_gemm) cudaFree(_counter.dptr());
 
@@ -168,7 +186,8 @@ void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper 
   // Communication: AG and RS
   int comm_elements = (_ubuf.numel() / 2) * _ubuf.element_size();  // UBUF uses 2Byte element size
   if (comm_type == CommOverlapType::AG) {
-    allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm);
+    allgather2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
+                                (cudaEvent_t)_comm_launch_event);
   } else {
     if (_ubuf.element_size() == 1) {
       assert(_ubuf_scale_inv_initialized);
@@ -178,13 +197,18 @@ void CommOverlapBase::bulk_overlap(TensorWrapper &A, bool transa, TensorWrapper 
       assert(rs_output.element_size() == 2);
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, _ubuf_scale_inv, _ub_reg, 0,
-                                                 comm_elements, _ub_comm, _stream_comm);
+                                                 comm_elements, _ub_comm, _stream_comm,
+                                                 (cudaEvent_t)_comm_launch_event);
     } else {
-      reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm);
+      reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
+                                      (cudaEvent_t)_comm_launch_event);
     }
   }
 
   assert(pre_gelu_out.numel() == 0);
+  // When the kernel launch order is defined, enforce the GEMM kernel launch to wait for the communication kernel launch
+  if (_comm_launch_event)
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)stream_main, _comm_launch_event, 0));
   nvte_cublas_gemm(A.data(), B.data(), D.data(), bias.data(), pre_gelu_out.data(), transa, transb,
                    grad, workspace.data(), accumulate, use_split_accumulator, _math_sms,
                    stream_main);

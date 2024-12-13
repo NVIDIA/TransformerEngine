@@ -62,7 +62,7 @@ class CommOverlapCore {
   bool _ubuf_scale_inv_initialized{false};
 
   std::vector<cudaStream_t> _stream_compute;
-  cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm;
+  cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
 
  public:
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,

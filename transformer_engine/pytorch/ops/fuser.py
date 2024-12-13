@@ -135,7 +135,11 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
                     requires_grad = any(any(x.requires_grad for x in xs) for xs in extra_inputs)
             for idx in basic_op_idxs:
                 basic_op_ctxs[idx].requires_grad = requires_grad
-            x.requires_grad_(requires_grad=requires_grad)
+            if requires_grad != x.requires_grad:
+                if requires_grad:
+                    x.requires_grad_()
+                else:
+                    x = x.detach()
 
             # Forward op
             extra_inputs = [basic_op_extra_inputs[idx] for idx in basic_op_idxs]

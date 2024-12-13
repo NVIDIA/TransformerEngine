@@ -32,24 +32,17 @@ pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shap
   return PackOpaque(desc);
 }
 
-pybind11::bytes PackCustomCallNormDescriptor(
-    size_t batch_size, size_t hidden_size, size_t wkspace_size, size_t barrier_size,
-    const std::vector<size_t> &dgamma_part_shape, const std::vector<size_t> &dbeta_part_shape,
-    DType x_dtype, DType w_dtype, DType wkspace_dtype, DType barrier_dtype, DType dgamma_part_dtype,
-    DType dbeta_part_dtype, bool zero_centered_gamma, float eps, int sm_margin) {
+pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
+                                             size_t wkspace_size, DType x_dtype, DType w_dtype,
+                                             DType wkspace_dtype, bool zero_centered_gamma,
+                                             float eps, int sm_margin) {
   CustomCallNormDescriptor desc{};
   desc.batch_size = batch_size;
   desc.hidden_size = hidden_size;
   desc.wkspace_size = wkspace_size;
-  desc.barrier_size = barrier_size;
-  desc.dgamma_part_shape.from_vector(dgamma_part_shape);
-  desc.dbeta_part_shape.from_vector(dbeta_part_shape);
   desc.x_dtype = x_dtype;
   desc.w_dtype = w_dtype;
   desc.wkspace_dtype = wkspace_dtype;
-  desc.barrier_dtype = barrier_dtype;
-  desc.dgamma_part_dtype = dgamma_part_dtype;
-  desc.dbeta_part_dtype = dbeta_part_dtype;
   desc.zero_centered_gamma = zero_centered_gamma;
   desc.eps = eps;
   desc.sm_margin = sm_margin;
