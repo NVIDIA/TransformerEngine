@@ -30,14 +30,14 @@ endif()
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
 if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
+            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
             "Try running 'git submodule update --init --recursive' "
             "within the Transformer Engine source.")
 endif()
-include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
@@ -46,7 +46,7 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
 list(APPEND transformer_engine_SOURCES
-     pycudnn.cpp
+     cudnn_utils.cpp
      transformer_engine.cpp
      common.cu
      transpose/cast_transpose.cu
@@ -61,15 +61,17 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
+     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
@@ -80,7 +82,11 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
-     recipe/delayed_scaling.cu)
+     recipe/delayed_scaling.cu
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/userbuffers/userbuffers.cu
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -92,6 +98,15 @@ target_link_libraries(transformer_engine PUBLIC
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
+
+# Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
+if (NVTE_UB_WITH_MPI)
+    find_package(MPI REQUIRED)
+    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
+    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
+endif()
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)

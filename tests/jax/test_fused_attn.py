@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from math import sqrt
 from typing import Tuple, Optional
+import random
 
 import jax
 import jax.numpy as jnp
@@ -305,11 +306,14 @@ class FusedAttnRunner:
         ]:
             pytest.skip("THD format requires padding masks.")
 
-        if self.qkv_layout == QKVLayout.BS3HD or get_qkv_format(self.qkv_layout) == QKVFormat.THD:
-            if self.num_heads_q != self.num_heads_kv:
-                pytest.skip("QKVPACKED layout requires num_heads_q and num_heads_kv to be equal.")
+        qkv_format = get_qkv_format(self.qkv_layout)
+        if self.qkv_layout == QKVLayout.BS3HD or qkv_format == QKVFormat.THD:
             if self.max_seqlen_q != self.max_seqlen_kv:
-                pytest.skip("QKVPACKED layout requires max_seqlen_q and max_seqlen_kv to be equal.")
+                pytest.skip(f"{self.qkv_layout} requires max_seqlen_q == max_seqlen_kv")
+
+        if self.qkv_layout == QKVLayout.BS3HD or self.qkv_layout == QKVLayout.T3HD:
+            if self.num_heads_q != self.num_heads_kv:
+                pytest.skip(f"{self.qkv_layout} requires num_heads_q == num_heads_kv")
 
         if self.max_seqlen_q > self.max_seqlen_kv and self.window_size is not None:
             pytest.skip(

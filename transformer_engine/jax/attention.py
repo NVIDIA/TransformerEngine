@@ -79,6 +79,19 @@ class QKVFormat(Enum):
     THD = NVTE_QKV_Format.NVTE_THD
 
 
+class CPStrategy(Enum):
+    """Defines the context parallel strategies of Jax fused attention.
+
+    DEFAULT: Default strategy will choose automatically if context parallel axis is sharded.
+    ALL_GATHER: All-gather/reduce scatter implementation.
+    RING: Ring attention implementation (https://arxiv.org/abs/2310.01889).
+    """
+
+    DEFAULT = 0
+    ALL_GATHER = 1
+    RING = 2
+
+
 def get_qkv_format(qkv_layout):
     """
     Get qkv_format from qkv_layout
@@ -190,7 +203,6 @@ def is_fused_attn_kernel_available(
     kv_max_seqlen,
     head_dim,
     window_size: Optional[Tuple[int, int]] = None,
-    is_context_parallel: bool = False,
 ):
     """
     To check whether the fused attention kernel is supported
@@ -215,11 +227,6 @@ def is_fused_attn_kernel_available(
     if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
         return False
 
-    # For context parallel need to check additional masking types
-    if is_context_parallel and attn_mask_type == AttnMaskType.CAUSAL_MASK:
-        if not make_helper(AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK).is_fused_attn_kernel_available():
-            return False
-
     return True
 
 
@@ -242,73 +249,16 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def _reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat, inverse: bool):
-    match tensor_format:
-        case QKVFormat.SBHD:
-            seq_dim = 0
-        case QKVFormat.BSHD:
-            seq_dim = 1
-        case _:
-            raise ValueError(f"{tensor_format=} is not supported for causal load balancing.")
-
-    if cp_size == 1:
-        return tensor
-
-    if cp_size % 2 != 0:
-        raise ValueError(f"{cp_size=} must be a multiple of 2.")
-
-    # Need to ensure we have 2 pairs to swap for balancing between cp ranks
-    if tensor.shape[seq_dim] % (cp_size * 2) != 0:
-        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
-
-    # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D]
-    # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
-    ori_tensor_shape = tensor.shape
-    tensor = tensor.reshape(
-        (
-            *ori_tensor_shape[:seq_dim],
-            2 * cp_size,
-            ori_tensor_shape[seq_dim] // (2 * cp_size),
-            *ori_tensor_shape[seq_dim + 1 :],
-        )
-    )
-
-    parts = []
-    if not inverse:
-        for cp_rank in range(cp_size):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            index = jnp.array([cp_rank, (2 * cp_size - cp_rank - 1)])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-    else:
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 4 * cp_rank
-            index = jnp.array([base, base + 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-        for cp_rank in range(cp_size // 2):
-            # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D] -> [B, 2, S/2*cp_size, H, D]
-            # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D] -> [2, S/2*cp_size, B, H, D]
-            base = 2 * cp_size - 1 - 4 * cp_rank
-            index = jnp.array([base, base - 2])
-            parts.append(jnp.take(tensor, index, axis=seq_dim))
-
-    # [B, S, H, D]: [B, 2*cp_size, S/2*cp_size, H, D]
-    # [S, B, H, D]: [2*cp_size, S/2*cp_size, B, H, D]
-    combined = jnp.stack(parts, axis=seq_dim)
-
-    return combined.reshape(ori_tensor_shape)
-
-
 def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
     """Reorders a tensor for load balancing the compute of causal attention."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, False)
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
 
 
 def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
     """Inverse operation of `reorder_causal_load_balancing`."""
-    return _reorder_causal_load_balancing(tensor, cp_size, tensor_format, True)
+    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
+    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
 def fused_attn(
@@ -323,6 +273,7 @@ def fused_attn(
     dropout_probability: float,
     is_training: bool,
     window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -410,6 +361,7 @@ def fused_attn(
         is_training=is_training,
         max_segments_per_seq=1,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -433,6 +385,7 @@ def fused_attn_thd(
     is_training: bool,
     max_segments_per_seq: int = 1,
     window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
@@ -533,6 +486,7 @@ def fused_attn_thd(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -540,7 +494,7 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -557,6 +511,7 @@ def _fused_attn(
     is_training: bool,
     max_segments_per_seq: int,
     window_size: Optional[Tuple[int, int]],
+    context_parallel_strategy: CPStrategy,
     context_parallel_causal_load_balanced: bool,
     context_parallel_axis: str,
 ):
@@ -576,6 +531,7 @@ def _fused_attn(
         is_training,
         max_segments_per_seq,
         window_size,
+        context_parallel_strategy,
         context_parallel_causal_load_balanced,
         context_parallel_axis,
     )
@@ -598,6 +554,7 @@ def _fused_attn_fwd_rule(
     is_training,
     max_segments_per_seq,
     window_size,
+    context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
 ):
@@ -617,6 +574,7 @@ def _fused_attn_fwd_rule(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )
@@ -645,6 +603,7 @@ def _fused_attn_bwd_rule(
     is_training,
     max_segments_per_seq,
     window_size,
+    context_parallel_strategy,
     context_parallel_causal_load_balanced,
     context_parallel_axis,
     ctx,
@@ -680,6 +639,7 @@ def _fused_attn_bwd_rule(
         is_training=is_training,
         max_segments_per_seq=max_segments_per_seq,
         window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
         context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
         context_parallel_axis=context_parallel_axis,
     )

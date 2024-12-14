@@ -11,7 +11,7 @@ import socket
 import fcntl
 import struct
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Generator, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 
 import torch
@@ -87,9 +87,55 @@ def initialize_ub(
     ub_cfgs: Optional[dict] = None,
     bootstrap_backend: Union[str, torch.distributed.Backend] = None,
 ) -> None:
-    """Initialize communicators for TP comm overlap using userbuffers."""
+    r"""
+    Initialize the Userbuffers communicator for overlapping tensor-parallel communications with
+    GEMM compute in te.Linear, te.LayerNormLinear and te.LayerNormMLP modules.
+
+    Parameters
+    ----------
+    shape : list
+            shape of the communication buffer, typically set to be the same as the global shape of
+            the input tensor to a te.TransformerLayer forward pass, with the sequence and batch
+            dimensions collapsed together -- i.e.: `(sequence_length * batch_size, hidden_size)`
+    tp_size : int
+              number of GPUs in the tensor-parallel process group
+    use_fp8 : bool = False
+              allocate the communication buffer for FP8 GEMM inputs/outputs
+    dtype : torch.dtype = torch.bfloat16
+            non-FP8 data type of the communication buffer when `use_fp8 = False`
+    ub_cfgs: dict = None
+             Configuration dictionary with the structure
+             ```
+             {
+                <gemm_name> : {
+                    "method": <"ring_exchange" or "pipeline">,
+                    "is_reduce_scatter": bool,
+                    "num_sm": int,
+                    "cga_size": int,
+                    "set_sm_margin": bool,
+                    "num_splits": int,
+                    "aggregate": bool,
+                    "atomic_gemm": bool,
+                    "use_ce": bool,
+                    "fp8_buf": bool,
+                }
+             }
+             ```
+             for `te.TransformerLayer` GEMM layers in `["qkv_fprop", "qkv_dgrad", "qkv_wgrad",
+             "proj_fprop", "proj_dgrad", "proj_wgrad", "fc1_fprop", "fc1_dgrad", "fc2_dgrad",
+             "fc2_fprop", "fc2_dgrad"]`.
+    bootstrap_backend : str = None
+                        `torch.distributed` communication backend for the all-gather, broadcast and
+                        barrier collectives during Userbuffers initialization. Not all backends are
+                        valid for every cluster configuration and distributed launch method even if
+                        they are available in PyTorch. When left unset, the initialization prefers
+                        to use the MPI backend, falling back first on Gloo and then NCCL if MPI is
+                        not available. Setting `NVTE_UB_WITH_MPI=1` when building TE overrides this
+                        option and always initializes Userbuffers with direct MPI calls in C++,
+                        which also requires `MPI_HOME=/path/to/mpi/root` to be set at compile time.
+    """
     if not tex.device_supports_multicast():
-        assert bool(os.getenv("UB_SKIPMC", "0")), (
+        assert bool(int(os.getenv("UB_SKIPMC", "0"))), (
             "CUDA device, driver and/or toolkit version does not support comm+GEMM overlap with "
             + "CUDA Multicast. Launch app with UB_SKIPMC=1 to try CUDA IPC instead."
         )
@@ -99,50 +145,52 @@ def initialize_ub(
     _ub_communicators = {}
 
     if tex.ubuf_built_with_mpi():
-        # Userbuffers will ignore all these values when it is built with MPI, so these are just
-        # placeholders based on an assumption that tp_size covers all devices in a physical node.
+        # We're bootstrapping with direct calls to MPI in Userbuffers code so we need to force
+        # an MPI_Init() here by creating a new MPI process group...
         assert torch.distributed.is_mpi_available()
-        mpi_group = torch.distributed.new_group(backend="mpi")
-        world_rank = torch.distributed.get_rank(mpi_group)
-        world_size = torch.distributed.get_world_size(mpi_group)
-        local_rank = world_rank % tp_size
-        local_size = tp_size
-        self_node_idx = world_rank // tp_size
-        num_nodes = world_size // tp_size
-        ub_callbacks = tex.UbufBootstrapCallbacks()
+        _ = torch.distributed.new_group(backend="mpi")
+        helper = tex.CommOverlapHelper()
     else:
+        # Bootstrapping with torch.distributed API, so check backend and construct
+        # intra/inter-node process groups...
         assert (
             torch.distributed.is_initialized()
         ), "torch.distributed must be initialized before Userbuffers"
         if bootstrap_backend is None:
             bootstrap_backend = "nccl"
-            if torch.distributed.is_gloo_available():
-                bootstrap_backend = "gloo"
-            elif torch.distributed.is_mpi_available():
+            if torch.distributed.is_mpi_available():
                 bootstrap_backend = "mpi"
+            elif torch.distributed.is_gloo_available():
+                bootstrap_backend = "gloo"
         else:
-            assert bootstrap_backend in ["gloo", "mpi", "nccl"]
+            assert bootstrap_backend in [
+                "gloo",
+                "mpi",
+                "nccl",
+            ], "Invalid torch.distributed backend for bootstrapping Userbuffers!"
+            assert torch.distributed.is_backend_available(bootstrap_backend), (
+                f"PyTorch must be compiled with '{bootstrap_backend}' support in order to "
+                f"bootstrap Userbuffers with '{bootstrap_backend}' collectives."
+            )
 
         world_group = torch.distributed.new_group(backend=bootstrap_backend)
         world_rank = torch.distributed.get_rank(world_group)
         world_size = torch.distributed.get_world_size(world_group)
 
-        # Construct an intra-node communicator based on global ranks that share the same hostname
-        # NOTE: If the user specified a valid network interface for NCCL or GLOO, use the host
-        #       address on that interface instead of the hostname. This can help avoid issues when
-        #       different hosts have the same hostname on Kubernetes clusters.
-        hostname = socket.gethostname()
+        # We have single-node NVLink so we can color based on physical node hostnames.
+        # NOTE: Prefer a network interface defined via the NVTE_UB_SOCKET_IFNAME variable, and
+        #       otherwise fall back on NCCL_SOCKET_IFNAME or GLOO_SOCKET_IFNAME depending on
+        #       the chosen bootstrap backend.
+        mydomain = socket.gethostname()
         ifname = os.getenv(
-            "NVTE_UB_SOCKET_IFNAME",
-            os.getenv("NCCL_SOCKET_IFNAME", os.getenv("GLOO_SOCKET_IFNAME")),
+            "NVTE_UB_SOCKET_IFNAME", os.getenv(f"{bootstrap_backend.upper()}_SOCKET_IFNAME")
         )
-
         if ifname is not None:
             # Make sure the ifname found in the environment is a valid network interface
             if ifname in [name for _, name in socket.if_nameindex()]:
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 try:
-                    hostname = socket.inet_ntoa(
+                    mydomain = socket.inet_ntoa(
                         fcntl.ioctl(
                             s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
                         )[20:24]
@@ -154,56 +202,63 @@ def initialize_ub(
             else:
                 ifname_warning = (
                     f"'{ifname}' is not a valid network interface! `te.initialize_ub()` will"
-                    " attempt to "
-                    + "detect ranks on the same node by matching 'socket.gethostname()', which is "
-                    + "known to fail on virtual clusters like Kubernetes. If Userbuffers "
-                    + "initialization fails, please set the 'NVTE_UB_SOCKET_IFNAME' variable in "
-                    + "your environment to the correct network interface."
+                    + " attempt to detect ranks on the same node by matching "
+                    + "'socket.gethostname()', which is known to fail on virtual clusters like "
+                    + "Kubernetes. If Userbuffers initialization fails, please set the "
+                    + "'NVTE_UB_SOCKET_IFNAME' variable in your environment to the correct network "
+                    + "interface."
                 )
                 warnings.warn(ifname_warning, UserWarning)
 
-        hostnames = [None for _ in range(world_size)]
-        torch.distributed.all_gather_object(hostnames, hostname, world_group)
-        unique_hosts = []
-        for host in hostnames:
-            if host not in unique_hosts:
-                unique_hosts.append(host)
-        num_nodes = len(unique_hosts)
+        # Allgather the domain colors across ranks and reduce to a list of unique domains
+        domain_per_rank_list = [None for _ in range(world_size)]
+        torch.distributed.all_gather_object(domain_per_rank_list, mydomain, world_group)
+        unique_domains = []
+        for domain in domain_per_rank_list:
+            if domain not in unique_domains:
+                unique_domains.append(domain)
+        num_domains = len(unique_domains)
 
-        if num_nodes > 1:
-            ranks_per_node_list = [[] for _ in range(num_nodes)]
-            self_node_idx = -1
-            for i, host in enumerate(hostnames):
-                node_idx = unique_hosts.index(host)
-                ranks_per_node_list[node_idx].append(i)
-                if host == hostname:
-                    self_node_idx = node_idx
-            assert self_node_idx >= 0, "Internal TE error!"
+        if num_domains > 1:
+            # DP/TP model replicated on multiple NVLink domains
+            ranks_per_domain_list = [[] for _ in range(num_domains)]
+            mydomain_idx = -1
+            for i, domain in enumerate(domain_per_rank_list):
+                domain_idx = unique_domains.index(domain)
+                ranks_per_domain_list[domain_idx].append(i)
+                if domain == mydomain:
+                    mydomain_idx = domain_idx
+            assert mydomain_idx >= 0, "Internal TE error!"
 
-            intra_node_group, _ = torch.distributed.new_subgroups_by_enumeration(
-                ranks_per_node_list, backend=bootstrap_backend
+            intra_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                ranks_per_domain_list, backend=bootstrap_backend
             )
-            local_rank = torch.distributed.get_rank(intra_node_group)
-            local_size = torch.distributed.get_world_size(intra_node_group)
-            intra_node_ranks = torch.distributed.get_process_group_ranks(intra_node_group)
+            local_rank = torch.distributed.get_rank(intra_domain_group)
+            intra_domain_ranks = torch.distributed.get_process_group_ranks(intra_domain_group)
+
+            inter_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
+                [list(ranks) for ranks in zip(*ranks_per_domain_list)],
+                backend=bootstrap_backend,
+            )
+
+            helper = tex.CommOverlapHelper(world_group, intra_domain_group, inter_domain_group)
 
         else:
-            self_node_idx = 0
-            intra_node_group = world_group
+            # TP model on single NVLink domain, no replication, no data-parallelism
+            mydomain_idx = 0
             local_rank = world_rank
-            local_size = world_size
-            intra_node_ranks = list(range(world_size))
+            intra_domain_ranks = list(range(world_size))
+
+            helper = tex.CommOverlapHelper(world_group)
 
         if world_rank == 0:
-            print(f"!!! [UB] Number of physical nodes: {num_nodes}\n", end="", flush=True)
+            print(f"!!! [UB] Number of NVLink domains: {num_domains}\n", end="", flush=True)
         if local_rank == 0:
             print(
-                f"!!! [UB] Global ranks on node {self_node_idx}: {intra_node_ranks}\n",
+                f"!!! [UB] Global ranks on domain {mydomain_idx}: {intra_domain_ranks}\n",
                 end="",
                 flush=True,
             )
-
-        ub_callbacks = tex.UbufBootstrapCallbacks(world_group, intra_node_group)
 
     # Increase the workspace by the number of maximum concurrent streams
     global _cublas_workspace
@@ -303,46 +358,34 @@ def initialize_ub(
                 if atomic_gemm and method == "ring_exchange":
                     assert rs_ag_pairs[name] in layers_atomic_ring_exchange, assert_message
 
-        sample_buffer = torch.empty(
-            shape, dtype=torch.uint8 if (use_fp8 and fp8_buf) else dtype, device="cuda"
-        )
+        buffer_dtype = torch.uint8 if (use_fp8 and fp8_buf) else dtype
         if method == "ring_exchange":
-            ub_obj = tex.UbufP2PCommOverlap(
-                sample_buffer,  # Sample userbuffer
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                self_node_idx,  # Node ID
-                num_nodes,  # Number of nodes
+            ub_obj = tex.CommOverlapP2P(
+                shape,  # Communication buffer shape
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                set_sm_margin,  # Set SM margin
-                aggregate,  # Aggregate 2X GEMM chunks
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                is_reduce_scatter,  # Overlap with reduce scatter
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                use_ce,  # Use copy engine for P2P communications
-                ub_callbacks,
+                tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
+                use_ce=use_ce,
+                aggregate=aggregate,
             )
         else:
-            ub_obj = tex.UbufCommOverlap(
-                sample_buffer,  # Sample userbuffer
-                world_rank,  # World rank
-                world_size,  # World size
-                local_rank,  # Rank within the node
-                local_size,  # Number of ranks/GPUs per node
-                self_node_idx,  # Node ID
-                num_nodes,  # Number of nodes
+            ub_obj = tex.CommOverlap(
+                shape,  # Communication buffer shape
+                buffer_dtype,  # Communication buffer data type
+                helper,  # Helper for torch.distributed callbacks during bootstrapping
                 tp_size,  # Tensor-parallel group size (may be different than local_size)
-                num_sm,  # Number of communication SMs
-                cga_size,  # CGA cluster size
-                num_splits,  # Number of communication splits
-                set_sm_margin,  # Set SM margin
-                _NUM_MAX_UB_STREAMS,  # Max concurrent GEMM streams
-                atomic_gemm,  # Use a single GEMM with atomic-counters
-                ub_callbacks,
+                num_splits=num_splits,
+                num_max_streams=_NUM_MAX_UB_STREAMS,
+                comm_cga_size=cga_size,
+                num_comm_sm=num_sm,
+                set_sm_margin=set_sm_margin,
+                atomic_gemm=atomic_gemm,
             )
         _ub_communicators[name] = ub_obj
 
@@ -407,15 +450,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, Float8Tensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
-
-        # Fast getter for parameters
-        # Note: torch.nn.Module does not store parameters like normal
-        # attrs, but rather in a dict. When attempting to access, the
-        # module will raise an AttributeError in __getattribute__ and
-        # call a custom __getattr__. This is unnecessary overhead if
-        # we know we are accessing a parameter.
-        self._fast_get_param: Callable[str, torch.nn.Parameter]
-        self._fast_get_param = self.__dict__["_parameters"].get
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
@@ -554,20 +588,50 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     def get_extra_state(self) -> torch.Tensor:
         """Save before checkpointing."""
+
+        # This implementation is working around a few issues:
+        #
+        # (1) PyTorch's "extra state" infrastructure might be able to
+        #     support any picklable type, but they make no guarantees.
+        #     We have experienced problems (e.g. in ONNX export) with
+        #     non-tensor extra state.
+        # (2) PyTorch's checkpointing infrastructure does not remap
+        #     devices for "extra state" like it does for "state dict".
+        #     Thus, we want to avoid putting extra state on the GPU
+        #     since it may be loaded on the wrong device.
+        # (3) The extra state consists of many small tensors. If we
+        #     want to copy them all to CPU, then we need to avoid the
+        #     overhead of many GPU-CPU memory transfers.
+        #
+        # See: https://github.com/NVIDIA/TransformerEngine/pull/351
+        # See: https://github.com/NVIDIA/TransformerEngine/pull/363
+
+        def to_cpu(src: torch.Tensor) -> torch.Tensor:
+            """Helper function to make CPU copy of tensor
+
+            Memory transfer is asynchronous w.r.t. host, so GPU should
+            be synchronized before using result.
+
+            """
+            dst = torch.empty_like(src, device="cpu")
+            dst.copy_(src, non_blocking=True)
+            return dst
+
+        # Store FP8 state if needed
         state = None
-
         fp8_checkpoint = self.fp8_meta["fp8_checkpoint"] or self.fp8 or self.fp8_calibration
-
         if fp8_checkpoint:
-            state = {}
-            state["scale_fwd"] = self.fp8_meta["scaling_fwd"].scale
-            state["scale_inv_fwd"] = self.fp8_meta["scaling_fwd"].scale_inv
-            state["amax_history_fwd"] = self.fp8_meta["scaling_fwd"].amax_history
-            state["scale_bwd"] = self.fp8_meta["scaling_bwd"].scale
-            state["scale_inv_bwd"] = self.fp8_meta["scaling_bwd"].scale_inv
-            state["amax_history_bwd"] = self.fp8_meta["scaling_bwd"].amax_history
 
-            # Store other pickelable values.
+            # Copy tensors to CPU and store
+            state = {}
+            state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
+            state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
+            state["scale_inv_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale_inv)
+            state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
+            state["amax_history_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].amax_history)
+            state["scale_inv_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale_inv)
+
+            # Store other pickelable values
             extra = {}
             for k, v in self.fp8_meta.items():
                 if k != "buffer_index_and_autocast_key" and isinstance(
@@ -576,12 +640,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     extra[k] = v
             state["extra_fp8_variables"] = extra
 
-        if is_in_onnx_export_mode():
-            state_serialized = torch.frombuffer(pickle.dumps(state), dtype=torch.uint8)
-        else:
-            state_serialized = io.BytesIO()
-            torch.save(state, state_serialized)
-
+        # Serialize state into byte tensor
+        torch.cuda.synchronize()
+        state_serialized = bytearray(pickle.dumps(state))
+        state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized
 
     def set_extra_state(self, state: torch.Tensor) -> None:
@@ -589,9 +651,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
+        # Load state
         if isinstance(state, torch.Tensor):
+            # Default format: byte tensor with pickled data
             state = pickle.loads(state.detach().cpu().numpy().tobytes())
         elif isinstance(state, io.BytesIO):
+            # Deprecated format with io.BytesIO
             state.seek(0)
             state = torch.load(state, map_location="cuda")
         else:
@@ -600,20 +665,32 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if state is None:
             return
 
-        # Load extra items.
+        # Load extra items
         self.fp8_meta.update(state["extra_fp8_variables"])
         self.fp8_meta["recipe"].amax_history_len = state["amax_history_fwd"].shape[0]
         if "global_fp8_buffer_pos_fwd_recompute" in self.fp8_meta:
             del self.fp8_meta["global_fp8_buffer_pos_fwd_recompute"]
 
-        # Initialize before loading.
+        # Initialize before loading
         self.init_fp8_meta_tensors()
-        self.fp8_meta["scaling_fwd"].scale.copy_(state["scale_fwd"])
-        self.fp8_meta["scaling_fwd"].amax_history.copy_(state["amax_history_fwd"])
-        self.fp8_meta["scaling_bwd"].scale.copy_(state["scale_bwd"])
-        self.fp8_meta["scaling_bwd"].amax_history.copy_(state["amax_history_bwd"])
-        self.fp8_meta["scaling_fwd"].scale_inv.copy_(state["scale_inv_fwd"])
-        self.fp8_meta["scaling_bwd"].scale_inv.copy_(state["scale_inv_bwd"])
+
+        def copy_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
+            """Helper function to copy tensor from CPU
+
+            Memory transfer is asynchronous w.r.t. host, so GPU should
+            be synchronized before using result.
+
+            """
+            dst.copy_(src, non_blocking=True)
+
+        # Load tensors
+        copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
+        copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
+        copy_tensor(state["scale_inv_fwd"], self.fp8_meta["scaling_fwd"].scale_inv)
+        copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
+        copy_tensor(state["amax_history_bwd"], self.fp8_meta["scaling_bwd"].amax_history)
+        copy_tensor(state["scale_inv_bwd"], self.fp8_meta["scaling_bwd"].scale_inv)
+        torch.cuda.synchronize()
 
     def set_activation_dtype(self, inp: torch.Tensor) -> None:
         """Get activation data type for AMP."""
@@ -728,9 +805,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 )
 
             if self.fp8 and not FP8GlobalStateManager.fp8_graph_capturing():
-                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(
-                    self.fp8_meta, fp8_weights=self._get_fp8_params()
-                )
+                FP8GlobalStateManager.add_fp8_tensors_to_global_buffer(self.fp8_meta)
 
             # Activation recomputation is used and this is the first forward phase.
             if self.fp8 and self.training and is_fp8_activation_recompute_enabled():
