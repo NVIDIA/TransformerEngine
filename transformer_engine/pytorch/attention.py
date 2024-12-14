@@ -1143,15 +1143,18 @@ def get_full_mask(
     swa_left = None
     swa_right = None
     if attn_mask_type == "causal_bottom_right" or (
-        attn_mask_type in ["no_mask", "arbitrary"] and bottom_right_alignment):
+        attn_mask_type in ["no_mask", "arbitrary"] and bottom_right_alignment
+    ):
         swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
         swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
     elif attn_mask_type in ["causal", "padding_causal"] or (
-        attn_mask_type in ["no_mask", "padding", "arbitrary"] and not bottom_right_alignment):
+        attn_mask_type in ["no_mask", "padding", "arbitrary"] and not bottom_right_alignment
+    ):
         swa_left = mask - window_size[0]
         swa_right = mask + window_size[1]
     elif attn_mask_type == "padding_causal_bottom_right" or (
-        attn_mask_type == "padding" and bottom_right_alignment):
+        attn_mask_type == "padding" and bottom_right_alignment
+    ):
         batch_size = attention_mask.shape[0]
         swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q - window_size[0]
@@ -4848,8 +4851,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
 
         attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = get_full_mask(
-            max_seqlen_q, max_seqlen_kv, attn_mask_type=attn_mask_type,
-            attention_mask=attention_mask, window_size=window_size,
+            max_seqlen_q,
+            max_seqlen_kv,
+            attn_mask_type=attn_mask_type,
+            attention_mask=attention_mask,
+            window_size=window_size,
             attention_type=self.attention_type,
         )
 
