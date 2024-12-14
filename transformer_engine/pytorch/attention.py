@@ -689,32 +689,32 @@ def get_attention_backend(
         window_size = check_set_window_size(attn_mask_type, window_size)
     else:
         if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            #if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+            # if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
             #    logger.debug(
             #        "Disabling FusedAttention as it does not support sliding window attention"
             #        " for FP8"
             #    )
             #    use_fused_attention = False
-            #elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
+            # elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
             if attention_dropout != 0.0:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
                     "with dropout"
                 )
                 use_fused_attention = False
-            #elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
+            # elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
             #    "no_mask",
             #    "padding",
             #    "causal_bottom_right",
             #    "padding_causal_bottom_right",
-            #]:
+            # ]:
             #    logger.debug(
             #        "Disabling FusedAttention as it does not support sliding window attention "
             #        "with attn_mask_type = %s for cross-attention",
             #        attn_mask_type,
             #    )
             #    use_fused_attention = False
-            #elif "padding" in attn_mask_type:
+            # elif "padding" in attn_mask_type:
             #    logger.debug(
             #        "Disabling FusedAttention as it does not support sliding window attention "
             #        "with attn_mask_type = %s",

@@ -683,7 +683,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     if config.window_size[0] == -1 and config.window_size[1] in [-1, 0]:
         pad_between_seqs = True
         test_dot_product_attention(
-           dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )
     if get_cudnn_version() >= (9, 3, 0):
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
