@@ -135,6 +135,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         !requires_64bit_ragged_offset) {
       flag_m512 = true;
     }
+    // TODO(cyang): replace with cudnn-frontend check_support for cleaner logic and better error messaging
     if (  // architecture
         ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80) ||
          (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90))) &&
