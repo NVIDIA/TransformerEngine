@@ -702,7 +702,10 @@ def get_attention_backend(
     if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if _use_flash_attn_3:
             if not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
-                logger.debug("Disabling FlashAttention 3 as it only supports sliding window with bottom right diagonal alignment for cross-attention")
+                logger.debug(
+                    "Disabling FlashAttention 3 as it only supports sliding window with bottom"
+                    " right diagonal alignment for cross-attention"
+                )
                 _use_flash_attn_3 = False
         if not _use_flash_attn_3:
             if not _flash_attn_is_installed:
@@ -713,7 +716,10 @@ def get_attention_backend(
                 )
                 use_flash_attention = False
             elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
-                logger.debug("Disabling FlashAttention as it only supports sliding window with bottom right diagonal alignment for cross-attention")
+                logger.debug(
+                    "Disabling FlashAttention as it only supports sliding window with bottom right"
+                    " diagonal alignment for cross-attention"
+                )
                 use_flash_attention = False
 
     # Filter: Attention bias
@@ -735,7 +741,10 @@ def get_attention_backend(
             logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
             use_flash_attention = False
         elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
-            logger.debug("Disabling FlashAttention as it only supports ALiBi with bottom right diagonal alignment for cross-attention")
+            logger.debug(
+                "Disabling FlashAttention as it only supports ALiBi with bottom right diagonal"
+                " alignment for cross-attention"
+            )
             use_flash_attention = False
 
     if use_flash_attention and (
@@ -7901,7 +7910,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 bottom_right_diagonal = self.bottom_right_diagonal
             if attn_mask_type in {"causal", "padding_causal"}:
                 bottom_right_diagonal = False
-            if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+            if bottom_right_diagonal is None or attn_mask_type in {
+                "causal_bottom_right",
+                "padding_causal_bottom_right",
+            }:
                 bottom_right_diagonal = True
 
             if self.rng_states_tracker is not None and is_graph_capturing():
@@ -8883,7 +8895,10 @@ class MultiheadAttention(torch.nn.Module):
             bottom_right_diagonal = self.bottom_right_diagonal
         if attn_mask_type in {"causal", "padding_causal"}:
             bottom_right_diagonal = False
-        if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+        if bottom_right_diagonal is None or attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
             bottom_right_diagonal = True
 
         if "padding" in attn_mask_type and attention_mask is not None:

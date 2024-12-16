@@ -679,13 +679,19 @@ class TransformerLayer(torch.nn.Module):
             bottom_right_diagonal = self.bottom_right_diagonal
         if attn_mask_type in {"causal", "padding_causal"}:
             bottom_right_diagonal = False
-        if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+        if bottom_right_diagonal is None or attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
             bottom_right_diagonal = True
         if enc_dec_bottom_right_diagonal is None:
             enc_dec_bottom_right_diagonal = self.enc_dec_bottom_right_diagonal
         if enc_dec_attn_mask_type in {"causal", "padding_causal"}:
             enc_dec_bottom_right_diagonal = False
-        if enc_dec_bottom_right_diagonal is None or enc_dec_attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+        if enc_dec_bottom_right_diagonal is None or enc_dec_attn_mask_type in {
+            "causal_bottom_right",
+            "padding_causal_bottom_right",
+        }:
             enc_dec_bottom_right_diagonal = True
 
         assert (

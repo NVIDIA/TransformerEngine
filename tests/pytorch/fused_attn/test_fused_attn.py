@@ -350,8 +350,8 @@ def test_dot_product_attention(
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
-        torch.save(fused_attn_fwd, 'fused_attn_fwd.pt')
-        torch.save(flash_attn_fwd, 'flash_attn_fwd.pt')
+        torch.save(fused_attn_fwd, "fused_attn_fwd.pt")
+        torch.save(flash_attn_fwd, "flash_attn_fwd.pt")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
