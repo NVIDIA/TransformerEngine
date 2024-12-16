@@ -183,12 +183,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
           max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0) ||
-         // 9.6: adds {bshd, sbhd} + causal_bottom_right + cross-attn (sq > skv)
-         // and thd + padding_causal_bottom_right
+	 // 9.6: adds thd + padding_causal_bottom_right
          (cudnn_runtime_version >= 90600 &&
-          (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 &&
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+	  max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
@@ -206,23 +204,25 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (window_size_right == -1 || window_size_right == 0)) ||
          // 9.2: SWA (left, 0) + top-left diagonal + {bshd, sbhd}
          (cudnn_runtime_version >= 90200 &&
-          ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
-           ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
-            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+          ((window_size_left == -1 && window_size_right == -1 &&
+	    attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK) ||
+           ((window_size_left == -1 || window_size_left >= 0) && window_size_right == 0 &&
+            (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+             attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               max_seqlen_q == max_seqlen_kv)) &&
             dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
              qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) ||
-         // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
+         // 9.6: SWA (left, right) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
          (cudnn_runtime_version >= 90600 &&
-          ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
-           ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
-            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
-            max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 &&
-            bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0)))) &&
+          (window_size_left == -1 || window_size_left >= 0) &&
+	  (window_size_right == -1 || window_size_right >= 0) &&
+          (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK))) &&
         // check 64-bit ragged offset support
         (supported_ragged_offset_size)) {
       flag_arb = true;
@@ -272,7 +272,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
                                    const NVTETensor rng_state, size_t max_seqlen, bool is_training,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   int64_t window_size_left, int64_t window_size_right,
+                                   int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
                                    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
@@ -324,7 +324,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd_qkvpacked(
         b, h, max_seqlen, d, t, is_training, attn_scale, dropout, qkv_layout, bias_type,
-        attn_mask_type, window_size_left, window_size_right, input_QKV, input_Bias, output_O,
+        attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_QKV, input_Bias, output_O,
         Aux_CTX_Tensors, input_cu_seqlens, input_cu_seqlens_padded, input_rng_state, wkspace,
         stream, handle);
 #else
@@ -334,7 +334,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_qkvpacked(b, h, max_seqlen, d, is_training, attn_scale, dropout, qkv_layout,
-                                 bias_type, attn_mask_type, input_QKV, input_output_S, output_O,
+                                 bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_QKV, input_output_S, output_O,
                                  Aux_CTX_Tensors, input_cu_seqlens, input_rng_state, wkspace,
                                  stream, handle);
 #else
@@ -352,7 +352,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
                                    const NVTETensor cu_seqlens_padded, size_t max_seqlen,
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   int64_t window_size_left, int64_t window_size_right,
+                                   int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
                                    bool deterministic, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
@@ -414,7 +414,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     }
     fused_attn_arbitrary_seqlen_bwd_qkvpacked(
         b, h, max_seqlen, d, t, attn_scale, dropout, qkv_layout, bias_type, attn_mask_type,
-        window_size_left, window_size_right, deterministic, input_QKV, input_O, input_dO,
+        window_size_left, window_size_right, bottom_right_diagonal, deterministic, input_QKV, input_O, input_dO,
         input_Bias, output_S, output_dQKV, output_dBias, input_cu_seqlens, input_cu_seqlens_padded,
         input_rng_state, wkspace, stream, handle);
 #else
@@ -429,7 +429,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     const Tensor *input_ZInv = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_qkvpacked(b, h, max_seqlen, d, attn_scale, dropout, qkv_layout, bias_type,
-                                 attn_mask_type, input_QKV, input_O, input_dO, input_M, input_ZInv,
+                                 attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_QKV, input_O, input_dO, input_M, input_ZInv,
                                  input_S, input_output_dP, output_dQKV, input_cu_seqlens,
                                  input_rng_state, wkspace, stream, handle);
 #else
@@ -448,7 +448,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
                                   size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                  int64_t window_size_left, int64_t window_size_right,
+                                  int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
                                   NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
@@ -507,7 +507,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 #if (CUDNN_VERSION >= 8903)
     fused_attn_arbitrary_seqlen_fwd_kvpacked(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, is_training, attn_scale, dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
+        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q,
         input_KV, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
         input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream,
         handle);
@@ -519,7 +519,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd_kvpacked(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, is_training, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, input_Q, input_KV, input_output_S, output_O, Aux_CTX_Tensors,
+        bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_KV, input_output_S, output_O, Aux_CTX_Tensors,
         input_cu_seqlens_q, input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR("cuDNN 8.9.0 is required for FP8 fused attention. \n");
@@ -536,7 +536,7 @@ void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, NVTETensor workspace,
     cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
   using namespace transformer_engine;
@@ -607,7 +607,7 @@ void nvte_fused_attn_bwd_kvpacked(
     }
     fused_attn_arbitrary_seqlen_bwd_kvpacked(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, attn_scale, dropout, qkv_layout,
-        bias_type, attn_mask_type, window_size_left, window_size_right, deterministic, input_Q,
+        bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, deterministic, input_Q,
         input_KV, input_O, input_dO, input_Bias, output_S, output_dQ, output_dKV, output_dBias,
         input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
@@ -623,7 +623,7 @@ void nvte_fused_attn_bwd_kvpacked(
     const Tensor *input_ZInv = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd_kvpacked(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, attn_scale, dropout,
-                                qkv_layout, bias_type, attn_mask_type, input_Q, input_KV, input_O,
+                                qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_KV, input_O,
                                 input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ,
                                 output_dKV, input_cu_seqlens_q, input_cu_seqlens_kv,
                                 input_rng_state, wkspace, stream, handle);
@@ -643,7 +643,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                         int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+                         int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal, NVTETensor workspace,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
@@ -695,7 +695,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 #if (CUDNN_VERSION >= 8900)
     fused_attn_arbitrary_seqlen_fwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, is_training, attn_scale,
-        dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right,
+        dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal,
         input_Q, input_K, input_V, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
         input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_rng_state,
         wkspace, stream, handle);
@@ -706,7 +706,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_FP8) {
 #if (CUDNN_VERSION >= 8900)
     fused_attn_fp8_fwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, is_training, attn_scale,
-                       dropout, qkv_layout, bias_type, attn_mask_type, input_Q, input_K, input_V,
+                       dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K, input_V,
                        input_output_S, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
                        input_cu_seqlens_kv, input_rng_state, wkspace, stream, handle);
 #else
@@ -726,7 +726,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, int64_t window_size_left,
-                         int64_t window_size_right, bool deterministic, NVTETensor workspace,
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, NVTETensor workspace,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
@@ -791,7 +791,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     }
     fused_attn_arbitrary_seqlen_bwd(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, t_q, t_kv, attn_scale, dropout,
-        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, deterministic,
+        qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, deterministic,
         input_Q, input_K, input_V, input_O, input_dO, input_Bias, output_S, output_dQ, output_dK,
         output_dV, output_dBias, input_cu_seqlens_q, input_cu_seqlens_kv, input_cu_seqlens_q_padded,
         input_cu_seqlens_kv_padded, input_rng_state, wkspace, stream, handle);
@@ -807,7 +807,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     const Tensor *input_ZInv = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[1]);
     const Tensor *input_rng_state = reinterpret_cast<const Tensor *>(Aux_CTX_Tensors->tensors[2]);
     fused_attn_fp8_bwd(b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, attn_scale, dropout,
-                       qkv_layout, bias_type, attn_mask_type, input_Q, input_K, input_V, input_O,
+                       qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, bottom_right_diagonal, input_Q, input_K, input_V, input_O,
                        input_dO, input_M, input_ZInv, input_S, input_output_dP, output_dQ,
                        output_dK, output_dV, input_cu_seqlens_q, input_cu_seqlens_kv,
                        input_rng_state, wkspace, stream, handle);

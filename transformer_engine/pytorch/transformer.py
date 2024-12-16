@@ -147,11 +147,21 @@ class TransformerLayer(torch.nn.Module):
                 distinguishes them based on `self_attn_mask_type` or `enc_dec_attn_mask_type`.
                 Similar to :attr:`self_attn_mask_type`, `window_size` can be overridden by
                 :attr:`window_size` in `forward` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                          Align sliding window and ALiBi diagonal to the top left (`False`)
+                          or bottom right (`True`) corner of the softmax matrix in the encoder.
+                          If `None`, it will be set to `False` for `self_attn_mask_type` =
+                          {'causal', 'padding_causal'} and `True` for other mask types.
     enc_dec_attn_mask_type: {'no_mask', 'causal', 'padding', 'padding_causal', 'arbitrary'},
                            default = `no_mask`
                            type of attention mask passed into softmax operation for decoder.
     enc_dec_window_size: Optional[Tuple[int, int]], default = `None`
                         sliding window size for local attention in decoder.
+    enc_dec_bottom_right_diagonal: Optional[bool], default = `None`
+                                  Align sliding window and ALiBi diagonal to the top left (`False`)
+                                  or bottom right (`True`) corner of the softmax matrix in the decoder.
+                                  If `None`, it will be set to `False` for `enc_dec_attn_mask_type` =
+                                  {'causal', 'padding_causal'} and `True` for other mask types.
     zero_centered_gamma : bool, default = 'False'
                          if set to 'True', gamma parameter in LayerNorm is initialized to 0 and
                          the LayerNorm formula changes to
@@ -247,8 +257,10 @@ class TransformerLayer(torch.nn.Module):
         kv_channels: Optional[int] = None,
         self_attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: bool = None,
         enc_dec_attn_mask_type: str = "no_mask",
         enc_dec_window_size: Optional[Tuple[int, int]] = None,
+        enc_dec_bottom_right_diagonal: bool = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         params_dtype: Optional[torch.dtype] = None,
@@ -282,10 +294,12 @@ class TransformerLayer(torch.nn.Module):
 
         self.self_attn_mask_type = self_attn_mask_type
         self.window_size = check_set_window_size(self_attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         self.enc_dec_attn_mask_type = enc_dec_attn_mask_type
         self.enc_dec_window_size = check_set_window_size(
             enc_dec_attn_mask_type, enc_dec_window_size
         )
+        self.enc_dec_bottom_right_diagonal = enc_dec_bottom_right_diagonal
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         ub_bulk_wgrad = ub_tp_comm_overlap and ub_bulk_wgrad
         ub_bulk_dgrad = ub_tp_comm_overlap and ub_bulk_dgrad
@@ -530,10 +544,12 @@ class TransformerLayer(torch.nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         self_attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         encoder_output: Optional[torch.Tensor] = None,
         enc_dec_attn_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         enc_dec_attn_mask_type: Optional[str] = None,
         enc_dec_window_size: Optional[Tuple[int, int]] = None,
+        enc_dec_bottom_right_diagonal: Optional[bool] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
         inference_params: Optional[InferenceParams] = None,
@@ -575,6 +591,11 @@ class TransformerLayer(torch.nn.Module):
                             causal masks are aligned to the bottom right corner.
         window_size: Optional[Tuple[int, int]], default = `None`
                     Sliding window size for local attention in encoder.
+        bottom_right_diagonal: Optional[bool] = `None`
+                              Align sliding window and ALiBi diagonal to the top left (`False`)
+                              or bottom right (`True`) corner of the softmax matrix in the encoder.
+                              If `None`, it will be set to `False` for `self_attn_mask_type` =
+                              {'causal', 'padding_causal'} and `True` for other mask types.
         encoder_output : Optional[torch.Tensor], default = `None`
              Output of the encoder block to be fed into the decoder block if using
              `layer_type="decoder"`.
@@ -591,6 +612,11 @@ class TransformerLayer(torch.nn.Module):
                                Type of attention mask passed into softmax operation for decoder.
         enc_dec_window_size: Optional[Tuple[int, int]], default = `None`
                             Sliding window size for local attention in decoder.
+        enc_dec_bottom_right_diagonal: Optional[bool] = `None`
+                                      Align sliding window and ALiBi diagonal to the top left (`False`)
+                                      or bottom right (`True`) corner of the softmax matrix in the decoder.
+                                      If `None`, it will be set to `False` for `enc_dec_attn_mask_type` =
+                                      {'causal', 'padding_causal'} and `True` for other mask types.
         is_first_microbatch : {True, False, None}, default = None
                              During training using either gradient accumulation or
                              pipeline parallelism a minibatch of data is further split
@@ -649,6 +675,18 @@ class TransformerLayer(torch.nn.Module):
         if enc_dec_window_size is None:
             enc_dec_window_size = self.enc_dec_window_size
         enc_dec_window_size = check_set_window_size(enc_dec_attn_mask_type, enc_dec_window_size)
+        if bottom_right_diagonal is None:
+            bottom_right_diagonal = self.bottom_right_diagonal
+        if attn_mask_type in {"causal", "padding_causal"}:
+            bottom_right_diagonal = False
+        if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+            bottom_right_diagonal = True
+        if enc_dec_bottom_right_diagonal is None:
+            enc_dec_bottom_right_diagonal = self.enc_dec_bottom_right_diagonal
+        if enc_dec_attn_mask_type in {"causal", "padding_causal"}:
+            enc_dec_bottom_right_diagonal = False
+        if enc_dec_bottom_right_diagonal is None or enc_dec_attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+            enc_dec_bottom_right_diagonal = True
 
         assert (
             self_attn_mask_type in AttnMaskTypes
@@ -692,6 +730,7 @@ class TransformerLayer(torch.nn.Module):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
+            bottom_right_diagonal=bottom_right_diagonal,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             max_seqlen_q=max_seqlen_q,
@@ -723,6 +762,7 @@ class TransformerLayer(torch.nn.Module):
                 core_attention_bias_type=core_attention_bias_type,
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
+                bottom_right_diagonal=enc_dec_bottom_right_diagonal,
                 fast_zero_fill=fast_zero_fill,
             )
             if self.apply_residual_connection_post_layernorm:

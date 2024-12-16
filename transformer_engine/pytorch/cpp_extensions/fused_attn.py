@@ -117,6 +117,7 @@ def fused_attn_fwd_qkvpacked(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed QKV input.
@@ -186,6 +187,9 @@ def fused_attn_fwd_qkvpacked(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -271,6 +275,7 @@ def fused_attn_fwd_qkvpacked(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         cu_seqlens,
         qkv,
         qkv_dtype,
@@ -324,6 +329,7 @@ def fused_attn_bwd_qkvpacked(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed QKV input.
@@ -394,6 +400,9 @@ def fused_attn_bwd_qkvpacked(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
@@ -444,6 +453,7 @@ def fused_attn_bwd_qkvpacked(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         deterministic,
         cu_seqlens,
         qkv,
@@ -500,6 +510,7 @@ def fused_attn_fwd_kvpacked(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for packed KV input.
@@ -579,6 +590,9 @@ def fused_attn_fwd_kvpacked(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -665,6 +679,7 @@ def fused_attn_fwd_kvpacked(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -725,6 +740,7 @@ def fused_attn_bwd_kvpacked(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
@@ -806,6 +822,9 @@ def fused_attn_bwd_kvpacked(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
@@ -859,6 +878,7 @@ def fused_attn_bwd_kvpacked(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,
@@ -919,6 +939,7 @@ def fused_attn_fwd(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     rng_gen: torch.Generator = None,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention FWD for separate QKV input.
@@ -1004,6 +1025,9 @@ def fused_attn_fwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     rng_gen: torch.Generator, default = None
                 random number generator;
                 if None, uses the default CUDA generator from PyTorch; otherwise, uses rng_gen
@@ -1090,6 +1114,7 @@ def fused_attn_fwd(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         cu_seqlens_q,
         cu_seqlens_kv,
         q,
@@ -1152,6 +1177,7 @@ def fused_attn_bwd(
     attn_bias_type: str = "no_bias",
     attn_mask_type: str = "padding",
     window_size: Tuple[int, int] = (-1, -1),
+    bottom_right_diagonal: bool = True,
     deterministic: bool = False,
 ) -> Tuple[Union[torch.Tensor, None], ...]:
     """Fused Attention BWD for packed KV input.
@@ -1238,6 +1264,9 @@ def fused_attn_bwd(
                 in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
                 + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
                 window and causal mask specifically.
+    bottom_right_diagonal: bool, default = True
+                whether to align sliding window and ALiBi diagonal to the top left (False) or
+                bottom right (True) corner of the softmax matrix.
     deterministic: bool, default = False
                 whether to execute the backward pass with deterministic behaviours.
 
@@ -1293,6 +1322,7 @@ def fused_attn_bwd(
         AttnBiasType[attn_bias_type],
         AttnMaskType[attn_mask_type],
         window_size,
+        bottom_right_diagonal,
         deterministic,
         cu_seqlens_q,
         cu_seqlens_kv,

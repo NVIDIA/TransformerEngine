@@ -256,6 +256,9 @@ class AttentionParams:
         Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
     core_attention_bias_requires_grad: bool, default = `True`
         Whether attention bias requires gradient.
+    bottom_right_diagonal: bool, default = `True`
+        Whether to align sliding window and ALiBi diagonal to the bottom right corner
+        of the softmax matrix.
     pad_between_seqs: bool, default = `False`
         Whether there is padding between sequences in a batch.
         This only applies to `qkv_format=thd`.
@@ -289,6 +292,7 @@ class AttentionParams:
     core_attention_bias_type: str = "no_bias"
     core_attention_bias_shape: str = "1hss"
     core_attention_bias_requires_grad: bool = True
+    bottom_right_diagonal: bool = True
     pad_between_seqs: bool = False
     attention_dropout: float = 0.0
     context_parallel: bool = False
@@ -303,7 +307,7 @@ _alibi_cache = {
     "_alibi_slopes": None,
     "_max_seqlen_q": None,
     "_max_seqlen_kv": None,
-    "_bottom_right_alignment": True,
+    "_bottom_right_diagonal": True,
     "_alibi_bias": None,
     "_alibi_slopes_require_update": False,
     "_alibi_bias_require_update": False,
@@ -358,6 +362,7 @@ def get_attention_backend(
     core_attention_bias_type = attention_params.core_attention_bias_type
     core_attention_bias_shape = attention_params.core_attention_bias_shape
     core_attention_bias_requires_grad = attention_params.core_attention_bias_requires_grad
+    bottom_right_diagonal = attention_params.bottom_right_diagonal
     pad_between_seqs = attention_params.pad_between_seqs
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
@@ -679,60 +684,36 @@ def get_attention_backend(
         _use_flash_attn_3 = False
 
     # Filter: Sliding window attention
-    #    backend                 |      window_size       | diagonal alignment
+    #    backend                 | window_size (left, right) | diagonal alignment
     # ---------------------------------------------------------------------------------
-    # FlashAttention             | (-1, -1) or (>=0, >=0) | bottom right
-    # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
-    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
-    #                            |                        | converts window_size to an 'arbitrary' mask
+    # FlashAttention             |  (-1 or >=0, -1 or >=0)   | bottom right
+    # FusedAttention             |  (-1 or >=0, -1 or >=0)   | top left and bottom right
+    # UnfusedDotProductAttention |  (-1 or >=0, -1 or >=0)   | top left and bottom right;
+    #                            |                           | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
-    else:
-        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            # if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
-            #    logger.debug(
-            #        "Disabling FusedAttention as it does not support sliding window attention"
-            #        " for FP8"
-            #    )
-            #    use_fused_attention = False
-            # elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
-            if attention_dropout != 0.0:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with dropout"
-                )
-                use_fused_attention = False
-            # elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
-            #    "no_mask",
-            #    "padding",
-            #    "causal_bottom_right",
-            #    "padding_causal_bottom_right",
-            # ]:
-            #    logger.debug(
-            #        "Disabling FusedAttention as it does not support sliding window attention "
-            #        "with attn_mask_type = %s for cross-attention",
-            #        attn_mask_type,
-            #    )
-            #    use_fused_attention = False
-            # elif "padding" in attn_mask_type:
-            #    logger.debug(
-            #        "Disabling FusedAttention as it does not support sliding window attention "
-            #        "with attn_mask_type = %s",
-            #        attn_mask_type,
-            #    )
-            #    use_fused_attention = False
-        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if _use_flash_attn_3:
-                logger.debug(
-                    "Disabling FlashAttention 3 as it does not support sliding window attention"
-                )
+    if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+        if attention_dropout != 0.0:
+            logger.debug(
+                "Disabling FusedAttention as it does not support sliding window attention "
+                "with dropout"
+            )
+            use_fused_attention = False
+    if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+        if _use_flash_attn_3:
+            if not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+                logger.debug("Disabling FlashAttention 3 as it only supports sliding window with bottom right diagonal alignment for cross-attention")
                 _use_flash_attn_3 = False
+        if not _use_flash_attn_3:
             if not _flash_attn_is_installed:
                 _flash_attn_version_required = PkgVersion("2.3")
             elif not _flash_attn_2_3_plus:
                 logger.debug(
                     "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
                 )
+                use_flash_attention = False
+            elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+                logger.debug("Disabling FlashAttention as it only supports sliding window with bottom right diagonal alignment for cross-attention")
                 use_flash_attention = False
 
     # Filter: Attention bias
@@ -752,6 +733,9 @@ def get_attention_backend(
             _flash_attn_version_required = PkgVersion("2.4")
         elif not _flash_attn_2_4_plus:
             logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
+            use_flash_attention = False
+        elif not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+            logger.debug("Disabling FlashAttention as it only supports ALiBi with bottom right diagonal alignment for cross-attention")
             use_flash_attention = False
 
     if use_flash_attention and (
@@ -1089,7 +1073,7 @@ def get_alibi(
     actual_seqlens_kv: Optional[torch.Tensor] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     bias_dtype: Optional[torch.dtype] = None,
-    bottom_right_alignment: bool = True,
+    bottom_right_diagonal: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Parameters
@@ -1108,7 +1092,7 @@ def get_alibi(
         Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
     bias_dtype: Optional[torch.dtype], default = `None`
         Dtype of the generated ALiBi bias. If None, use torch.float32.
-    bottom_right_alignment: bool, default = `True`
+    bottom_right_diagonal: bool, default = `True`
         Whether to align the diagonal of the ALiBi bias to the bottom right corner of
         the matrix (`True`) or top left (`False`).
 
@@ -1157,12 +1141,12 @@ def get_alibi(
             1, 1, 1, max_seqlen_kv
         )
         if actual_seqlens_q is None and actual_seqlens_kv is None:
-            if bottom_right_alignment:
+            if bottom_right_diagonal:
                 bias = bias + max_seqlen_kv - max_seqlen_q
         elif actual_seqlens_q is not None and actual_seqlens_kv is not None:
             batch_size = actual_seqlens_q.shape[0]
             bias = bias.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
-            if bottom_right_alignment:
+            if bottom_right_diagonal:
                 bias = bias + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
         else:
             assert (
@@ -1171,7 +1155,7 @@ def get_alibi(
         bias = bias.abs().mul(-1)
         bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
         _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
-        _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
+        _alibi_cache["_bottom_right_diagonal"] = bottom_right_diagonal
         bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
         _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
         _alibi_cache["_alibi_bias_require_update"] = False
@@ -4735,6 +4719,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        bottom_right_diagonal: Optional[bool] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
         assert (
@@ -4874,7 +4859,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     actual_seqlens_q=actual_seqlens_q if "padding" in attn_mask_type else None,
                     actual_seqlens_kv=actual_seqlens_kv if "padding" in attn_mask_type else None,
                     alibi_slopes=alibi_slopes,
-                    bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                    bottom_right_diagonal=bottom_right_diagonal,
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -6418,6 +6403,7 @@ class FusedAttnFunc(torch.autograd.Function):
         attn_bias_type,
         attn_mask_type,
         window_size,
+        bottom_right_diagonal,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
@@ -6506,6 +6492,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias_type,
                 attn_mask_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
             )
             if is_output_fp8:
@@ -6637,6 +6624,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias_type,
                 attn_mask_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
             )
             out_save = out_ret
@@ -6682,6 +6670,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.window_size = window_size
+        ctx.bottom_right_diagonal = bottom_right_diagonal
         ctx.fused_attention_backend = (
             fused_attention_backend if ctx.fp8 else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
@@ -6801,6 +6790,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                     )
 
@@ -6926,6 +6916,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_bias_type,
                         ctx.attn_mask_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                     )
 
@@ -6959,6 +6950,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -6974,6 +6966,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dv,
             None,
             rest[0],
+            None,
             None,
             None,
             None,
@@ -7081,6 +7074,7 @@ class FusedAttention(torch.nn.Module):
         fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         fast_zero_fill: bool = True,
         cp_group: Optional[Union[dist_group_type, List[dist_group_type]]] = None,
         cp_global_ranks: List[int] = None,
@@ -7248,6 +7242,7 @@ class FusedAttention(torch.nn.Module):
                     core_attention_bias_type,
                     attn_mask_type,
                     window_size,
+                    bottom_right_diagonal,
                     None,  # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd,
@@ -7335,6 +7330,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
                 `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                          Align sliding window and ALiBi diagonal to the top left (`False`)
+                          or bottom right (`True`) corner of the softmax matrix in the encoder.
+                          If `None`, it will be set to `False` for `attn_mask_type` =
+                          {'causal', 'padding_causal'} and `True` for other mask types.
     attention_type: str, default = `self`
                    type of attention, either "`self`" and "`cross`".
     layer_number: int, default = `None`
@@ -7397,6 +7397,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         qkv_format: str = "sbhd",
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         sequence_parallel: bool = False,
         tp_size: int = 1,
         get_rng_state_tracker: Optional[Callable] = None,
@@ -7421,6 +7422,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
         self.window_size = check_set_window_size(attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -7638,6 +7640,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         fast_zero_fill: bool = True,
         inference_params: Optional[InferenceParams] = None,
         is_first_microbatch: Optional[bool] = None,
@@ -7798,6 +7801,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
+        bottom_right_diagonal: Optional[bool], default = `None`
+                              Align sliding window and ALiBi diagonal to the top left (`False`)
+                              or bottom right (`True`) corner of the softmax matrix in the encoder.
+                              If `None`, it will be set to `False` for `attn_mask_type` =
+                              {'causal', 'padding_causal'} and `True` for other mask types.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
         inference_params: Optional[InferenceParams], default = `None`
@@ -7889,6 +7897,12 @@ class DotProductAttention(TransformerEngineBaseModule):
             if window_size is None:
                 window_size = self.window_size
             window_size = check_set_window_size(attn_mask_type, window_size)
+            if bottom_right_diagonal is None:
+                bottom_right_diagonal = self.bottom_right_diagonal
+            if attn_mask_type in {"causal", "padding_causal"}:
+                bottom_right_diagonal = False
+            if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+                bottom_right_diagonal = True
 
             if self.rng_states_tracker is not None and is_graph_capturing():
                 assert isinstance(
@@ -8060,7 +8074,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if self.layer_number == 1:
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-            bottom_right_alignment = (attn_mask_type not in ["causal", "padding_causal"],)
             if core_attention_bias_type == "alibi":
                 assert (
                     core_attention_bias is None
@@ -8069,7 +8082,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_num_heads"] != query_layer.shape[-2]
                     or _alibi_cache["_max_seqlen_q"] != max_seqlen_q
                     or _alibi_cache["_max_seqlen_kv"] != max_seqlen_kv
-                    or _alibi_cache["_bottom_right_alignment"] != bottom_right_alignment
+                    or _alibi_cache["_bottom_right_diagonal"] != bottom_right_diagonal
                     or _alibi_cache["_alibi_slopes"] is None
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
@@ -8125,6 +8138,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 core_attention_bias_requires_grad=(
                     core_attention_bias.requires_grad if core_attention_bias is not None else False
                 ),
+                bottom_right_diagonal=bottom_right_diagonal,
                 pad_between_seqs=pad_between_seqs,
                 attention_dropout=self.attention_dropout,
                 context_parallel=context_parallel,
@@ -8209,7 +8223,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                         bias_dtype=query_layer.dtype,
-                        bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                        bottom_right_diagonal=bottom_right_diagonal,
                     )
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -8230,6 +8244,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         fused_attention_backend=fused_attention_backend,
                         core_attention_bias_type=fu_core_attention_bias_type,
                         core_attention_bias=fu_core_attention_bias,
+                        bottom_right_diagonal=bottom_right_diagonal,
                         fast_zero_fill=fast_zero_fill,
                         cp_group=self.cp_group,
                         cp_global_ranks=self.cp_global_ranks,
@@ -8255,6 +8270,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fused_attention_backend=fused_attention_backend,
                     core_attention_bias_type=fu_core_attention_bias_type,
                     core_attention_bias=fu_core_attention_bias,
+                    bottom_right_diagonal=bottom_right_diagonal,
                     fast_zero_fill=fast_zero_fill,
                     cp_group=self.cp_group,
                     cp_global_ranks=self.cp_global_ranks,
@@ -8293,6 +8309,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
+                        bottom_right_diagonal=bottom_right_diagonal,
                     )
                 return self.unfused_attention(
                     query_layer,
@@ -8306,6 +8323,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
+                    bottom_right_diagonal=bottom_right_diagonal,
                 )
 
             raise ValueError("No dot product attention support for the provided inputs!")
@@ -8362,6 +8380,11 @@ class MultiheadAttention(torch.nn.Module):
                 map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
                 `attn_mask_type`. Similar to :attr:`attn_mask_type`, `window_size` can
                 be overridden by :attr:`window_size` in `forward` as well.
+    bottom_right_diagonal: Optional[bool], default = `None`
+                          Align sliding window and ALiBi diagonal to the top left (`False`)
+                          or bottom right (`True`) corner of the softmax matrix in the encoder.
+                          If `None`, it will be set to `False` for `attn_mask_type` =
+                          {'causal', 'padding_causal'} and `True` for other mask types.
     num_gqa_groups : int, default = `None`
                          number of GQA groups in the transformer layer.
                          Grouped Query Attention is described in
@@ -8462,6 +8485,7 @@ class MultiheadAttention(torch.nn.Module):
         layer_number: Optional[int] = None,
         attn_mask_type: str = "causal",
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         tp_group: Optional[dist_group_type] = None,
         tp_size: int = 1,
         num_gqa_groups: Optional[int] = None,
@@ -8492,6 +8516,7 @@ class MultiheadAttention(torch.nn.Module):
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
         self.window_size = check_set_window_size(attn_mask_type, window_size)
+        self.bottom_right_diagonal = bottom_right_diagonal
         self.layer_number = layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
@@ -8757,6 +8782,7 @@ class MultiheadAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         cu_seqlens_q: Optional[torch.Tensor] = None,
         cu_seqlens_kv: Optional[torch.Tensor] = None,
         max_seqlen_q: Optional[int] = None,
@@ -8826,6 +8852,11 @@ class MultiheadAttention(torch.nn.Module):
                      ALiBi slopes in FP32 and shape [nheads] or [batch_size, nheads].
                      It adds a bias of (-alibi_slope * (i + seqlen_k - seqlen_q - j))
                      to the attention score of query i and key j.
+        bottom_right_diagonal: Optional[bool], default = `None`
+                              Align sliding window and ALiBi diagonal to the top left (`False`)
+                              or bottom right (`True`) corner of the softmax matrix in the encoder.
+                              If `None`, it will be set to `False` for `attn_mask_type` =
+                              {'causal', 'padding_causal'} and `True` for other mask types.
         cu_seqlens_q: Optional[torch.Tensor], default = `None`
                    Cumulative sum of sequence lengths (without offset) in a batch for `query_layer`,
                    with shape [batch_size + 1] and dtype torch.int32.
@@ -8848,6 +8879,12 @@ class MultiheadAttention(torch.nn.Module):
         if window_size is None:
             window_size = self.window_size
         window_size = check_set_window_size(attn_mask_type, window_size)
+        if bottom_right_diagonal is None:
+            bottom_right_diagonal = self.bottom_right_diagonal
+        if attn_mask_type in {"causal", "padding_causal"}:
+            bottom_right_diagonal = False
+        if bottom_right_diagonal is None or attn_mask_type in {"causal_bottom_right", "padding_causal_bottom_right"}:
+            bottom_right_diagonal = True
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
@@ -9109,6 +9146,7 @@ class MultiheadAttention(torch.nn.Module):
             core_attention_bias_type=core_attention_bias_type,
             core_attention_bias=core_attention_bias,
             alibi_slopes=alibi_slopes,
+            bottom_right_diagonal=bottom_right_diagonal,
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
         )
