@@ -7,15 +7,15 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 #define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
 
-#include "../utils.cuh"
+#include "../../utils.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
-namespace rmsnorm {
-using namespace transformer_engine;
+namespace normalization {
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_kernel(
-    BwdParams params) {
+    BackwardKernelParams params) {
   enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
   enum { WARPS_M = Ktraits::WARPS_M };
   enum { WARPS_N = Ktraits::WARPS_N };
@@ -172,7 +172,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_tuned_ke
 
 template <typename Kernel_traits>
 __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void rmsnorm_bwd_finalize_tuned_kernel(
-    BwdParams params) {
+    BackwardKernelParams params) {
   using compute_t = typename Kernel_traits::compute_t;
   using weight_t = typename Kernel_traits::weight_t;
   using index_t = typename Kernel_traits::index_t;
@@ -276,7 +276,7 @@ __global__ __launch_bounds__(Kernel_traits::THREADS_PER_CTA) void rmsnorm_bwd_fi
 
 template <typename Ktraits>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_kernel(
-    BwdParams params) {
+    BackwardKernelParams params) {
   enum { LDGS = Ktraits::LDGS };
   enum { NUM_ELTS = Ktraits::ELTS_PER_LDG };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -430,8 +430,9 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_bwd_general_
 
 template <typename weight_t, typename compute_t, uint32_t WARPS_M, uint32_t WARPS_N,
           uint32_t BYTES_PER_LDG, uint32_t THREADS_PER_WARP>
-__global__ __launch_bounds__(
-    WARPS_M *WARPS_N *THREADS_PER_WARP) void rmsnorm_bwd_finalize_general_kernel(BwdParams params) {
+__global__
+__launch_bounds__(WARPS_M *WARPS_N *THREADS_PER_WARP) void rmsnorm_bwd_finalize_general_kernel(
+    BackwardKernelParams params) {
   enum { NUM_ELTS = BYTES_PER_LDG / sizeof(compute_t) };
   using Wvec = Vec<weight_t, NUM_ELTS>;
   using Cvec = Vec<compute_t, NUM_ELTS>;
@@ -474,7 +475,7 @@ __global__ __launch_bounds__(
   }
 }
 
-}  // namespace rmsnorm
+}  // namespace normalization
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_BWD_KERNELS_CUH_
