@@ -246,11 +246,9 @@ def test_dot_product_attention(
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
-    # Test backend availability
-    window_size = (-1, -1)
-    if swa:
-        window_size = [2, 2]
-    config.window_size = check_set_window_size(config.attn_mask_type, window_size)
+    if config.window_size == (-1, -1) and swa:
+        config.window_size = [2, 2]
+    config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -259,9 +257,6 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if swa:
-        unfused_attn_supported = False
-    print(flash_attn_supported, fused_attn_supported, unfused_attn_supported)
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
     if pad_between_seqs and not (
@@ -338,20 +333,18 @@ def test_dot_product_attention(
             is_training,
         )
 
-    if unfused_attn_supported and fused_attn_supported:
-        logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
-        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-        for i, _ in enumerate(unfused_attn_bwd):
-            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
+    if unfused_attn_supported and fused_attn_supported:
+        logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        for i, _ in enumerate(unfused_attn_bwd):
+            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
-        torch.save(fused_attn_fwd, "fused_attn_fwd.pt")
-        torch.save(flash_attn_fwd, "flash_attn_fwd.pt")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(fused_attn_bwd[i], flash_attn_bwd[i], **tols)
@@ -657,7 +650,7 @@ model_configs_layout_thd = {
         16,
         128,
         2048,
-        2048,
+        4096,
         0.0,
         "padding_causal_bottom_right",
         "no_bias",
@@ -667,10 +660,16 @@ model_configs_layout_thd = {
         4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
     ),
     "layout_3_2": ModelConfig(
-        2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+        2, 16, 16, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
     ),
     "layout_3_3": ModelConfig(
         4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_3_4": ModelConfig(
+        2, 16, 16, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_5": ModelConfig(
+        4, 16, 1, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
     ),
 }
 
@@ -688,12 +687,13 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
-    if config.window_size[0] == -1 and config.window_size[1] in [-1, 0]:
-        pad_between_seqs = True
-        test_dot_product_attention(
-            dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
-        )
+    logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = True")
+    pad_between_seqs = True
+    test_dot_product_attention(
+        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
+    )
     if get_cudnn_version() >= (9, 3, 0):
+        logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
         test_dot_product_attention(

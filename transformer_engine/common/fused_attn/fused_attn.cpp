@@ -217,12 +217,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
              qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) ||
          // 9.6: SWA (left, right) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
          (cudnn_runtime_version >= 90600 && (window_size_left == -1 || window_size_left >= 0) &&
-          (window_size_right == -1 || window_size_right >= 0) &&
-          (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-           attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK))) &&
+          (window_size_right == -1 || window_size_right >= 0))) &&
         // check 64-bit ragged offset support
         (supported_ragged_offset_size)) {
       flag_arb = true;
