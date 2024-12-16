@@ -8173,7 +8173,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 alibi_dict["_bottom_right_diagonal"] = bottom_right_diagonal
                 alibi_dict["_actual_seqlens_q"] = actual_seqlens_q
                 alibi_dict["_actual_seqlens_kv"] = actual_seqlens_kv
-                if any(y != _alibi_cache[x] for x,y in alibi_dict.items()):
+                if any(y != _alibi_cache[x] for x, y in alibi_dict.items()):
                     _alibi_cache["_alibi_bias_require_update"] = True
 
             core_attention_bias_shape = None
