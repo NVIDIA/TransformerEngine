@@ -205,6 +205,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
  *  \param[in]     attn_mask_type           Attention mask type.
  *  \param[in]     window_size_left         Sliding window size (the left half).
  *  \param[in]     window_size_right        Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal    Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
@@ -215,7 +216,8 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
                                    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                                    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
                                    int64_t window_size_left, int64_t window_size_right,
-                                   NVTETensor workspace, cudaStream_t stream);
+                                   bool bottom_right_diagonal, NVTETensor workspace,
+                                   cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed QKV input.
  *
@@ -259,19 +261,18 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
  *  \param[in]     attn_mask_type           Attention mask type.
  *  \param[in]     window_size_left         Sliding window size (the left half).
  *  \param[in]     window_size_right        Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal    Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic            Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                Workspace tensor.
  *  \param[in]     stream                   CUDA stream used for this operation.
  */
-void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, const NVTETensor dO,
-                                   const NVTETensor S, NVTETensor dP,
-                                   const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQKV,
-                                   NVTETensor dBias, const NVTETensor cu_seqlens,
-                                   const NVTETensor cu_seqlens_padded, size_t max_seqlen,
-                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                   NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                   int64_t window_size_left, int64_t window_size_right,
-                                   bool deterministic, NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_bwd_qkvpacked(
+    const NVTETensor QKV, const NVTETensor O, const NVTETensor dO, const NVTETensor S,
+    NVTETensor dP, const NVTETensorPack* Aux_CTX_Tensors, NVTETensor dQKV, NVTETensor dBias,
+    const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded, size_t max_seqlen,
+    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, bool deterministic, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with packed KV input.
  *
@@ -325,20 +326,19 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
-void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias,
-                                  NVTETensor S, NVTETensor O, NVTETensorPack* Aux_CTX_Tensors,
-                                  const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                                  const NVTETensor cu_seqlens_q_padded,
-                                  const NVTETensor cu_seqlens_kv_padded, const NVTETensor rng_state,
-                                  size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                                  float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                  int64_t window_size_left, int64_t window_size_right,
-                                  NVTETensor workspace, cudaStream_t stream);
+void nvte_fused_attn_fwd_kvpacked(
+    const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O,
+    NVTETensorPack* Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    const NVTETensor rng_state, size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
+    float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type, int64_t window_size_left, int64_t window_size_right,
+    bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with packed KV input.
  *
@@ -388,6 +388,7 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
@@ -399,8 +400,8 @@ void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
     size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
     NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-    int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
-    cudaStream_t stream);
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute dot product attention with separate Q, K and V.
  *
@@ -458,6 +459,7 @@ void nvte_fused_attn_bwd_kvpacked(
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
  */
@@ -469,8 +471,8 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
                          float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
                          NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                         int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
-                         cudaStream_t stream);
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream);
 
 /*! \brief Compute the backward of the dot product attention with separate Q, K and V.
  *
@@ -525,6 +527,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
  *  \param[in]     attn_mask_type            Attention mask type.
  *  \param[in]     window_size_left          Sliding window size (the left half).
  *  \param[in]     window_size_right         Sliding window size (the right half).
+ *  \param[in]     bottom_right_diagonal     Whether to align sliding window and ALiBi diagonal to the bottom right corner of the softmax matrix.
  *  \param[in]     deterministic             Whether to execute with deterministic behaviours.
  *  \param[in]     workspace                 Workspace tensor.
  *  \param[in]     stream                    CUDA stream used for this operation.
@@ -538,8 +541,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, int64_t window_size_left,
-                         int64_t window_size_right, bool deterministic, NVTETensor workspace,
-                         cudaStream_t stream);
+                         int64_t window_size_right, bool bottom_right_diagonal, bool deterministic,
+                         NVTETensor workspace, cudaStream_t stream);
 
 #ifdef __cplusplus
 }  // extern "C"
