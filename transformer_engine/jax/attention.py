@@ -2,10 +2,11 @@
 #
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
-
+from __future__ import annotations
+from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
@@ -289,6 +290,78 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
     return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
+@jax.tree_util.register_dataclass
+@dataclass
+class MaskDescriptor:
+    """Class representing QKV inputs with flexible initialization."""
+
+    seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    seq_offsets: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+
+    @classmethod
+    def _expand_to_pair(
+        cls, value: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]
+    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """
+        Internal helper to ensure a single value expands into a pair (q, kv).
+        """
+        if isinstance(value, tuple):
+            if len(value) != 2:
+                raise ValueError("Input tuple must have exactly 2 elements.")
+            return value
+
+        if isinstance(value, jnp.ndarray):
+            return value, value  # Duplicate for q=kv case
+
+        raise TypeError(
+            "Expected a jax.numpy.ndarray or a tuple of two jax.numpy.ndarray, "
+            f"but got {type(value).__name__}."
+        )
+
+    @classmethod
+    def from_seqlens(
+        cls,
+        seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+    ) -> MaskDescriptor:
+        """Factory method for inputs with sequence lengths only."""
+        q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
+        return cls(seqlens=(q_seqlens, kv_seqlens))
+
+    @classmethod
+    def from_seqlens_with_offsets(
+        cls,
+        seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+        seq_offsets: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+    ) -> MaskDescriptor:
+        """Factory method for inputs with sequence lengths and offsets."""
+        q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
+        q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
+        return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
+
+    @classmethod
+    def from_segment_ids_with_pos(
+        cls,
+        qkv: Tuple[jnp.ndarray, ...],
+        segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
+        segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
+    ) -> MaskDescriptor:
+        """
+        Factory method for inputs with segment IDs and optional segment positions.
+        """
+        q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
+
+        if segment_pos is not None:
+            q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
+            segment_pos = (q_seg_pos, kv_seg_pos)
+
+        return cls(
+            segment_ids=(q_seg_ids, kv_seg_ids),
+            segment_pos=segment_pos,
+        )
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -372,10 +445,7 @@ def fused_attn(
     output = _fused_attn(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        None,
-        None,
+        MaskDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -497,10 +567,9 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        MaskDescriptor.from_seqlens_with_offsets(
+            (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
+        ),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -518,14 +587,11 @@ def fused_attn_thd(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    q_seq_lens: jnp.ndarray,
-    kv_seq_lens: jnp.ndarray,
-    q_seq_offsets: Optional[jnp.ndarray],
-    kv_seq_offsets: Optional[jnp.ndarray],
+    mask_descriptor: MaskDescriptor,
     seed: jnp.ndarray,
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
@@ -542,10 +608,7 @@ def _fused_attn(
     output, _ = _fused_attn_fwd_rule(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        mask_descriptor,
         seed,
         attn_bias_type,
         attn_mask_type,
@@ -565,10 +628,7 @@ def _fused_attn(
 def _fused_attn_fwd_rule(
     qkv,
     bias,
-    q_seq_lens,
-    kv_seq_lens,
-    q_seq_offsets,
-    kv_seq_offsets,
+    mask_descriptor,
     seed,
     attn_bias_type,
     attn_mask_type,
@@ -585,12 +645,7 @@ def _fused_attn_fwd_rule(
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
-        None,
-        None,
+        mask_descriptor,
         seed,
         attn_bias_type=attn_bias_type.value,
         attn_mask_type=attn_mask_type.value,
@@ -607,13 +662,14 @@ def _fused_attn_fwd_rule(
     output = checkpoint_name(output, "context")
     softmax_aux = checkpoint_name(softmax_aux, "context")
     rng_state = checkpoint_name(rng_state, "context")
+    seq_offsets = mask_descriptor.seq_offsets
+    if seq_offsets is None:
+        seq_offsets = (None, None)
     return output, (
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        *mask_descriptor.seqlens,
+        *seq_offsets,
         softmax_aux,
         rng_state,
         output,
@@ -671,7 +727,12 @@ def _fused_attn_bwd_rule(
     )
     if attn_bias_type == AttnBiasType.NO_BIAS:
         grad_bias = None
-    return grad_qkv, grad_bias, None, None, None, None, None
+    return (
+        grad_qkv,
+        grad_bias,
+        None,
+        None,
+    )
 
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)

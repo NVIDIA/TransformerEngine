@@ -17,7 +17,7 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
 
-from transformer_engine.jax.attention import CPStrategy
+from transformer_engine.jax.attention import CPStrategy, MaskDescriptor
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import (
@@ -1997,12 +1997,7 @@ def _maybe_context_parallel_axis(cp_axis: str):
 def fused_attn_fwd(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    q_seqlen: Optional[jnp.ndarray],
-    kv_seqlen: Optional[jnp.ndarray],
-    q_seq_offsets: Optional[jnp.ndarray],
-    kv_seq_offsets: Optional[jnp.ndarray],
-    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]],
-    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]],
+    mask_descriptor: MaskDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: NVTE_Bias_Type,
     attn_mask_type: NVTE_Mask_Type,
@@ -2058,29 +2053,6 @@ def fused_attn_fwd(
     # For optional tensors, which custom calls doesn't support None
     _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
 
-    assert (q_seq_offsets is None) == (
-        kv_seq_offsets is None
-    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
-
-    # TODO(rewang): Refine type definition and check (tuple or jnp.ndarray or iterable)
-    if segment_ids is None:
-        q_segment_ids = kv_segment_ids = jnp.zeros(0, dtype=jnp.int32)
-    elif len(segment_ids) == 1:
-        q_segment_ids = kv_segment_ids = segment_ids[0]
-    elif len(segment_ids) == 2:
-        q_segment_ids, kv_segment_ids = segment_ids
-    else:
-        raise ValueError("segment_ids is expected to be Tuple[jnp.ndarray, jnp.ndarray]")
-
-    if segment_ids is None:
-        q_segment_pos = kv_segment_pos = jnp.zeros(0, dtype=jnp.int32)
-    elif len(segment_pos) == 1:
-        q_segment_pos = kv_segment_pos = segment_pos[0]
-    elif len(segment_ids) == 2:
-        q_segment_pos, kv_segment_pos = segment_pos
-    else:
-        raise ValueError("segment_ids is expected to be Tuple[jnp.ndarray, jnp.ndarray]")
-
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     match qkv_layout:
@@ -2125,12 +2097,15 @@ def fused_attn_fwd(
     return primitive.bind(
         *qkv_for_primitive,
         bias,
-        q_seqlen,
-        kv_seqlen,
-        q_seq_offsets if is_ragged else _not_used,
-        kv_seq_offsets if is_ragged else _not_used,
+        *mask_descriptor.seqlens,
+        *(
+            mask_descriptor.seq_offsets
+            if mask_descriptor.seq_offsets is not None
+            else (_not_used, _not_used)
+        ),
         seed,
-        jnp.array([q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos]),
+        jnp.array(mask_descriptor.segment_ids),
+        # jnp.array([q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos]),
         config=fused_config,
     )
 
