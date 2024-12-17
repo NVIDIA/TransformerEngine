@@ -928,11 +928,18 @@ class Linear(TransformerEngineBaseModule):
             assert ub_name is not None, f"Userbuffer name [string] is not set."
         self.ub_name = ub_name
 
-        assert not (self.ub_overlap_rs_fprop and self.ub_overlap_ag_fprop), "Internal TE error!"
-        assert not (self.ub_overlap_ag_dgrad and self.ub_overlap_rs_dgrad), "Internal TE error!"
-        assert not (
-            self.ub_overlap_rs_dgrad and (self.ub_bulk_dgrad or self.ub_bulk_wgrad)
-        ), "Internal TE error!"
+        assert not (self.ub_overlap_rs_fprop and self.ub_overlap_ag_fprop), (
+            "Failed to infer TP overlap options! "
+            + "Forward pass cannot do AG+GEMM and GEMM+RS at the same time."
+        )
+        assert not (self.ub_overlap_ag_dgrad and self.ub_overlap_rs_dgrad), (
+            "Failed to infer TP overlap options! "
+            + "Backward pass cannot do AG+DGRAD and DGRAD+RS at the same time."
+        )
+        assert not self.ub_overlap_rs_dgrad and (self.ub_bulk_dgrad or self.ub_bulk_wgrad), (
+            "Failed to infer TP overlap options! "
+            + "Backward pass cannot do DGRAD+RS and bulk overlaps at the same time."
+        )
 
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
