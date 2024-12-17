@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Linear API"""
-import sys
 from functools import reduce
 from operator import mul as multiply_op
 from typing import Any, Callable, Dict, Optional, Tuple, Union
@@ -925,7 +924,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_bulk_wgrad,
             ]
         ):
-            assert ub_name is not None, f"Userbuffer name [string] is not set."
+            assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
 
         assert not (self.ub_overlap_rs_fprop and self.ub_overlap_ag_fprop), (
