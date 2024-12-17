@@ -589,6 +589,8 @@ def _fused_attn_fwd_rule(
         kv_seq_lens,
         q_seq_offsets,
         kv_seq_offsets,
+        None,
+        None,
         seed,
         attn_bias_type=attn_bias_type.value,
         attn_mask_type=attn_mask_type.value,

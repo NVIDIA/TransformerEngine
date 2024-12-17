@@ -2070,10 +2070,12 @@ def _maybe_context_parallel_axis(cp_axis: str):
 def fused_attn_fwd(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    q_seqlen: jnp.ndarray,
-    kv_seqlen: jnp.ndarray,
+    q_seqlen: Optional[jnp.ndarray],
+    kv_seqlen: Optional[jnp.ndarray],
     q_seq_offsets: Optional[jnp.ndarray],
     kv_seq_offsets: Optional[jnp.ndarray],
+    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]],
+    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]],
     seed: Optional[jnp.ndarray],
     attn_bias_type: NVTE_Bias_Type,
     attn_mask_type: NVTE_Mask_Type,
@@ -2082,8 +2084,6 @@ def fused_attn_fwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
-    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
-    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
     window_size: Optional[Tuple[int, int]] = None,
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
@@ -2137,7 +2137,7 @@ def fused_attn_fwd(
 
     # TODO(rewang): Refine type definition and check (tuple or jnp.ndarray or iterable)
     if segment_ids is None:
-        q_segment_ids = kv_segment_ids = _not_used
+        q_segment_ids = kv_segment_ids = jnp.zeros(0, dtype=jnp.int32)
     elif len(segment_ids) == 1:
         q_segment_ids = kv_segment_ids = segment_ids[0]
     elif len(segment_ids) == 2:
@@ -2146,7 +2146,7 @@ def fused_attn_fwd(
         raise ValueError("segment_ids is expected to be Tuple[jnp.ndarray, jnp.ndarray]")
 
     if segment_ids is None:
-        q_segment_pos = kv_segment_pos = _not_used
+        q_segment_pos = kv_segment_pos = jnp.zeros(0, dtype=jnp.int32)
     elif len(segment_pos) == 1:
         q_segment_pos = kv_segment_pos = segment_pos[0]
     elif len(segment_ids) == 2:
@@ -2215,8 +2215,8 @@ def fused_attn_bwd(
     rng_state: jnp.ndarray,
     output: jnp.ndarray,
     doutput: jnp.ndarray,
-    q_seqlen: jnp.ndarray,
-    kv_seqlen: jnp.ndarray,
+    q_seqlen: Optional[jnp.ndarray],
+    kv_seqlen: Optional[jnp.ndarray],
     q_seq_offsets: Optional[jnp.ndarray],
     kv_seq_offsets: Optional[jnp.ndarray],
     attn_bias_type: NVTE_Bias_Type,
