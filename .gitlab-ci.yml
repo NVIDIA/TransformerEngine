@@ -9,7 +9,7 @@ variables:
     # framework containers
     PYTORCH_IMAGE:
       description: Base Docker container for PyTorch build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+      value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:24.12-py3-devel
     JAX_IMAGE:
       description: Base Docker container for JAX build
       value: ghcr.io/nvidia/jax:pax
