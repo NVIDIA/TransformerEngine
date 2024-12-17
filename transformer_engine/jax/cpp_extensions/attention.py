@@ -1222,6 +1222,47 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
     This context parallel implementation uses all-gather to collect KV inputs from context parallel ranks.
     """
 
+    impl_static_args = (10,)
+
+    @staticmethod
+    def impl(
+        q,
+        k,
+        v,
+        bias,
+        q_seqlen,
+        kv_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        seed,
+        cp_aux_args,
+        config: _FusedAttnConfig,
+    ):
+        del cp_aux_args
+        return FusedAttnFwdPrimitive.impl(
+            q,
+            k,
+            v,
+            bias,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            seed,
+            config=config,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Fused attention fwd outer primitive abstract
+        Remove cp_aux_args from the abstract
+        """
+        out_aval, softmax_aux_aval, rng_state_aval, _ = FusedAttnFwdPrimitive.abstract(
+            *args[:-1], **kwargs
+        )
+        return out_aval, softmax_aux_aval, rng_state_aval
+
     @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
         # Call base implementation for non-context parallel mesh to avoid unecessary work.
@@ -1240,10 +1281,17 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
-        arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos[:-1]] + [seed_sharding])
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[-2] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
-        def impl(q, k, v, bias, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets, seed):
+        def impl(
+            q, k, v, bias, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets, seed, cp_aux_args
+        ):
+            # To Convert segment_ids/segmen_pos to q_seqlen/q_seq_offset
+            # q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos = cp_aux_args
+            del cp_aux_args
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
 
@@ -1578,6 +1626,47 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
     Fused Ring Attention Forward Primitive
     """
 
+    impl_static_args = (10,)
+
+    @staticmethod
+    def impl(
+        q,
+        k,
+        v,
+        bias,
+        q_seqlen,
+        kv_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        seed,
+        cp_aux_args,
+        config: _FusedAttnConfig,
+    ):
+        del cp_aux_args
+        return FusedAttnFwdPrimitive.impl(
+            q,
+            k,
+            v,
+            bias,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            seed,
+            config=config,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        Fused attention fwd outer primitive abstract
+        Remove cp_aux_args from the abstract
+        """
+        out_aval, softmax_aux_aval, rng_state_aval, _ = FusedAttnFwdPrimitive.abstract(
+            *args[:-1], **kwargs
+        )
+        return out_aval, softmax_aux_aval, rng_state_aval
+
     @staticmethod
     def partition(config, mesh, arg_infos, result_infos):
         is_context_parallel = get_mesh_axis_size(config.cp_axis, mesh) > 1
@@ -1595,7 +1684,9 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
         rng_state_sharding = seed_sharding = NamedSharding(
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
-        arg_shardings = tuple([arg_i.sharding for arg_i in arg_infos[:-1]] + [seed_sharding])
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[-2] = seed_sharding
+        arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
         def ring_attn_fwd_impl(
@@ -1608,7 +1699,11 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             q_seq_offsets,
             k_seq_offsets,
             seed,
+            cp_aux_args,
         ):
+            # To Convert segment_ids/segmen_pos to q_seqlen/q_seq_offset
+            # q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos = cp_aux_args
+            del cp_aux_args
             _not_used = jnp.zeros(0, dtype=v.dtype)
 
             # Combine KV tensors if separate for better permute scheduling and performance.
@@ -1649,7 +1744,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         q_seq_offsets,
                         k_seq_offsets,
                         seed,
-                        helper.get_step_config(attn_mask_type),
+                        config=helper.get_step_config(attn_mask_type),
                     )
                     return output_per_step, softmax_aux_per_step
 
@@ -1987,6 +2082,8 @@ def fused_attn_fwd(
     dropout_probability: float,
     is_training: bool,
     max_segments_per_seq: int,
+    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
+    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None,
     window_size: Optional[Tuple[int, int]] = None,
     context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
     context_parallel_causal_load_balanced: bool = False,
@@ -2031,14 +2128,34 @@ def fused_attn_fwd(
         (jnp.ndarray): The output tensor from the fused attention.
     """
     seed = _FusedAttnRNGStateChecker().check_seed(seed, dropout_probability, is_training)
+    # For optional tensors, which custom calls doesn't support None
+    _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
 
     assert (q_seq_offsets is None) == (
         kv_seq_offsets is None
     ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
+
+    # TODO(rewang): Refine type definition and check (tuple or jnp.ndarray or iterable)
+    if segment_ids is None:
+        q_segment_ids = kv_segment_ids = _not_used
+    elif len(segment_ids) == 1:
+        q_segment_ids = kv_segment_ids = segment_ids[0]
+    elif len(segment_ids) == 2:
+        q_segment_ids, kv_segment_ids = segment_ids
+    else:
+        raise ValueError("segment_ids is expected to be Tuple[jnp.ndarray, jnp.ndarray]")
+
+    if segment_ids is None:
+        q_segment_pos = kv_segment_pos = _not_used
+    elif len(segment_pos) == 1:
+        q_segment_pos = kv_segment_pos = segment_pos[0]
+    elif len(segment_ids) == 2:
+        q_segment_pos, kv_segment_pos = segment_pos
+    else:
+        raise ValueError("segment_ids is expected to be Tuple[jnp.ndarray, jnp.ndarray]")
+
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
-    # For optional tensors, which custom calls doesn't support None
-    _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
     match qkv_layout:
         case NVTE_QKV_Layout.NVTE_BS3HD | NVTE_QKV_Layout.NVTE_T3HD:
             assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
@@ -2071,14 +2188,14 @@ def fused_attn_fwd(
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )
 
-    primative = None
+    primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primative = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
+            primitive = FusedAttnCPWithAllGatherFwdPrimitive.outer_primitive
         case CPStrategy.RING:
-            primative = FusedRingAttnFwdPrimitive.outer_primitive
+            primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
-    return primative.bind(
+    return primitive.bind(
         *qkv_for_primitive,
         bias,
         q_seqlen,
@@ -2086,6 +2203,7 @@ def fused_attn_fwd(
         q_seq_offsets if is_ragged else _not_used,
         kv_seq_offsets if is_ragged else _not_used,
         seed,
+        jnp.array([q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos]),
         config=fused_config,
     )
 
@@ -2196,14 +2314,14 @@ def fused_attn_bwd(
         cp_axis=_maybe_context_parallel_axis(context_parallel_axis),
     )
 
-    primative = None
+    primitive = None
     match context_parallel_strategy:
         case CPStrategy.DEFAULT | CPStrategy.ALL_GATHER:
-            primative = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
+            primitive = FusedAttnCPWithAllGatherBwdPrimitive.outer_primitive
         case CPStrategy.RING:
-            primative = FusedRingAttnBwdPrimitive.outer_primitive
+            primitive = FusedRingAttnBwdPrimitive.outer_primitive
 
-    *qkv_grads, bias_grad = primative.bind(
+    *qkv_grads, bias_grad = primitive.bind(
         *qkv_for_primitive,
         bias,
         softmax_aux,
