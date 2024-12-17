@@ -24,6 +24,19 @@ from .quantized_tensor import QuantizedTensor
 aten = torch.ops.aten
 updated_fp8_params = {}
 
+_ops_to_preserve_subclass_in_fsdp2 = {
+    torch.ops.aten.empty_like.default,
+    torch.ops.aten.new_zeros.default,
+    torch.ops.aten.slice.Tensor,
+    torch.ops.aten.copy_.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten.as_strided.default,
+    torch.ops.aten._to_copy.default,
+    torch.ops.aten._pin_memory.default,
+    torch.ops.aten.split.Tensor,
+    torch.ops.aten.clone.default,
+}
+
 
 def _make_fp8_attr_property_funcs(name: str) -> Any:
     """Make accessors for an FP8 attribute
@@ -429,6 +442,37 @@ class Float8Tensor(QuantizedTensor):
         self._transpose_invalid = self._transpose is None
 
         return self
+
+    def fsdp_pre_all_gather(self, mesh):  # pylint: disable=unused-argument
+        """
+        A hook function used in torch fsdp2, called before all-gather
+        return (all-gather input), (metadata)
+        Ref: https://github.com/pytorch/pytorch/pull/122908
+
+        """
+
+        return (self._data,), (self,)
+
+    def fsdp_post_all_gather(
+        self,
+        all_gather_outputs: Tuple[torch.Tensor, ...],
+        metadata: Any,
+        param_dtype: torch.dtype,  # pylint: disable=unused-argument
+        *,
+        out: Optional[torch.Tensor] = None,
+    ):
+        """
+        A hook function used in torch fsdp2, called after all-gather
+        return (Float8Tensor class instance of all-gathered input), (Things to free after forward)
+        Ref: https://github.com/pytorch/pytorch/pull/122908
+
+        """
+        (data,) = all_gather_outputs
+        (sample,) = metadata
+        if out is not None:
+            assert isinstance(out, Float8Tensor), f"{type(out)}"
+            return None
+        return Float8Tensor.make_like(sample, data=data), all_gather_outputs
 
     @classmethod
     def make_like(
@@ -902,7 +946,53 @@ class Float8Tensor(QuantizedTensor):
             )
             return Float8Tensor.make_like(tensor, data=data_view)
 
-        # Default case
+        # Related to FSDP2
+        if func == aten.split.Tensor:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
+        if func == aten.new_zeros.default:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(tensor, data=func_out)
+        if func == torch.ops.aten.as_strided.default:
+            tensor = args[0]
+            data = tensor._data
+            func_out = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            return Float8Tensor.make_like(tensor, data=func_out)
+        if func == torch.ops.aten.detach.default:
+            return cls.detach(args[0])
+        if func == torch.ops.aten.clone.default:
+            return cls.clone(args[0])
+        if func == torch.ops.aten.copy_.default:
+            # Implementation in the superclass (QuantizedTensor) returns a proper output
+            pass
+        elif func in _ops_to_preserve_subclass_in_fsdp2:
+            # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
+            warnings.warn(
+                f"A function call({func}) in {cls} may not return {cls} tensor as an output. It"
+                " might cause an error in torch FSDP2!"
+            )
+        else:
+            pass
+
         return super().__torch_dispatch__(func, types, args, kwargs)
 
     @classmethod

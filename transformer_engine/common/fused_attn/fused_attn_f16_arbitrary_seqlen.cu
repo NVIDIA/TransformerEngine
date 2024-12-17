@@ -679,6 +679,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
       if (is_ragged && cudnn_runtime_version >= 90600) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
+        sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
       }
 
       fe::DiagonalAlignment_t const &diagonal_alignment =
