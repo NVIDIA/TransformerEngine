@@ -927,15 +927,14 @@ class Linear(TransformerEngineBaseModule):
             assert ub_name is not None, f"Comm+GEMM overlap layer '{ub_name}' is not initialized."
         self.ub_name = ub_name
 
-        assert not (self.ub_overlap_rs_fprop and self.ub_overlap_ag_fprop), (
-            "Cannot enable AG+GEMM and GEMM+RS overlaps at the same time."
-        )
-        assert not (self.ub_overlap_rs_dgrad and self.ub_bulk_dgrad), (
-            "Cannot enable DGRAD+RS and bulk DGRAD overlaps at the same time."
-        )
         assert not (
-            self.ub_overlap_ag_dgrad
-            and (self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad)
+            self.ub_overlap_rs_fprop and self.ub_overlap_ag_fprop
+        ), "Cannot enable AG+GEMM and GEMM+RS overlaps at the same time."
+        assert not (
+            self.ub_overlap_rs_dgrad and self.ub_bulk_dgrad
+        ), "Cannot enable DGRAD+RS and bulk DGRAD overlaps at the same time."
+        assert not (
+            self.ub_overlap_ag_dgrad and (self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad)
         ), "Cannot enable AG+DGRAD and DGRAD+RS or bulk DGRAD overlaps at the same time."
 
         self.get_rng_state_tracker = get_rng_state_tracker
