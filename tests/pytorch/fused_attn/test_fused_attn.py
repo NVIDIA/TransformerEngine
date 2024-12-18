@@ -427,8 +427,12 @@ model_configs_mask = {
     "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
     "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
     "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_10_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "mask_10_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
+    "mask_10_0": ModelConfig(
+        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_10_1": ModelConfig(
+        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
 }
 
 
@@ -643,18 +647,51 @@ model_configs_layout_thd = {
     "layout_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "layout_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
     "layout_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "layout_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "layout_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "layout_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "layout_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4,4)),
-    "layout_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4,4)),
-    "layout_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4,4)),
-    "layout_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4,0)),
-    "layout_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4,0)),
-    "layout_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4,0)),
-    "layout_5_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4,0)),
-    "layout_5_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4,0)),
-    "layout_5_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4,0)),
+    "layout_2_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_3_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_4_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_2": ModelConfig(
+        2,
+        24,
+        24,
+        128,
+        2048,
+        4096,
+        0.0,
+        "padding_causal_bottom_right",
+        "no_bias",
+        window_size=(4, 0),
+    ),
 }
 
 
