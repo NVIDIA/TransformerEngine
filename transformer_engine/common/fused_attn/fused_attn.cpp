@@ -205,10 +205,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           (window_size_right == -1 || window_size_right == 0)) ||
          // 9.2: SWA (left, 0) + top-left diagonal + {bshd, sbhd}
          (cudnn_runtime_version >= 90200 &&
-          ((window_size_left == -1 && window_size_right == -1) ||
-           ((window_size_left == -1 || window_size_left >= 0) && window_size_right == 0 &&
-            (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+          ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
+           ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
+            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               max_seqlen_q == max_seqlen_kv)) &&
             max_seqlen_q <= max_seqlen_kv && dropout == 0.0 &&
@@ -217,10 +216,9 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
              qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) ||
          // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
          (cudnn_runtime_version >= 90600 &&
-          ((window_size_left == -1 && window_size_right == -1) ||
-           ((window_size_left == -1 || window_size_left >= 0) && window_size_right == 0 &&
+          ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
+           ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
             (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
             max_seqlen_q <= max_seqlen_kv && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
