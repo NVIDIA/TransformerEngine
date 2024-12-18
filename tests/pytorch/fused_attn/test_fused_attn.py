@@ -546,16 +546,19 @@ model_configs_swa = {
     "swa_3_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "swa_3_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "swa_5_1": ModelConfig(
+    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "swa_5_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "swa_6_1": ModelConfig(
         2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "swa_5_2": ModelConfig(
+    "swa_6_2": ModelConfig(
         2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "swa_5_3": ModelConfig(
+    "swa_6_3": ModelConfig(
         2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
 }
