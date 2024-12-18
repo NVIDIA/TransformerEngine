@@ -339,7 +339,7 @@ class TestFloat8Tensor:
         del x_fp8, byte_stream
 
         # Deserialize tensor
-        x_fp8 = torch.load(io.BytesIO(x_bytes))
+        x_fp8 = torch.load(io.BytesIO(x_bytes), weights_only=False)
         del x_bytes
 
         # Check results

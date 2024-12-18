@@ -9,7 +9,7 @@ import warnings
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
@@ -74,7 +74,7 @@ class LayerNormFwdPrimitive(BasePrimitive):
 
         mu_rsigama_dtype = jnp.float32
 
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         mu_aval = rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=mu_rsigama_dtype)
 
         assert gamma_aval.size == beta_aval.size
@@ -361,8 +361,8 @@ class LayerNormBwdPrimitive(BasePrimitive):
         assert mu_aval.shape == rsigma_aval.shape == x_aval.shape[:-1]
         assert mu_dtype == rsigma_dtype == jnp.float32
 
-        dx_aval = core.raise_to_shaped(dz_aval)
-        dgamma_aval = dbeta_aval = core.raise_to_shaped(gamma_aval)
+        dx_aval = dz_aval
+        dgamma_aval = dbeta_aval = gamma_aval
 
         (wkspace_info,) = transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
@@ -589,7 +589,7 @@ class RmsNormFwdPrimitive(BasePrimitive):
 
         rsigama_dtype = jnp.float32
 
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         rsigma_aval = out_aval.update(shape=out_aval.shape[:-1], dtype=rsigama_dtype)
 
         hidden_size = gamma_aval.size
@@ -783,8 +783,8 @@ class RmsNormBwdPrimitive(BasePrimitive):
         assert rsigma_aval.shape == x_aval.shape[:-1]
         assert rsigma_dtype == jnp.float32
 
-        dx_aval = core.raise_to_shaped(dz_aval)
-        dgamma_aval = core.raise_to_shaped(gamma_aval)
+        dx_aval = dz_aval
+        dgamma_aval = gamma_aval
 
         (wkspace_info,) = transformer_engine_jax.get_layernorm_bwd_workspace_sizes(
             x_aval.size // gamma_aval.size,  # batch size
