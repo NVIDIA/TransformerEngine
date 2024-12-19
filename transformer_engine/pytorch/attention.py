@@ -965,7 +965,6 @@ def get_attention_backend(
     available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention, fused_attn_avail_backends]
 
     # Filter: Environment variables
-    #selected_backend = [use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend]
     use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend = update_env_vars(logger, available_backends)
 
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
