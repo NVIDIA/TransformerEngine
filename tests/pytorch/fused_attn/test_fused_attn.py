@@ -178,7 +178,9 @@ def _get_attention_backends(
         fp8=fp8,
         fp8_meta=fp8_meta,
     )
-    _attention_backends["update_selection"] = attention_params not in _attention_backends["attention_params"]
+    _attention_backends["update_selection"] = (
+        attention_params not in _attention_backends["attention_params"]
+    )
     _attention_backends["update_env_vars_only"] = False
     available_backends, _ = get_attention_backend(attention_params)
     return available_backends
@@ -206,7 +208,7 @@ param_types_lean = [torch.bfloat16]
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-@pytest.mark.parametrize("workspace_opt", [True])#, False])
+@pytest.mark.parametrize("workspace_opt", [True])  # , False])
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
@@ -241,7 +243,9 @@ def test_dot_product_attention(
         window_size=config.window_size,
         pad_between_seqs=pad_between_seqs,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported, fused_attn_backends = available_backends
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported, fused_attn_backends = (
+        available_backends
+    )
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
     if pad_between_seqs and not (
@@ -1037,7 +1041,9 @@ def test_transformer_layer(
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported, fused_attn_backends = available_backends
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported, fused_attn_backends = (
+        available_backends
+    )
 
     # Skip if only unfused backend is supported
     if (len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported) < 2:
@@ -1747,7 +1753,9 @@ def test_custom_mha_fp8_vs_f16(dtype, model):
     config = model_configs_fp8[model]
 
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_custom_mha_fp8(dtype, config, "FusedAttention")
-    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(dtype, config, "UnfusedDotProductAttention")
+    unfused_attn_fwd_f16, unfused_attn_bwd_f16 = _run_ref_mha_f16(
+        dtype, config, "UnfusedDotProductAttention"
+    )
 
     atol = 5e-1
     rtol = 5e-1

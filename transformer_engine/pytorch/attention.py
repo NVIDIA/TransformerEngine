@@ -406,7 +406,7 @@ def get_attention_backend(
         attention_params in _attention_backends["attention_params"]
         and not _attention_backends["update_env_vars_only"]
         and not _attention_backends["update_selection"]
-        ):
+    ):
         config_id = _attention_backends["attention_params"].index(attention_params)
         available_backends = _attention_backends["available_backends"][config_id]
         selected_backend = _attention_backends["selected_backend"][config_id]
@@ -415,7 +415,12 @@ def get_attention_backend(
     # if environment variables such as NVTE_FUSED_ATTN change in the middle of the run
     def update_env_vars(logger, available_backends):
         # Filter: Environment variables
-        use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backends = available_backends
+        (
+            use_flash_attention,
+            use_fused_attention,
+            use_unfused_attention,
+            fused_attention_backends,
+        ) = available_backends
         _use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
         _use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         _use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
@@ -435,13 +440,19 @@ def get_attention_backend(
             if len(fused_attention_backends) == 2:
                 sub_backend = int(os.getenv("NVTE_FUSED_ATTN_BACKEND", "1"))
                 fused_attention_backend = fused_attention_backends[sub_backend]
-        selected_backend = [use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend]
+        selected_backend = [
+            use_flash_attention,
+            use_fused_attention,
+            use_unfused_attention,
+            fused_attention_backend,
+        ]
         return selected_backend
+
     if (
         attention_params in _attention_backends["attention_params"]
         and _attention_backends["update_env_vars_only"]
         and not _attention_backends["update_selection"]
-        ):
+    ):
         config_id = _attention_backends["attention_params"].index(attention_params)
         available_backends = _attention_backends["available_backends"][config_id]
         selected_backend = update_env_vars(logger, available_backends)
@@ -449,7 +460,10 @@ def get_attention_backend(
         return available_backends, selected_backend
 
     # keep unique attention_params
-    if attention_params in _attention_backends["attention_params"] and _attention_backends["update_selection"]:
+    if (
+        attention_params in _attention_backends["attention_params"]
+        and _attention_backends["update_selection"]
+    ):
         config_id = _attention_backends["attention_params"].index(attention_params)
         _attention_backends["attention_params"].pop(config_id)
         _attention_backends["available_backends"].pop(config_id)
@@ -883,7 +897,7 @@ def get_attention_backend(
             return fused_attention_backend
 
         # all available cuDNN sub-backends
-        for k,v in FusedAttnBackend.items():
+        for k, v in FusedAttnBackend.items():
             if k != "No_Backend":
                 os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(int(v))
                 backend = get_fused_attn_backend()
@@ -962,10 +976,17 @@ def get_attention_backend(
             use_fused_attention = False
 
     # All available backends
-    available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention, fused_attn_avail_backends]
+    available_backends = [
+        use_flash_attention,
+        use_fused_attention,
+        use_unfused_attention,
+        fused_attn_avail_backends,
+    ]
 
     # Filter: Environment variables
-    use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend = update_env_vars(logger, available_backends)
+    use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend = (
+        update_env_vars(logger, available_backends)
+    )
 
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
@@ -983,10 +1004,11 @@ def get_attention_backend(
         use_flash_attention = False
         available_backends[0] = False
 
-
     fused_attn_str = ""
     if len(fused_attn_avail_backends) > 0:
-        fused_attn_str = " (sub-backend " + " and ".join([str(int(x)) for x in fused_attn_avail_backends]) + ")"
+        fused_attn_str = (
+            " (sub-backend " + " and ".join([str(int(x)) for x in fused_attn_avail_backends]) + ")"
+        )
     logger.debug(
         "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
         " UnfusedDotProductAttention=%s}",
@@ -1035,7 +1057,12 @@ def get_attention_backend(
     elif use_unfused_attention:
         backend = "UnfusedDotProductAttention"
     logger.debug("Selected backend = %s", backend)
-    selected_backend = [use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend]
+    selected_backend = [
+        use_flash_attention,
+        use_fused_attention,
+        use_unfused_attention,
+        fused_attention_backend,
+    ]
 
     _attention_backends["attention_params"].append(attention_params)
     _attention_backends["available_backends"].append(available_backends)
@@ -8268,11 +8295,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
             )
-            is_new_config = (attention_params not in _attention_backends["attention_params"]
+            is_new_config = (
+                attention_params not in _attention_backends["attention_params"]
                 or _attention_backends["update_env_vars_only"]
-                or _attention_backends["update_selection"])
+                or _attention_backends["update_selection"]
+            )
             _, selected_backend = get_attention_backend(attention_params)
-            use_flash_attention, use_fused_attention, use_unfused_attention, fused_attention_backend = selected_backend
+            (
+                use_flash_attention,
+                use_fused_attention,
+                use_unfused_attention,
+                fused_attention_backend,
+            ) = selected_backend
             if is_new_config:
                 if use_flash_attention:
                     self.logger.info(
@@ -8286,7 +8320,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     )
                 elif use_unfused_attention:
                     self.logger.info("Running with UnfusedDotProductAttention backend")
-
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
