@@ -187,8 +187,6 @@ def _get_attention_backends(
 model_configs_base = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias   # attn , backend
     "base_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
-    #"base_1_1": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
-    #"base_2_1": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "no_mask", "no_bias"),  # self , 0
     "base_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "no_mask", "no_bias"),  # cross, 0
     "base_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),  # self , 1
     "base_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),  # cross, 1
@@ -244,7 +242,6 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported, fused_attn_backends = available_backends
-    print('----',flash_attn_supported, fused_attn_supported, unfused_attn_supported)
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
     if pad_between_seqs and not (
@@ -674,7 +671,6 @@ def _run_dot_product_attention(
         os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_env_vars_only"] = True
 
     # Create seqlens
@@ -1166,7 +1162,6 @@ def _run_transformer_layer(
         os.environ["NVTE_FUSED_ATTN"] = "1"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_env_vars_only"] = True
 
     # Create input tensor
@@ -1358,7 +1353,6 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         os.environ["NVTE_UNFUSED_ATTN"] = "0"
-        #_attention_backends["backend_selection_requires_update"] = True
         _attention_backends["update_selection"] = True
         logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
         flash_attn_fwd_fp8, param_names, flash_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
@@ -1368,7 +1362,6 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_selection"] = True
     logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
     fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
@@ -1541,7 +1534,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         os.environ["NVTE_UNFUSED_ATTN"] = "0"
-        #_attention_backends["backend_selection_requires_update"] = True
         _attention_backends["update_selection"] = True
         logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
         flash_attn_fwd_fp8, flash_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
@@ -1551,7 +1543,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "1"
     os.environ["NVTE_UNFUSED_ATTN"] = "0"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_selection"] = True
     logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = True")
     fused_attn_fwd_fp8, fused_attn_bwd_fp8 = _run_dpa_fp8_vs_f16(
@@ -1794,7 +1785,6 @@ def _run_custom_mha_fp8(dtype, config, backend):
         os.environ["NVTE_FUSED_ATTN"] = "1"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_selection"] = True
 
     inp = 0.0001 * torch.randint(
@@ -1852,7 +1842,6 @@ def _run_ref_mha_f16(dtype, config, backend):
         os.environ["NVTE_FUSED_ATTN"] = "1"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
-    #_attention_backends["backend_selection_requires_update"] = True
     _attention_backends["update_selection"] = True
 
     inp = torch.load("qkv.pt").to(device="cuda")

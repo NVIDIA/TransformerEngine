@@ -402,12 +402,6 @@ def get_attention_backend(
 
     # check if attention_params already exists in cache
     global _attention_backends
-    #print('entering .....',
-    #    attention_params in _attention_backends["attention_params"],
-    #    _attention_backends["update_env_vars_only"],
-    #    _attention_backends["update_selection"])
-    #print(_attention_backends["attention_params"])
-    #print(attention_params)
     if (
         attention_params in _attention_backends["attention_params"]
         and not _attention_backends["update_env_vars_only"]
@@ -416,7 +410,6 @@ def get_attention_backend(
         config_id = _attention_backends["attention_params"].index(attention_params)
         available_backends = _attention_backends["available_backends"][config_id]
         selected_backend = _attention_backends["selected_backend"][config_id]
-        print('retrieveing ',config_id) #, available_backends, selected_backend)
         return available_backends, selected_backend
 
     # if environment variables such as NVTE_FUSED_ATTN change in the middle of the run
@@ -453,7 +446,6 @@ def get_attention_backend(
         available_backends = _attention_backends["available_backends"][config_id]
         selected_backend = update_env_vars(logger, available_backends)
         _attention_backends["selected_backend"][config_id] = selected_backend
-        print('retrieveing update env var',config_id) #, available_backends, selected_backend)
         return available_backends, selected_backend
 
     # keep unique attention_params
@@ -1054,7 +1046,6 @@ def get_attention_backend(
         _attention_backends["available_backends"].pop(0)
         _attention_backends["selected_backend"].pop(0)
     _attention_backends["update_selection"] = False
-    print('addingggg ', len(_attention_backends["attention_params"])) #,available_backends, selected_backend)
 
     return (
         available_backends,
