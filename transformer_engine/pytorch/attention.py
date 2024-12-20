@@ -602,6 +602,11 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
+        elif cudnn_version >= (9, 6, 0) and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD for cuDNN 9.6+"
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
