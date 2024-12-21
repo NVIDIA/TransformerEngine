@@ -9,3 +9,6 @@
 	path = 3rdparty/flashattn_internal
 	url = ../../../ksivamani/flashattn_internal.git
 	branch = fa_2.4.2_b100
+[submodule "dlfw-ci"]
+	path = dlfw-ci
+	url = ../../devops/dlfw-ci
