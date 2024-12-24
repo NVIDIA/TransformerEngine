@@ -8,7 +8,7 @@ from functools import reduce, partial
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
@@ -98,7 +98,7 @@ class ActLuPrimitive(BasePrimitive):
         assert x_shape[-2] == 2 or x_shape[-2] == 1
         hidden_size = x_shape[-1]
         batch_shapes = x_shape[:-2]
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         out_shape = (batch_shapes) + (hidden_size,)
         out_aval = out_aval.update(shape=out_shape, dtype=dtype)
 
@@ -225,7 +225,7 @@ class DActLuPrimitive(BasePrimitive):
         i_hidden_size = dz_aval.shape[-1]
         g_hidden_size = x_aval.shape[-1]
         assert i_hidden_size == g_hidden_size
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
 
         return out_aval
 
