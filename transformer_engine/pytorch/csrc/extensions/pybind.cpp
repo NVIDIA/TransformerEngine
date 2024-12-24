@@ -41,10 +41,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Scaled Bottom-Right Corner Aligned Masked Softmax BWD",
         py::call_guard<py::gil_scoped_release>());
 
-  m.def("fused_out_correction", &fused_out_correction,
-        "fused out correction after qkv calculation without lse_",
-        py::call_guard<py::gil_scoped_release>());
-
   // Other granular functions
   m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8",
         py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("weight"),
@@ -198,6 +194,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_out_correction", &fused_out_correction,
+        "fused out correction after qkv calculation without lse_",
         py::call_guard<py::gil_scoped_release>());
 
   // multi-tensor functions

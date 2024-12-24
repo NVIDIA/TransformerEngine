@@ -1223,15 +1223,14 @@ std::vector<at::Tensor> fused_attn_bwd(
 }
 
 /***************************************************************************************************
- * Support THD(including SBHD and BSHD) format for Context Parallel: Fused out correction in forward
+ * Support BSHD, SBHD, and THD formats for Context Parallel: Fused out correction in forward
  **************************************************************************************************/
 
 template <typename dtype, bool causal>
 void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
                                  const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
                                  const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
-                                 int rank, bool softmax_lse_in_packed_format,
-                                 const at::Tensor *lse_ = nullptr) {
+                                 int rank, bool softmax_lse_in_packed_format) {
   int lse_seqlen;
   int batch;
   int num_heads;
@@ -1278,19 +1277,11 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
       tensors.addresses_lse[j] = lse_per_step[i + j].data_ptr<float>();
     }
     if (qkv_format == "sbhd") {
-      if (softmax_lse_in_packed_format) {
-        fused_out_correction_kernel<dtype, tile, causal, QKVFormat::SBH, QKVFormat::HBS,
-                                    max_tensors>
-            <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
-                out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
-                batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
-      } else {
-        fused_out_correction_kernel<dtype, tile, causal, QKVFormat::SBH, QKVFormat::BHS,
-                                    max_tensors>
-            <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
-                out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
-                batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
-      }
+      NVTE_CHECK(softmax_lse_in_packed_format == false, "Packed lse doesn't support SBHD format.");
+      fused_out_correction_kernel<dtype, tile, causal, QKVFormat::SBH, QKVFormat::BHS, max_tensors>
+          <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+              out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
+              batch, num_heads, dim_per_head, lse_seqlen, cp_size, rank, i);
 
     } else if (qkv_format == "bshd") {
       if (softmax_lse_in_packed_format) {

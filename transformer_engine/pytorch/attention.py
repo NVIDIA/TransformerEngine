@@ -2421,46 +2421,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
 
-        if qkv_format == "sbhd":
-            tex.fused_out_correction(
-                out.view(-1, *out.shape[-3:]),
-                out_per_step,
-                softmax_lse,
-                softmax_lse_per_step,
-                cu_seqlens_q_padded,
-                qkv_format,
-                cp_size,
-                rank,
-                causal,
-                softmax_lse_in_packed_format,
-            )
-        elif qkv_format == "bshd":
-            tex.fused_out_correction(
-                out.view(out.shape[-4], -1, *out.shape[-2:]),
-                out_per_step,
-                softmax_lse,
-                softmax_lse_per_step,
-                cu_seqlens_q_padded,
-                qkv_format,
-                cp_size,
-                rank,
-                causal,
-                softmax_lse_in_packed_format,
-            )
-        else:
-            tex.fused_out_correction(
-                out,
-                out_per_step,
-                softmax_lse,
-                softmax_lse_per_step,
-                cu_seqlens_q_padded,
-                qkv_format,
-                cp_size,
-                rank,
-                causal,
-                softmax_lse_in_packed_format,
-            )
-
         if qkv_format != "thd" and softmax_lse_in_packed_format:
             # [np, b, sq] -> [np, t]
             softmax_lse = softmax_lse.view(softmax_lse.shape[0], -1)
@@ -2471,6 +2431,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         elif qkv_format == "sbhd":
             out = out.view(-1, *out.shape[-3:])
             ctx.batch_size = out.shape[1]
+
+        tex.fused_out_correction(
+            out,
+            out_per_step,
+            softmax_lse,
+            softmax_lse_per_step,
+            cu_seqlens_q_padded,
+            qkv_format,
+            cp_size,
+            rank,
+            causal,
+            softmax_lse_in_packed_format,
+        )
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, False)

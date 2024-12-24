@@ -136,11 +136,6 @@ std::vector<at::Tensor> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-void fused_out_correction(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
-                          const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
-                          const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
-                          int rank, bool causal, bool softmax_lse_in_packed_format);
-
 /***************************************************************************************************
  * GEMM
  **************************************************************************************************/
@@ -457,6 +452,11 @@ void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
                                        int world_size, int rank);
+
+void fused_out_correction(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
+                          const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
+                          const at::Tensor &cu_seqlens, std::string qkv_format, int cp_size,
+                          int rank, bool causal, bool softmax_lse_in_packed_format);
 
 /***************************************************************************************************
  * multi_tensor_* kernels

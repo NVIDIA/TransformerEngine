@@ -102,7 +102,7 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
 }
 
 /***************************************************************************************************
- * Support THD(including SBHD and BSHD) format for Context Parallel: Out correction in forward
+ * Support BSHD, SBHD, and THD formats for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
 // format of out and lse, ignoring d as it’s always the last dimension.
@@ -258,20 +258,19 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
     }
 
     for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
-      size_t idx_out;
-      size_t idx_lse;
       float4 data = reinterpret_cast<float4 *>(cur_out)[j];
       dtype *p = reinterpret_cast<dtype *>(&data);
 
       for (int i = start; i < end; i++) {
-        if (id[1] >= 0 && start + tensors.start_tensor_this_launch > full_num && i > rank) {
+        size_t idx_out;
+        size_t idx_lse;
+        if (causal && id[1] >= 0 && i > rank) {
           idx_out = idx_out_half;
           idx_lse = idx_lse_half;
         } else {
           idx_out = idx_out_full;
           idx_lse = idx_lse_full;
         }
-
         dtype *cur_out_per_step =
             reinterpret_cast<dtype *>(tensors.addresses_out[i]) + idx_out * dim_per_head;
         float4 data_per_step = reinterpret_cast<float4 *>(cur_out_per_step)[j];
