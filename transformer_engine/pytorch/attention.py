@@ -3010,7 +3010,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         kv_ = kv.view(kv.shape[0], -1, *kv.shape[-3:])
                     elif ctx.qkv_format == "sbhd":
                         # [2, sq//2, b, np, hn] -> [sq//2, b, np, hn]
-                        q_, out_, out_ = q[1], out[1], dout[1]
+                        q_, out_, dout_ = q[1], out[1], dout[1]
                         # [2, sk//2, b, 2, np, hn] -> [sk, b, 2, np, hn]
                         kv_ = kv.view(-1, *kv.shape[-4:])
                     elif ctx.qkv_format == "thd":
@@ -3148,17 +3148,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
             if ctx.fp8:
                 dq = dq_fp8[(rank + i + 1) % cp_size]
-            if i >= (cp_size - rank - 1) or not causal:
-                # [b*sq, np, hn] -> [b, 2, sq//2, np, hn] if causal
-                # [b*sq, np, hn] -> [b, sq, np, hn] if not causal
+            if causal and ctx.qkv_format in ["bshd", "sbhd"] and i >= (cp_size - rank - 1):
+                # [b, sq, np, hn] -> [b, 2, sq//2, np, hn] or
+                # [sq, b, np, hn] -> [2, sq//2, b, np, hn]
                 dq_ = dq_.view(*dq.shape)
-            else:
-                if ctx.qkv_format == "bshd":
-                    # [b*sq//2, np, hn] -> [b, sq//2, np, hn]
-                    dq_ = dq_.view(dq.shape[0], *dq.shape[2:])
-                elif ctx.qkv_format == "sbhd":
-                    # [b*sq//2, np, hn] -> [sq//2, b, np, hn]
-                    dq_ = dq_.view(-1, *dq.shape[-3:])
 
             if ctx.fp8:
                 if i >= (cp_size - rank - 1) or not causal:
@@ -3233,24 +3226,21 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             else:
                 dkv = p2p_comm_buffers[(i + 1) % 2][1]
             if ctx.use_fused_attention:
-                dkv_ = torch.cat(
-                    (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0
-                )  # pylint: disable=used-before-assignment
                 if ctx.qkv_format in ["bshd", "sbhd"]:
-                    # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
-                    # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
-                    dkv = dkv.view(2, *dkv.shape[0:-3], *dkv.shape[-2:])
-            if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
-                if ctx.qkv_format == "bshd":
-                    # [2, b*sk//2, np, hn] -> [2, b, sk//2, np, hn]
-                    dkv_ = dkv_.view(*dkv.shape[0:2], *dkv.shape[3:])
-                elif ctx.qkv_format == "sbhd":
-                    # [2, b*sk//2, np, hn] -> [2, sk//2, b, np, hn]
-                    dkv_ = dkv_.view(dkv.shape[0], -1, *dkv.shape[-3:])
-            else:
-                # [2, b*sk, np, hn] -> [2, b, 2, sk//2, np, hn] if causal
-                # [2, b*sk, np, hn] -> [2, b, sk, np, hn] if not causal
-                dkv_ = dkv_.view(*dkv.shape)
+                    dkv_ = _combine_tensors([dk_, dv_], -2)
+                elif ctx.qkv_format == "thd":
+                    dkv_ = torch.cat(
+                        (dk_.unsqueeze(0), dv_.unsqueeze(0)), dim=0
+                    )  # pylint: disable=used-before-assignment
+            if ctx.qkv_format in ["bshd", "sbhd"]:
+                # [b, 2, sk//2, 2, np, hn] -> [2, b, 2, sk//2, np, hn] or
+                # [2, sk//2, b, 2, np, hn] -> [2, 2, sk//2, b, np, hn]
+                dkv = dkv.view(2, *dkv.shape[0:-3], *dkv.shape[-2:])
+                dkv_ = dkv_.movedim(-3, 0)
+                if causal and (i < (cp_size - rank - 1) or i == (cp_size - 1)):
+                    # [2, b, sk, np, hn] -> [2, b, 2, sk//2, np, hn] or
+                    # [2, sk, b, np, hn] -> [2, 2, sk//2, b, np, hn]
+                    dkv_ = dkv_.view(*dkv.shape)
 
             if ctx.fp8:
                 if causal and i >= (cp_size - rank - 1) and i != (cp_size - 1):
