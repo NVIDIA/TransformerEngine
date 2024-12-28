@@ -2465,16 +2465,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
-            out_ = None
-            if qkv_format == "bshd":
-                out_per_step[i] = out_per_step[i].view(
-                    out.shape[0], -1, *out.shape[-2:]
-                )  # pylint: disable=used-before-assignment
-                out_ = out[:, 1, ...]
-            elif qkv_format == "sbhd":
-                out_per_step[i] = out_per_step[i].view(-1, *out.shape[-3:])
-                out_ = out[1]
-
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(
@@ -2497,6 +2487,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     )
             else:
                 if qkv_format in ["bshd", "sbhd"]:
+                    out_ = out.select(seq_dim, 1)
                     flash_attn_fwd_out_correction(
                         out_,
                         out_per_step[i],
