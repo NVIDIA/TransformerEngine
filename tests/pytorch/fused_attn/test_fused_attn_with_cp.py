@@ -121,12 +121,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
     if dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
-    if qkv_format == "thd" and get_cudnn_version() >= (9, 6, 0):
-        pytest.skip("THD format is not supported for cuDNN 9.6+!")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
-        pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":

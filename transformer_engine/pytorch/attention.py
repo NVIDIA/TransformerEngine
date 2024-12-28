@@ -606,12 +606,6 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
-        elif cudnn_version >= (9, 6, 0) and qkv_format == "thd":
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with THD for"
-                " cuDNN 9.6+"
-            )
-            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -1911,9 +1905,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             )
         assert q.shape[-1] % 8 == 0, "hidden size per attention head should be multiple of 8"
 
-        softmax_lse_in_packed_format = qkv_format == "thd" and not use_fused_attention and (
-            _flash_attn_2_6_0_plus or _use_flash_attn_3
-        )
+        softmax_lse_in_packed_format = False
+        if qkv_format == "thd":
+            if use_fused_attention:
+                softmax_lse_in_packed_format = get_cudnn_version() >= (9, 6, 0)
+            else:
+                softmax_lse_in_packed_format = _flash_attn_2_6_0_plus or _use_flash_attn_3
+
         flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
@@ -2421,8 +2419,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     flash_attn_streams[(i - 1) % 2].wait_event(fwd_results_correction_done)
 
                 if use_fused_attention:
-                    # [b, np, sq, 1] -> [b, np, sq]
+                    # [b, np, sq, 1] -> [b, np, sq] or
+                    # [t, np, 1] -> [t, np]
                     softmax_lse_per_step[i - 1].squeeze_(-1)
+                    if softmax_lse_in_packed_format:
+                        softmax_lse_per_step[i - 1] = softmax_lse_per_step[i - 1].transpose(0, 1).contiguous()
 
                 with torch.cuda.stream(flash_attn_streams[(i - 1) % 2]):
                     if fp8:
@@ -2611,6 +2612,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.attn_bias_shape = None if attn_bias is None else attn_bias.shape
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
@@ -2660,14 +2662,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = None
             attn_dbias_ = None
 
-        softmax_lse_in_packed_format = ctx.qkv_format == "thd" and not ctx.use_fused_attention and (
-            _flash_attn_2_6_0_plus or _use_flash_attn_3
-        )
-
         if causal:
             if ctx.qkv_format == "thd":
                 softmax_lse_ = tex.thd_read_second_half_lse(
-                    softmax_lse, cu_seqlens_q_padded, softmax_lse_in_packed_format
+                    softmax_lse, cu_seqlens_q_padded, ctx.softmax_lse_in_packed_format
                 )
             else:
                 # [b, np, sq] -> [b, np, 2, sq//2]
@@ -2675,11 +2673,17 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     *softmax_lse.shape[:-1], 2, softmax_lse.shape[-1] // 2
                 )
                 softmax_lse_ = softmax_lse_[..., 1, :].contiguous()
-                if ctx.use_fused_attention:
-                    # [b, np, sq//2] -> [b, np, sq//2, 1]
-                    softmax_lse_.unsqueeze_(-1)
+            if ctx.use_fused_attention:
+                if ctx.softmax_lse_in_packed_format:
+                    softmax_lse_ = softmax_lse_.transpose(0, 1).contiguous()
+                # [b, np, sq//2] -> [b, np, sq//2, 1] or
+                # [t//2, np] -> [t//2, np, 1]
+                softmax_lse_.unsqueeze_(-1)
         if ctx.use_fused_attention:
-            # [b, np, sq] -> [b, np, sq, 1]
+            if ctx.softmax_lse_in_packed_format:
+                softmax_lse = softmax_lse.transpose(0, 1).contiguous()
+            # [b, np, sq] -> [b, np, sq, 1] or
+            # [t, np] -> [t, np, 1]
             softmax_lse.unsqueeze_(-1)
 
         dout_dtype = dout.dtype
