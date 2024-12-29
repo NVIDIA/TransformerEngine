@@ -4413,9 +4413,7 @@ def attn_forward_func_with_cp(
         window_size is not None and window_size != (-1, 0) and window_size != (-1, -1)
     )
     assert (
-        not sliding_window_attn
-        or cp_comm_type == "a2a"
-        or (cp_comm_type == "all_gather" and not use_fused_attention)
+        not sliding_window_attn or cp_comm_type in ["a2a", "all_gather"]
     ), "The context parallel running configs cannot support sliding window attetnion!"
 
     args = [
