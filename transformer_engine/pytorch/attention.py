@@ -125,11 +125,13 @@ _flash_attn_2_4_1_plus = False
 _flash_attn_2_5_7_plus = False
 _flash_attn_2_6_0_plus = False
 
+flash_attn_cuda_bwd = None
 flash_attn_func = None
 flash_attn_varlen_func = None
-flash_attn_varlen_fwd = None
-flash_attn_varlen_bwd = None
-flash_attn_cuda_bwd = None
+_flash_attn_fwd = None
+_flash_attn_bwd = None
+_flash_attn_varlen_fwd = None
+_flash_attn_varlen_bwd = None
 
 try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
