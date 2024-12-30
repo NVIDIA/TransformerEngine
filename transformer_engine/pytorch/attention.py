@@ -2692,6 +2692,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # [t, np] -> [t, np, 1]
             softmax_lse.unsqueeze_(-1)
 
+        dq = None
         dout_dtype = dout.dtype
         fused_attn_backend = None
         fused_attn_qkv_dtype = None
@@ -2836,7 +2837,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 )
 
             kv = p2p_comm_buffers[i % 2][0]
-            dk_, dv_ = None, None
+            q_, kv_, out_, dout_ = None, None, None, None
+            dq_, dk_, dv_ = None, None, None
             if ctx.fp8 and ctx.use_fused_attention:
                 fp8_meta_kwargs["amax_dp"] = amax_per_step[0][i]
                 fp8_meta_kwargs["amax_dqkv"] = amax_per_step[0][i]
@@ -3767,7 +3769,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             deterministic=ctx.deterministic,
                         )
                     else:
-                        batch_size = k_.shape[0]
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
                         ]
