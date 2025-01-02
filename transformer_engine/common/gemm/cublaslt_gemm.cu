@@ -50,6 +50,27 @@ uint32_t _getAlignment(uintptr_t address) {
 
 namespace transformer_engine {
 
+class cublasHandleManager {
+ public:
+  static cublasHandleManager &Instance() {
+    static thread_local cublasHandleManager instance;
+    return instance;
+  }
+
+  cublasLtHandle_t GetHandle() {
+    static thread_local std::once_flag flag;
+    std::call_once(flag, [&] {
+        NVTE_CHECK_CUBLAS(cublasLtCreate(&handle_));
+        });
+    return handle_;
+  }
+
+  ~cublasHandleManager() {}
+
+ private:
+  cublasLtHandle_t handle_ = nullptr;
+};
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, cublasOperation_t transa, cublasOperation_t transb, bool grad,
@@ -98,8 +119,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  cublasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
+  cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
   cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
