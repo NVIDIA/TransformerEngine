@@ -59,9 +59,7 @@ class cublasHandleManager {
 
   cublasLtHandle_t GetHandle() {
     static thread_local std::once_flag flag;
-    std::call_once(flag, [&] {
-        NVTE_CHECK_CUBLAS(cublasLtCreate(&handle_));
-        });
+    std::call_once(flag, [&] { NVTE_CHECK_CUBLAS(cublasLtCreate(&handle_)); });
     return handle_;
   }
 
