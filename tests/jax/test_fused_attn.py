@@ -170,20 +170,8 @@ def make_mask(
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    if window_size is not None:
-
-        def local_mask(pos_q, pos_kv, window_size):
-            left_window, right_window = window_size
-            return (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
-
-        inv_swa_mask = local_mask(
-            jnp.expand_dims(segment_pos_q, axis=-1),
-            jnp.expand_dims(segment_pos_kv, axis=-2),
-            window_size,
-        )
-        inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
-        inv_mask = combine_masks(inv_swa_mask, inv_mask)
-
+    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, jnp.bool_)
+    inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
 
