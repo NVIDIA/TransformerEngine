@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -124,7 +124,7 @@ def test_export_loaded_checkpoint(scale_fwd, scale_bwd, history_fwd, history_bwd
     torch.save(model_in.state_dict(), tmp_filename)
 
     model_out = Test_TE_Export(precision, True)
-    model_out.load_state_dict(torch.load(tmp_filename))
+    model_out.load_state_dict(torch.load(tmp_filename, weights_only=False))
     model_out.eval()
 
     # scaling fwd
@@ -263,7 +263,7 @@ def test_fp8_model_checkpoint(
     # to load the fp8 metadata before loading tensors.
     #
     # Load checkpoint
-    model.load_state_dict(torch.load(io.BytesIO(model_bytes)))
+    model.load_state_dict(torch.load(io.BytesIO(model_bytes), weights_only=False))
     del model_bytes
 
     # Check that loaded model matches saved model
@@ -450,7 +450,7 @@ def test_sequential_model(
                 torch.testing.assert_close(m_model.scale_inv, m_ref["scale_inv"], **exact_tols)
 
     # Load checkpoint
-    model.load_state_dict(torch.load(io.BytesIO(model_bytes)))
+    model.load_state_dict(torch.load(io.BytesIO(model_bytes), weights_only=False))
     del model_bytes
 
     # Check that new model's FP8 metadata matches saved model

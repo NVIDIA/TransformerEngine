@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,7 +20,6 @@ from distributed_test_base import (
 from utils import (
     make_causal_mask,
     make_self_mask,
-    assert_tree_like_allclose,
     assert_allclose,
     print_debug_tensor_stats,
 )
@@ -32,7 +31,6 @@ from transformer_engine.jax.attention import (
     AttnMaskType,
     QKVLayout,
     QKVFormat,
-    get_qkv_format,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     CPStrategy,
@@ -341,8 +339,9 @@ class TestDistributedCrossAttn:
 @pytest.mark.parametrize(
     "data_shape",
     [
-        pytest.param([2, 512, 12, 128], id="2-512-12-128"),
-        pytest.param([4, 1024, 16, 64], id="4-1024-16-64"),
+        # Sequence lengths will be scaled by CP so that we don't run with tiny sizes.
+        pytest.param([2, 128, 12, 128], id="2-128xCP-12-128"),
+        pytest.param([4, 256, 16, 64], id="4-256xCP-16-64"),
     ],
 )
 @pytest.mark.parametrize("kv_groups", [1, 4, 8, 12, 16])
@@ -420,9 +419,15 @@ class TestDistributedContextParallelSelfAttn:
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = get_qkv_format(qkv_layout)
+        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
+
+        # Scale the sequence length by 2*CP so its never too small as we scale up test.
+        # 2*CP is used since we split into two CP groups for load balancing.
+        seqlen = seqlen * cp_size * 2
+        data_shape = batch, seqlen, num_head, hidden
+
         num_kv_heads = num_head // kv_groups
         scaling_factor = 1.0 / np.sqrt(num_head)
 
@@ -496,7 +501,7 @@ class TestDistributedContextParallelSelfAttn:
             # Gradient is small, use a gradient multiplier to amplify the gradient
             _, max_seq_len, num_heads, _ = data_shape
             gradient_multiplier = max_seq_len * num_heads
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK]:
+            if attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             ret_valid = func(*args, **kwargs)
             return (jnp.mean(ret_valid, dtype=jnp.float32) * gradient_multiplier).astype(dtype)

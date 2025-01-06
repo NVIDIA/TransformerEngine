@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -149,6 +149,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         !requires_64bit_ragged_offset) {
       flag_m512 = true;
     }
+    // TODO(cyang): replace with cudnn-frontend check_support for cleaner logic and better error messaging
     if (  // architecture
         ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80) ||
          (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90))) &&
@@ -166,7 +167,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
           head_dim_qk % 8 == 0 && head_dim_v <= 256 && head_dim_v % 8 == 0)) &&
         // bias type
         ((cudnn_runtime_version < 8906 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS) ||
-         ((cudnn_runtime_version >= 8906) &&
+         (cudnn_runtime_version >= 8906 &&
           (bias_type == NVTE_Bias_Type::NVTE_NO_BIAS ||
            (bias_type == NVTE_Bias_Type::NVTE_ALIBI &&
             attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK &&
@@ -175,46 +176,76 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
             attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
             sm_arch_ >= 90) ||
            (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && sm_arch_ >= 90))) ||
-         ((cudnn_runtime_version >= 90000) &&
+         (cudnn_runtime_version >= 90000 &&
           (bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS && sm_arch_ >= 80))) &&
         // mask type
+        // pre-8.9.6: causal
         ((cudnn_runtime_version < 8906 && attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK) ||
-         ((cudnn_runtime_version >= 8906) &&
+         // 8.9.6: {bshd, sbhd} + {no_mask, causal, padding, padding_causal}
+         (cudnn_runtime_version >= 8906 &&
+          (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
           (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
            attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) ||
-         ((cudnn_runtime_version >= 90300) &&
-          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
-          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 &&
-          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+         // 9.1: adds thd + {padding, padding_causal}
+         (cudnn_runtime_version >= 90100 && qkv_format == NVTE_QKV_Format::NVTE_THD &&
+          (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK)) ||
+         // 9.3: adds {bshd, sbhd} + causal_bottom_right + self/cross-attn (sq <= skv)
+         (cudnn_runtime_version >= 90300 &&
           (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) &&
-          max_seqlen_q <= max_seqlen_kv && dropout == 0.0) ||
-         ((cudnn_runtime_version >= 90500) &&
+          attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
+          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0) ||
+         // 9.5: adds {paged_kv_bshd, paged_kv_sbhd} + {padding, padding_causal, padding_causal_bottom_right}
+         (cudnn_runtime_version >= 90500 &&
           (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_2BSHD ||
-           layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_2SBHD))) &&
+           layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_2SBHD) &&
+          (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0) ||
+         // 9.6: adds {bshd, sbhd, thd} + padding_causal_bottom_right + self/cross-attn (sq <= skv)
+         (cudnn_runtime_version >= 90600 &&
+          attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
+          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
+          bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
            (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) &&
            bias_type == NVTE_Bias_Type::NVTE_POST_SCALE_BIAS)) &&
         // qkv format
-        ((qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD) ||
+        (qkv_format == NVTE_QKV_Format::NVTE_SBHD || qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
          (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
           ((cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
-           (cudnn_runtime_version >= 90600)))) &&
+           cudnn_runtime_version >= 90600))) &&
         // sliding window
+        // pre-9.2: full attn, causal
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
           (window_size_right == -1 || window_size_right == 0)) ||
+         // 9.2: SWA (left, 0) + top-left diagonal + {bshd, sbhd}
          (cudnn_runtime_version >= 90200 &&
           ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
            ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
             (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               max_seqlen_q == max_seqlen_kv)) &&
-            dropout == 0.0 && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+            max_seqlen_q <= max_seqlen_kv && dropout == 0.0 &&
+            bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
             (qkv_format == NVTE_QKV_Format::NVTE_BSHD ||
-             qkv_format == NVTE_QKV_Format::NVTE_SBHD))))) &&
+             qkv_format == NVTE_QKV_Format::NVTE_SBHD)))) ||
+         // 9.6: SWA (left, 0) + top-left/bottom-right diagonal + {bshd, sbhd, thd}
+         (cudnn_runtime_version >= 90600 &&
+          ((window_size_left == -1 && (window_size_right == -1 || window_size_right == 0)) ||
+           ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
+            (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+             attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK) &&
+            max_seqlen_q <= max_seqlen_kv && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+            dropout == 0.0)))) &&
         // check 64-bit ragged offset support
         (supported_ragged_offset_size)) {
       flag_arb = true;

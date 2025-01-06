@@ -1,24 +1,24 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_
-#define TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_
+#ifndef TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
+#define TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_
 
 #include <cfloat>
 #include <cstdio>
 
-#include "../utils.cuh"
-#include "ln.h"
+#include "../../utils.cuh"
+#include "../common.h"
 
 namespace transformer_engine {
-namespace layer_norm {
-using namespace transformer_engine;
+namespace normalization {
 
 template <typename Ktraits>
-__global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(FwdParams params) {
+__global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_tuned_kernel(
+    ForwardKernelParams params) {
   enum { ROWS_PER_CTA = Ktraits::ROWS_PER_CTA };
   enum { WARPS_N = Ktraits::WARPS_N };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -54,22 +54,19 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 
   Stats stats(params, bidm, bidn, warp_m, warp_n, lane, smem_);
 
-  compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
   compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
 
   Wvec gamma[LDGS];
-  Wvec beta[LDGS];
   index_t idx = c;
 #pragma unroll
-  for (int it = 0; it < LDGS; ++it) {
+  for (int it = 0; it < LDGS; it++) {
     gamma[it].load_from(params.gamma, idx);
-    beta[it].load_from(params.beta, idx);
     idx += VEC_COLS_PER_LDG;
   }
 
   constexpr compute_t rn = 1.f / compute_t(Ktraits::COLS);
 
-  compute_t scale = 1.f;
+  compute_t scale;
   if (params.fp8_out) {
     scale = *reinterpret_cast<compute_t *>(params.scale);
   }
@@ -92,14 +89,11 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 
     stats_t s = stats.compute(xf, rn);
 
-    compute_t mu = layer_norm::Get<0>::of<stats_t, compute_t>(s);
-    compute_t m2 = layer_norm::Get<1>::of<stats_t, compute_t>(s);
-
-    if (bidn == 0 && warp_n == 0 && lane == 0) {
-      mu_ptr[row] = mu;
-    }
-
-    compute_t rs = rsqrtf(rn * m2 + params.epsilon);
+    compute_t mu = Get<0>::of<stats_t, compute_t>(s);
+    compute_t m2 = Get<1>::of<stats_t, compute_t>(s);
+    // reciprocal of root mean square
+    // we could optimize here to count mean square directly
+    compute_t rs = rsqrtf(rn * m2 + mu * mu + params.epsilon);
 
     if (bidn == 0 && warp_n == 0 && lane == 0) {
       rs_ptr[row] = rs;
@@ -111,13 +105,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
     for (int it = 0; it < LDGS; it++) {
 #pragma unroll
       for (int jt = 0; jt < NUM_ELTS; jt++) {
-        compute_t y_ij = rs * (xf[it * NUM_ELTS + jt] - mu);
+        compute_t y_ij = rs * (xf[it * NUM_ELTS + jt]);
         compute_t g_ij = gamma[it].data.elt[jt];
         if (params.zero_centered_gamma) {
           g_ij += 1;
         }
-        compute_t b_ij = beta[it].data.elt[jt];
-        compute_t temp_output = g_ij * y_ij + b_ij;
+        compute_t temp_output = g_ij * y_ij;
 
         if (params.fp8_out) {
           __builtin_assume(amax >= 0);
@@ -149,8 +142,8 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_tuned_kernel(
 }
 
 template <typename Ktraits>
-__global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kernel(
-    FwdParams params) {
+__global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void rmsnorm_fwd_general_kernel(
+    ForwardKernelParams params) {
   enum { LDGS = Ktraits::LDGS };
   enum { NUM_ELTS = Ktraits::NUM_ELTS };
   enum { WARPS_M = Ktraits::WARPS_M };
@@ -193,15 +186,13 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
 
   // Load weights
   Cvec gamma[LDGS];
-  Cvec beta[LDGS];
+
 #pragma unroll
   for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && col < params.cols;
-       ++it, col += gdimn * NUM_ELTS) {
-    Wvec gamma_in, beta_in;
+       it++, col += gdimn * NUM_ELTS) {
+    Wvec gamma_in;
     gamma_in.load_from_elts(params.gamma, col, params.cols - col);
-    beta_in.load_from_elts(params.beta, col, params.cols - col);
     gamma_in.to(gamma[it]);
-    beta_in.to(beta[it]);
   }
 
   // fp8 factors
@@ -224,18 +215,6 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
       x_in.to(x[it]);
     }
 
-    // Compute mean
-    compute_t mu = 0.f;
-#pragma unroll
-    for (int it = 0, col = gidn * NUM_ELTS; it < LDGS && row < params.rows && col < params.cols;
-         it++, col += gdimn * NUM_ELTS) {
-#pragma unroll
-      for (int jt = 0; jt < NUM_ELTS; jt++) {
-        mu += x[it].data.elt[jt];
-      }
-    }
-    mu = reducer.allreduce(mu, sum) * rn;
-
     // Compute variance
     compute_t sqsigma = 0.f;
 #pragma unroll
@@ -244,7 +223,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
 #pragma unroll
       for (int jt = 0; jt < NUM_ELTS; jt++) {
         if (col + jt < params.cols) {
-          compute_t diff = x[it].data.elt[jt] - mu;
+          compute_t diff = x[it].data.elt[jt];
           sqsigma += diff * diff;
         }
       }
@@ -254,9 +233,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
 
     // Write statistics
     if (gidn == 0 && row < params.rows) {
-      compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
       compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
-      mu_ptr[row] = mu;
       rs_ptr[row] = rs;
     }
 
@@ -268,13 +245,12 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
       Cvec z;
 #pragma unroll
       for (int jt = 0; jt < NUM_ELTS; jt++) {
-        compute_t y_ij = rs * (x[it].data.elt[jt] - mu);
+        compute_t y_ij = rs * (x[it].data.elt[jt]);
         compute_t g_ij = gamma[it].data.elt[jt];
         if (params.zero_centered_gamma) {
           g_ij += 1;
         }
-        compute_t b_ij = beta[it].data.elt[jt];
-        z.data.elt[jt] = g_ij * y_ij + b_ij;
+        z.data.elt[jt] = g_ij * y_ij;
       }
 
       // Apply fp8 factors
@@ -315,7 +291,7 @@ __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) void ln_fwd_general_kerne
   }
 }
 
-}  // namespace layer_norm
+}  // namespace normalization
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_COMMON_LAYER_NORM_LN_FWD_KERNELS_CUH_
+#endif  // TRANSFORMER_ENGINE_COMMON_RMSNORM_RMSNORM_FWD_KERNELS_CUH_

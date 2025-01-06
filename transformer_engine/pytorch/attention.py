@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -640,6 +640,12 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
+        elif cudnn_version >= (9, 6, 0) and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD for"
+                " cuDNN 9.6+"
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -656,9 +662,7 @@ def get_attention_backend(
     #     self-attention          |                                      | All
     #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
     # causal_bottom_right         | None                                 | All
-    # padding_causal_bottom_right | Same as "padding"                    |
-    #     self-attention          |                                      | All
-    #     cross-attention         |                                      | FlashAttention, UnfusedDotProductAttention
+    # padding_causal_bottom_right | Same as "padding"                    | All
     # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
@@ -735,29 +739,16 @@ def get_attention_backend(
                     " for FP8"
                 )
                 use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
+            elif window_size[1] != 0 or attention_dropout != 0.0:
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
-                    "with causal mask, no dropout, and qkv_format = bshd/sbhd"
+                    "with (left, 0) and no dropout"
                 )
                 use_fused_attention = False
-            elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
-                "no_mask",
-                "padding",
-                "causal_bottom_right",
-                "padding_causal_bottom_right",
-            ]:
+            elif max_seqlen_q > max_seqlen_kv:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s for cross-attention",
-                    attn_mask_type,
-                )
-                use_fused_attention = False
-            elif "padding" in attn_mask_type:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s",
-                    attn_mask_type,
+                    "with s_q > s_kv for cross-attention"
                 )
                 use_fused_attention = False
         if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
@@ -1397,27 +1388,51 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
 
 
 @torch.no_grad()
-def get_swa_mask(
-    window_size: Tuple[int, int],
+def get_full_mask(
     max_seqlen_q: int,
     max_seqlen_kv: int,
     attn_mask_type: str = "no_mask",
-    attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+    window_size: Tuple[int, int] = None,
+    attention_type: str = "self",
+    bottom_right_alignment: bool = True,
 ) -> torch.Tensor:
     """
-    Convert sliding window `window_size` to an equivalent "`arbitrary`" mask.
-    For "`causal`" mask type, the sliding window diagonal is aligned to the top left corner,
-    and for other mask types, the bottom right corner.
+    Get full attention mask in [..., max_seqlen_q, max_seqlen_kv] shape, based on `attn_mask_type`,
+    `attention_mask`, and `window_size`. For sliding window attention, the diagonal alignment depends
+    on both `attn_mask_type` and `bottom_right_alignment`, as detailed below.::
+
+       attn_mask_type              output shape                                 diagonal alignment
+       --------------------------------------------------------------------------------------------
+       no_mask                     [1, 1, max_seqlen_q, max_seqlen_kv]          follow bottom_right_alignment
+       causal                      [1, 1, max_seqlen_q, max_seqlen_kv]          always top left
+       causal_bottom_right         [1, 1, max_seqlen_q, max_seqlen_kv]          always bottom right
+       padding                     [batch_size, 1, max_seqlen_q, max_seqlen_kv] follow bottom_right_alignment
+       padding_causal              [batch_size, 1, max_seqlen_q, max_seqlen_kv] always top left
+       padding_causal_bottom_right [batch_size, 1, max_seqlen_q, max_seqlen_kv] always bottom right
+       arbitrary                   same as attention_mask                       follow bottom_right_alignment
+
+    .. note::
+
+    For "padding_bottom_right" mask, or "padding" mask with `bottom_right_alignment` = True, the bottom right
+    diagonal comes from the bottom right corner of the [actual_seqlens_q[i], actual_seqlens_kv[i]] matrix,
+    i = 0,...,batch_size-1, not the [max_seqlen_q, max_seqlen_kv] matrix. For example, with max_seqlen_q = 4,
+    max_seqlen_kv = 4, attn_mask_type = "padding", attention_type = "cross", and attention_mask = (
+    [[False, False,  True, True], [False, False, False, False]],
+    [[False, False, False, True], [False,  True,  True,  True]]), the returned full attention mask has [2, 4, 4]
+    shape and is,::
+
+      [[[False, False, False, True],
+        [False, False, False, True],
+        [ True,  True,  True, True],
+        [ True,  True,  True, True]],
+       [[False,  True,  True, True],
+        [False,  True,  True, True],
+        [False,  True,  True, True],
+        [False,  True,  True, True]]]
 
     Parameters
     ----------
-    window_size: Tuple[int, int]
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-        `attn_mask_type`.
     max_seqlen_q: int
         Maximum sequence length for queries.
     max_seqlen_kv: int
@@ -1425,33 +1440,105 @@ def get_swa_mask(
     attn_mask_type: str, default = `no_mask`
         Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
         "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
-    attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         default = `None`
-        Boolean tensor(s) used to mask out attention softmax input.
+        Boolean tensor(s) used to mask out attention softmax input. Please see DotProductAttention
+        for the requirements of `attention_mask` for different `attn_mask_type`s.
+    window_size: Tuple[int, int], default = `None`
+        Sliding window size for local attention, where query at position i attends to keys
+        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
+        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
+        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
+        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
+        `attn_mask_type`.
+    attention_type: str, default = "self"
+        Attention type, {"self", "cross"}
+    bottom_right_alignment: bool, default = `True`
+        Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
+        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
+        specifies "causal" or "causal_bottom_right".
 
     Returns
     ----------
+    attn_mask_type: str
+        For sliding window attention (>=0, >0), "arbitrary"; otherwise, the same as input `attn_mask_type`
     attention_mask: torch.Tensor
-        Combined `attention_mask` (input) and sliding window attention mask.
-        The shape is [max_seqlen_q, max_seqlen_kv] when input `attention_mask` is None;
-        else, the same shape as input `attention_mask`.
+        The full attention mask based on `attn_mask_type`, `attention_mask` and `window_size`
+    actual_seqlens_q: torch.Tensor
+        For padding masks, the actual sequence lengths for queries, in shape [batch_size].
+        For other masks, `None`.
+    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
+        For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
+        For other masks, `None`.
     """
-    mask = torch.ones(max_seqlen_q, max_seqlen_kv, dtype=torch.bool, device="cuda")
-    if attn_mask_type in ["causal"]:
-        left = window_size[0] if window_size[0] != -1 else max_seqlen_q
-        right = window_size[1] if window_size[1] != -1 else max_seqlen_q
-        mask_upper = torch.triu(mask, diagonal=-left)
-        mask_lower = torch.tril(mask_upper, diagonal=right)
-    else:
-        left = window_size[0] if window_size[0] != -1 else max_seqlen_kv
-        right = window_size[1] if window_size[1] != -1 else max_seqlen_kv
-        mask_upper = torch.triu(mask, diagonal=max_seqlen_kv - max_seqlen_q - left)
-        mask_lower = torch.tril(mask_upper, diagonal=max_seqlen_kv - max_seqlen_q + right)
-    attn_mask_type = "arbitrary"
-    mask = mask_lower.logical_not()
+    # perform basic checks
+    change_type = window_size is not None and (
+        window_size[0] != -1 or window_size[1] not in [-1, 0]
+    )
+    if window_size is None:
+        window_size = (-1, -1)
+    if "causal" in attn_mask_type:
+        window_size = (window_size[0], 0)
+    window_size = (
+        max_seqlen_kv if window_size[0] == -1 else window_size[0],
+        max_seqlen_q if window_size[1] == -1 else window_size[1],
+    )
+
+    # apply padding mask
+    actual_seqlens_q = None
+    actual_seqlens_kv = None
+    if "padding" in attn_mask_type:
+        if attention_type == "self":
+            attention_mask = torch.logical_or(
+                attention_mask.squeeze(1).unsqueeze(3), attention_mask
+            )
+        else:
+            attention_mask = torch.logical_or(
+                attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
+            )
+        m = attention_mask.logical_not()
+        actual_seqlens_q = m[:, 0, :, 0].sum(dim=1)
+        actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
+
+    # apply SWA mask
+    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
+        1, 1, max_seqlen_q, 1
+    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
+    swa_left = None
+    swa_right = None
+    if attn_mask_type == "causal_bottom_right" or (
+        attn_mask_type in ["no_mask", "arbitrary"] and bottom_right_alignment
+    ):
+        swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
+        swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
+    elif attn_mask_type in ["causal", "padding_causal"] or (
+        attn_mask_type in ["no_mask", "padding", "arbitrary"] and not bottom_right_alignment
+    ):
+        swa_left = mask - window_size[0]
+        swa_right = mask + window_size[1]
+    elif attn_mask_type == "padding_causal_bottom_right" or (
+        attn_mask_type == "padding" and bottom_right_alignment
+    ):
+        batch_size = attention_mask.shape[0]
+        swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
+            actual_seqlens_kv - actual_seqlens_q - window_size[0]
+        ).view(batch_size, 1, 1, 1)
+        swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
+            actual_seqlens_kv - actual_seqlens_q + window_size[1]
+        ).view(batch_size, 1, 1, 1)
+    swa_mask = torch.logical_not(
+        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
+    )
     if attention_mask is not None:
-        mask = torch.logical_and(attention_mask, mask)
-    return attn_mask_type, mask
+        attention_mask = torch.logical_or(swa_mask, attention_mask)
+    else:
+        attention_mask = swa_mask
+
+    # change mask type
+    if change_type:
+        attn_mask_type = "arbitrary"
+
+    return attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv
 
 
 @torch.no_grad()
@@ -4682,14 +4769,6 @@ def attn_forward_func_with_cp(
     assert (
         qkv_format != "sbhd" or use_fused_attention
     ), "FlashAttention does not support sbhd format!"
-    assert (
-        qkv_format != "thd"
-        or not use_fused_attention
-        or attn_mask_type in ["padding", "padding_causal"]
-    ), (
-        f"Context parallelism is not supported for {attn_mask_type} mask type and "
-        f"{qkv_format} format with {'FusedAttention' if use_fused_attention else 'FlashAttention'}!"
-    )
     assert attn_bias is None or (use_fused_attention and "padding" not in attn_mask_type), (
         """Attention bias is only supported with FusedAttention and "causal" """
         """or "no_mask" mask types!"""
@@ -5114,6 +5193,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         cu_seqlens_kv: Optional[torch.Tensor] = None,  # pylint: disable=unused-argument
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
+        window_size: Optional[Tuple[int, int]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -5142,108 +5222,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer.shape[0],
             key_layer.shape[0],
         )
-        if "padding" in attn_mask_type:
-            if self.attention_type == "self":
-                if attention_mask is None:
-                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-                    for i in range(batch_size):
-                        attention_mask_q = torch.cat(
-                            [
-                                attention_mask_q,
-                                torch.Tensor(
-                                    [False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i])
-                                )
-                                .to(dtype=torch.bool)
-                                .unsqueeze(0)
-                                .unsqueeze(0)
-                                .unsqueeze(0),
-                            ],
-                            dim=0,
-                        )
-                    attention_mask = attention_mask_q.to(device="cuda")
-                assert attention_mask.shape == (
-                    batch_size,
-                    1,
-                    1,
-                    max_seqlen_q,
-                ), "attention_mask should be a single tensor with [b, 1, 1, sq] shape!"
-                attention_mask = torch.logical_or(
-                    attention_mask.squeeze(1).unsqueeze(3), attention_mask
-                )
-            else:
-                if attention_mask is None:
-                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
-                    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
-                    for i in range(batch_size):
-                        attention_mask_q = torch.cat(
-                            [
-                                attention_mask_q,
-                                torch.Tensor(
-                                    [False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i])
-                                )
-                                .to(dtype=torch.bool)
-                                .unsqueeze(0)
-                                .unsqueeze(0)
-                                .unsqueeze(0),
-                            ],
-                            dim=0,
-                        )
-                        attention_mask_kv = torch.cat(
-                            [
-                                attention_mask_kv,
-                                torch.Tensor(
-                                    [False] * seqlens_kv[i]
-                                    + [True] * (max_seqlen_kv - seqlens_kv[i])
-                                )
-                                .to(dtype=torch.bool)
-                                .unsqueeze(0)
-                                .unsqueeze(0)
-                                .unsqueeze(0),
-                            ],
-                            dim=0,
-                        )
-                    attention_mask = (
-                        attention_mask_q.to(device="cuda"),
-                        attention_mask_kv.to(device="cuda"),
-                    )
-                assert (
-                    len(attention_mask) == 2
-                    and attention_mask[0].shape == (batch_size, 1, 1, max_seqlen_q)
-                    and attention_mask[1].shape == (batch_size, 1, 1, max_seqlen_kv)
-                ), (
-                    "attention_mask should be a tuple of two tensors with shapes "
-                    "[b, 1, 1, sq] and [b, 1, 1, skv]!"
-                )
-                attention_mask = torch.logical_or(
-                    attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
-                )
-            mask = attention_mask.squeeze(1).logical_not()
-            actual_seqlens_q = mask[:, :, 0].sum(dim=1)
-            actual_seqlens_kv = mask[:, 0, :].sum(dim=1)
-            mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-                1, 1, max_seqlen_q, 1
-            ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-                1, 1, 1, max_seqlen_kv
-            )
-            if attn_mask_type == "padding_causal":
-                attention_mask = torch.logical_or(
-                    torch.where(mask.view(1, 1, max_seqlen_q, max_seqlen_kv) < 0, 1, 0),
-                    attention_mask,
-                )
-            if attn_mask_type == "padding_causal_bottom_right":
-                attention_mask = torch.logical_or(
-                    torch.where(
-                        mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
-                        + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
-                        < 0,
-                        1,
-                        0,
-                    ),
-                    attention_mask,
-                )
+
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = get_full_mask(
+            max_seqlen_q,
+            max_seqlen_kv,
+            attn_mask_type=attn_mask_type,
+            attention_mask=attention_mask,
+            window_size=window_size,
+            attention_type=self.attention_type,
+        )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
@@ -8354,6 +8341,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             ), f"Values have head_dim = {value_layer.shape[-1]}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
 
+            if qkv_format is None:
+                qkv_format = self.qkv_format
+
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
@@ -8771,12 +8761,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
 
             if use_unfused_attention:
-                if window_size is not None and (
-                    window_size[0] != -1 or window_size[1] not in [-1, 0]
-                ):
-                    attn_mask_type, attention_mask = get_swa_mask(
-                        window_size, max_seqlen_q, max_seqlen_kv, attn_mask_type, attention_mask
-                    )
                 if checkpoint_core_attention:
                     output = self._checkpointed_attention_forward(
                         self.unfused_attention,
@@ -8788,6 +8772,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cu_seqlens_kv=cu_seqlens_kv,
                         attn_mask_type=attn_mask_type,
                         attention_mask=attention_mask,
+                        window_size=window_size,
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
@@ -8802,6 +8787,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cu_seqlens_kv=cu_seqlens_kv,
                     attn_mask_type=attn_mask_type,
                     attention_mask=attention_mask,
+                    window_size=window_size,
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,

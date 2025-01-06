@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -68,13 +68,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
                           (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   if (is_bottom_right && s_q == s_kv && !is_padding) {
     is_causal = true;
     is_bottom_right = false;
   }
+  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_dropout = (is_training && dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -476,13 +476,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK));
   bool is_bottom_right = ((mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK) ||
                           (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
-  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
-                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   if (is_bottom_right && s_q == s_kv && !is_padding) {
     is_causal = true;
     is_bottom_right = false;
   }
+  bool is_padding = ((mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK) ||
+                     (mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK));
   bool is_dropout = (dropout_probability != 0.0f);
   bool is_ragged = (nvte_get_qkv_format(layout) == NVTE_QKV_Format::NVTE_THD);
   const auto cudnn_runtime_version = cudnnGetVersion();
@@ -681,7 +681,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
       if (is_ragged && cudnn_runtime_version >= 90600) {
         sdpa_backward_options.set_max_total_seq_len_q(s_q);
-        sdpa_backward_options.set_max_total_seq_len_q(s_kv);
+        sdpa_backward_options.set_max_total_seq_len_kv(s_kv);
       }
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {

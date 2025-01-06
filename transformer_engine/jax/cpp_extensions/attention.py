@@ -1,9 +1,9 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
 from dataclasses import dataclass
-from functools import partial, reduce, cache
+from functools import partial, reduce
 import operator
 import os
 from typing import Optional, Tuple
@@ -133,7 +133,6 @@ class FusedAttnHelper:
         )
 
     @staticmethod
-    @cache
     def is_non_deterministic_allowed():
         """Check if non-deterministic kernels are allowed"""
         return bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))

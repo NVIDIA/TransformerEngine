@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
@@ -19,7 +19,11 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
-from transformer_engine.jax.attention import AttnMaskType, make_swa_mask
+from transformer_engine.jax.attention import (
+    AttnMaskType,
+    canonicalize_attn_mask_type,
+    make_swa_mask,
+)
 from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
@@ -913,15 +917,7 @@ def apply_swa_mask(
     window_size: Tuple[int, int] = (-1, -1),
 ) -> Array:
     """Apply the sliding window mask to a given mask"""
-    mask_map = {
-        "no_mask": AttnMaskType.NO_MASK,
-        "padding": AttnMaskType.PADDING_MASK,
-        "causal": AttnMaskType.CAUSAL_MASK,
-        "padding_causal": AttnMaskType.PADDING_CAUSAL_MASK,
-        "causal_bottom_right": AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        "padding_causal_bottom_right": AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    }
-    _attn_mask_type = mask_map.get(attn_mask_type, None)
+    _attn_mask_type = canonicalize_attn_mask_type(attn_mask_type)
     assert _attn_mask_type is not None
     max_seqlen_q = original_mask.shape[-2]
     max_seqlen_kv = original_mask.shape[-1]

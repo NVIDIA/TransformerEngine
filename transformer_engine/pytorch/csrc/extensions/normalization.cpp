@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -19,7 +19,7 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dx = at::empty_like(x_);
   auto dgamma = at::empty_like(gamma_);
   auto dbeta = at::empty_like(gamma_);
-  transformer_engine::TensorWrapper workspace, barrier, dgamma_part, dbeta_part;
+  transformer_engine::TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
   auto x_cu = makeTransformerEngineTensor(x_);
@@ -31,32 +31,21 @@ std::vector<at::Tensor> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dbeta_cu = makeTransformerEngineTensor(dbeta);
 
   // This call populates tensors with the required config.
-  const auto bwd_fun = zero_centered_gamma ? nvte_layernorm1p_bwd : nvte_layernorm_bwd;
-  bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(), dbeta_part.data(),
-          at::cuda::getCurrentCUDAStream(),
-          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-          barrier.data());
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   // Alloc space for Tensors.
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
-  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
-  auto dbeta_part_data = allocateSpace(dbeta_part.shape(), dbeta_part.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
-  dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
-                                            dgamma_part.dtype());
-  dbeta_part = makeTransformerEngineTensor(dbeta_part_data.data_ptr(), dbeta_part.shape(),
-                                           dbeta_part.dtype());
 
   // Actual call to bwd kernel.
-  bwd_fun(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dbeta_cu.data(), dgamma_part.data(), dbeta_part.data(),
-          at::cuda::getCurrentCUDAStream(),
-          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-          barrier.data());
+  nvte_layernorm_bwd(dz_cu.data(), x_cu.data(), mu_cu.data(), rsigma_cu.data(), gamma_cu.data(),
+                     dx_cu.data(), dgamma_cu.data(), dbeta_cu.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   return {dx, dgamma, dbeta};
 }
@@ -88,9 +77,6 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
   const auto &weight_ = weight.contiguous();
   const auto &bias_ = bias.contiguous();
 
-  // Choose kernel implementation
-  const auto func = zero_centered_gamma ? nvte_layernorm1p_fwd : nvte_layernorm_fwd;
-
   // Tensor dimensions
   size_t N = static_cast<size_t>(input.size(0));
   size_t H = static_cast<size_t>(input.size(1));
@@ -113,24 +99,22 @@ std::vector<at::Tensor> layernorm_fwd_fp8_noalloc(
   auto rsigma_cu = makeTransformerEngineTensor(rsigma);
 
   // Query workspace sizes
-  transformer_engine::TensorWrapper workspace, barrier;
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-       barrier.data());
+  transformer_engine::TensorWrapper workspace;
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   // Allocate workspaces
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
 
   // Launch kernel
-  func(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(), mu_cu.data(),
-       rsigma_cu.data(), at::cuda::getCurrentCUDAStream(),
-       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-       barrier.data());
+  nvte_layernorm_fwd(input_cu.data(), gamma_cu.data(), beta_cu.data(), eps, z_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(),
+                     at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                     zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   return {ln_out, mu, rsigma};
 }
@@ -194,7 +178,7 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
 
   auto dx = at::empty_like(x_);
   auto dgamma = at::empty_like(gamma_);
-  transformer_engine::TensorWrapper workspace, barrier, dgamma_part;
+  transformer_engine::TensorWrapper workspace;
 
   auto dz_cu = makeTransformerEngineTensor(dz_);
   auto x_cu = makeTransformerEngineTensor(x_);
@@ -204,27 +188,21 @@ std::vector<at::Tensor> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
   auto dgamma_cu = makeTransformerEngineTensor(dgamma);
 
   // This call populates tensors with the required config.
-  const auto bwd_fun = zero_centered_gamma ? nvte_rmsnorm1p_bwd : nvte_rmsnorm_bwd;
-  bwd_fun(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dgamma_part.data(), at::cuda::getCurrentCUDAStream(),
-          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-          barrier.data());
+  nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
+                   dgamma_cu.data(), workspace.data(),
+                   at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                   zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   // Alloc space for Tensors.
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
-  auto dgamma_part_data = allocateSpace(dgamma_part.shape(), dgamma_part.dtype());
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
-  dgamma_part = makeTransformerEngineTensor(dgamma_part_data.data_ptr(), dgamma_part.shape(),
-                                            dgamma_part.dtype());
 
   // Actual call to bwd kernel.
-  bwd_fun(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
-          dgamma_cu.data(), dgamma_part.data(), at::cuda::getCurrentCUDAStream(),
-          at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-          barrier.data());
+  nvte_rmsnorm_bwd(dz_cu.data(), x_cu.data(), rsigma_cu.data(), gamma_cu.data(), dx_cu.data(),
+                   dgamma_cu.data(), workspace.data(),
+                   at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                   zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   return {dx, dgamma};
 }
@@ -255,9 +233,6 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
                                                 const int scale_inv_offset) {
   using namespace transformer_engine;
 
-  // Choose kernel implementation
-  const auto func = zero_centered_gamma ? nvte_rmsnorm1p_fwd : nvte_rmsnorm_fwd;
-
   // Tensor dimensions
   size_t N = static_cast<size_t>(input.size(0));
   size_t H = static_cast<size_t>(input.size(1));
@@ -277,24 +252,22 @@ std::vector<at::Tensor> rmsnorm_fwd_fp8_noalloc(const at::Tensor &input, const a
   auto rsigma_cu = makeTransformerEngineTensor(rsigma);
 
   // Query workspace sizes
-  transformer_engine::TensorWrapper workspace, barrier;
-  func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-       at::cuda::getCurrentCUDAStream(),
-       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-       barrier.data());
+  transformer_engine::TensorWrapper workspace;
+  nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
+                   workspace.data(),
+                   at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                   zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   // Allocate workspaces
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
-  auto barrier_data = allocateSpace(barrier.shape(), barrier.dtype(), true);
   workspace =
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
-  barrier = makeTransformerEngineTensor(barrier_data.data_ptr(), barrier.shape(), barrier.dtype());
 
   // Launch kernel
-  func(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
-       at::cuda::getCurrentCUDAStream(),
-       at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin, workspace.data(),
-       barrier.data());
+  nvte_rmsnorm_fwd(input_cu.data(), gamma_cu.data(), eps, z_cu.data(), rsigma_cu.data(),
+                   workspace.data(),
+                   at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
+                   zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
   return {ln_out, rsigma};
 }

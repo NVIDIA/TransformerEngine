@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,8 +10,7 @@ add_executable(test_operator
                test_cast_transpose_dbias_dgelu.cu
                test_cast_transpose_dgeglu.cu
                test_act.cu
-               test_layernorm.cu
-               test_rmsnorm.cu
+               test_normalization.cu
                test_multi_cast_transpose.cu
                test_multi_padding.cu
                test_causal_softmax.cu
