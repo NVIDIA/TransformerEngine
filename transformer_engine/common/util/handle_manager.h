@@ -7,20 +7,20 @@
 #ifndef TRANSFORMER_ENGINE_UTIL_HANDLE_MANAGER_H_
 #define TRANSFORMER_ENGINE_UTIL_HANDLE_MANAGER_H_
 
+#include <cuda_runtime_api.h>
+
 #include <mutex>
 #include <vector>
-#include <cuda_runtime_api.h>
-#include "logging.h"
+
 #include "cuda_runtime.h"
+#include "logging.h"
 
 namespace transformer_engine::detail {
 
-template <typename Handle,
-          void Create(Handle*),
-          void Destroy(Handle) = nullptr>
+template <typename Handle, void Create(Handle*), void Destroy(Handle) = nullptr>
 class HandleManager {
  public:
-  static HandleManager &Instance() {
+  static HandleManager& Instance() {
     static thread_local HandleManager instance;
     return instance;
   }
@@ -29,9 +29,7 @@ class HandleManager {
     static std::vector<std::once_flag> flags(handles_.size());
     int device_id = cuda::current_device();
     NVTE_CHECK(0 <= device_id && device_id < handles_.size(), "invalid CUDA device ID");
-    auto init = [&]() {
-      Create(&(handles_[device_id]));
-    };
+    auto init = [&]() { Create(&(handles_[device_id])); };
     std::call_once(flags[device_id], init);
     return handles_[device_id];
   }

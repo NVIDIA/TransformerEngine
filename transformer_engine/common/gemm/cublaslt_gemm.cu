@@ -14,8 +14,8 @@
 #include <mutex>
 
 #include "../common.h"
-#include "../util/logging.h"
 #include "../util/handle_manager.h"
+#include "../util/logging.h"
 
 namespace {
 
@@ -47,7 +47,7 @@ uint32_t _getAlignment(uintptr_t address) {
   }
 }
 
-inline void CreateCublasHandle(cublasLtHandle_t* handle) {
+inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
