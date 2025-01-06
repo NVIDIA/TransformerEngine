@@ -194,7 +194,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
 
-        def apply_swa_mask(attn_mask_type: AttnMaskType, original_mask: Array) -> Array:
+        def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""
             batch = original_mask.shape[0]
             max_seqlen_q = original_mask.shape[-2]
@@ -216,7 +216,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size is None:
                 mask = None
             if mask is not None:
-                mask = apply_swa_mask(attn_mask_type, mask)
+                mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask
