@@ -15,6 +15,7 @@
 
 #include "../common.h"
 #include "../util/logging.h"
+#include "../util/handle_manager.h"
 
 namespace {
 
@@ -46,28 +47,15 @@ uint32_t _getAlignment(uintptr_t address) {
   }
 }
 
+inline void CreateCublasHandle(cublasLtHandle_t* handle) {
+  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
+}
+
 }  // namespace
 
 namespace transformer_engine {
 
-class cublasHandleManager {
- public:
-  static cublasHandleManager &Instance() {
-    static thread_local cublasHandleManager instance;
-    return instance;
-  }
-
-  cublasLtHandle_t GetHandle() {
-    static thread_local std::once_flag flag;
-    std::call_once(flag, [&] { NVTE_CHECK_CUBLAS(cublasLtCreate(&handle_)); });
-    return handle_;
-  }
-
-  ~cublasHandleManager() {}
-
- private:
-  cublasLtHandle_t handle_ = nullptr;
-};
+using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
