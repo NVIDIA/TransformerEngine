@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -423,10 +423,16 @@ model_configs_mask = {
     "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
     "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_9_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
-    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"),
+    "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
+    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
+    "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_10_0": ModelConfig(
+        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_10_1": ModelConfig(
+        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
 }
 
 
@@ -544,16 +550,19 @@ model_configs_swa = {
     "swa_3_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "swa_3_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
     "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "swa_5_1": ModelConfig(
+    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "swa_5_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "swa_6_1": ModelConfig(
         2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "swa_5_2": ModelConfig(
+    "swa_6_2": ModelConfig(
         2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "swa_5_3": ModelConfig(
+    "swa_6_3": ModelConfig(
         2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
 }
@@ -632,22 +641,49 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(3, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(8, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_4": ModelConfig(8, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "layout_0_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "layout_0_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "layout_0_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "layout_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "layout_2_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
     "layout_3_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_4_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_2": ModelConfig(
         2,
-        16,
-        16,
+        24,
+        24,
         128,
         2048,
         4096,
@@ -655,21 +691,6 @@ model_configs_layout_thd = {
         "padding_causal_bottom_right",
         "no_bias",
         window_size=(4, 0),
-    ),
-    "layout_3_1": ModelConfig(
-        4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
-    ),
-    "layout_3_2": ModelConfig(
-        2, 16, 16, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
-    "layout_3_3": ModelConfig(
-        4, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
-    ),
-    "layout_3_4": ModelConfig(
-        2, 16, 16, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
-    ),
-    "layout_3_5": ModelConfig(
-        4, 16, 1, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
     ),
 }
 

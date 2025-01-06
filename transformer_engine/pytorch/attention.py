@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -610,6 +610,12 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
+        elif cudnn_version >= (9, 6, 0) and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD for"
+                " cuDNN 9.6+"
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -695,16 +701,28 @@ def get_attention_backend(
     #                            |                           | converts window_size to an 'arbitrary' mask
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
-    if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if attention_dropout != 0.0:
-            logger.debug(
-                "Disabling FusedAttention as it does not support sliding window attention "
-                "with dropout"
-            )
-            use_fused_attention = False
-    if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if _use_flash_attn_3:
-            if not bottom_right_diagonal and max_seqlen_q != max_seqlen_kv:
+    else:
+        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+            if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention"
+                    " for FP8"
+                )
+                use_fused_attention = False
+            elif attention_dropout != 0.0:
+                logger.debug(
+                    "Disabling FusedAttention as it only supports sliding window attention "
+                    "with no dropout"
+                )
+                use_fused_attention = False
+            elif max_seqlen_q > max_seqlen_kv:
+                logger.debug(
+                    "Disabling FusedAttention as it does not support sliding window attention "
+                    "with s_q > s_kv for cross-attention"
+                )
+                use_fused_attention = False
+        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
+            if _use_flash_attn_3:
                 logger.debug(
                     "Disabling FlashAttention 3 as it only supports sliding window with bottom"
                     " right diagonal alignment for cross-attention"
