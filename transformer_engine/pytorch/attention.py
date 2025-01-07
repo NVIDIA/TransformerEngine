@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -602,6 +602,12 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support context parallelism with MLA"
             )
             use_fused_attention = False
+        elif cudnn_version >= (9, 6, 0) and qkv_format == "thd":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD for"
+                " cuDNN 9.6+"
+            )
+            use_fused_attention = False
 
     # Filter: Attention mask
     # attn_mask_type              | attention_mask                       | supported backends
@@ -618,9 +624,7 @@ def get_attention_backend(
     #     self-attention          |                                      | All
     #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
     # causal_bottom_right         | None                                 | All
-    # padding_causal_bottom_right | Same as "padding"                    |
-    #     self-attention          |                                      | All
-    #     cross-attention         |                                      | FlashAttention, UnfusedDotProductAttention
+    # padding_causal_bottom_right | Same as "padding"                    | All
     # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
@@ -697,29 +701,16 @@ def get_attention_backend(
                     " for FP8"
                 )
                 use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0 or qkv_format == "thd":
+            elif window_size[1] != 0 or attention_dropout != 0.0:
                 logger.debug(
                     "Disabling FusedAttention as it only supports sliding window attention "
-                    "with causal mask, no dropout, and qkv_format = bshd/sbhd"
+                    "with (left, 0) and no dropout"
                 )
                 use_fused_attention = False
-            elif max_seqlen_q != max_seqlen_kv and attn_mask_type in [
-                "no_mask",
-                "padding",
-                "causal_bottom_right",
-                "padding_causal_bottom_right",
-            ]:
+            elif max_seqlen_q > max_seqlen_kv:
                 logger.debug(
                     "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s for cross-attention",
-                    attn_mask_type,
-                )
-                use_fused_attention = False
-            elif "padding" in attn_mask_type:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with attn_mask_type = %s",
-                    attn_mask_type,
+                    "with s_q > s_kv for cross-attention"
                 )
                 use_fused_attention = False
         if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):

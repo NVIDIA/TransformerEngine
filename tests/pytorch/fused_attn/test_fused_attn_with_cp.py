@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -121,6 +121,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
     if dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
+    if qkv_format == "thd" and get_cudnn_version() >= (9, 6, 0):
+        pytest.skip("THD format is not supported for cuDNN 9.6+!")
 
     config = model_configs_fused_attn[model]
     if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
