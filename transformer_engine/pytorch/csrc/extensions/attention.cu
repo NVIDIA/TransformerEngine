@@ -1537,10 +1537,10 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   int batch, lse_seqlen;
   if (lse_packed) {
     batch = cu_seqlens.size(0) - 1;
-    lse_seqlen = total_tokens;
+    lse_seqlen = lse.size(1);
 
     NVTE_CHECK(lse.size(0) == num_heads);
-    NVTE_CHECK(lse.size(1) == lse_seqlen);
+    NVTE_CHECK(lse_seqlen >= total_tokens);
     NVTE_CHECK(lse_per_step.size(0) == num_heads);
     NVTE_CHECK(lse_per_step.size(1) == lse_seqlen / (only_second_half + 1));
   } else {
