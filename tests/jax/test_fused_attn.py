@@ -148,30 +148,30 @@ def make_mask(
     segment_ids: [1, 1, 1, 0, 2, 2, 2, 3, 3, 3, 4, 0, 0, 5, 5, 5]
     segment_pos: [0, 1, 2, 3, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
     """
+    # segment masks
     inv_mask = make_attention_mask(
         segment_ids_q, segment_ids_kv, lambda x, y: (jnp.logical_and(jnp.equal(x, y), x != 0))
     )
+
+    if segment_pos_q is None:
+        segment_pos_q = jnp.broadcast_to(
+            jnp.arange(segment_ids_q.shape[-1], dtype=jnp.int32), segment_ids_q.shape
+        )
+    if segment_pos_kv is None:
+        segment_pos_kv = jnp.broadcast_to(
+            jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
+        )
+
+    # causal mask
     if attn_mask_type.is_causal():
-        if segment_pos_q is None:
-            segment_pos_q = jnp.broadcast_to(
-                jnp.arange(segment_ids_q.shape[-1], dtype=jnp.int32), segment_ids_q.shape
-            )
-        if segment_pos_kv is None:
-            segment_pos_kv = jnp.broadcast_to(
-                jnp.arange(segment_ids_kv.shape[-1], dtype=jnp.int32), segment_ids_kv.shape
-            )
         inv_causal_mask = make_attention_mask(
             segment_pos_q, segment_pos_kv, lambda x, y: jnp.greater_equal(x, y)
         )
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
-    if window_size is not None:
-        max_seqlen_q = inv_mask.shape[-2]
-        max_seqlen_kv = inv_mask.shape[-1]
-        inv_swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, window_size, attn_mask_type)
-        inv_swa_mask = jnp.broadcast_to(inv_swa_mask, inv_mask.shape)
-        inv_mask = combine_masks(inv_mask, inv_swa_mask)
-
+    # sliding window mask
+    inv_swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, jnp.bool_)
+    inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
 
@@ -314,13 +314,6 @@ class FusedAttnRunner:
             return self.num_segments_per_seq + 1
 
     def _check_configs(self):
-        # TODO(rewang): Fix THD + PADDING_CAUSAL + SWA reference
-        if (
-            self.qkv_layout.is_thd()
-            and self.attn_mask_type == AttnMaskType.PADDING_CAUSAL_MASK
-            and self.window_size is not None
-        ):
-            pytest.skip("THD + PADDING_CAUSAL + SWA reference is not implemented.")
         # TODO(rewang): probably adds this in is_fused_attn_available
         if self.qkv_layout.is_thd() and not self.attn_mask_type.is_padding():
             pytest.skip("THD format requires padding masks.")
@@ -432,7 +425,12 @@ class FusedAttnRunner:
             return tokens, jnp.logical_not(tokens)
 
         def generate_random_segment_ids(
-            batch_size, sequence_length, num_segments, seed, with_segment_pad=True
+            batch_size,
+            sequence_length,
+            num_segments,
+            seed,
+            with_segment_pad=True,
+            min_segment_len=None,
         ):
             rng = np.random.default_rng(seed=seed)
             # [1, 1, 1, 2, 2, 3, 3, 3, 3, 0, 0], 0 means pad
@@ -448,15 +446,20 @@ class FusedAttnRunner:
                 current_pos = 0
                 segment_id = 1
 
-                for _ in range(num_segments):
-                    segment_size = rng.integers(1, max_segment_size + 1)
+                for seg_id in range(num_segments):
+                    # min_segment_len is to force kv_len >= q_len because cuDNN kernels failed
+                    # TODO(rewang): Remove this constrain after cuDNN supports
+                    min_segment_size = 1
+                    if min_segment_len is not None:
+                        min_segment_size = min_segment_len[i][seg_id]
+                    segment_size = rng.integers(min_segment_size, max_segment_size + 1)
                     if current_pos + segment_size > sequence_length:
                         break
                     segment_end = current_pos + segment_size
                     segment_ids[i, current_pos:segment_end] = segment_id
                     segment_pos[i, current_pos:segment_end] = np.arange(segment_size)
                     if with_segment_pad:
-                        num_valid = rng.integers(1, segment_size + 1)
+                        num_valid = rng.integers(min_segment_size, segment_size + 1)
                         segment_pad[i, current_pos + num_valid : segment_end] = 1
                     current_pos = segment_end
                     segment_id += 1
@@ -473,18 +476,21 @@ class FusedAttnRunner:
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
+            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
             if self.qkv_layout == QKVLayout.T3HD:
                 self.segment_ids_kv = self.segment_ids_q
                 self.segment_pos_kv = self.segment_pos_q
                 self.pad_kv = self.pad_q
             else:
+                # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
+                min_segment_len = None if self.window_size is None else self.seqlens_q
                 self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                     self.batch_size,
                     self.max_seqlen_kv,
                     self.num_segments_per_seq,
                     seed=2024,
+                    min_segment_len=min_segment_len,
                 )
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.num_segments_per_seq = 1
