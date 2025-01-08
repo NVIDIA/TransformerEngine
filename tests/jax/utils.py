@@ -919,14 +919,14 @@ def apply_swa_mask(
     """Apply the sliding window mask to a given mask"""
     _attn_mask_type = canonicalize_attn_mask_type(attn_mask_type)
     assert _attn_mask_type is not None
+    batch = original_mask.shape[0]
     max_seqlen_q = original_mask.shape[-2]
     max_seqlen_kv = original_mask.shape[-1]
-    swa_mask = make_swa_mask(
-        max_seqlen_q, max_seqlen_kv, window_size, _attn_mask_type, dtype=original_mask.dtype
-    )
+    pos_q = jnp.broadcast_to(jnp.arange(max_seqlen_q), (batch, max_seqlen_q))
+    pos_kv = jnp.broadcast_to(jnp.arange(max_seqlen_kv), (batch, max_seqlen_kv))
+    swa_mask = make_swa_mask(pos_q, pos_kv, window_size, original_mask.dtype)
     # In swa_mask and original_mask 0 is masked out
-    swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
-    new_mask = jnp.where(original_mask == 1, swa_mask_bcast, original_mask)
+    new_mask = jnp.where(original_mask == 1, swa_mask, original_mask)
     return new_mask
 
 
