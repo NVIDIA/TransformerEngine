@@ -343,7 +343,6 @@ class MaskDescriptor:
     @classmethod
     def from_segment_ids_with_pos(
         cls,
-        qkv: Tuple[jnp.ndarray, ...],
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
     ) -> MaskDescriptor:
@@ -353,7 +352,15 @@ class MaskDescriptor:
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
         if segment_pos is not None:
-            q_seg_pos, kv_seg_pos = cls._expand_to_pair(segment_pos)
+            segment_pos = cls._expand_to_pair(segment_pos)
+        else:
+
+            def generate_default_pos(segment_ids):
+                seqlen = segment_ids.shape[-1]
+                return jnp.broadcast_to(jnp.arange(seqlen), segment_ids.shape)
+
+            q_seg_pos = generate_default_pos(q_seg_ids)
+            kv_seg_pos = generate_default_pos(kv_seg_ids)
             segment_pos = (q_seg_pos, kv_seg_pos)
 
         return cls(

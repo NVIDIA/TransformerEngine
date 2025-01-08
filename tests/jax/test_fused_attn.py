@@ -192,8 +192,8 @@ def get_seqlens_and_offsets(segment_ids):
         ).squeeze(-1)
 
     offsets = _find_offsets(segment_ids)
-    offsets = jnp.insert(offsets, -1, values=-1, axis=-1)
-    seqlens = jnp.insert(seqlens, -1, values=0, axis=-1)
+    offsets = jnp.insert(offsets, offsets.shape[-1], values=-1, axis=-1)
+    seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
     seqlens = jnp.where(seqlens, seqlens, -1)
     return seqlens, offsets
 
