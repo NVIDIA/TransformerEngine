@@ -147,59 +147,44 @@ class CPStrategy(Enum):
 
 
 def make_swa_mask(
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
+    segment_pos_q: jnp.ndarray,
+    segment_pos_kv: jnp.ndarray,
     window_size: Optional[Tuple[int, int]] = None,
-    attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
     dtype: jax.typing.DTypeLike = jnp.float32,
 ):
     """
-    Generate sliding window mask. `True` or `1` means keep the element.
+    Generate a sliding window mask (1 = attend, 0 = masked).
 
-    For `CAUSAL_BOTTOM_RIGHT_MASK` and `PADDING_CAUSAL_BOTTOM_RIGHT_MASK` mask type,
-    the sliding window diagonal is aligned to the bottom right corner, and for other
-    mask types, the top left corner.
+    Args:
+        segment_pos_q (jnp.ndarray):
+            Query positions within each segment. For example, a batch with segment_ids =
+            [[1, 1, 1, 2, 2, 2, 2, 2]] yields segment_pos =
+            [[0, 1, 2, 0, 1, 2, 3, 4]].
+        segment_pos_kv (jnp.ndarray):
+            Key/value positions within each segment.
+        window_size (Optional[Tuple[int, int]], optional):
+            Sliding window size for local attention, where query at position i attends to keys
+            in [i - window_size[0], i + window_size[1]] inclusive. A negative number means an
+            infinite window; None means no sliding window.
+            Defaults to None.
+        dtype (jax.typing.DTypeLike, optional):
+            Mask data type. Defaults to jnp.float32.
 
-    Parameters
-    ----------
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    window_size: Optional[Tuple[int, int]] = None
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Negative number in window size means infinity window.
-        `None` means no sliding window.
-    attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
-    dtype: jax.typing.DTypeLike, default=jnp.float32
-        The mask data type.
-    Returns
-    ----------
-    swa_mask: jax.numpy.tensor
-        Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
-        that will get attention, value 0 are the masked out positions.
+    Returns:
+        jnp.ndarray:
+            The mask with shape [b, 1, max_seqlen_q, max_seqlen_kv].
     """
-    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
-    if window_size is None:
-        return swa_mask
-    left_window, right_window = window_size
-    if attn_mask_type.is_bottom_right():
-        if left_window < 0:
-            left_window = max_seqlen_kv
-        if right_window < 0:
-            right_window = max_seqlen_kv
-        bottom_right_shift = max_seqlen_kv - max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window + bottom_right_shift)
-        swa_mask = jnp.tril(swa_mask, k=right_window + bottom_right_shift)
+    if window_size is not None:
+        left_window, right_window = window_size
     else:
-        if left_window < 0:
-            left_window = max_seqlen_q
-        if right_window < 0:
-            right_window = max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window)
-        swa_mask = jnp.tril(swa_mask, k=right_window)
-    return swa_mask
+        left_window = right_window = jnp.inf
+    left_window = jnp.inf if left_window < 0 else left_window
+    right_window = jnp.inf if right_window < 0 else right_window
+    pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
+    pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
+    inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
+    inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
+    return inv_swa_mask.astype(dtype)
 
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
