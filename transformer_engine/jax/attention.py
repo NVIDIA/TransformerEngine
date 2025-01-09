@@ -669,14 +669,10 @@ def _fused_attn_fwd_rule(
     output = checkpoint_name(output, "context")
     softmax_aux = checkpoint_name(softmax_aux, "context")
     rng_state = checkpoint_name(rng_state, "context")
-    seq_offsets = mask_descriptor.seq_offsets
-    if seq_offsets is None:
-        seq_offsets = (None, None)
     return output, (
         qkv,
         bias,
-        *mask_descriptor.seqlens,
-        *seq_offsets,
+        mask_descriptor,
         softmax_aux,
         rng_state,
         output,
@@ -701,10 +697,7 @@ def _fused_attn_bwd_rule(
     (
         qkv,
         bias,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        mask_descriptor,
         softmax_aux,
         rng_state,
         output,
@@ -716,10 +709,7 @@ def _fused_attn_bwd_rule(
         rng_state,
         output,
         dz,
-        q_seq_lens,
-        kv_seq_lens,
-        q_seq_offsets,
-        kv_seq_offsets,
+        mask_descriptor,
         attn_bias_type=attn_bias_type.value,
         attn_mask_type=attn_mask_type.value,
         qkv_layout=qkv_layout.value,

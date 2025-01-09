@@ -2117,10 +2117,7 @@ def fused_attn_bwd(
     rng_state: jnp.ndarray,
     output: jnp.ndarray,
     doutput: jnp.ndarray,
-    q_seqlen: Optional[jnp.ndarray],
-    kv_seqlen: Optional[jnp.ndarray],
-    q_seq_offsets: Optional[jnp.ndarray],
-    kv_seq_offsets: Optional[jnp.ndarray],
+    mask_descriptor: MaskDescriptor,
     attn_bias_type: NVTE_Bias_Type,
     attn_mask_type: NVTE_Mask_Type,
     qkv_layout: NVTE_QKV_Layout,
@@ -2176,9 +2173,6 @@ def fused_attn_bwd(
         - The second value is the gradient with respect to `bias`, or `None` if `bias` is `None`.
     """
 
-    assert (q_seq_offsets is None) == (
-        kv_seq_offsets is None
-    ), "Both q_seq_offsets and kv_seq_offsets must be either None or have values."
     is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     # For optional tensors, which custom calls doesn't support None
@@ -2230,10 +2224,12 @@ def fused_attn_bwd(
         rng_state,
         output,
         doutput,
-        q_seqlen,
-        kv_seqlen,
-        q_seq_offsets if is_ragged else _not_used,
-        kv_seq_offsets if is_ragged else _not_used,
+        *mask_descriptor.seqlens,
+        *(
+            mask_descriptor.seq_offsets
+            if mask_descriptor.seq_offsets is not None
+            else (_not_used, _not_used)
+        ),
         config=fused_config,
     )
     return tuple(qkv_grads[: len(qkv)]), bias_grad
