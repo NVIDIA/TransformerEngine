@@ -2679,7 +2679,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if causal and ctx.second_half_lse_seqlen is not None:
             if ctx.qkv_format == "thd":
                 softmax_lse_ = tex.thd_read_second_half_lse(
-                    softmax_lse, cu_seqlens_q_padded, ctx.softmax_lse_in_packed_format, ctx.second_half_lse_seqlen
+                    softmax_lse,
+                    cu_seqlens_q_padded,
+                    ctx.softmax_lse_in_packed_format,
+                    ctx.second_half_lse_seqlen,
                 )
             else:
                 # [b, np, sq] -> [b, np, 2, sq//2]
