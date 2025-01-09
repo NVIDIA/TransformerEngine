@@ -1420,7 +1420,7 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
 
-  int batch, num_heads, lse_seqlen;
+  int batch, num_heads, lse_seqlen, second_half_lse_seqlen;
 
   if (lse_packed) {
     NVTE_CHECK(lse.dim() == 2);
@@ -1539,7 +1539,7 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   NVTE_CHECK(out_per_step.size(1) == num_heads);
   NVTE_CHECK(out_per_step.size(2) == dim_per_head);
 
-  int batch, lse_seqlen;
+  int batch, lse_seqlen, lse_per_step_seqlen;
   if (lse_packed) {
     batch = cu_seqlens.size(0) - 1;
     lse_seqlen = lse.size(1);

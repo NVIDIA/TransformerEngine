@@ -2475,7 +2475,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         second_half_lse_seqlen = None
         if causal and rank < (cp_size - 1):
-            second_half_lse_seqlen = softmax_lse_per_step[-1].shape[0]
+            second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
