@@ -224,7 +224,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     name = "te_fused_attn_forward"
     multiple_results = True
-    impl_static_args = (10,)
+    impl_static_args = (13,)
     inner_primitive = None
     outer_primitive = None
 
@@ -234,12 +234,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_aval,
         v_aval,
         bias_aval,
+        seed_aval,
         q_seqlen_or_cu_seqlen_aval,
         kv_seqlen_or_cu_seqlen_aval,
         _q_seq_offsets,
         _k_seq_offsets,
-        seed_aval,
-        _cp_aux_args,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
         *,
         config: _FusedAttnConfig,
     ):
@@ -355,12 +358,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k,
         v,
         bias,
+        seed,
         q_cu_seqlen,
         kv_cu_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        seed,
-        _cp_aux_args,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
         *,
         config: _FusedAttnConfig,
     ):
@@ -389,12 +395,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 k,
                 v,
                 bias,
+                seed,
                 q_cu_seqlen,
                 kv_cu_seqlen,
                 q_seq_offsets,
                 k_seq_offsets,
-                seed,
-                _cp_aux_args,  # FFI Lowering requires number of parameters meets primitive.lowering
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
                 input_batch=input_batch,
                 bias_batch=bias_batch,
                 q_max_seqlen=q_max_seqlen,
@@ -420,11 +429,11 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 k,
                 v,
                 bias,
+                seed,
                 q_cu_seqlen,
                 kv_cu_seqlen,
                 q_seq_offsets,
                 k_seq_offsets,
-                seed,
             ]
             operand_shapes = map(lambda x: x.type.shape, operands)
             out_types = [
@@ -469,12 +478,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k,
         v,
         bias,
+        seed,
         q_seqlen,
         kv_seqlen,
         q_seq_offsets,
         k_seq_offsets,
-        seed,
-        _cp_aux_args,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
         config: _FusedAttnConfig,
     ):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
@@ -546,12 +558,15 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             k,
             v,
             bias,
+            seed,
             q_cu_seqlen,
             kv_cu_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            seed,
-            _cp_aux_args,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
             config=config,
         )
         return output, softmax_aux, rng_state
@@ -560,7 +575,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def batcher(batched_args, batch_dims, *, config):
         check_valid_batch_dims(batch_dims)
         assert FusedAttnFwdPrimitive.outer_primitive is not None
-        q_bdim, *_, seed_bdim = batch_dims
+        q_bdim, _, _, _, seed_bdim, *_ = batch_dims
 
         out_bdims = q_bdim, q_bdim, seed_bdim
         return (
@@ -606,7 +621,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-2] = seed_sharding
+        arg_shardings[4] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
         impl = partial(FusedAttnFwdPrimitive.impl, config=config)
@@ -1253,10 +1268,20 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
         def impl(
-            q, k, v, bias, q_seqlen, kv_seqlen, q_seq_offsets, k_seq_offsets, seed, cp_aux_args
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_seqlen,
+            kv_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
         ):
-            # To Convert segment_ids/segmen_pos to q_seqlen/q_seq_offset
-            # q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos = cp_aux_args
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
 
@@ -1293,12 +1318,15 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
                         k_unmasked,
                         v_unmasked,
                         bias,
+                        seed,
                         q_seqlen_for_step,
                         kv_seqlen_for_step,
                         q_seq_offsets,
                         k_seq_offsets,
-                        seed,
-                        cp_aux_args,
+                        _q_segment_ids,
+                        _kv_segment_ids,
+                        _q_segment_pos,
+                        _kv_segment_pos,
                         config=helper.get_step_config(),
                     )
                     results.append((output, softmax_aux, rng_state))
@@ -1619,15 +1647,16 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             k,
             v,
             bias,
+            seed,
             q_seqlen,
             kv_seqlen,
             q_seq_offsets,
             k_seq_offsets,
-            seed,
-            cp_aux_args,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
         ):
-            # To Convert segment_ids/segmen_pos to q_seqlen/q_seq_offset
-            # q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos = cp_aux_args
             _not_used = jnp.zeros(0, dtype=v.dtype)
 
             # Combine KV tensors if separate for better permute scheduling and performance.
@@ -1663,12 +1692,15 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
+                        seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
                         q_seq_offsets,
                         k_seq_offsets,
-                        seed,
-                        cp_aux_args,
+                        _q_segment_ids,
+                        _kv_segment_ids,
+                        _q_segment_pos,
+                        _kv_segment_pos,
                         config=helper.get_step_config(attn_mask_type),
                     )
                     return output_per_step, softmax_aux_per_step
@@ -1685,12 +1717,15 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv_part,
                         _not_used,
                         bias,
+                        seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
                         q_seq_offsets,
                         k_seq_offsets,
-                        seed,
-                        cp_aux_args,
+                        _q_segment_ids,
+                        _kv_segment_ids,
+                        _q_segment_pos,
+                        _kv_segment_pos,
                         config=helper.get_step_config(NVTE_Mask_Type.NVTE_NO_MASK),
                     )
                     return output_per_step, softmax_aux_per_step
@@ -1704,12 +1739,15 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
                         kv,
                         _not_used,
                         bias,
+                        seed,
                         q_seqlen_per_step,
                         kv_seqlen_per_step,
                         q_seq_offsets,
                         k_seq_offsets,
-                        seed,
-                        cp_aux_args,
+                        _q_segment_ids,
+                        _kv_segment_ids,
+                        _q_segment_pos,
+                        _kv_segment_pos,
                         config=helper.get_step_config(NVTE_Mask_Type.NVTE_NO_MASK),
                     )
                     output_per_step = jnp.concat([jnp.zeros_like(q_part), output_per_step], axis=1)
@@ -2097,15 +2135,8 @@ def fused_attn_fwd(
     return primitive.bind(
         *qkv_for_primitive,
         bias,
-        *mask_descriptor.seqlens,
-        *(
-            mask_descriptor.seq_offsets
-            if mask_descriptor.seq_offsets is not None
-            else (_not_used, _not_used)
-        ),
         seed,
-        jnp.array(mask_descriptor.segment_ids),
-        # jnp.array([q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos]),
+        *jax.tree.flatten(mask_descriptor)[0],
         config=fused_config,
     )
 

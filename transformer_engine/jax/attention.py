@@ -290,15 +290,28 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
     return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
-@jax.tree_util.register_dataclass
-@dataclass
+@jax.tree_util.register_pytree_node_class
 class MaskDescriptor:
     """Class representing QKV inputs with flexible initialization."""
 
-    seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
-    seq_offsets: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
-    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
-    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+    seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    seq_offsets: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    segment_ids: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+    segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
+
+    def __init__(self, seqlens=None, seq_offsets=None, segment_ids=None, segment_pos=None):
+        self.seqlens = (jnp.zeros(0), jnp.zeros(0)) if seqlens is None else seqlens
+        self.seq_offsets = (jnp.zeros(0), jnp.zeros(0)) if seq_offsets is None else seq_offsets
+        self.segment_ids = (jnp.zeros(0), jnp.zeros(0)) if segment_ids is None else segment_ids
+        self.segment_pos = (jnp.zeros(0), jnp.zeros(0)) if segment_pos is None else segment_pos
+
+    def tree_flatten(self):
+        return ((self.seqlens, self.seq_offsets, self.segment_ids, self.segment_pos), None)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del aux_data
+        return cls(*children)
 
     @classmethod
     def _expand_to_pair(
