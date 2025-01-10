@@ -69,7 +69,7 @@ struct ReadLseFunctor {
 
 template <typename lse_dtype, bool lse_packed, typename Functor>
 __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens, int batch,
-                               int num_heads, int total_tokens) {
+                               int num_heads, int lse_seqlen, int second_half_lse_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / 2;
@@ -85,15 +85,15 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
     for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
       size_t idx, half_idx;
       if constexpr (lse_packed) {
-        idx = head_id * total_tokens + token_id + cu_seqlens_s[seq_id + 1];
-        half_idx = head_id * total_tokens / 2 + token_id;
+        idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1];
+        half_idx = head_id * second_half_lse_seqlen + token_id;
       } else {
         size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
         int col = token_id - cu_seqlens_s[seq_id];
         int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
 
-        idx = row * total_tokens + col + seq_len;
-        half_idx = row * total_tokens / 2 + col;
+        idx = row * lse_seqlen + col + seq_len;
+        half_idx = row * second_half_lse_seqlen + col;
       }
 
       Functor::run(lse, half_lse, idx, half_idx);
@@ -108,7 +108,8 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
 template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
 __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
                                           float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen) {
+                                          int num_heads, int dim_per_head, int lse_seqlen,
+                                          int lse_per_step_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
@@ -128,13 +129,13 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
 
       if constexpr (lse_packed) {
         idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-        idx_per_step = head_id * lse_seqlen / (only_second_half + 1) + token_id;
+        idx_per_step = head_id * lse_per_step_seqlen + token_id;
       } else {
         size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
         int col = token_id - cu_seqlens_s[seq_id];
         int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
         idx = row * lse_seqlen + col + seq_len * only_second_half;
-        idx_per_step = row * lse_seqlen / (only_second_half + 1) + col;
+        idx_per_step = row * lse_per_step_seqlen + col;
       }
       float lse_corrected_exp = exp(lse_per_step[idx_per_step] - lse[idx]);
 
