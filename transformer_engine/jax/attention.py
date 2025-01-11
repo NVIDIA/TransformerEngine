@@ -292,7 +292,7 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
 
 
 def _get_seqlens_and_offsets(segment_ids):
-    batch, max_seqlen = segment_ids.shape
+    max_seqlen = segment_ids.shape[-1]
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
     seqlens = seqlens_with_zero[..., 1:]
@@ -326,31 +326,34 @@ def _segment_ids_pos_to_seqlen_offset(
     segment_ids_kv,
     segment_pos_q,
     segment_pos_kv,
+    attn_mask_type,
+    window_size,
 ):
-    # Satisified condition will be marked as true
+    # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
         segment_ids_q,
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y),
     )
-
     segment_mask_with_id = make_attention_mask(
         segment_ids_q,
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    if attn_mask_type.is_causal():
+        causal_mask = make_attention_mask(
+            segment_pos_q,
+            segment_pos_kv,
+            lambda x, y: jnp.greater_equal(x, y),
+        )
+        attn_mask = jnp.logical_and(segment_mask, causal_mask)
 
-    causal_mask = make_attention_mask(
-        segment_pos_q,
-        segment_pos_kv,
-        lambda x, y: jnp.greater_equal(x, y),
-    )
+    swa_mask = make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool)
+    attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
-    attn_mask = jnp.logical_and(segment_mask, causal_mask)
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
-
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(attn_mask_with_id)
-    return attn_mask_with_id, q_seqlen, kv_seqlen, q_offset, kv_offset
+    return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
 @jax.tree_util.register_pytree_node_class
@@ -376,17 +379,21 @@ class SequenceDescriptor:
         del aux_data
         return cls(*children)
 
-    def get_seqlens_and_offsets(self):
+    def get_seqlens_and_offsets(self, attn_mask_type, window_size):
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
         assert q_segment_ids.shape == q_segment_pos.shape
         assert kv_segment_ids.shape == kv_segment_pos.shape
-
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
-        _, q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlen_offset(
-            q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos
+        q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlen_offset(
+            q_segment_ids,
+            kv_segment_ids,
+            q_segment_pos,
+            kv_segment_pos,
+            attn_mask_type,
+            window_size,
         )
         return (q_seqlens, kv_seqlens), (q_offsets, kv_offsets)
 

@@ -499,7 +499,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            sequence_descriptor.get_seqlens_and_offsets()
+            sequence_descriptor.get_seqlens_and_offsets(config.attn_mask_type, config.window_size)
         )
 
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
