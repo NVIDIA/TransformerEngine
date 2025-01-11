@@ -17,7 +17,7 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
 
-from transformer_engine.jax.attention import CPStrategy, MaskDescriptor
+from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import (
@@ -491,7 +491,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     ):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
-        mask_descriptor = MaskDescriptor(
+        sequence_descriptor = SequenceDescriptor(
             seqlens=(q_seqlen, kv_seqlen),
             seq_offsets=(q_seq_offsets, k_seq_offsets),
             segment_ids=(_q_segment_ids, _kv_segment_ids),
@@ -499,7 +499,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            mask_descriptor.get_seqlens_and_offsets()
+            sequence_descriptor.get_seqlens_and_offsets()
         )
 
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
@@ -2046,7 +2046,7 @@ def _maybe_context_parallel_axis(cp_axis: str):
 def fused_attn_fwd(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    mask_descriptor: MaskDescriptor,
+    sequence_descriptor: SequenceDescriptor,
     seed: Optional[jnp.ndarray],
     attn_bias_type: NVTE_Bias_Type,
     attn_mask_type: NVTE_Mask_Type,
@@ -2143,7 +2143,7 @@ def fused_attn_fwd(
         case CPStrategy.RING:
             primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
-    seq_desc_flatten, _ = jax.tree.flatten(mask_descriptor)
+    seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
     return primitive.bind(
         *qkv_for_primitive,
         bias,
@@ -2160,7 +2160,7 @@ def fused_attn_bwd(
     rng_state: jnp.ndarray,
     output: jnp.ndarray,
     doutput: jnp.ndarray,
-    mask_descriptor: MaskDescriptor,
+    sequence_descriptor: SequenceDescriptor,
     attn_bias_type: NVTE_Bias_Type,
     attn_mask_type: NVTE_Mask_Type,
     qkv_layout: NVTE_QKV_Layout,
@@ -2267,10 +2267,10 @@ def fused_attn_bwd(
         rng_state,
         output,
         doutput,
-        *mask_descriptor.seqlens,
+        *sequence_descriptor.seqlens,
         *(
-            mask_descriptor.seq_offsets
-            if mask_descriptor.seq_offsets is not None
+            sequence_descriptor.seq_offsets
+            if sequence_descriptor.seq_offsets is not None
             else (_not_used, _not_used)
         ),
         config=fused_config,

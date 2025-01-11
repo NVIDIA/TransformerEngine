@@ -354,7 +354,7 @@ def _segment_ids_pos_to_seqlen_offset(
 
 
 @jax.tree_util.register_pytree_node_class
-class MaskDescriptor:
+class SequenceDescriptor:
     """Class representing QKV inputs with flexible initialization."""
 
     seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
@@ -414,7 +414,7 @@ class MaskDescriptor:
     def from_seqlens(
         cls,
         seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-    ) -> MaskDescriptor:
+    ) -> SequenceDescriptor:
         """Factory method for inputs with sequence lengths only."""
         q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
         return cls(seqlens=(q_seqlens, kv_seqlens))
@@ -424,7 +424,7 @@ class MaskDescriptor:
         cls,
         seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         seq_offsets: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
-    ) -> MaskDescriptor:
+    ) -> SequenceDescriptor:
         """Factory method for inputs with sequence lengths and offsets."""
         q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
         q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
@@ -435,7 +435,7 @@ class MaskDescriptor:
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
-    ) -> MaskDescriptor:
+    ) -> SequenceDescriptor:
         """
         Factory method for inputs with segment IDs and optional segment positions.
         """
@@ -542,7 +542,7 @@ def fused_attn(
     output = _fused_attn(
         qkv,
         bias,
-        MaskDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
+        SequenceDescriptor.from_seqlens((q_seq_lens, kv_seq_lens)),
         seed,
         attn_bias_type=attn_bias_type,
         attn_mask_type=attn_mask_type,
@@ -664,7 +664,7 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
-        MaskDescriptor.from_seqlens_with_offsets(
+        SequenceDescriptor.from_seqlens_with_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
         seed,
@@ -688,7 +688,7 @@ def fused_attn_thd(
 def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
-    mask_descriptor: MaskDescriptor,
+    sequence_descriptor: SequenceDescriptor,
     seed: jnp.ndarray,
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
@@ -705,7 +705,7 @@ def _fused_attn(
     output, _ = _fused_attn_fwd_rule(
         qkv,
         bias,
-        mask_descriptor,
+        sequence_descriptor,
         seed,
         attn_bias_type,
         attn_mask_type,
@@ -725,7 +725,7 @@ def _fused_attn(
 def _fused_attn_fwd_rule(
     qkv,
     bias,
-    mask_descriptor,
+    sequence_descriptor,
     seed,
     attn_bias_type,
     attn_mask_type,
@@ -742,7 +742,7 @@ def _fused_attn_fwd_rule(
     output, softmax_aux, rng_state = tex.fused_attn_fwd(
         qkv,
         bias,
-        mask_descriptor,
+        sequence_descriptor,
         seed,
         attn_bias_type=attn_bias_type.value,
         attn_mask_type=attn_mask_type.value,
@@ -762,7 +762,7 @@ def _fused_attn_fwd_rule(
     return output, (
         qkv,
         bias,
-        mask_descriptor,
+        sequence_descriptor,
         softmax_aux,
         rng_state,
         output,
@@ -787,7 +787,7 @@ def _fused_attn_bwd_rule(
     (
         qkv,
         bias,
-        mask_descriptor,
+        sequence_descriptor,
         softmax_aux,
         rng_state,
         output,
@@ -799,7 +799,7 @@ def _fused_attn_bwd_rule(
         rng_state,
         output,
         dz,
-        mask_descriptor,
+        sequence_descriptor,
         attn_bias_type=attn_bias_type.value,
         attn_mask_type=attn_mask_type.value,
         qkv_layout=qkv_layout.value,
