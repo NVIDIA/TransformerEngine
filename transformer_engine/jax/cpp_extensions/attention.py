@@ -17,8 +17,6 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
 
-from flax.linen import make_attention_mask
-
 from transformer_engine.jax.attention import CPStrategy, MaskDescriptor
 
 from transformer_engine import transformer_engine_jax
@@ -217,68 +215,6 @@ def generate_cu_seqlen(actual_seqlen):
     cu_seqlen = jnp.where(actual_seqlen < 0, -1, cu_seqlen)
     cu_seqlen = jnp.insert(cu_seqlen, 0, values=0, axis=-1)
     return cu_seqlen
-
-
-def get_seqlens_and_offsets(segment_ids):
-    batch, max_seqlen = segment_ids.shape
-    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
-    seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
-    seqlens = seqlens_with_zero[..., 1:]
-
-    def _find_offsets(x):
-        same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
-        first_column = x[..., :1] != 0
-        same_as_previous = jnp.hstack((first_column, same_as_previous))
-        return jax.vmap(partial(jnp.argwhere, size=x.shape[1], fill_value=-1))(
-            same_as_previous
-        ).squeeze(-1)
-
-    offsets = _find_offsets(segment_ids)
-    offsets = jnp.insert(offsets, offsets.shape[-1], values=-1, axis=-1)
-    seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
-    seqlens = jnp.where(seqlens, seqlens, -1)
-    return seqlens, offsets
-
-
-def segment_ids_pos_to_seqlen_offset(
-    segment_ids_q,
-    segment_ids_kv,
-    segment_pos_q,
-    segment_pos_kv,
-):
-    # Satisified condition will be marked as true
-    segment_mask = make_attention_mask(
-        segment_ids_q,
-        segment_ids_kv,
-        lambda x, y: jnp.equal(x, y),
-    )
-
-    segment_mask_with_id = make_attention_mask(
-        segment_ids_q,
-        segment_ids_kv,
-        lambda x, y: jnp.equal(x, y) * x,
-    )
-
-    causal_mask = make_attention_mask(
-        segment_pos_q,
-        segment_pos_kv,
-        lambda x, y: jnp.greater_equal(x, y),
-    )
-
-    attn_mask = jnp.logical_and(segment_mask, causal_mask)
-    attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
-
-    q_seqlen, q_offset, kv_seqlen, kv_offset = mask_to_seqlens_offset(attn_mask_with_id)
-    return attn_mask_with_id, q_seqlen, q_offset, kv_seqlen, kv_offset
-
-
-def mask_to_seqlens_offset(mask):
-    assert mask.shape[1] == 1
-    row_ids = mask.squeeze(axis=1).max(axis=-1)
-    q_seqlen, q_offset = get_seqlens_and_offsets(row_ids)
-    col_ids = mask.squeeze(axis=1).max(axis=-2)
-    kv_seqlen, kv_offset = get_seqlens_and_offsets(col_ids)
-    return q_seqlen, q_offset, kv_seqlen, kv_offset
 
 
 class FusedAttnFwdPrimitive(BasePrimitive):
@@ -555,10 +491,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     ):
         assert FusedAttnFwdPrimitive.inner_primitive is not None
 
-        if _q_segment_ids.size != 0:
-            _, q_seqlen, q_seq_offsets, kv_seqlen, k_seq_offsets = segment_ids_pos_to_seqlen_offset(
-                _q_segment_ids, _kv_segment_ids, _q_segment_pos, _kv_segment_pos
-            )
+        mask_descriptor = MaskDescriptor(
+            seqlens=(q_seqlen, kv_seqlen),
+            seq_offsets=(q_seq_offsets, k_seq_offsets),
+            segment_ids=(_q_segment_ids, _kv_segment_ids),
+            segment_pos=(_q_segment_pos, _kv_segment_pos),
+        )
+
+        (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
+            mask_descriptor.get_seqlens_and_offsets()
+        )
 
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
 
@@ -2201,11 +2143,12 @@ def fused_attn_fwd(
         case CPStrategy.RING:
             primitive = FusedRingAttnFwdPrimitive.outer_primitive
 
+    seq_desc_flatten, _ = jax.tree.flatten(mask_descriptor)
     return primitive.bind(
         *qkv_for_primitive,
         bias,
         seed,
-        *jax.tree.flatten(mask_descriptor)[0],
+        *seq_desc_flatten,
         config=fused_config,
     )
 

@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Union
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
+from flax.linen import make_attention_mask
 
 from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
 from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
@@ -290,6 +291,68 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
     return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
+def _get_seqlens_and_offsets(segment_ids):
+    batch, max_seqlen = segment_ids.shape
+    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
+    seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
+    seqlens = seqlens_with_zero[..., 1:]
+
+    def _find_offsets(x):
+        same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
+        first_column = x[..., :1] != 0
+        same_as_previous = jnp.hstack((first_column, same_as_previous))
+        return jax.vmap(partial(jnp.argwhere, size=x.shape[1], fill_value=-1))(
+            same_as_previous
+        ).squeeze(-1)
+
+    offsets = _find_offsets(segment_ids)
+    offsets = jnp.insert(offsets, offsets.shape[-1], values=-1, axis=-1)
+    seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
+    seqlens = jnp.where(seqlens, seqlens, -1)
+    return seqlens, offsets
+
+
+def _mask_to_seqlens_offset(mask):
+    assert mask.shape[1] == 1
+    row_ids = mask.squeeze(axis=1).max(axis=-1)
+    q_seqlen, q_offset = _get_seqlens_and_offsets(row_ids)
+    col_ids = mask.squeeze(axis=1).max(axis=-2)
+    kv_seqlen, kv_offset = _get_seqlens_and_offsets(col_ids)
+    return q_seqlen, q_offset, kv_seqlen, kv_offset
+
+
+def _segment_ids_pos_to_seqlen_offset(
+    segment_ids_q,
+    segment_ids_kv,
+    segment_pos_q,
+    segment_pos_kv,
+):
+    # Satisified condition will be marked as true
+    segment_mask = make_attention_mask(
+        segment_ids_q,
+        segment_ids_kv,
+        lambda x, y: jnp.equal(x, y),
+    )
+
+    segment_mask_with_id = make_attention_mask(
+        segment_ids_q,
+        segment_ids_kv,
+        lambda x, y: jnp.equal(x, y) * x,
+    )
+
+    causal_mask = make_attention_mask(
+        segment_pos_q,
+        segment_pos_kv,
+        lambda x, y: jnp.greater_equal(x, y),
+    )
+
+    attn_mask = jnp.logical_and(segment_mask, causal_mask)
+    attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
+
+    q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(attn_mask_with_id)
+    return attn_mask_with_id, q_seqlen, kv_seqlen, q_offset, kv_offset
+
+
 @jax.tree_util.register_pytree_node_class
 class MaskDescriptor:
     """Class representing QKV inputs with flexible initialization."""
@@ -312,6 +375,20 @@ class MaskDescriptor:
     def tree_unflatten(cls, aux_data, children):
         del aux_data
         return cls(*children)
+
+    def get_seqlens_and_offsets(self):
+        q_segment_ids, kv_segment_ids = self.segment_ids
+        q_segment_pos, kv_segment_pos = self.segment_pos
+        assert q_segment_ids.shape == q_segment_pos.shape
+        assert kv_segment_ids.shape == kv_segment_pos.shape
+
+        # No segment_ids/segment_pos
+        if q_segment_ids.size + kv_segment_ids.size == 0:
+            return self.seqlens, self.seq_offsets
+        _, q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlen_offset(
+            q_segment_ids, kv_segment_ids, q_segment_pos, kv_segment_pos
+        )
+        return (q_seqlens, kv_seqlens), (q_offsets, kv_offsets)
 
     @classmethod
     def _expand_to_pair(
