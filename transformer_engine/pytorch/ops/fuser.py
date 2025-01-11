@@ -192,9 +192,7 @@ class _OperationFuserAutogradFunction(torch.autograd.Function):
             func_ctx.backward_ops = backward_ops
             func_ctx.basic_ops = basic_ops
             func_ctx.basic_op_ctxs = basic_op_ctxs
-            func_ctx.basic_op_num_params = [
-                sum(1 for _ in op.parameters()) for op in basic_ops
-            ]
+            func_ctx.basic_op_num_params = [sum(1 for _ in op.parameters()) for op in basic_ops]
             func_ctx.num_extra_inputs = num_extra_inputs
             func_ctx.num_extra_outputs = len(extra_outputs_flat)
             func_ctx.is_first_module = FP8GlobalStateManager.is_first_fp8_module()
