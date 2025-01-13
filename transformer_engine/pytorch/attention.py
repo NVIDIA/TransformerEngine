@@ -2473,6 +2473,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         torch.cuda.current_stream().wait_stream(flash_attn_streams[1])
 
+        second_half_lse_seqlen = None
+        if causal and rank < (cp_size - 1):
+            second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
+
         softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             if i <= rank or not causal:
@@ -2621,6 +2625,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
         ctx.softmax_lse_in_packed_format = softmax_lse_in_packed_format
+        ctx.second_half_lse_seqlen = second_half_lse_seqlen
         ctx.fp8 = fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
@@ -2670,10 +2675,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             attn_dbias = None
             attn_dbias_ = None
 
-        if causal:
+        softmax_lse_ = None
+        if causal and ctx.second_half_lse_seqlen is not None:
             if ctx.qkv_format == "thd":
                 softmax_lse_ = tex.thd_read_second_half_lse(
-                    softmax_lse, cu_seqlens_q_padded, ctx.softmax_lse_in_packed_format
+                    softmax_lse,
+                    cu_seqlens_q_padded,
+                    ctx.softmax_lse_in_packed_format,
+                    ctx.second_half_lse_seqlen,
                 )
             else:
                 # [b, np, sq] -> [b, np, 2, sq//2]
