@@ -51,15 +51,23 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
     kwargs["ub_overlap_ag"] = not reference
 
     if config.layer_type is te.Linear:
-        input_shape[2] = hidden_size // tp_size
-        args.append(hidden_size)
-        kwargs["parallel_mode"] = "row"
-        kwargs["ub_overlap_rs"] = not reference
-        kwargs["ub_name"] = "proj"
+        if config.linear_parallel_mode == "row":
+            input_shape[2] = hidden_size // tp_size
+            args.append(hidden_size)
+            kwargs["ub_overlap_rs"] = not reference
+        elif config.linear_parallel_mode == "column":
+            input_shape[0] = config.seq_length // tp_size
+            args.append(3 * hidden_size)
+            kwargs["ub_overlap_rs"] = config.overlap_rs_dgrad and not reference
+            kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
+            kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
+        kwargs["parallel_mode"] = config.linear_parallel_mode
+        kwargs["ub_name"] = "proj" if config.linear_parallel_mode == "row" else "qkv"
     else:
         input_shape[0] = config.seq_length // tp_size
-        kwargs["ub_bulk_wgrad"] = not reference
-        kwargs["ub_bulk_dgrad"] = not reference
+        kwargs["ub_overlap_rs_dgrad"] = config.overlap_rs_dgrad and not reference
+        kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
+        kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
         if config.layer_type is te.LayerNormLinear:
             args.append(3 * hidden_size)
             kwargs["parallel_mode"] = "column"
@@ -124,6 +132,19 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
+    )
+    parser.add_argument(
+        "--linear-parallel-mode",
+        type=str.lower,
+        default="row",
+        choices=["row", "column"],
+        help="Parallel mode for te.Linear.",
+    )
+    parser.add_argument(
+        "--overlap-rs-dgrad",
+        action="store_true",
+        default=False,
+        help="Overlap reduce-scatter with DGRAD in the backward pass instead of bulk overlaps.",
     )
     parser.add_argument(
         "--debug",
@@ -230,12 +251,19 @@ def _train(opts):
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
     # Intialize userbuffers
+    ub_cfgs = None
+    if opts.overlap_rs_dgrad:
+        ub_cfgs = {
+            "proj_dgrad": {"method": "ring_exchange"},
+            "qkv_dgrad": {"method": "ring_exchange"},
+        }
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
         WORLD_SIZE,
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
+        ub_cfgs=ub_cfgs,
     )
 
     # Initialize the Transformer Engine layer with overlap
@@ -314,27 +342,29 @@ def _train(opts):
             ref_grads.append(ref_param.grad)
 
     # Make sure we have the same number of gradients
-    numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
+    num_grads_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
     if len(test_grads) != len(ref_grads):
-        numerics_failed[0] = 1
+        num_grads_failed[0] = 1
         numerics_info = (
             "NUMERICAL CHECK FAILED: Incorrect number of gradients, "
             + f"expected {len(ref_grads)} but got {len(test_grads)}."
         )
         dist_print(numerics_info, src=WORLD_RANK, error=True)
-    dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
+    dist.all_reduce(num_grads_failed, dist.ReduceOp.MAX, nccl_world)
 
     # Now validate accuracy
-    if not bool(numerics_failed.item()):
+    numerics_failed = torch.zeros(len(test_grads), dtype=torch.uint8, device="cuda")
+    if not bool(num_grads_failed.item()):
         for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
             rtol = 0.125 if opts.fp8 else 0.025
             atol = 0.0625 if opts.fp8 else 0.00125
             grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
             dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
-            numerics_failed[0] = int(grad_failed)
-            dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
-            if bool(numerics_failed.item()):
-                break
+            numerics_failed[i] = int(grad_failed)
+        return_code = torch.max(numerics_failed)
+        dist.all_reduce(return_code, dist.ReduceOp.MAX, nccl_world)
+    else:
+        return_code = num_grads_failed
 
     te.module.base.destroy_ub()
     dist_print("Destroying Userbuffers objects...", debug=True)
@@ -344,7 +374,7 @@ def _train(opts):
     if opts.debug and WORLD_RANK == 0:
         print("Exiting...\n", end="", flush=True)
 
-    return numerics_failed[0].item()
+    return return_code.item()
 
 
 if __name__ == "__main__":
