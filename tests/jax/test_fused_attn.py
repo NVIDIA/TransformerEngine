@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
-from enum import Enum
+from enum import Enum, auto
 from dataclasses import dataclass
 from functools import partial
 from math import sqrt
@@ -268,6 +268,12 @@ class BiasShape(Enum):
     _11SS = "11SS"
 
 
+class SeqDescFormat(Enum):
+    Mask = auto()
+    Seqlens = auto()
+    SegmentIDs = auto()
+
+
 @dataclass
 class FusedAttnRunner:
     """
@@ -287,7 +293,8 @@ class FusedAttnRunner:
     is_training: bool
     qkv_layout: QKVLayout
     bias_shape: BiasShape
-    window_size: Optional[Tuple[int, int]] = None
+    window_size: Tuple[int, int]
+    seq_desc_format: SeqDescFormat
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -501,33 +508,47 @@ class FusedAttnRunner:
             self.window_size,
         )
 
+        # Test different input formats
         if self.qkv_layout.is_thd():
-            # self.sequence_desciptor = SequenceDescriptor.from_seqlens_with_offsets(
-            #     (self.seqlens_q, self.seqlens_kv),
-            #     (self.offsets_q, self.offsets_kv),
-            # )
-            self.sequence_desciptor = SequenceDescriptor.from_segment_ids_with_pos(
-                (self.segment_ids_q, self.segment_ids_kv),
-                (self.segment_pos_q, self.segment_pos_kv),
-            )
+            match self.seq_desc_format:
+                case SeqDescFormat.Mask:
+                    pytest.skip("THD doesn't support mask input")
+                case SeqDescFormat.Seqlens:
+                    self.sequence_desciptor = SequenceDescriptor.from_seqlens_and_offsets(
+                        (self.seqlens_q, self.seqlens_kv),
+                        (self.offsets_q, self.offsets_kv),
+                    )
+                case SeqDescFormat.SegmentIDs:
+                    self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
+                        (self.segment_ids_q, self.segment_ids_kv),
+                        (self.segment_pos_q, self.segment_pos_kv),
+                    )
+                case _:
+                    raise ValueError(f"Unknown {self.seq_desc_format=}")
         else:
-            # self.sequence_desciptor = make_mask(
-            #     self.segment_ids_q,
-            #     self.segment_ids_kv,
-            #     self.segment_pos_q,
-            #     self.segment_pos_kv,
-            #     self.attn_mask_type,
-            # )
-            self.sequence_desciptor = SequenceDescriptor.from_seqlens(
-                (
-                    self.segment_ids_q.sum(axis=-1).astype(jnp.int32),
-                    self.segment_ids_kv.sum(axis=-1).astype(jnp.int32),
-                ),
-            )
-            # self.sequence_desciptor = SequenceDescriptor.from_segment_ids_with_pos(
-            #     (self.segment_ids_q, self.segment_ids_kv),
-            #     None,
-            # )
+            match self.seq_desc_format:
+                case SeqDescFormat.Mask:
+                    self.sequence_desciptor = make_mask(
+                        self.segment_ids_q,
+                        self.segment_ids_kv,
+                        self.segment_pos_q,
+                        self.segment_pos_kv,
+                        self.attn_mask_type,
+                    )
+                case SeqDescFormat.Seqlens:
+                    self.sequence_desciptor = SequenceDescriptor.from_seqlens(
+                        (
+                            self.segment_ids_q.sum(axis=-1).astype(jnp.int32),
+                            self.segment_ids_kv.sum(axis=-1).astype(jnp.int32),
+                        ),
+                    )
+                case SeqDescFormat.SegmentIDs:
+                    self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
+                        (self.segment_ids_q, self.segment_ids_kv),
+                        None,
+                    )
+                case _:
+                    raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
         self.scaling_factor = 1.0 / sqrt(self.head_dim)
@@ -706,10 +727,7 @@ class FusedAttnRunner:
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d, dtype",
     [
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.bfloat16, id="4-128-128-16-16-64-BF16-SELF"),
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
         pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
-        pytest.param(4, 128, 256, 16, 16, 64, jnp.bfloat16, id="4-128-256-16-16-64-BF16-CROSS"),
         pytest.param(
             2,
             2048,
@@ -720,8 +738,8 @@ class FusedAttnRunner:
             jnp.bfloat16,
             id="2-2048-1024-12-12-64-BF16-CROSS",
         ),
-        pytest.param(4, 128, 128, 16, 8, 64, jnp.bfloat16, id="4-128-128-16-8-64-BF16-GQA"),
         pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
+        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
     ],
 )
 @pytest.mark.parametrize(
@@ -736,6 +754,14 @@ class FusedAttnRunner:
     [
         pytest.param(False, id="NO_SWA"),
         pytest.param(True, id="SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Mask, id="Mask"),
+        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
+        pytest.param(SeqDescFormat.SegmentIDs, id="SegmentIDs"),
     ],
 )
 class TestFusedAttn:
@@ -776,6 +802,7 @@ class TestFusedAttn:
         qkv_layout,
         bias_shape,
         swa,
+        seq_desc_format,
     ):
         """
         Test forward with parameterized configs
@@ -800,6 +827,7 @@ class TestFusedAttn:
             qkv_layout,
             bias_shape,
             window_size,
+            seq_desc_format,
         )
         runner.test_forward()
 
@@ -825,6 +853,7 @@ class TestFusedAttn:
         qkv_layout,
         bias_shape,
         swa,
+        seq_desc_format,
     ):
         """
         Test backward with parameterized configs
@@ -847,5 +876,6 @@ class TestFusedAttn:
             qkv_layout,
             bias_shape,
             window_size,
+            seq_desc_format,
         )
         runner.test_backward()
