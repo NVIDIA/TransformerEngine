@@ -202,8 +202,7 @@ class FusedAdam(torch.optim.Optimizer):
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
         # Works only when master params is in FP32
-        self.store_param_remainders = store_param_remainders and master_weights
-                                      and master_weight_dtype == torch.float32
+        self.store_param_remainders = store_param_remainders and master_weights and master_weight_dtype == torch.float32
 
     def zero_grad(self):
         # pylint: disable=missing-function-docstring

@@ -250,7 +250,7 @@ struct AdamFunctorMasterParamRemainder {
         local_master_param[ii].int16[0] = local_p_rem[ii];
       }
 
-      MATH_T* r_p = reinterpret_cast<MATH_T*>(local_master_param)
+      MATH_T* r_p = reinterpret_cast<MATH_T*>(local_master_param);
 
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
