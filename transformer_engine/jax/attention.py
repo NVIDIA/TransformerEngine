@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from typing import Optional, Tuple, Union
+import warnings
+
 from jax.ad_checkpoint import checkpoint_name
 import jax
 import jax.numpy as jnp
@@ -321,7 +323,7 @@ def _mask_to_seqlens_offset(mask):
     return q_seqlen, q_offset, kv_seqlen, kv_offset
 
 
-def _segment_ids_pos_to_seqlen_offset(
+def _segment_ids_pos_to_seqlens_offsets(
     segment_ids_q,
     segment_ids_kv,
     segment_pos_q,
@@ -340,6 +342,7 @@ def _segment_ids_pos_to_seqlen_offset(
         segment_ids_kv,
         lambda x, y: jnp.equal(x, y) * x,
     )
+    attn_mask = segment_mask
     if attn_mask_type.is_causal():
         causal_mask = make_attention_mask(
             segment_pos_q,
@@ -354,6 +357,21 @@ def _segment_ids_pos_to_seqlen_offset(
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
     q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(attn_mask_with_id)
     return q_seqlen, kv_seqlen, q_offset, kv_offset
+
+
+def _segment_ids_pos_to_seqlens(
+    segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, attn_mask_type
+):
+    # convert the mask to seqlens, mask doesn't support ragged offsets
+    if not attn_mask_type.is_padding():
+        q_max_seqlen = segment_ids_q.shape[-1]
+        kv_max_seqlen = segment_ids_kv.shape[-1]
+        q_seq_lens = jnp.full_like(q_max_seqlen, q_max_seqlen, dtype=jnp.int32)
+        kv_seq_lens = jnp.full_like(kv_max_seqlen, kv_max_seqlen, dtype=jnp.int32)
+    else:
+        q_seq_lens = jnp.sum(segment_ids_q, axis=-1).astype(jnp.int32)
+        kv_seq_lens = jnp.sum(segment_ids_kv, axis=-1).astype(jnp.int32)
+    return q_seq_lens, kv_seq_lens
 
 
 @jax.tree_util.register_pytree_node_class
@@ -379,7 +397,9 @@ class SequenceDescriptor:
         del aux_data
         return cls(*children)
 
-    def get_seqlens_and_offsets(self, attn_mask_type, window_size):
+    def get_seqlens_and_offsets(self, attn_mask_type, qkv_layout, window_size):
+        attn_mask_type = AttnMaskType(attn_mask_type)
+        qkv_layout = QKVLayout(qkv_layout)
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
         assert q_segment_ids.shape == q_segment_pos.shape
@@ -387,14 +407,25 @@ class SequenceDescriptor:
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
-        q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlen_offset(
-            q_segment_ids,
-            kv_segment_ids,
-            q_segment_pos,
-            kv_segment_pos,
-            attn_mask_type,
-            window_size,
-        )
+
+        if qkv_layout.is_thd():
+            q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
+                q_segment_ids,
+                kv_segment_ids,
+                q_segment_pos,
+                kv_segment_pos,
+                attn_mask_type,
+                window_size,
+            )
+        else:
+            q_seqlens, kv_seqlens = _segment_ids_pos_to_seqlens(
+                q_segment_ids,
+                kv_segment_ids,
+                q_segment_pos,
+                kv_segment_pos,
+                attn_mask_type,
+            )
+            q_offsets = kv_offsets = jnp.zeros(0)
         return (q_seqlens, kv_seqlens), (q_offsets, kv_offsets)
 
     @classmethod
@@ -466,7 +497,7 @@ class SequenceDescriptor:
         )
 
 
-def fused_attn(
+def fused_attn_legacy(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     mask: Optional[jnp.ndarray],
@@ -696,7 +727,7 @@ def _fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     sequence_descriptor: SequenceDescriptor,
-    seed: jnp.ndarray,
+    seed: Optional[jnp.ndarray],
     attn_bias_type: AttnBiasType,
     attn_mask_type: AttnMaskType,
     qkv_layout: QKVLayout,
@@ -830,3 +861,64 @@ def _fused_attn_bwd_rule(
 
 
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
+
+
+def fused_attn(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int = 1,
+    window_size: Optional[Tuple[int, int]] = None,
+    context_parallel_strategy: CPStrategy = CPStrategy.DEFAULT,
+    context_parallel_causal_load_balanced: bool = False,
+    context_parallel_axis: str = "",
+):
+    if isinstance(sequence_descriptor, jnp.ndarray):
+        warnings.warn(
+            "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
+            + "See help(transformer_engine.jax.attention.SequenceDescriptor) for details.",
+            DeprecationWarning,
+        )
+        assert max_segments_per_seq == 1
+        return fused_attn_legacy(
+            qkv,
+            bias,
+            sequence_descriptor,
+            seed,
+            attn_bias_type=attn_bias_type,
+            attn_mask_type=attn_mask_type,
+            qkv_layout=qkv_layout,
+            scaling_factor=scaling_factor,
+            dropout_probability=dropout_probability,
+            is_training=is_training,
+            window_size=window_size,
+            context_parallel_strategy=context_parallel_strategy,
+            context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+            context_parallel_axis=context_parallel_axis,
+        )
+    output = _fused_attn(
+        qkv,
+        bias,
+        sequence_descriptor,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+        context_parallel_strategy=context_parallel_strategy,
+        context_parallel_causal_load_balanced=context_parallel_causal_load_balanced,
+        context_parallel_axis=context_parallel_axis,
+    )
+
+    return output

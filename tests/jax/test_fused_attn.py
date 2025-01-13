@@ -25,10 +25,9 @@ from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
-    QKVFormat,
     fused_attn,
-    fused_attn_thd,
     make_swa_mask,
+    SequenceDescriptor,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.transformer_engine_jax import (
@@ -232,11 +231,7 @@ def customcall_fused_dpa(
     key,
     value,
     bias,
-    mask,
-    seqlens_q,
-    seqlens_kv,
-    offsets_q,
-    offsets_kv,
+    sequence_descriptor,
     dropout_rng,
     **kwargs,
 ):
@@ -257,19 +252,9 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    if not qkv_layout.is_thd():
-        kwargs.pop("max_segments_per_seq")
-        return fused_attn(qkv_args, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
-    return fused_attn_thd(
-        qkv_args,
-        bias,
-        seqlens_q,
-        seqlens_kv,
-        offsets_q,
-        offsets_kv,
-        dropout_rng,
-        **kwargs,
-    ).astype(query.dtype)
+    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, **kwargs).astype(
+        query.dtype
+    )
 
 
 class BiasShape(Enum):
@@ -307,11 +292,14 @@ class FusedAttnRunner:
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
-        if 90400 <= get_cudnn_version() < 90500:
-            return self.num_segments_per_seq
+        if self.qkv_layout.is_thd():
+            if 90400 <= get_cudnn_version() < 90500:
+                return self.num_segments_per_seq
+            else:
+                # +1 for testing runtime_segments < max_segments
+                return self.num_segments_per_seq + 1
         else:
-            # +1 for testing runtime_segments < max_segments
-            return self.num_segments_per_seq + 1
+            return 1
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
@@ -434,11 +422,11 @@ class FusedAttnRunner:
         ):
             rng = np.random.default_rng(seed=seed)
             # [1, 1, 1, 2, 2, 3, 3, 3, 3, 0, 0], 0 means pad
-            segment_ids = np.zeros((batch_size, sequence_length), dtype=int)
-            segment_pos = np.zeros((batch_size, sequence_length), dtype=int)
+            segment_ids = np.zeros((batch_size, sequence_length), dtype=np.int32)
+            segment_pos = np.zeros((batch_size, sequence_length), dtype=np.int32)
             # [0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 0]
             # [0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1], 1 means pad
-            segment_pad = np.zeros((batch_size, sequence_length), dtype=int)
+            segment_pad = np.zeros((batch_size, sequence_length), dtype=np.int32)
 
             # Not include paddings
             max_segment_size = sequence_length // num_segments
@@ -514,15 +502,32 @@ class FusedAttnRunner:
         )
 
         if self.qkv_layout.is_thd():
-            self.mask_for_customcall = None  # THD format doesn't support mask
-        else:
-            self.mask_for_customcall = make_mask(
-                self.segment_ids_q,
-                self.segment_ids_kv,
-                self.segment_pos_q,
-                self.segment_pos_kv,
-                self.attn_mask_type,
+            # self.sequence_desciptor = SequenceDescriptor.from_seqlens_with_offsets(
+            #     (self.seqlens_q, self.seqlens_kv),
+            #     (self.offsets_q, self.offsets_kv),
+            # )
+            self.sequence_desciptor = SequenceDescriptor.from_segment_ids_with_pos(
+                (self.segment_ids_q, self.segment_ids_kv),
+                (self.segment_pos_q, self.segment_pos_kv),
             )
+        else:
+            # self.sequence_desciptor = make_mask(
+            #     self.segment_ids_q,
+            #     self.segment_ids_kv,
+            #     self.segment_pos_q,
+            #     self.segment_pos_kv,
+            #     self.attn_mask_type,
+            # )
+            self.sequence_desciptor = SequenceDescriptor.from_seqlens(
+                (
+                    self.segment_ids_q.sum(axis=-1).astype(jnp.int32),
+                    self.segment_ids_kv.sum(axis=-1).astype(jnp.int32),
+                ),
+            )
+            # self.sequence_desciptor = SequenceDescriptor.from_segment_ids_with_pos(
+            #     (self.segment_ids_q, self.segment_ids_kv),
+            #     None,
+            # )
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
         self.scaling_factor = 1.0 / sqrt(self.head_dim)
@@ -539,11 +544,7 @@ class FusedAttnRunner:
             self.k,
             self.v,
             self.bias,
-            self.mask_for_customcall,
-            self.seqlens_q,
-            self.seqlens_kv,
-            self.offsets_q,
-            self.offsets_kv,
+            self.sequence_desciptor,
             self.dropout_rng,
         ]
         kwargs = {
@@ -595,11 +596,7 @@ class FusedAttnRunner:
             self.k,
             self.v,
             self.bias,
-            self.mask_for_customcall,
-            self.seqlens_q,
-            self.seqlens_kv,
-            self.offsets_q,
-            self.offsets_kv,
+            self.sequence_desciptor,
             self.dropout_rng,
         ]
         kwargs = {

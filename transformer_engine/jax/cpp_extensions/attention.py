@@ -499,7 +499,9 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         )
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            sequence_descriptor.get_seqlens_and_offsets(config.attn_mask_type, config.window_size)
+            sequence_descriptor.get_seqlens_and_offsets(
+                config.attn_mask_type, config.qkv_layout, config.window_size
+            )
         )
 
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
@@ -900,7 +902,9 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         )
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
-            sequence_descriptor.get_seqlens_and_offsets(config.attn_mask_type, config.window_size)
+            sequence_descriptor.get_seqlens_and_offsets(
+                config.attn_mask_type, config.qkv_layout, config.window_size
+            )
         )
 
         if nvte_get_qkv_format(config.qkv_layout) == NVTE_QKV_Format.NVTE_THD:
@@ -2182,8 +2186,6 @@ def fused_attn_fwd(
     seed = _FusedAttnRNGStateChecker().check_seed(seed, dropout_probability, is_training)
     # For optional tensors, which custom calls doesn't support None
     _not_used = jnp.zeros(0, dtype=qkv[0].dtype)
-
-    is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format.NVTE_THD
 
     match qkv_layout:
         case NVTE_QKV_Layout.NVTE_BS3HD | NVTE_QKV_Layout.NVTE_T3HD:
