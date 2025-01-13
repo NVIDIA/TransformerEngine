@@ -256,28 +256,24 @@ def is_fused_attn_kernel_available(
             (-1, -1) if window_size is None else window_size,
         )
 
-    if not make_helper(attn_mask_type).is_fused_attn_kernel_available():
-        return False
-
-    return True
+    return make_helper(attn_mask_type).is_fused_attn_kernel_available()
 
 
 def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
-    match qkv_layout:
-        case QKVLayout.BS3HD | QKVLayout.T3HD:
-            assert len(qkv) == 1, f"qkv must be (qkvpacked,) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = q_max_seqlen
-        case QKVLayout.BSHD_BS2HD | QKVLayout.THD_T2HD:
-            assert len(qkv) == 2, f"qkv must be (query, kvpacked) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = qkv[1].shape[1]
-        case QKVLayout.BSHD_BSHD_BSHD | QKVLayout.THD_THD_THD:
-            assert len(qkv) == 3, f"qkv must be (query, key, value) with {qkv_layout=}"
-            batch, q_max_seqlen, *_ = qkv[0].shape
-            kv_max_seqlen = qkv[1].shape[1]
-        case _:
-            raise ValueError(f"Unsupported {qkv_layout=}")
+    if qkv_layout.is_qkvpacked():
+        assert len(qkv) == 1, f"qkv must be (qkvpacked,) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = q_max_seqlen
+    elif qkv_layout.is_kvpacked():
+        assert len(qkv) == 2, f"qkv must be (query, kvpacked) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = qkv[1].shape[1]
+    elif qkv_layout.is_separate():
+        assert len(qkv) == 3, f"qkv must be (query, key, value) with {qkv_layout=}"
+        batch, q_max_seqlen, *_ = qkv[0].shape
+        kv_max_seqlen = qkv[1].shape[1]
+    else:
+        raise ValueError(f"Unsupported {qkv_layout=}")
     return batch, q_max_seqlen, kv_max_seqlen
 
 
@@ -376,7 +372,14 @@ def _segment_ids_pos_to_seqlens(
 
 @jax.tree_util.register_pytree_node_class
 class SequenceDescriptor:
-    """Class representing QKV inputs with flexible initialization."""
+    """A class to descibe the sequences with flexible initialization.
+    - SequenceDescriptor.from_seqlens
+      For non-THD (non-packed) cases, where each batch has only 1 sequence.
+    - SequenceDescriptor.from_seqlens_and_offsets
+      For THD (packed) cases, where each batch may have not only 1 sequence.
+    - SequenceDescriptor.from_segment_ids_and_pos
+      Experimental feature for THD (packed) cases with context parallelism.
+    """
 
     seqlens: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
     seq_offsets: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
@@ -384,6 +387,9 @@ class SequenceDescriptor:
     segment_pos: Optional[Tuple[jnp.ndarray, jnp.ndarray]]
 
     def __init__(self, seqlens=None, seq_offsets=None, segment_ids=None, segment_pos=None):
+        """
+        Initialize to Tuple(jnp.zeros, jnp.zeros) because the primitive only accepts pure jax array
+        """
         self.seqlens = (jnp.zeros(0), jnp.zeros(0)) if seqlens is None else seqlens
         self.seq_offsets = (jnp.zeros(0), jnp.zeros(0)) if seq_offsets is None else seq_offsets
         self.segment_ids = (jnp.zeros(0), jnp.zeros(0)) if segment_ids is None else segment_ids
@@ -398,6 +404,9 @@ class SequenceDescriptor:
         return cls(*children)
 
     def get_seqlens_and_offsets(self, attn_mask_type, qkv_layout, window_size):
+        """
+        Acquire the seqlens/offsets for cuDNN backend
+        """
         attn_mask_type = AttnMaskType(attn_mask_type)
         qkv_layout = QKVLayout(qkv_layout)
         q_segment_ids, kv_segment_ids = self.segment_ids
@@ -453,29 +462,73 @@ class SequenceDescriptor:
         cls,
         seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
     ) -> SequenceDescriptor:
-        """Factory method for inputs with sequence lengths only."""
+        """
+        Factory method for inputs with sequence lengths only (non-THD).
+        Args:
+            seqlens(Tuple(jnp.ndarray, jnp.ndarray)) = (q_seqlens, kv_seqlens):
+                - q_seqlens (jnp.ndarray):
+                  Sequence lengths for the query, with shape [batch].
+                - kv_seqlen (jnp.ndarray):
+                  Sequence lengths for the key and value, with shape [batch].
+        Return:
+            A SequenceDescriptor with only seqlens initialized.
+        """
         q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
         return cls(seqlens=(q_seqlens, kv_seqlens))
 
     @classmethod
-    def from_seqlens_with_offsets(
+    def from_seqlens_and_offsets(
         cls,
         seqlens: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         seq_offsets: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
     ) -> SequenceDescriptor:
-        """Factory method for inputs with sequence lengths and offsets."""
+        """
+        Factory method for inputs with sequence lengths and offsets (THD).
+        Args:
+            seqlens(Tuple(jnp.ndarray, jnp.ndarray)) = (q_seqlens, kv_seqlens):
+                - q_seqlens (jnp.ndarray):
+                  Sequence lengths for the query, with shape [batch, max_seqlen].
+                  Unused positions are padded with -1.
+                - kv_seqlen (jnp.ndarray):
+                  Sequence lengths for the key and value, with shape [batch, max_seqlen].
+                  Unused positions are padded with -1.
+            seq_offsets(Tuple(jnp.ndarray, jnp.ndarray)) = (q_offsets, kv_offsets)
+                - q_seq_offsets (jnp.ndarray):
+                  The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+                  Unused positions are padded with -1.
+                - kv_seq_offsets (jnp.ndarray):
+                  The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
+                  Unused positions are padded with -1.
+        Return:
+            A SequenceDescriptor with seqlens/seq_offsets initialized.
+        """
         q_seqlens, kv_seqlens = cls._expand_to_pair(seqlens)
         q_offsets, kv_offsets = cls._expand_to_pair(seq_offsets)
         return cls(seqlens=(q_seqlens, kv_seqlens), seq_offsets=(q_offsets, kv_offsets))
 
     @classmethod
-    def from_segment_ids_with_pos(
+    def from_segment_ids_and_pos(
         cls,
         segment_ids: Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]],
         segment_pos: Optional[Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]] = None,
     ) -> SequenceDescriptor:
         """
-        Factory method for inputs with segment IDs and optional segment positions.
+        Experimental factory method for inputs with segment IDs and optional positions. (THD)
+        Args:
+            segment_ids(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_ids, kv_segment_ids):
+                - q_segment_ids (jnp.ndarray):
+                  Query segment ids start with 1, with shape [batch, max_seqlen].
+                  0s are treated as paddings.
+                - kv_segment_ids (jnp.ndarray):
+                  Key, value segment ids start with 1, with shape [batch, max_seqlen].
+                  0s are treated as paddings.
+            segment_pos(Tuple(jnp.ndarray, jnp.ndarray)) = (q_segment_pos, kv_segment_pos)
+                - q_segment_pos (jnp.ndarray):
+                  The position inside each segment for query, with shape [batch, max_seqlen].
+                - kv_segment_pos (jnp.ndarray):
+                  The position inside each segment for key, value, with shape [batch, max_seqlen].
+        Return:
+            A SequenceDescriptor with segment_ids/segment_pos initialized.
         """
         q_seg_ids, kv_seg_ids = cls._expand_to_pair(segment_ids)
 
@@ -497,7 +550,7 @@ class SequenceDescriptor:
         )
 
 
-def fused_attn_legacy(
+def _legacy_fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
     mask: Optional[jnp.ndarray],
@@ -619,63 +672,13 @@ def fused_attn_thd(
     context_parallel_axis: str = "",
 ):
     """
-    (Experimental) Perform THD (packed) cuDNN fused attention.
-
-    This function implements the following formula:
-        BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
-    Args:
-        qkv (Tuple[jnp.ndarray, ...]): A tuple containing query, key, and value tensors.
-        It supports three formats:
-            - `(qkv_packed,)`: For interleaved QKV packed format, typically used when query, key,
-              and value have the same shape (e.g., self-attention).
-            - `(query, kv_packed)`: For separate query and KV packed format, typically used when
-              query has a different shape (e.g., cross-attention).
-            - `(query, key, value)`: For separate query, key, and value tensors.
-        bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
-        q_seqlen (jnp.ndarray):
-            Sequence lengths for the query, with shape [batch, max_seqlen]. Unused positions are
-            padded with -1.
-        kv_seqlen (jnp.ndarray):
-            Sequence lengths for the key and value, with shape [batch, max_seqlen]. Unused positions
-            are padded with -1.
-        q_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
-            Unused positions are padded with -1.
-        kv_seq_offsets (jnp.ndarray):
-            The offsets in the sequence dim for the query, with shape [batch, max_seqlen + 1].
-            Unused positions are padded with -1.
-        seed (Optional[jnp.ndarray]): Optional random seed for dropout.
-        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
-        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
-        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
-        scaling_factor (float): Scaling factor for the attention scores.
-        dropout_probability (float): Dropout probability to apply during attention.
-        is_training (bool): Flag indicating whether the model is in training mode.
-        max_segments_per_seq (int):
-            Indicating the maximum number of segments inside a sequence. This parameter is to
-            constrain the limit usage and need to be static during the e2e training. The XLA compile
-            time and memory consumption is proportional to `max_segments_per_seq`.
-        window_size (Optional[Tuple[int, int]]):
-            Sliding window size.
-        context_parallel_causal_load_balanced (bool):
-            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
-        context_parallel_axis (str): The name of the context parallel axis.
-    Returns:
-        (jnp.ndarray): The output tensor from the fused attention.
-
-    Examples:
-        >>> # segment_ids = [[1, 1, 2, 3], [1, 1, 2, 0]], 0 means padded tokens
-        >>> b, s, h, d = 2, 4, 12, 64
-        >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
-        >>> # 3 segments in first seq, 2 segments in second seq
-        >>> q_seq_lens = kv_seq_lens = jnp.asarray([[2, 1, 1, -1], [2, 1, -1, -1]])
-        >>> # seq_offsets need to include the end offset of the last segments
-        >>> q_seq_offsets = kv_seq_offsets = jnp.asarray([[0, 2, 3, 4, -1], [0, 2, 3, -1, -1]])
-        >>> out = fused_attn_thd((qkv,), None, q_seq_lens, kv_seq_lens,
-                                 q_seq_offsets, kv_seq_offsets, None,
-                                 AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
-                                 QKVLayout.T3HD, 0.125, 0, True, 3)
+    Deprecated THD fused attn, please use fusd_attn with SequenceDescriptor
     """
+    warnings.warn(
+        "fused_attn_thd is deprecated, please use fused_attn with SequenceDescriptor",
+        DeprecationWarning,
+    )
+
     assert (
         qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
@@ -702,7 +705,7 @@ def fused_attn_thd(
     output = _fused_attn(
         qkv,
         bias,
-        SequenceDescriptor.from_seqlens_with_offsets(
+        SequenceDescriptor.from_seqlens_and_offsets(
             (q_seq_lens, kv_seq_lens), (q_seq_offsets, kv_seq_offsets)
         ),
         seed,
@@ -880,14 +883,78 @@ def fused_attn(
     context_parallel_causal_load_balanced: bool = False,
     context_parallel_axis: str = "",
 ):
+    """
+    Perform cuDNN fused attention.
+
+    This function implements the following formula:
+        BMM1 -> (PreBias) -> ScaleMaskSoftmax -> (PostBias) -> (Dropout) -> BMM2
+    Args:
+        qkv (Tuple[jnp.ndarray, ...]): A tuple containing query, key, and value tensors.
+        It supports three formats:
+            - `(qkv_packed,)`: For interleaved QKV packed format, typically used when query, key,
+              and value have the same shape (e.g., self-attention).
+            - `(query, kv_packed)`: For separate query and KV packed format, typically used when
+              query has a different shape (e.g., cross-attention).
+            - `(query, key, value)`: For separate query, key, and value tensors.
+        bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
+        sequence_descriptor (SequenceDescriptor): Descriptor for how to describe the sequence.
+        seed (Optional[jnp.ndarray]): Optional random seed for dropout.
+        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
+        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
+        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        scaling_factor (float): Scaling factor for the attention scores.
+        dropout_probability (float): Dropout probability to apply during attention.
+        is_training (bool): Flag indicating whether the model is in training mode.
+        max_segments_per_seq (int):
+            Indicating the maximum number of segments inside a sequence. This parameter is to
+            constrain the limit usage and need to be static during the e2e training. The XLA compile
+            time and memory consumption is proportional to `max_segments_per_seq`.
+        window_size (Optional[Tuple[int, int]]):
+            Sliding window size.
+        context_parallel_causal_load_balanced (bool):
+            Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
+        context_parallel_axis (str): The name of the context parallel axis.
+    Returns:
+        (jnp.ndarray): The output tensor from the fused attention.
+
+    Examples (non-THD, also known as non-packed):
+        >>> #  q_segment_ids = [[1, 1, 1, 0], [1, 1, 0, 0]], 0 means padded tokens
+        >>> # kv_segment_ids = [[1, 0, 0, 0], [1, 1, 0, 0]], 0 means padded tokens
+        >>> b, s, h, d = 2, 4, 12, 64
+        >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
+        >>> q_seq_lens = jnp.asarray([3, 2])
+        >>> kv_seq_lens = jnp.asarray([1, 2])
+        >>> sequence_desc = SequenceDescriptor.from_seqlens(
+                seqlens=(q_seq_lens, kv_seq_lens))
+        >>> out = fused_attn((qkv,), None, sequence_desc, None,
+                             AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
+                             QKVLayout.BS3HD, 0.125, 0, True, 3)
+
+    Examples (THD, also known as packed):
+        >>> # segment_ids = [[1, 1, 2, 3], [1, 1, 2, 0]], 0 means padded tokens
+        >>> # segment_pos = [[0, 1, 0, 0], [0, 1, 0, 1]]
+        >>> b, s, h, d = 2, 4, 12, 64
+        >>> qkv = jnp.zeros((b, s, 3, h, d), dtype=jnp.bfloat16)
+        >>> # 3 segments in first seq, 2 segments in second seq
+        >>> q_seq_lens = kv_seq_lens = jnp.asarray([[2, 1, 1, -1], [2, 1, -1, -1]])
+        >>> # seq_offsets need to include the end offset of the last segments
+        >>> q_seq_offsets = kv_seq_offsets = jnp.asarray([[0, 2, 3, 4, -1], [0, 2, 3, -1, -1]])
+        >>> sequence_desc = SequenceDescriptor.from_seqlens_and_offsets(
+                seqlens=(q_seq_lens, kv_seq_lens),
+                seq_offsets=(q_seq_offsets, kv_seq_offsets))
+        >>> out = fused_attn((qkv,), None, sequence_desc, None,
+                             AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
+                             QKVLayout.T3HD, 0.125, 0, True, 3)
+    """
     if isinstance(sequence_descriptor, jnp.ndarray):
         warnings.warn(
             "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
             + "See help(transformer_engine.jax.attention.SequenceDescriptor) for details.",
             DeprecationWarning,
         )
-        assert max_segments_per_seq == 1
-        return fused_attn_legacy(
+        if max_segments_per_seq != 1:
+            raise ValueError("Passing mask is only supported for non-THD case.")
+        return _legacy_fused_attn(
             qkv,
             bias,
             sequence_descriptor,
