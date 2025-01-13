@@ -643,9 +643,9 @@ Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_T
                                 Buffer_Type output_buf, Buffer_Type doutput_buf,
                                 Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                 Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
-                                Result_Type dq_buf, Result_Type dk_buf, Result_Type dv_buf,
-                                Result_Type dbias_buf, Result_Type workspace_buf,
-                                Dictionary attrs) {
+                                Variadic_Buffer_Type _unused_args, Result_Type dq_buf,
+                                Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf,
+                                Result_Type workspace_buf, Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
 
   FusedAttnBackwardImpl(
@@ -678,6 +678,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Arg<Buffer_Type>()      // kv_cu_seqlens
                                   .Arg<Buffer_Type>()      // q_seq_offsets
                                   .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .RemainingArgs()         // _cp_aux_args unused
                                   .Ret<Buffer_Type>()      // dq
                                   .Ret<Buffer_Type>()      // dk
                                   .Ret<Buffer_Type>()      // dv
