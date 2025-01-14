@@ -120,35 +120,51 @@ struct TypeInfo {
     using namespace transformer_engine;                      \
     case DType::kByte: {                                     \
       using type = unsigned char;                            \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kInt32: {                                    \
       using type = int32_t;                                  \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kInt64: {                                    \
       using type = int64_t;                                  \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kFloat32: {                                  \
       using type = float;                                    \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kFloat16: {                                  \
       using type = fp16;                                     \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kBFloat16: {                                 \
       using type = bf16;                                     \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kFloat8E4M3: {                               \
       using type = fp8e4m3;                                  \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     case DType::kFloat8E5M2: {                               \
       using type = fp8e5m2;                                  \
-      { __VA_ARGS__ }                                        \
+      {                                                      \
+        __VA_ARGS__                                          \
+      }                                                      \
     } break;                                                 \
     default:                                                 \
       NVTE_ERROR("Invalid type.");                           \
@@ -159,23 +175,33 @@ struct TypeInfo {
     using namespace transformer_engine;                         \
     case DType::kFloat32: {                                     \
       using type = float;                                       \
-      { __VA_ARGS__ }                                           \
+      {                                                         \
+        __VA_ARGS__                                             \
+      }                                                         \
     } break;                                                    \
     case DType::kFloat16: {                                     \
       using type = fp16;                                        \
-      { __VA_ARGS__ }                                           \
+      {                                                         \
+        __VA_ARGS__                                             \
+      }                                                         \
     } break;                                                    \
     case DType::kBFloat16: {                                    \
       using type = bf16;                                        \
-      { __VA_ARGS__ }                                           \
+      {                                                         \
+        __VA_ARGS__                                             \
+      }                                                         \
     } break;                                                    \
     case DType::kFloat8E5M2: {                                  \
       using type = fp8e5m2;                                     \
-      { __VA_ARGS__ }                                           \
+      {                                                         \
+        __VA_ARGS__                                             \
+      }                                                         \
     } break;                                                    \
     case DType::kFloat8E4M3: {                                  \
       using type = fp8e4m3;                                     \
-      { __VA_ARGS__ }                                           \
+      {                                                         \
+        __VA_ARGS__                                             \
+      }                                                         \
     } break;                                                    \
     default:                                                    \
       NVTE_ERROR("Invalid type.");                              \
@@ -186,11 +212,15 @@ struct TypeInfo {
     using namespace transformer_engine;                          \
     case DType::kFloat8E5M2: {                                   \
       using type = fp8e5m2;                                      \
-      { __VA_ARGS__ }                                            \
+      {                                                          \
+        __VA_ARGS__                                              \
+      }                                                          \
     } break;                                                     \
     case DType::kFloat8E4M3: {                                   \
       using type = fp8e4m3;                                      \
-      { __VA_ARGS__ }                                            \
+      {                                                          \
+        __VA_ARGS__                                              \
+      }                                                          \
     } break;                                                     \
     default:                                                     \
       NVTE_ERROR("Invalid type.");                               \
@@ -201,15 +231,21 @@ struct TypeInfo {
     using namespace transformer_engine;                        \
     case DType::kFloat32: {                                    \
       using type = float;                                      \
-      { __VA_ARGS__ }                                          \
+      {                                                        \
+        __VA_ARGS__                                            \
+      }                                                        \
     } break;                                                   \
     case DType::kFloat16: {                                    \
       using type = fp16;                                       \
-      { __VA_ARGS__ }                                          \
+      {                                                        \
+        __VA_ARGS__                                            \
+      }                                                        \
     } break;                                                   \
     case DType::kBFloat16: {                                   \
       using type = bf16;                                       \
-      { __VA_ARGS__ }                                          \
+      {                                                        \
+        __VA_ARGS__                                            \
+      }                                                        \
     } break;                                                   \
     case DType::kFloat8E5M2:                                   \
     case DType::kFloat8E4M3: {                                 \
