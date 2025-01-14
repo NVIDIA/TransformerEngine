@@ -5,7 +5,7 @@
 
 import argparse
 import numpy as np
-
+from functools import partial
 from mpi4py import MPI
 
 import jax
@@ -40,13 +40,15 @@ parser.add_argument("--batch-size", type=int, default=4)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
 parser.add_argument("--comm-type", type=str.upper, default="AG", choices=["AG", "RS"])
+parser.add_argument("--check-result", action="store_true")
+parser.add_argument("--std", type=float, default=0.023)
 args = parser.parse_args()
 
 # GEMM problem sizing
 dtype = jnp.bfloat16
-seq_length = args.base_size * 8
-hidden_size = args.base_size * 6
-ffn_hidden_size = args.base_size * 16
+seq_length = 2  # args.base_size * 8
+hidden_size = 4  # args.base_size * 6
+ffn_hidden_size = 6  # args.base_size * 16
 
 # Operand shapes
 lhs_shape = [seq_length, hidden_size] if args.comm_type == "AG" else [seq_length, ffn_hidden_size]
@@ -87,19 +89,31 @@ if batched:
             weight_specs = ["tp", None]
         weight_no_fsdp = weight_specs
 else:
-    mesh_shape = {"tp": args.tp_size}
-    mesh_resource = te.MeshResource(tp_resource="tp", cp_resource="cp")
-    if args.comm_type == "AG":
-        input_specs = ["tp", None]
-        weight_specs = [None, "tp"]
-    elif args.comm_type == "RS":
-        input_specs = [None, "tp"]
-        weight_specs = ["tp", None]
-    weight_no_fsdp = weight_specs
+    if fsdp:
+        mesh_shape = {"zp": args.fsdp_size, "tp": args.tp_size}
+        mesh_resource = te.MeshResource(fsdp_resource="zp", tp_resource="tp", cp_resource="cp")
+        if args.comm_type == "AG":
+            input_specs = ["tp", None]
+            weight_specs = ["zp", "tp"]
+        elif args.comm_type == "RS":
+            input_specs = [None, "tp"]
+            weight_specs = ["tp", "zp"]
+        weight_no_fsdp = ["tp", None]
+    else:
+        mesh_shape = {"tp": args.tp_size}
+        mesh_resource = te.MeshResource(tp_resource="tp", cp_resource="cp")
+        if args.comm_type == "AG":
+            input_specs = ["tp", None]
+            weight_specs = [None, "tp"]
+        elif args.comm_type == "RS":
+            input_specs = [None, "tp"]
+            weight_specs = ["tp", None]
+        weight_no_fsdp = weight_specs
 
 # Mesh setup and sharding definitions
 devices = mesh_utils.create_device_mesh((args.num_gpus,), devices=jax.devices()[: args.num_gpus])
 mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
+no_sharding = NamedSharding(mesh, PartitionSpec(None))
 input_sharding = NamedSharding(mesh, PartitionSpec(*input_specs))
 weight_sharding = NamedSharding(mesh, PartitionSpec(*weight_specs))
 weight_no_fsdp_sharding = NamedSharding(mesh, PartitionSpec(*weight_no_fsdp))
@@ -107,8 +121,10 @@ weight_no_fsdp_sharding = NamedSharding(mesh, PartitionSpec(*weight_no_fsdp))
 # Operand initialization
 key = jax.random.PRNGKey(0)
 key1, key2 = jax.random.split(key, 2)
-lhs = jax.device_put(jax.random.normal(key1, lhs_shape, dtype=dtype), input_sharding)
-rhs = jax.device_put(jax.random.normal(key2, rhs_shape, dtype=dtype), weight_sharding)
+lhs_data = jax.random.normal(key1, lhs_shape, dtype=dtype)
+rhs_data = jax.random.normal(key2, rhs_shape, dtype=dtype)
+lhs = jax.device_put(lhs_data, input_sharding)
+rhs = jax.device_put(rhs_data, weight_sharding)
 
 # Name of comm+GEMM overlap layer
 overlap_name = "ag_gemm" if args.comm_type == "AG" else "gemm_rs"
@@ -162,7 +178,7 @@ def te_gemm(A, B):
     return gemm_impl(
         A,
         jax.lax.with_sharding_constraint(B, weight_no_fsdp_sharding),  # all-gather FSDP weights
-        batched_output=True,  # internal option, will be hidden by the FWD/BWD wrapper
+        batched_output=not args.no_batch,  # internal option, will be hidden by the FWD/BWD wrapper
         comm_overlap_config=get_comm_overlap_config(overlap_name),
     )[return_idx]
 
@@ -177,5 +193,47 @@ if myrank == 0:
         + f"{myrank}:    Sharding: {get_padded_spec(output.sharding.spec, output.ndim)}\n",
         flush=True,
     )
+
+if args.check_result:
+    ref_global = jnp.matmul(jax.device_put(lhs_data, no_sharding),
+                            jax.device_put(rhs_data, no_sharding))
+    if myrank == 0:
+        print(f"{myrank}: Global reference: {ref_global}\n", flush=True)
+
+    output_global = jax.lax.with_sharding_constraint(output, no_sharding)
+    if myrank == 0:
+        print(f"{myrank}: Global output: {output_global}\n", flush=True)
+
+    diff = jnp.abs(ref_global - output_global).flatten()
+    if myrank == 0:
+        print(f"{myrank}: Global difference: {diff}\n", flush=True)
+
+    m = jnp.argmax(diff).item()
+    abs_err = diff[m].item()
+    rel_err = abs_err / max(abs(ref_global.flatten()[m]), 1e-5)
+
+    rtol = 0.02
+    atol = 0.001
+    numerics_failed = False
+    if rel_err > rtol and abs_err > atol:
+        numerics_failed = True
+        numerics_info = (
+            "NUMERICAL CHECK FAILED: "
+            + f"Outputs not close enough at index {m} "
+            + f"with {output.flatten()[m].item()} vs {ref_global.flatten()[m].item()} | "
+            + f"rel. error = {rel_err} (tol = {rtol}) | "
+            + f"abs. error = {abs_err} (tol = {atol})"
+        )
+    else:
+        numerics_info = "NUMERICAL CHECK PASSED: "
+        if rel_err <= rtol:
+            numerics_info += f"rel. error = {rel_err} (tol = {rtol})" + (
+                " | " if abs_err < atol else ""
+            )
+        if abs_err <= atol:
+            numerics_info += f"abs. error = {abs_err} (tol = {atol})"
+
+    if myrank == 0:
+        print(numerics_info + "\n", end="", flush=True)
 
 destroy_comm_gemm_overlaps()
