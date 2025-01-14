@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
 from __future__ import annotations
-from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from typing import Optional, Tuple, Union
@@ -331,7 +330,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     segment_mask = make_attention_mask(
         segment_ids_q,
         segment_ids_kv,
-        lambda x, y: jnp.equal(x, y),
+        jnp.equal,
     )
     segment_mask_with_id = make_attention_mask(
         segment_ids_q,
@@ -343,7 +342,7 @@ def _segment_ids_pos_to_seqlens_offsets(
         causal_mask = make_attention_mask(
             segment_pos_q,
             segment_pos_kv,
-            lambda x, y: jnp.greater_equal(x, y),
+            jnp.greater_equal,
         )
         attn_mask = jnp.logical_and(segment_mask, causal_mask)
 
@@ -355,9 +354,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
-def _segment_ids_pos_to_seqlens(
-    segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, attn_mask_type
-):
+def _segment_ids_to_seqlens(segment_ids_q, segment_ids_kv, attn_mask_type):
     # convert the mask to seqlens, mask doesn't support ragged offsets
     if not attn_mask_type.is_padding():
         q_max_seqlen = segment_ids_q.shape[-1]
@@ -396,10 +393,16 @@ class SequenceDescriptor:
         self.segment_pos = (jnp.zeros(0), jnp.zeros(0)) if segment_pos is None else segment_pos
 
     def tree_flatten(self):
+        """
+        Flatten method to register as a pytree node
+        """
         return ((self.seqlens, self.seq_offsets, self.segment_ids, self.segment_pos), None)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
+        """
+        Unflatten method to register as a pytree node
+        """
         del aux_data
         return cls(*children)
 
@@ -427,11 +430,9 @@ class SequenceDescriptor:
                 window_size,
             )
         else:
-            q_seqlens, kv_seqlens = _segment_ids_pos_to_seqlens(
+            q_seqlens, kv_seqlens = _segment_ids_to_seqlens(
                 q_segment_ids,
                 kv_segment_ids,
-                q_segment_pos,
-                kv_segment_pos,
                 attn_mask_type,
             )
             q_offsets = kv_offsets = jnp.zeros(0)
