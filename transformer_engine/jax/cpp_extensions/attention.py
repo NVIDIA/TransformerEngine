@@ -1317,7 +1317,7 @@ class FusedAttnCPWithAllGatherFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-2] = seed_sharding
+        arg_shardings[4] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
@@ -1718,7 +1718,7 @@ class FusedRingAttnFwdPrimitive(FusedAttnFwdPrimitive):
             mesh, PartitionSpec(get_all_mesh_axes(), None)
         )
         arg_shardings = [arg_i.sharding for arg_i in arg_infos]
-        arg_shardings[-2] = seed_sharding
+        arg_shardings[4] = seed_sharding
         arg_shardings = tuple(arg_shardings)
         out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
