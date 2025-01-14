@@ -38,6 +38,7 @@ from ..cpp_extensions import (
 )
 from ..constants import dist_group_type
 from ..float8_tensor import Float8Tensor
+from ..utils import torch_get_autocast_gpu_dtype
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -696,7 +697,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """Get activation data type for AMP."""
         # Native AMP (`torch.autocast`) gets highest priority
         if torch.is_autocast_enabled():
-            self.activation_dtype = torch.get_autocast_gpu_dtype()
+            self.activation_dtype = torch_get_autocast_gpu_dtype()
             return
 
         # All checks after this have already been performed once, thus skip

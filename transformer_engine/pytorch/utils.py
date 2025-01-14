@@ -7,9 +7,19 @@ from __future__ import annotations
 import functools
 import math
 from typing import Any, Callable, Optional, Tuple
+from packaging.version import Version as PkgVersion
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
+
+_torch_version = PkgVersion(torch.__version__)
+
+
+def is_torch_min_version(version, check_equality=True):
+    """Check if minimum version of `torch` is installed."""
+    if check_equality:
+        return _torch_version >= PkgVersion(version)
+    return _torch_version > PkgVersion(version)
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -305,3 +315,16 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
             index2 = torch.cuda.current_device()
         return index1 == index2
     return device1 == device2
+
+
+def torch_get_autocast_gpu_dtype() -> torch.dtype:
+    """Get PyTorch autocast GPU dtype."""
+    if is_torch_min_version("2.4.0a0"):
+        return torch.get_autocast_dtype("cuda")
+    return torch.get_autocast_gpu_dtype()
+
+
+if is_torch_min_version("2.4.0a0"):
+    gpu_autocast_ctx = functools.partial(torch.amp.autocast, device_type="cuda")
+else:
+    gpu_autocast_ctx = torch.cuda.amp.autocast
