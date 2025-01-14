@@ -7529,7 +7529,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         ), "The number of attention heads must be divisible by the number of GQA groups!"
 
         self.rng_states_tracker = None
-        if sequence_parallel or get_rng_state_tracker is None:
+        if get_rng_state_tracker is None:
             attention_dropout_ctx = nullcontext
         else:
             self.rng_states_tracker = get_rng_state_tracker()
