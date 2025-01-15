@@ -288,9 +288,9 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
     return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
-def _get_seqlens_and_offsets(segment_ids):
+def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
     max_seqlen = segment_ids.shape[-1]
-    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_seqlen))
+    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
     seqlens = seqlens_with_zero[..., 1:]
 
@@ -309,12 +309,12 @@ def _get_seqlens_and_offsets(segment_ids):
     return seqlens, offsets
 
 
-def _mask_to_seqlens_offset(mask):
+def _mask_to_seqlens_offset(mask, max_segments_per_seq):
     assert mask.shape[1] == 1
     row_ids = mask.squeeze(axis=1).max(axis=-1)
-    q_seqlen, q_offset = _get_seqlens_and_offsets(row_ids)
+    q_seqlen, q_offset = _get_seqlens_and_offsets(row_ids, max_segments_per_seq)
     col_ids = mask.squeeze(axis=1).max(axis=-2)
-    kv_seqlen, kv_offset = _get_seqlens_and_offsets(col_ids)
+    kv_seqlen, kv_offset = _get_seqlens_and_offsets(col_ids, max_segments_per_seq)
     return q_seqlen, q_offset, kv_seqlen, kv_offset
 
 
@@ -325,6 +325,7 @@ def _segment_ids_pos_to_seqlens_offsets(
     segment_pos_kv,
     attn_mask_type,
     window_size,
+    max_segments_per_seq,
 ):
     # (1 = attend, 0 = masked)
     segment_mask = make_attention_mask(
@@ -350,7 +351,9 @@ def _segment_ids_pos_to_seqlens_offsets(
     attn_mask = jnp.logical_and(attn_mask, swa_mask)
 
     attn_mask_with_id = jnp.where(attn_mask, segment_mask_with_id, 0)
-    q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(attn_mask_with_id)
+    q_seqlen, q_offset, kv_seqlen, kv_offset = _mask_to_seqlens_offset(
+        attn_mask_with_id, max_segments_per_seq
+    )
     return q_seqlen, kv_seqlen, q_offset, kv_offset
 
 
@@ -406,7 +409,9 @@ class SequenceDescriptor:
         del aux_data
         return cls(*children)
 
-    def get_seqlens_and_offsets(self, attn_mask_type, qkv_layout, window_size):
+    def get_seqlens_and_offsets(
+        self, attn_mask_type, qkv_layout, window_size, max_segments_per_seq
+    ):
         """
         Acquire the seqlens/offsets for cuDNN backend
         """
@@ -428,6 +433,7 @@ class SequenceDescriptor:
                 kv_segment_pos,
                 attn_mask_type,
                 window_size,
+                max_segments_per_seq,
             )
         else:
             q_seqlens, kv_seqlens = _segment_ids_to_seqlens(

@@ -211,9 +211,8 @@ def generate_cu_seqlen(actual_seqlen):
     """
     Generating cumsum seqlen for a batch
     """
-    cu_seqlen = jnp.cumsum(actual_seqlen, axis=-1)
-    cu_seqlen = jnp.where(actual_seqlen < 0, -1, cu_seqlen)
-    cu_seqlen = jnp.insert(cu_seqlen, 0, values=0, axis=-1)
+    actual_seqlen = jnp.where(actual_seqlen < 0, 0, actual_seqlen)
+    cu_seqlen = jnp.cumulative_sum(actual_seqlen, include_initial=True)
     return cu_seqlen
 
 
@@ -500,7 +499,10 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
-                config.attn_mask_type, config.qkv_layout, config.window_size
+                config.attn_mask_type,
+                config.qkv_layout,
+                config.window_size,
+                config.max_segments_per_seq,
             )
         )
 
@@ -546,6 +548,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 fill_value = 0
             else:
                 fill_value = -1
+
             q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
             kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
 
@@ -553,15 +556,17 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
             q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
             k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+
             # Gather valid q_seq_offsets, which is greater and equal to 0
             # [[0, 3, 5, -1], [8, 11, 13, -1]] -> [[0, 3, 5, 8], [11, 13, -1, -1]]
-            q_seq_offsets = _fix_len_take(q_seq_offsets, q_seq_offsets >= 0)
-            k_seq_offsets = _fix_len_take(k_seq_offsets, k_seq_offsets >= 0)
-
-            # Set the unused position to max size (batch * max_seqlen)
+            # And set the unused position to max size (batch * max_seqlen)
             # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
-            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
-            k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
+            q_seq_offsets = _fix_len_take(
+                q_seq_offsets, q_seq_offsets >= 0, fill_value=q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _fix_len_take(
+                k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
@@ -903,7 +908,10 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
         (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
             sequence_descriptor.get_seqlens_and_offsets(
-                config.attn_mask_type, config.qkv_layout, config.window_size
+                config.attn_mask_type,
+                config.qkv_layout,
+                config.window_size,
+                config.max_segments_per_seq,
             )
         )
 
@@ -957,15 +965,17 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             # max_seqlen = 8, [[0, 3, 5, -1], [0, 2, 4, -1]] -> [[0, 3, 5, -1], [8, 11, 13, -1]]
             q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
             k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+
             # Gather valid q_seq_offsets, which is greater and equal to 0
             # [[0, 3, 5, -1], [8, 11, 13, -1]] -> [[0, 3, 5, 8], [11, 13, -1, -1]]
-            q_seq_offsets = _fix_len_take(q_seq_offsets, q_seq_offsets >= 0)
-            k_seq_offsets = _fix_len_take(k_seq_offsets, k_seq_offsets >= 0)
-
-            # Set the unused position to max size (batch * max_seqlen)
+            # And set the unused position to max size (batch * max_seqlen)
             # [[0, 3, 5, 8], [11, 13, -1, -1]] -> [[0, 3, 5, 8], [11, 13, b*s, b*s]]
-            q_seq_offsets = jnp.where(q_seq_offsets < 0, q_batch * q_max_seqlen, q_seq_offsets)
-            k_seq_offsets = jnp.where(k_seq_offsets < 0, kv_batch * kv_max_seqlen, k_seq_offsets)
+            q_seq_offsets = _fix_len_take(
+                q_seq_offsets, q_seq_offsets >= 0, fill_value=q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _fix_len_take(
+                k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
 
         q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
         kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
