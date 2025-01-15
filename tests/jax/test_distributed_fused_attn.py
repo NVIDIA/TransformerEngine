@@ -401,7 +401,7 @@ class TestDistributedContextParallelSelfAttn:
                 raise ValueError(f"Unsupported {qkv_layout=}")
         return qkv_args
 
-    def impl_test_contex_parallel_attn(
+    def impl_test_context_parallel_attn(
         self,
         device_count,
         mesh_shape,
@@ -583,7 +583,7 @@ class TestDistributedContextParallelSelfAttn:
 
                 assert_allclose(target_grads[i], ref_grads[i], dtype=dtype)
 
-    def test_contex_parallel_allgather_attn(
+    def test_context_parallel_allgather_attn(
         self,
         device_count,
         mesh_shape,
@@ -596,7 +596,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
-        return self.impl_test_contex_parallel_attn(
+        return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -623,7 +623,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
-        return self.impl_test_contex_parallel_attn(
+        return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,

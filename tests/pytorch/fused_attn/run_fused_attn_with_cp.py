@@ -163,12 +163,10 @@ def run_dpa_with_cp(
                 torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
-        if kernel_backend == "FlashAttention":
-            cu_seqlens_q = cu_seqlens_q_padded[:-1]
-        else:
-            cu_seqlens_q = torch.cat(
-                [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
-            ).cuda()
+        cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
+        if kernel_backend == "FusedAttention":
+            cu_seqlens_q[1:-1] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+        cu_seqlens_q[-1] = cu_seqlens_q[-2]
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
     else:
@@ -204,10 +202,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
         if fp8_mha:
             dout_fp8 = Float8Tensor.to_float8(dout, fp8_dtype=tex.DType.kFloat8E5M2)
@@ -276,10 +272,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias_,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
         if fp8_mha:
             dout_fp8_ = Float8Tensor.to_float8(dout_, fp8_dtype=tex.DType.kFloat8E5M2)
@@ -311,7 +305,7 @@ def run_dpa_with_cp(
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
         dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
         )
@@ -327,7 +321,7 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
         cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
             cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
         )
