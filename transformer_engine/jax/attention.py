@@ -290,7 +290,7 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
 
 def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
     # bincount map with 0s
-    bincount_vmap = jax.vmap(partial(jnp.bincount, length=(max_segments_per_seq + 1)))
+    bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq + 1))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
     seqlens = seqlens_with_zero[..., 1:]
 
