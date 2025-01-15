@@ -147,6 +147,14 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
+option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
+if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
+  set_source_files_properties(activation/gelu.cu
+                              activation/relu.cu
+                              activation/swiglu.cu
+                              PROPERTIES
+                              COMPILE_OPTIONS "--use_fast_math")
+endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
