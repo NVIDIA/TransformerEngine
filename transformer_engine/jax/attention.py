@@ -289,7 +289,6 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
 
 
 def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
-    max_seqlen = segment_ids.shape[-1]
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq))
     seqlens_with_zero = bincount_vmap(segment_ids.astype(jnp.int32))
     seqlens = seqlens_with_zero[..., 1:]
@@ -298,12 +297,11 @@ def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
         same_as_previous = jnp.logical_and(x[..., 1:] != x[..., :-1], x[..., 1:] != 0)
         first_column = x[..., :1] != 0
         same_as_previous = jnp.hstack((first_column, same_as_previous))
-        return jax.vmap(partial(jnp.argwhere, size=x.shape[1], fill_value=-1))(
+        return jax.vmap(partial(jnp.argwhere, size=(max_segments_per_seq + 1), fill_value=-1))(
             same_as_previous
         ).squeeze(-1)
 
     offsets = _find_offsets(segment_ids)
-    offsets = jnp.insert(offsets, offsets.shape[-1], values=-1, axis=-1)
     seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
     seqlens = jnp.where(seqlens, seqlens, -1)
     return seqlens, offsets
