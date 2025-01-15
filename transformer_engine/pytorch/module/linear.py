@@ -593,8 +593,7 @@ class _Linear(torch.autograd.Function):
 
                     if ctx.ub_overlap_rs_dgrad:
                         dgrad = rs_out
-
-                    if output_dtype == torch.uint8:
+                    elif output_dtype == torch.uint8:
                         dgrad = Float8Tensor(
                             data=dgrad,
                             fp8_meta=ctx.fp8_meta,
