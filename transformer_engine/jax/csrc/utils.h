@@ -23,7 +23,7 @@ namespace jax {
 
 int GetCudaRuntimeVersion();
 size_t GetCudnnRuntimeVersion();
-int GetDeviceComputeCapability(int gpu_id);
+int GetDeviceComputeCapability(int gpu_id = -1);
 
 void PopulateRngStateAsync(void *rng_state_dst, const void *const seed, size_t q_max_seqlen,
                            size_t kv_max_seqlen, NVTE_Fused_Attn_Backend backend,

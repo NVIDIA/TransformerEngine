@@ -553,7 +553,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
               CommOverlapHelper *helper, int tp_size, int num_splits = 3,
               int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-              int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
+              int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false,
+              bool overlap_first_gemm = false);
 
   void set_ubuf_scale_inv(torch::Tensor scale_inv) {
     assert(scale_inv.numel());
