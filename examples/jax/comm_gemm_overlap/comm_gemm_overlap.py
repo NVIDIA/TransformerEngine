@@ -199,8 +199,9 @@ if myrank == 0:
     )
 
 if args.check_result:
-    ref_global = jnp.matmul(jax.device_put(lhs_data, no_sharding),
-                            jax.device_put(rhs_data, no_sharding))
+    ref_global = jnp.matmul(
+        jax.device_put(lhs_data, no_sharding), jax.device_put(rhs_data, no_sharding)
+    )
     if myrank == 0:
         print(f"{myrank}: Global reference: {ref_global}\n", flush=True)
 
