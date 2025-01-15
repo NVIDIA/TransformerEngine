@@ -35,25 +35,29 @@ parser.add_argument("-dp", "--dp-size", type=int, default=1)
 parser.add_argument("-zp", "--fsdp-size", type=int, default=2)
 parser.add_argument("-tp", "--tp-size", type=int, default=4)
 parser.add_argument("-np", "--num-gpus", type=int, default=8)
-parser.add_argument("--base-size", type=int, default=16)
 parser.add_argument("--batch-size", type=int, default=4)
+parser.add_argument("--seq-length", type=int, default=8192)
+parser.add_argument("--num-heads", type=int, default=128)
+parser.add_argument("--head-dim", type=int, default=128)
+parser.add_argument("--activation-size", type=int, default=53248)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
 parser.add_argument("--comm-type", type=str.upper, default="AG", choices=["AG", "RS"])
 parser.add_argument("--check-result", action="store_true")
-parser.add_argument("--std", type=float, default=0.023)
 args = parser.parse_args()
 
-# GEMM problem sizing
-dtype = jnp.bfloat16
-seq_length = 2  # args.base_size * 8
-hidden_size = 4  # args.base_size * 6
-ffn_hidden_size = 6  # args.base_size * 16
-
 # Operand shapes
-lhs_shape = [seq_length, hidden_size] if args.comm_type == "AG" else [seq_length, ffn_hidden_size]
+dtype = jnp.bfloat16
+hidden_size = args.num_heads * args.head_dim
+lhs_shape = (
+    [args.seq_length, hidden_size]
+    if args.comm_type == "AG"
+    else [args.seq_length, args.activation_size]
+)
 rhs_shape = (
-    [hidden_size, ffn_hidden_size] if args.comm_type == "AG" else [ffn_hidden_size, hidden_size]
+    [hidden_size, args.activation_size]
+    if args.comm_type == "AG"
+    else [args.activation_size, hidden_size]
 )
 
 # Operand partitioning
