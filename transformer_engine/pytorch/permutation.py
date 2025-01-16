@@ -8,7 +8,7 @@ from typing import Tuple
 import torch
 
 import transformer_engine_torch as tex
-import transformer_engine.pytorch.triton.permutation as triton_permuataion
+import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
@@ -16,12 +16,12 @@ from transformer_engine.pytorch.float8_tensor import Float8Tensor
 __all__ = [
     "moe_permute",
     "moe_unpermute",
-    "moe_sort_chunks_by_indices",
+    "moe_sort_chunks_by_index",
 ]
 
 
-class _moe_permute_indice_map(torch.autograd.Function):
-    """functional Permute with indice router map"""
+class _moe_permute_index_map(torch.autograd.Function):
+    """functional Permute with index router map"""
 
     workspace = None
     max_expanded_token_num = 0
@@ -30,7 +30,7 @@ class _moe_permute_indice_map(torch.autograd.Function):
     def forward(
         ctx,
         inp: torch.Tensor,
-        indices: torch.Tensor,
+        index: torch.Tensor,
         num_out_tokens: int,
         max_token_num: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -41,9 +41,9 @@ class _moe_permute_indice_map(torch.autograd.Function):
 
         # Device check
         assert inp.is_cuda, "TransformerEngine needs CUDA."
-        assert indices.is_cuda, "TransformerEngine needs CUDA."
+        assert index.is_cuda, "TransformerEngine needs CUDA."
         # Shape check
-        assert inp.size(0) == indices.size(0), "Permute not possible"
+        assert inp.size(0) == index.size(0), "Permute not possible"
 
         # Data type check
         fp8 = isinstance(inp, Float8Tensor)
@@ -53,27 +53,27 @@ class _moe_permute_indice_map(torch.autograd.Function):
             inp = inp._data
         else:
             dtype = TE_DType[inp.dtype]
-        if indices.dtype != torch.int32:
+        if index.dtype != torch.int32:
             warnings.warn(
-                f"The data type of the input `indices` of Permute is {indices.dtype}! "
+                f"The data type of the input `index` of Permute is {index.dtype}! "
                 "The recommended type is torch.int32."
             )
-            indices = indices.to(torch.int32)
+            index = index.to(torch.int32)
 
-        topK = indices.size(1)
+        topK = index.size(1)
 
         input_max_expanded_token_num = max(max_token_num, inp.size(0)) * topK
-        if _moe_permute_indice_map.max_expanded_token_num < input_max_expanded_token_num:
-            _moe_permute_indice_map.max_expanded_token_num = input_max_expanded_token_num
-            _moe_permute_indice_map.workspace = []
+        if _moe_permute_index_map.max_expanded_token_num < input_max_expanded_token_num:
+            _moe_permute_index_map.max_expanded_token_num = input_max_expanded_token_num
+            _moe_permute_index_map.workspace = []
 
-        permuted_act, row_id_map, _moe_permute_indice_map.workspace = tex.moe_permute_fwd(
+        permuted_act, row_id_map, _moe_permute_index_map.workspace = tex.moe_permute_fwd(
             inp,
             dtype,
-            indices,
+            index,
             num_out_tokens,
-            _moe_permute_indice_map.workspace,
-            _moe_permute_indice_map.max_expanded_token_num,
+            _moe_permute_index_map.workspace,
+            _moe_permute_index_map.max_expanded_token_num,
         )
 
         if fp8:
@@ -82,8 +82,8 @@ class _moe_permute_indice_map(torch.autograd.Function):
             )
 
         ctx.row_id_map = row_id_map
-        ctx.num_tokens = indices.size(0)
-        ctx.topK = indices.size(1)
+        ctx.num_tokens = index.size(0)
+        ctx.topK = index.size(1)
         ctx.fp8 = fp8
         return permuted_act, row_id_map
 
@@ -124,8 +124,8 @@ class _moe_permute_indice_map(torch.autograd.Function):
         return act_grad, None, None, None
 
 
-class _moe_unpermute_indice_map(torch.autograd.Function):
-    """functional Unpermute with indice router map"""
+class _moe_unpermute_index_map(torch.autograd.Function):
+    """functional Unpermute with index router map"""
 
     @staticmethod
     def forward(
@@ -251,14 +251,14 @@ class _moe_permute_mask_map(torch.autograd.Function):
             num_out_tokens is not None
         ), "num_out_tokens must be provided to the fused permute function."
 
-        row_id_map = triton_permuataion.make_row_id_map(routing_map, num_tokens, num_experts)
+        row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
 
         fp8 = isinstance(inp, Float8Tensor)
         if fp8:
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
-        output = triton_permuataion.permute_with_mask_map(
+        output = triton_permutation.permute_with_mask_map(
             inp,
             row_id_map,
             num_tokens,
@@ -273,7 +273,6 @@ class _moe_permute_mask_map(torch.autograd.Function):
         ctx.num_experts = num_experts
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
-        ctx.fp8 = fp8
         return output, row_id_map
 
     @staticmethod
@@ -289,16 +288,14 @@ class _moe_permute_mask_map(torch.autograd.Function):
         act_grad = None
         if ctx.needs_input_grad[0]:
             (row_id_map,) = ctx.saved_tensors
-            if ctx.fp8:
-                assert isinstance(
-                    permuted_act_grad, Float8Tensor
-                ), "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
+            fp8 = isinstance(permuted_act_grad, Float8Tensor)
+            if fp8:
                 fp8_dtype = permuted_act_grad._fp8_dtype
                 fp8_scale_inv = permuted_act_grad._scale_inv
                 permuted_act_grad = permuted_act_grad._data
             else:
                 fp8_dtype = None
-            act_grad = triton_permuataion.unpermute_with_mask_map(
+            act_grad = triton_permutation.unpermute_with_mask_map(
                 permuted_act_grad,
                 row_id_map,
                 None,
@@ -307,7 +304,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                 ctx.hidden_size,
                 fp8_dtype,
             )
-            if ctx.fp8:
+            if fp8:
                 act_grad = Float8Tensor(
                     data=act_grad,
                     fp8_dtype=fp8_dtype,
@@ -361,7 +358,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             inp = inp._data
         else:
             fp8_dtype = None
-        unpermuted_output = triton_permuataion.unpermute_with_mask_map(
+        unpermuted_output = triton_permutation.unpermute_with_mask_map(
             inp,
             row_id_map,
             probs,
@@ -384,7 +381,6 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         ctx.num_permuted_tokens = inp.size(0)
         ctx.hidden_size = hidden_size
         ctx.with_probs = with_probs
-        ctx.fp8 = fp8
         return unpermuted_output
 
     @staticmethod
@@ -401,10 +397,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             else:
                 (row_id_map,) = ctx.saved_tensors
 
-            if ctx.fp8:
-                assert isinstance(
-                    unpermuted_act_grad, Float8Tensor
-                ), "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
+            fp8 = isinstance(unpermuted_act_grad, Float8Tensor)
+            if fp8:
                 fp8_dtype = unpermuted_act_grad._fp8_dtype
                 fp8_scale_inv = unpermuted_act_grad._scale_inv
                 unpermuted_act_grad = unpermuted_act_grad._data
@@ -412,7 +406,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype = None
 
             if ctx.with_probs:
-                act_grad, probs_grad = triton_permuataion.unpermute_with_mask_map_bwd_with_probs(
+                act_grad, probs_grad = triton_permutation.unpermute_with_mask_map_bwd_with_probs(
                     unpermuted_act_grad,
                     row_id_map,
                     fwd_input,
@@ -424,7 +418,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     fp8_dtype,
                 )
             else:
-                act_grad = triton_permuataion.permute_with_mask_map(
+                act_grad = triton_permutation.permute_with_mask_map(
                     unpermuted_act_grad,
                     row_id_map,
                     ctx.num_tokens,
@@ -433,7 +427,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     ctx.hidden_size,
                 )
 
-            if ctx.fp8:
+            if fp8:
                 act_grad = Float8Tensor(
                     data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
                 )
@@ -463,7 +457,7 @@ def moe_permute(
         The token to expert mapping tensor.
         If map_type is 'mask', routing_map is of shape [num_tokens, num_experts] and dtype 'int32'.
         The values in it: 1 means the token is routed to this expert and 0 means not.
-        If map_type is 'indice', routing_map is of shape [num_tokens, topK] and dtype 'int32'.
+        If map_type is 'index', routing_map is of shape [num_tokens, topK] and dtype 'int32'.
         The values in it are the routed expert indices.
     num_out_tokens: int, default = -1
         The effective output token count, representing the number of tokens not dropped.
@@ -474,13 +468,13 @@ def moe_permute(
         automatically taken over by the operator.
     map_type: str, default = 'mask'
         Type of the routing map tensor.
-        Options are: 'mask', 'indice'.
+        Options are: 'mask', 'index'.
     """
-    if map_type == "indice":
-        return _moe_permute_indice_map.apply(inp, routing_map, num_out_tokens, max_token_num)
+    if map_type == "index":
+        return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
         return _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens)
-    raise ValueError("map_type should be one of 'mask' or 'indice'")
+    raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
 def moe_unpermute(
@@ -509,13 +503,13 @@ def moe_unpermute(
         The output shape after the unpermute operation.
     map_type: str, default = 'mask'
         Type of the routing map tensor. Should be the same as the value passed to moe_permute.
-        Options are: 'mask', 'indice'.
+        Options are: 'mask', 'index'.
     """
-    if map_type == "indice":
-        return _moe_unpermute_indice_map.apply(inp, row_id_map, probs)
+    if map_type == "index":
+        return _moe_unpermute_index_map.apply(inp, row_id_map, probs)
     if map_type == "mask":
         return _moe_unpermute_mask_map.apply(inp, row_id_map, probs, restore_shape)
-    raise ValueError("map_type should be one of 'mask' or 'indice'")
+    raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
 class _moe_chunk_sort(torch.autograd.Function):
@@ -545,7 +539,7 @@ class _moe_chunk_sort(torch.autograd.Function):
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
-        output, row_id_map = triton_permuataion.sort_chunks_by_idx(
+        output, row_id_map = triton_permutation.sort_chunks_by_idx(
             inp,
             split_sizes,
             sorted_idxs,
@@ -559,7 +553,6 @@ class _moe_chunk_sort(torch.autograd.Function):
         ctx.save_for_backward(row_id_map)
         ctx.num_tokens = num_tokens
         ctx.hidden_size = hidden_size
-        ctx.fp8 = fp8
         return output
 
     @staticmethod
@@ -574,30 +567,28 @@ class _moe_chunk_sort(torch.autograd.Function):
         act_grad = None
         if ctx.needs_input_grad[0]:
             (row_id_map,) = ctx.saved_tensors
-            if ctx.fp8:
-                assert isinstance(
-                    permuted_act_grad, Float8Tensor
-                ), "Grad of the output must be in Float8Tensor type for FP8 moe_chunk_permute."
+            fp8 = isinstance(permuted_act_grad, Float8Tensor)
+            if fp8:
                 fp8_dtype = permuted_act_grad._fp8_dtype
                 fp8_scale_inv = permuted_act_grad._scale_inv
                 permuted_act_grad = permuted_act_grad._data
-            act_grad = triton_permuataion.sort_chunks_by_map(
+            act_grad = triton_permutation.sort_chunks_by_map(
                 permuted_act_grad,
                 row_id_map,
                 ctx.num_tokens,
                 ctx.hidden_size,
             )
-            if ctx.fp8:
+            if fp8:
                 act_grad = Float8Tensor(
                     data=act_grad, fp8_dtype=fp8_dtype, fp8_scale_inv=fp8_scale_inv
                 )
         return act_grad, None, None
 
 
-def moe_sort_chunks_by_indices(
+def moe_sort_chunks_by_index(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
-    sorted_indices: torch.Tensor,
+    sorted_index: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Split and sort the input tensor based on the split_sizes and sorted indices.
@@ -613,4 +604,4 @@ def moe_sort_chunks_by_indices(
     sorted_indices: torch.Tensor
         Chunk indices used to permute the chunks.
     """
-    return _moe_chunk_sort.apply(inp, split_sizes, sorted_indices)
+    return _moe_chunk_sort.apply(inp, split_sizes, sorted_index)

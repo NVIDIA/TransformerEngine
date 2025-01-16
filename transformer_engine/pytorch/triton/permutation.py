@@ -35,12 +35,14 @@ def _row_id_map_pass_1_kernel(
         mask=(offset < num_tokens),
         other=0,
     ).to(tl.int64)
-    expert_token_cumsum = tl.cumsum(expert_token_mask) * expert_token_mask
+    row_id_within_token_block = tl.cumsum(expert_token_mask) * expert_token_mask
     tl.store(
-        row_id_map_ptr + pid_m * num_tokens + offset, expert_token_cumsum, mask=offset < num_tokens
+        row_id_map_ptr + pid_m * num_tokens + offset,
+        row_id_within_token_block,
+        mask=offset < num_tokens,
     )
-    expert_token_sum = tl.sum(expert_token_mask)
-    tl.store(workspace_ptr + pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n, expert_token_sum)
+    n_tokens_per_block = tl.sum(expert_token_mask)
+    tl.store(workspace_ptr + pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n, n_tokens_per_block)
 
 
 @triton.jit
@@ -58,16 +60,20 @@ def _row_id_map_pass_2_kernel(
     pid_n = tl.program_id(1)
     chunk_idx = pid_m * tl.cdiv(num_tokens, BLOCK_SIZE) + pid_n
     offset = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    chunk_cumsum = tl.load(
+    row_id_within_token_block = tl.load(
         row_id_map_ptr + pid_m * num_tokens + offset, mask=(offset < num_tokens), other=0
     )
 
     workspace_off = tl.arange(0, WORKSPACE_LOAD_WIDTH)
-    chunk_sums = tl.load(workspace_ptr + workspace_off, mask=workspace_off < chunk_idx)
-    chunk_cumsum = tl.where(chunk_cumsum == 0, -1, chunk_cumsum + tl.sum(chunk_sums) - 1)
+    n_tokens_per_chunk = tl.load(workspace_ptr + workspace_off, mask=workspace_off < chunk_idx)
+    row_id = tl.where(
+        row_id_within_token_block == 0,
+        -1,
+        row_id_within_token_block + tl.sum(n_tokens_per_chunk) - 1,
+    )
     tl.store(
         row_id_map_ptr + pid_m * num_tokens + offset,
-        chunk_cumsum,
+        row_id,
         mask=(offset < num_tokens),
     )
 

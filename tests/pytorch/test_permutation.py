@@ -11,7 +11,7 @@ from typing import Dict, List
 from transformer_engine.pytorch import (
     moe_permute as te_permute,
     moe_unpermute as te_unpermute,
-    moe_sort_chunks_by_indices as te_sort_chunks_by_indices,
+    moe_sort_chunks_by_index as te_sort_chunks_by_index,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -167,7 +167,7 @@ def pytorch_unpermute_mask_map(
     return output_tokens
 
 
-def pytorch_sort_chunks_by_idxs(
+def pytorch_sort_chunks_by_index(
     input: torch.Tensor,
     split_sizes: torch.Tensor,
     sorted_idxs: torch.Tensor,
@@ -181,21 +181,27 @@ def pytorch_sort_chunks_by_idxs(
     return output
 
 
-def dtype_tols(te_dtype: tex.DType) -> Dict[str, float]:
+def dtype_tols(te_dtype: tex.DType, has_tolerance: bool = True) -> Dict[str, float]:
     """Estimated tolerances for a datatype
 
     Based on tolerances for torch.testing.assert_close.
 
     """
-    if te_dtype == tex.DType.kFloat32:
-        return dict(rtol=1.0e-6, atol=1.0e-6)
-    if te_dtype == tex.DType.kFloat16:
-        return dict(rtol=3.0e-3, atol=1.0e-5)
-    if te_dtype == tex.DType.kBFloat16:
-        return dict(rtol=2.0e-2, atol=1.0e-5)
-    if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
-        return dict(rtol=2.0e-1, atol=1.0e-1)
-    raise ValueError(f"Unsuppored dtype ({te_dtype})")
+    if has_tolerance:
+        if te_dtype == tex.DType.kFloat32:
+            return dict(rtol=1.0e-6, atol=1.0e-6)
+        if te_dtype == tex.DType.kFloat16:
+            return dict(rtol=3.0e-3, atol=1.0e-5)
+        if te_dtype == tex.DType.kBFloat16:
+            return dict(rtol=2.0e-2, atol=1.0e-5)
+        if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
+            return dict(rtol=2.0e-1, atol=1.0e-1)
+        raise ValueError(f"Unsuppored dtype ({te_dtype})")
+    else:
+        if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
+            return dict(rtol=2.0e-1, atol=1.0e-1)
+        else:
+            return dict(rtol=0.0, atol=0.0)
 
 
 def _test_permutation_indice_map(
@@ -308,7 +314,7 @@ def _test_permutation_indice_map(
     te_permute_bwd_input = permute_bwd_input if fp8 else pytorch_permute_bwd_input.detach()
 
     te_permute_output, row_id_map = te_permute(
-        te_permute_fwd_input, indices, num_out_tokens, map_type="indice"
+        te_permute_fwd_input, indices, num_out_tokens, map_type="index"
     )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
@@ -321,7 +327,7 @@ def _test_permutation_indice_map(
     te_unpermute_bwd_input = unpermute_bwd_input if fp8 else pytorch_unpermute_bwd_input.detach()
 
     te_unpermute_output = te_unpermute(
-        te_unpermute_fwd_input, row_id_map, te_probs, map_type="indice"
+        te_unpermute_fwd_input, row_id_map, te_probs, map_type="index"
     )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
 
@@ -394,7 +400,7 @@ def _test_permutation_indice_map(
             lambda: pytorch_permute_indice_map(pytorch_permute_fwd_input, indices, num_out_tokens)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_permute(te_permute_fwd_input, indices, num_out_tokens, map_type="indice")
+            lambda: te_permute(te_permute_fwd_input, indices, num_out_tokens, map_type="index")
         )
         print(f"permute\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
@@ -424,7 +430,7 @@ def _test_permutation_indice_map(
             )
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_unpermute(te_unpermute_fwd_input, row_id_map, te_probs, map_type="indice")
+            lambda: te_unpermute(te_unpermute_fwd_input, row_id_map, te_probs, map_type="index")
         )
         print(f"unpermute\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
@@ -586,6 +592,7 @@ def _test_permutation_mask_map(
     #
     ###################################################################################################################################
     tols = dtype_tols(te_dtype)
+    non_tols = dtype_tols(te_dtype, False)
 
     if fp8:
         te_permute_output_ = te_permute_output.from_float8(torch.float32)
@@ -602,6 +609,7 @@ def _test_permutation_mask_map(
         pytorch_permute_output.float(),
         te_permute_output_,
         msg=f"Mismatch in te_permute fwd",
+        **non_tols,
     )
     torch.testing.assert_close(
         pytorch_permute_fwd_input.grad.float(),
@@ -619,7 +627,7 @@ def _test_permutation_mask_map(
         pytorch_unpermute_fwd_input.grad.float(),
         te_unpermute_fwd_input_grad,
         msg=f"Mismatch in te_unpermute bwd",
-        **tols,
+        **(tols if with_probs else non_tols),
     )
     if with_probs:
         torch.testing.assert_close(
@@ -774,7 +782,7 @@ def _test_moe_chunk_sort(
     # PyTorch Permutation
     #
     ###################################################################################################################################
-    pytorch_output = pytorch_sort_chunks_by_idxs(pytorch_fwd_input, split_sizes, sorted_idxs)
+    pytorch_output = pytorch_sort_chunks_by_index(pytorch_fwd_input, split_sizes, sorted_idxs)
     pytorch_output.backward(pytorch_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -786,7 +794,7 @@ def _test_moe_chunk_sort(
     te_fwd_input.requires_grad_(True)
     te_bwd_input = bwd_input if fp8 else pytorch_bwd_input.detach()
 
-    te_output = te_sort_chunks_by_indices(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
+    te_output = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
     te_output.backward(te_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -794,7 +802,7 @@ def _test_moe_chunk_sort(
     # Results Check
     #
     ###################################################################################################################################
-    tols = dtype_tols(te_dtype)
+    tols = dtype_tols(te_dtype, False)
 
     if fp8:
         te_output_ = te_output.from_float8(torch.float32)
@@ -835,10 +843,10 @@ def _test_moe_chunk_sort(
 
     if BENCHMARK:
         t1 = perf_test_cuda_kernel(
-            lambda: pytorch_sort_chunks_by_idxs(pytorch_fwd_input, split_sizes, sorted_idxs)
+            lambda: pytorch_sort_chunks_by_index(pytorch_fwd_input, split_sizes, sorted_idxs)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_sort_chunks_by_indices(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
+            lambda: te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
         )
         print(f"chunk sort\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
