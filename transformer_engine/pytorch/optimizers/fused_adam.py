@@ -96,11 +96,11 @@ class FusedAdam(torch.optim.Optimizer):
             (default: False)
         store_param_remainders (bool, optional): Whether to store entire FP32 master
             params or just store the trailing 16 remainder bits. Whole FP32 master can be
-            reconstructed from BF16 params plus the trailing remainder bits. Works only 
-            when param type is BF16 and master weight type is FP32, no effect otherwise. 
+            reconstructed from BF16 params plus the trailing remainder bits. Works only
+            when param type is BF16 and master weight type is FP32, no effect otherwise.
             Useful memory saving optimization.
             (default: True)
- 
+
 
     .. _Adam - A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
@@ -202,7 +202,9 @@ class FusedAdam(torch.optim.Optimizer):
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
         # Works only when master params is in FP32
-        self.store_param_remainders = store_param_remainders and master_weights and master_weight_dtype == torch.float32
+        self.store_param_remainders = (
+            store_param_remainders and master_weights and master_weight_dtype == torch.float32
+        )
 
     def zero_grad(self):
         # pylint: disable=missing-function-docstring
@@ -273,7 +275,7 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
-            if store_param_remainders and state_name == 'master_param':
+            if store_param_remainders and state_name == "master_param":
                 assert state[state_name].dtype == torch.int16
             else:
                 assert state[state_name].dtype == torch.float32
@@ -306,7 +308,9 @@ class FusedAdam(torch.optim.Optimizer):
         else:
             state[state_name].copy_(unscaled_state)
 
-    def _initialize_state(self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False):
+    def _initialize_state(
+        self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False
+    ):
         """Initialize one of the optimizer states according to `state_name`.
 
         Arguments:
@@ -351,8 +355,12 @@ class FusedAdam(torch.optim.Optimizer):
         self._initialize_state(param, "exp_avg", zero_buffer=True)
         self._initialize_state(param, "exp_avg_sq", zero_buffer=True)
         if self.master_weights:
-            self._initialize_state(param, "master_param", zero_buffer=False, 
-                                   store_param_remainders=store_param_remainders)
+            self._initialize_state(
+                param,
+                "master_param",
+                zero_buffer=False,
+                store_param_remainders=store_param_remainders,
+            )
             if not store_param_remainders:
                 self.set_scaled_state(param, "master_param", param.clone().detach().float())
 
@@ -626,7 +634,9 @@ class FusedAdam(torch.optim.Optimizer):
                     if self.store_param_remainders and has_bf16 and not has_fp16:
                         # When you have BF16 params and need FP32 master params, you can reconstruct
                         # the FP32 master params with BF16 params + int16 remainders
-                        apply_multi_tensor_adam(self.multi_tensor_adam_param_remainder, tensor_lists)
+                        apply_multi_tensor_adam(
+                            self.multi_tensor_adam_param_remainder, tensor_lists
+                        )
                     else:
                         apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
                 if len(p_fp8_model) > 0:

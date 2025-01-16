@@ -181,14 +181,12 @@ struct AdamFunctorMaster {
 
 template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
 struct AdamFunctorMasterParamRemainder {
-
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
                                              const float beta1, const float beta2,
                                              const float beta1_correction,
                                              const float beta2_correction, const float epsilon,
                                              const float lr, adamMode_t mode, const float decay) {
-
     index_t tensor_loc = tl.block_to_tensor[blockIdx.x];
 
     index_t chunk_idx = tl.block_to_chunk[blockIdx.x];
@@ -218,8 +216,8 @@ struct AdamFunctorMasterParamRemainder {
         int16_t int16[2];
       };
       fp32_or_int162 local_master_param[ILP];
-      int16_t local_p[ILP]; 
-      int16_t local_p_rem[ILP]; 
+      int16_t local_p[ILP];
+      int16_t local_p_rem[ILP];
       MATH_T r_g[ILP];
       MATH_T r_m[ILP];
       MATH_T r_v[ILP];
@@ -250,7 +248,7 @@ struct AdamFunctorMasterParamRemainder {
         local_master_param[ii].int16[0] = local_p_rem[ii];
       }
 
-      MATH_T* r_p = reinterpret_cast<MATH_T*>(local_master_param);
+      MATH_T *r_p = reinterpret_cast<MATH_T *>(local_master_param);
 
 #pragma unroll
       for (int ii = 0; ii < ILP; ii++) {
@@ -296,7 +294,6 @@ struct AdamFunctorMasterParamRemainder {
     }
   }
 };
-
 
 template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
 struct AdamFunctor {
@@ -668,9 +665,9 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
 }
 
 void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag,
-                                            std::vector<std::vector<at::Tensor>> tensor_lists, 
-                                            const float lr, const float beta1, const float beta2, 
-                                            const float epsilon, const int step, const int mode, 
+                                            std::vector<std::vector<at::Tensor>> tensor_lists,
+                                            const float lr, const float beta1, const float beta2,
+                                            const float epsilon, const int step, const int mode,
                                             const int bias_correction, const float weight_decay) {
   using namespace at;
 
@@ -711,20 +708,21 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
         p_in_type, 0, "adam",
         DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
             g_in_type, 1, "adam",
-            multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
-                                  tensor_lists,
-                                  AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int64_t>(),
-                                  beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                  (adamMode_t)mode, weight_decay);));
+            multi_tensor_apply<5>(
+                (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+                AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int64_t>(), beta1,
+                beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
+                weight_decay);));
   } else {
     DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
         p_in_type, 0, "adam",
         DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
             g_in_type, 1, "adam",
-            multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                  AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int32_t>(),
-                                  beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                  (adamMode_t)mode, weight_decay);));
+            multi_tensor_apply<5>(
+                BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int32_t>(), beta1,
+                beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
+                weight_decay);));
   }
   AT_CUDA_CHECK(cudaGetLastError());
 }
