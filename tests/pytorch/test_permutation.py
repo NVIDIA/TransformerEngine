@@ -815,6 +815,7 @@ def _test_moe_chunk_sort(
         pytorch_output.float(),
         te_output_,
         msg=f"Mismatch in te_permute fwd",
+        **tols,
     )
     torch.testing.assert_close(
         pytorch_fwd_input.grad.float(),
