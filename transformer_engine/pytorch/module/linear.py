@@ -568,9 +568,7 @@ class _Linear(torch.autograd.Function):
                 if dgrad is None:
                     if ctx.parallel_mode == "column" and ctx.sequence_parallel:
                         dgrad_shape[0] = dgrad_shape[0] * tp_world_size
-                    dgrad = torch.empty(
-                        dgrad_shape, dtype=output_dtype, device=grad_output.device
-                    )
+                    dgrad = torch.empty(dgrad_shape, dtype=output_dtype, device=grad_output.device)
 
             if ctx.requires_dgrad:
                 if ctx.fp8:
