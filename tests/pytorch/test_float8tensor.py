@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -339,7 +339,7 @@ class TestFloat8Tensor:
         del x_fp8, byte_stream
 
         # Deserialize tensor
-        x_fp8 = torch.load(io.BytesIO(x_bytes))
+        x_fp8 = torch.load(io.BytesIO(x_bytes), weights_only=False)
         del x_bytes
 
         # Check results

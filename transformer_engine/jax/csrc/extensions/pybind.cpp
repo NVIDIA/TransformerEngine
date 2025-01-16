@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -61,26 +61,23 @@ pybind11::dict Registrations() {
   dict["te_act_lu_ffi"] = EncapsulateFFI(ActLuHandler);
   dict["te_act_lu_fp8_ffi"] = EncapsulateFFI(ActLuFP8Handler);
   dict["te_dact_lu_ffi"] = EncapsulateFFI(DActLuHandler);
-  dict["te_dact_lu_dbias_cast_transpose_ffi"] =
-      EncapsulateFunction(DActLuDBiasCastTransposeHandler);
-  dict["te_dgated_act_lu_cast_transpose_ffi"] =
-      EncapsulateFunction(DGatedActLuCastTransposeHandler);
+  dict["te_dact_lu_dbias_cast_transpose_ffi"] = EncapsulateFFI(DActLuDBiasCastTransposeHandler);
+  dict["te_dgated_act_lu_cast_transpose_ffi"] = EncapsulateFFI(DGatedActLuCastTransposeHandler);
 
   // Quantization
   dict["te_quantize_ffi"] = EncapsulateFFI(QuantizeHandler);
   dict["te_dequantize_ffi"] = EncapsulateFFI(DequantizeHandler);
 
   // Softmax
-  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFunction(ScaledSoftmaxForwardHandler);
-  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFunction(ScaledSoftmaxBackwardHandler);
-  dict["te_scaled_masked_softmax_forward_ffi"] =
-      EncapsulateFunction(ScaledMaskedSoftmaxForwardHandler);
+  dict["te_scaled_softmax_forward_ffi"] = EncapsulateFFI(ScaledSoftmaxForwardHandler);
+  dict["te_scaled_softmax_backward_ffi"] = EncapsulateFFI(ScaledSoftmaxBackwardHandler);
+  dict["te_scaled_masked_softmax_forward_ffi"] = EncapsulateFFI(ScaledMaskedSoftmaxForwardHandler);
   dict["te_scaled_masked_softmax_backward_ffi"] =
-      EncapsulateFunction(ScaledMaskedSoftmaxBackwardHandler);
+      EncapsulateFFI(ScaledMaskedSoftmaxBackwardHandler);
   dict["te_scaled_upper_triang_masked_softmax_forward_ffi"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxForwardHandler);
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxForwardHandler);
   dict["te_scaled_upper_triang_masked_softmax_backward_ffi"] =
-      EncapsulateFunction(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
+      EncapsulateFFI(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
 
   // Normalization
   dict["te_layernorm_forward_ffi"] =

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,7 +20,6 @@ from distributed_test_base import (
 from utils import (
     make_causal_mask,
     make_self_mask,
-    assert_tree_like_allclose,
     assert_allclose,
     print_debug_tensor_stats,
 )
@@ -32,7 +31,6 @@ from transformer_engine.jax.attention import (
     AttnMaskType,
     QKVLayout,
     QKVFormat,
-    get_qkv_format,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     CPStrategy,
@@ -403,7 +401,7 @@ class TestDistributedContextParallelSelfAttn:
                 raise ValueError(f"Unsupported {qkv_layout=}")
         return qkv_args
 
-    def impl_test_contex_parallel_attn(
+    def impl_test_context_parallel_attn(
         self,
         device_count,
         mesh_shape,
@@ -421,7 +419,7 @@ class TestDistributedContextParallelSelfAttn:
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = get_qkv_format(qkv_layout)
+        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
 
@@ -503,7 +501,7 @@ class TestDistributedContextParallelSelfAttn:
             # Gradient is small, use a gradient multiplier to amplify the gradient
             _, max_seq_len, num_heads, _ = data_shape
             gradient_multiplier = max_seq_len * num_heads
-            if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK]:
+            if attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             ret_valid = func(*args, **kwargs)
             return (jnp.mean(ret_valid, dtype=jnp.float32) * gradient_multiplier).astype(dtype)
@@ -585,7 +583,7 @@ class TestDistributedContextParallelSelfAttn:
 
                 assert_allclose(target_grads[i], ref_grads[i], dtype=dtype)
 
-    def test_contex_parallel_allgather_attn(
+    def test_context_parallel_allgather_attn(
         self,
         device_count,
         mesh_shape,
@@ -598,7 +596,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
-        return self.impl_test_contex_parallel_attn(
+        return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -625,7 +623,7 @@ class TestDistributedContextParallelSelfAttn:
         qkv_layout,
         load_balanced,
     ):
-        return self.impl_test_contex_parallel_attn(
+        return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
