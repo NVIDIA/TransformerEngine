@@ -190,7 +190,7 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       wtype, cpp_dtype, *(reinterpret_cast<cpp_dtype*>(_scalar_dptr.get())) = (cpp_dtype)1.0f;);
 
-  _handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  _handle = cudnnExecutionPlanManager::Instance().GetHandle();
 
   _graph.set_io_data_type(get_cudnn_fe_dtype(itype))
       .set_intermediate_data_type(get_cudnn_fe_dtype(ctype))
