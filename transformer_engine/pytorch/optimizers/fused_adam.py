@@ -254,13 +254,14 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled_state.mul_(rscale)
             scaled_state.copy_(unscaled_state)
 
-    def get_unscaled_state(self, param, state_name):
+    def get_unscaled_state(self, param, state_name, store_param_remainders=False):
         """Return the unscaled state corresponding to the input `param` and `state_name`.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
+            store_param_remainders (bool): Option to store trailing parameter remainder bits only
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -272,7 +273,10 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
-            assert state[state_name].dtype == torch.float32
+            if store_param_remainders and state_name == 'master_param':
+                assert state[state_name].dtype == torch.int16
+            else:
+                assert state[state_name].dtype == torch.float32
             unscaled = state[state_name]
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/fp32.")
@@ -302,7 +306,7 @@ class FusedAdam(torch.optim.Optimizer):
         else:
             state[state_name].copy_(unscaled_state)
 
-    def _initialize_state(self, param, state_name, zero_buffer: bool, store_param_remainders: bool):
+    def _initialize_state(self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False):
         """Initialize one of the optimizer states according to `state_name`.
 
         Arguments:
@@ -349,7 +353,8 @@ class FusedAdam(torch.optim.Optimizer):
         if self.master_weights:
             self._initialize_state(param, "master_param", zero_buffer=False, 
                                    store_param_remainders=store_param_remainders)
-            self.set_scaled_state(param, "master_param", param.clone().detach().float())
+            if not store_param_remainders:
+                self.set_scaled_state(param, "master_param", param.clone().detach().float())
 
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all
@@ -481,7 +486,7 @@ class FusedAdam(torch.optim.Optimizer):
                 unscaled_state = {}
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
-                        unscaled = self.get_unscaled_state(p, name)
+                        unscaled = self.get_unscaled_state(p, name, store_param_remainders)
                         unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
