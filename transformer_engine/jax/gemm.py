@@ -20,6 +20,7 @@ from .cpp_extensions import (
     dact_lu,
     dbias_cast_transpose,
     dact_lu_dbias_cast_transpose,
+    get_num_max_compute_streams,
 )
 
 from .cpp_extensions.gemm import sanitize_dims, mirror_dim, copy_into_overlap_buffer
@@ -36,7 +37,7 @@ __all__ = [
     "get_comm_gemm_overlap_config",
 ]
 
-_NUM_MAX_UB_STREAMS = 3
+
 _ACTIVE_COMM_GEMM_OVERLAPS = dict()
 
 
@@ -921,7 +922,7 @@ def initialize_comm_gemm_overlaps(
                 else tex.CommOverlapType.RS
             ),
             "num_sm": 1 if method == "ring_exchange" else 16,
-            "num_max_streams": _NUM_MAX_UB_STREAMS,
+            "num_max_streams": get_num_max_compute_streams(),
             "cga_size": 1 if method == "ring_exchange" else 2,
             "set_sm_margin": False,
             "num_splits": 4 if method == "pipeline" else tp_size,
@@ -995,7 +996,7 @@ def initialize_comm_gemm_overlaps(
             numranks,
             tp_size,
             kwargs["num_splits"],
-            _NUM_MAX_UB_STREAMS,
+            get_num_max_compute_streams(),
             kwargs["cga_size"],
             kwargs["num_sm"],
             kwargs["set_sm_margin"],

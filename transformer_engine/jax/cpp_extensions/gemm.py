@@ -36,8 +36,12 @@ __all__ = [
     "gemm_impl",
     "copy_into_overlap_buffer",
     "bootstrap_comm_gemm_overlap",
+    "get_num_max_compute_streams",
+    "set_num_max_compute_streams",
 ]
 
+
+_NUM_MAX_COMPUTE_STREAMS = 3
 _COMM_GEMM_OVERLAP_LAYERS = ["qkv", "proj", "fc1", "fc2"]
 _COMM_GEMM_OVERLAP_NAMES = (
     [layer + "_fprop" for layer in _COMM_GEMM_OVERLAP_LAYERS]
@@ -60,6 +64,17 @@ def get_cublas_workspace_size_bytes() -> None:
     if tex.get_device_compute_capability() >= 90:
         return 33_554_432
     return 4_194_304
+
+
+def get_num_max_compute_streams() -> int:
+    """Return the maximum number of compute streams that Comm+GEMM overlap can utilize."""
+    return _NUM_MAX_COMPUTE_STREAMS
+
+
+def set_num_max_compute_streams(new_max: int) -> None:
+    """Change the maximum number of compute streams that Comm+GEMM overlap can utilize."""
+    global _NUM_MAX_COMPUTE_STREAMS
+    _NUM_MAX_COMPUTE_STREAMS = new_max
 
 
 class CollectiveGemmPrimitive(BasePrimitive):
@@ -222,10 +237,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
             if comm_overlap_config["method"] != "bulk":
                 # Increase workspace size to ensure every GEMM chunk has an independent workspace
                 # of the appropriate size
-                if comm_overlap_config["method"] == "pipeline":
-                    workspace_size *= comm_overlap_config.get("num_splits", 4)
-                elif comm_overlap_config["method"] == "ring_exchange":
-                    workspace_size *= tp_size
+                workspace_size *= _NUM_MAX_COMPUTE_STREAMS
 
                 if comm_type == tex.CommOverlapType.AG:
                     expected_extra_out_shape = list(lhs_aval.shape).copy()
@@ -440,11 +452,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
             bias_dtype = jax_dtype_to_te_dtype(bias_aval.dtype)
 
             workspace_size = get_cublas_workspace_size_bytes()
-            if comm_overlap_config is not None:
-                if comm_overlap_config["method"] == "pipeline":
-                    workspace_size *= comm_overlap_config["num_splits"]
-                elif comm_overlap_config["method"] == "ring_exchange":
-                    workspace_size *= comm_overlap_config["tp_size"]
+            if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
+                workspace_size *= get_num_max_compute_streams()
 
             descriptor_packer_fn = tex.pack_gemm_decriptor
             descriptor_args = (
