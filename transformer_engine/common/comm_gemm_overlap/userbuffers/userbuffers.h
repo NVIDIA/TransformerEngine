@@ -34,11 +34,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_MAX_REQUESTS 1024
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
-#define NVTE_MAX_NVLINK 8
-
-#define UB_MEM_UC_CONTIG 1
-#define UB_MEM_MC_CREATED 2
-#define UB_MEM_ALLOCATED 4
+#define NVTE_MAX_NVLINK 32
 
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
@@ -149,7 +145,6 @@ struct communicator {
   ExtBarrierOp _barrier;
 
   ExtComm comm_world;
-  ExtComm comm_inter;  // reduction group communicator (subset of the nodes) along GPU rail
   ExtComm comm_intra;  // full intranode (all ndev GPUS)
 #ifdef NVTE_UB_WITH_MPI
   MPI_Request mpihndl[NVTE_MAX_SHARP];
@@ -198,11 +193,6 @@ void destroy_communicator_mpi(communicator *comm);
     returns handler if buffer is registered already, or -1 if not.
     returned offset is offset of gpubuff relative to buffer registered
 */
-
-int pipe_rank(communicator *comm,
-              int step);  // helper function to help walk across allreduce1 x allreduce2 groups
-                          // data-parallel and tensor-parallel position within data and tensor
-                          // groups would be preserved
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
 /*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
