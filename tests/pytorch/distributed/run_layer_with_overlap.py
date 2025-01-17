@@ -7,6 +7,7 @@
 import os
 import sys
 import socket
+import subprocess
 import argparse
 import warnings
 import pprint
@@ -209,14 +210,21 @@ def _train(opts):
         opts.tcp_init = True
         opts.bind_to_device = True
         opts.bootstrap_backend = "mpi"
-    elif "TORCHELASTIC_RUN_ID" in os.environ:
+    else:
         WORLD_RANK = int(os.getenv("RANK", "0"))
         WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
         LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-    else:
-        raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
-    assert LOCAL_SIZE == WORLD_SIZE
+        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(torch.cuda.device_count())))
+
+    result = subprocess.run(
+        "nvidia-smi -q | grep -m1 CliqueId | awk '{printf $3}'",
+        capture_output=True,
+        text=True,
+        shell=True
+    )
+
+    if result.stdout == "0":  # Extra checks for non-MNNVL platforms
+        assert WORLD_SIZE == LOCAL_SIZE
 
     def dist_print(msg, src=None, end="\n", debug=False, error=False):
         if debug and not opts.debug:
@@ -227,7 +235,7 @@ def _train(opts):
         dist.barrier()
 
     # Set device and initialize RNG states
-    torch.cuda.set_device(WORLD_RANK)
+    torch.cuda.set_device(LOCAL_RANK)
     torch.manual_seed(opts.seed)
     torch.cuda.manual_seed(opts.seed)
 
@@ -312,7 +320,7 @@ def _train(opts):
         return out
 
     torch_rng_state = torch.get_rng_state()
-    cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{WORLD_RANK}"))
+    cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         test_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(test_graph):
@@ -329,7 +337,7 @@ def _train(opts):
             names.append(test_name + ".grad")
 
     torch.set_rng_state(torch_rng_state)
-    torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{WORLD_RANK}"))
+    torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         ref_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(ref_graph):

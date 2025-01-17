@@ -1681,7 +1681,7 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  callranks_rs_oop_stride(2) callranks_rs_oop_stride(4) callranks_rs_oop_stride(8)
+  callranks_rs_oop_stride(2) callranks_rs_oop_stride(4) callranks_rs_oop_stride(8) callranks_rs_oop_stride(16) callranks_rs_oop_stride(32)
 }
 void reducescatter2_userbuff_strided_atomic(void *output, const int handler, const int offset,
                                             const int rowelements, const int colelements,
@@ -1703,7 +1703,7 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
   callranks_rs_oop_stride_atomic(2) callranks_rs_oop_stride_atomic(4)
-      callranks_rs_oop_stride_atomic(8)
+      callranks_rs_oop_stride_atomic(8) callranks_rs_oop_stride_atomic(16) callranks_rs_oop_stride_atomic(32)
 }
 
 template <typename fp8type>
@@ -1728,7 +1728,7 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
   if (warps < ar_nvsize) warps = ar_nvsize;
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-  callranks_rs_oop_atomic_fp8(2) callranks_rs_oop_atomic_fp8(4) callranks_rs_oop_atomic_fp8(8)
+  callranks_rs_oop_atomic_fp8(2) callranks_rs_oop_atomic_fp8(4) callranks_rs_oop_atomic_fp8(8) callranks_rs_oop_atomic_fp8(16) callranks_rs_oop_atomic_fp8(32)
 }
 
 template <typename fp8type>
@@ -1773,7 +1773,7 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
 
   SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
   callranks_rs_oop_stride_multiatomic(2) callranks_rs_oop_stride_multiatomic(4)
-      callranks_rs_oop_stride_multiatomic(8)
+      callranks_rs_oop_stride_multiatomic(8) callranks_rs_oop_stride_multiatomic(16) callranks_rs_oop_stride_multiatomic(32)
 }
 
 void allgather2_userbuff_inplace(const int handler, const int offset, const int elements,
@@ -1793,17 +1793,17 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
 
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
     } else {
-      callranks_ag(2) callranks_ag(4) callranks_ag(8)
+      callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
     }
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_agMC(2) callranks_agMC(4) callranks_agMC(8) callranks_agMC(16) callranks_agMC(32)
     } else {
-      callranks_ag(2) callranks_ag(4) callranks_ag(8)
+      callranks_ag(2) callranks_ag(4) callranks_ag(8) callranks_ag(16) callranks_ag(32)
     }
   }
 }
@@ -1840,17 +1840,17 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
 
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
     } else {
-      callranks_rs(2) callranks_rs(4) callranks_rs(8)
+      callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
     }
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_rsMC(2) callranks_rsMC(4) callranks_rsMC(8) callranks_rsMC(16) callranks_rsMC(32)
     } else {
-      callranks_rs(2) callranks_rs(4) callranks_rs(8)
+      callranks_rs(2) callranks_rs(4) callranks_rs(8) callranks_rs(16) callranks_rs(32)
     }
   }
 }
@@ -1873,17 +1873,17 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
 
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8) callranks_rs_oopMC(16) callranks_rs_oopMC(32)
     } else {
-      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8) callranks_rs_oop(16) callranks_rs_oop(32)
     }
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    if (comm->use_mc && (comm->memflags[handler] & UB_MEM_MC_CREATED)) {
-      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8)
+    if (comm->use_mc && (comm->memflags[handler] & NVTE_UB_MEM_MC_CREATED)) {
+      callranks_rs_oopMC(2) callranks_rs_oopMC(4) callranks_rs_oopMC(8) callranks_rs_oopMC(16) callranks_rs_oopMC(32)
     } else {
-      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8)
+      callranks_rs_oop(2) callranks_rs_oop(4) callranks_rs_oop(8) callranks_rs_oop(16) callranks_rs_oop(32)
     }
   }
 }
@@ -1915,10 +1915,10 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
 
   if (comm_launch_event) {
     SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, warps * 32, stream, comm_launch_event);
-    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
+    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16) callranks_rs_oop_fp8(32)
   } else {
     SETUP_LAUNCH_CONFIG(sms, warps * 32, stream);
-    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8)
+    callranks_rs_oop_fp8(2) callranks_rs_oop_fp8(4) callranks_rs_oop_fp8(8) callranks_rs_oop_fp8(16) callranks_rs_oop_fp8(32)
   }
 }
 
