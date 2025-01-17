@@ -182,10 +182,11 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 out_amax_updated_dtype == out_scale_updated_dtype == jnp.float32
             ), "Invalid output amax or scale dtype."
         else:
-            assert out_dtype == lhs_dtype, (
-                "Output buffer has incorrect dtype: "
-                + f"expected {lhs_dtype} but found {out_dtype}"
-            )
+            if not jax_dtype_is_fp8(lhs_dtype):
+                assert out_dtype == lhs_dtype, (
+                    "Output buffer has incorrect dtype: "
+                    + f"expected {lhs_dtype} but found {out_dtype}"
+                )
             out_amax_updated_dtype = jnp.float32
             out_scale_updated_dtype = jnp.float32
 
@@ -208,7 +209,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 expected_out_shape[-1],
             ]
 
-        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
+        workspace_size = get_cublas_workspace_size_bytes()
+        if comm_overlap_config is not None:
             comm_type = comm_overlap_config.get("comm_type", None)
             assert comm_type is not None, "Missing comm type for comm+GEMM overlap."
 
@@ -217,18 +219,26 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 tp_size > 1
             ), "Comm+GEMM overlap requires tensor-parallel mesh axis size greater than 1."
 
-            if comm_type == tex.CommOverlapType.AG:
-                expected_extra_out_shape = list(lhs_aval.shape).copy()
-            elif comm_type == tex.CommOverlapType.RS:
-                expected_extra_out_shape = list(expected_out_shape).copy()
-                expected_extra_out_dtype = lhs_dtype
+            if comm_overlap_config["method"] != "bulk":
+                # Increase workspace size to ensure every GEMM chunk has an independent workspace
+                # of the appropriate size
+                if comm_overlap_config["method"] == "pipeline":
+                    workspace_size *= comm_overlap_config.get("num_splits", 4)
+                elif comm_overlap_config["method"] == "ring_exchange":
+                    workspace_size *= tp_size
 
-            if sharded_abstract:
                 if comm_type == tex.CommOverlapType.AG:
-                    expected_out_shape[-2] *= tp_size
-                    expected_extra_out_shape[-2] *= tp_size
-                else:
-                    expected_extra_out_shape[-2] = expected_extra_out_shape[-2] // tp_size
+                    expected_extra_out_shape = list(lhs_aval.shape).copy()
+                elif comm_type == tex.CommOverlapType.RS:
+                    expected_extra_out_shape = list(expected_out_shape).copy()
+                    expected_extra_out_dtype = lhs_dtype
+
+                if sharded_abstract:
+                    if comm_type == tex.CommOverlapType.AG:
+                        expected_out_shape[-2] *= tp_size
+                        expected_extra_out_shape[-2] *= tp_size
+                    else:
+                        expected_extra_out_shape[-2] = expected_extra_out_shape[-2] // tp_size
 
         assert out_aval.ndim == len(expected_out_shape), (
             "Output buffer has incorrect number of dimensions: "
@@ -296,9 +306,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
         extra_out_updated_aval = extra_out_aval.update(shape=extra_out_shape, dtype=extra_out_dtype)
-        workspace_aval = jax.core.ShapedArray(
-            shape=(get_cublas_workspace_size_bytes(),), dtype=jnp.uint8
-        )
+        workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         return (
             out_updated_aval,
@@ -428,9 +436,15 @@ class CollectiveGemmPrimitive(BasePrimitive):
             m = lhs_aval.shape[lhs_outer_dim]
             k = rhs_aval.shape[rhs_inner_dim]
             n = rhs_aval.shape[rhs_outer_dim]
-            workspace_size = get_cublas_workspace_size_bytes()
             operand_dtype = jax_dtype_to_te_dtype(lhs_aval.dtype)
             bias_dtype = jax_dtype_to_te_dtype(bias_aval.dtype)
+
+            workspace_size = get_cublas_workspace_size_bytes()
+            if comm_overlap_config is not None:
+                if comm_overlap_config["method"] == "pipeline":
+                    workspace_size *= comm_overlap_config["num_splits"]
+                elif comm_overlap_config["method"] == "ring_exchange":
+                    workspace_size *= comm_overlap_config["tp_size"]
 
             descriptor_packer_fn = tex.pack_gemm_decriptor
             descriptor_args = (

@@ -35,10 +35,9 @@ parser.add_argument("-dp", "--dp-size", type=int, default=1)
 parser.add_argument("-zp", "--fsdp-size", type=int, default=2)
 parser.add_argument("-tp", "--tp-size", type=int, default=4)
 parser.add_argument("-np", "--num-gpus", type=int, default=8)
-parser.add_argument("--batch-size", type=int, default=4)
+parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
-parser.add_argument("--num-heads", type=int, default=128)
-parser.add_argument("--head-dim", type=int, default=128)
+parser.add_argument("--hidden-size", type=int, default=16384)
 parser.add_argument("--activation-size", type=int, default=53248)
 parser.add_argument("--no-batch", action="store_true")
 parser.add_argument("--no-fsdp", action="store_true")
@@ -48,16 +47,15 @@ args = parser.parse_args()
 
 # Operand shapes
 dtype = jnp.bfloat16
-hidden_size = args.num_heads * args.head_dim
 lhs_shape = (
-    [args.seq_length, hidden_size]
+    [args.seq_length, args.hidden_size]
     if args.comm_type == "AG"
     else [args.seq_length, args.activation_size]
 )
 rhs_shape = (
-    [hidden_size, args.activation_size]
+    [args.hidden_size, args.activation_size]
     if args.comm_type == "AG"
-    else [args.activation_size, hidden_size]
+    else [args.activation_size, args.hidden_size]
 )
 
 # Operand partitioning
