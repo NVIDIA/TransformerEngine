@@ -786,17 +786,19 @@ class Linear(TransformerEngineBaseLayer):
 
         # Initialize weight parameter
         with track_rng_state(enable=self.tensor_parallel):
-            # TE linear weight is in column major
+            # Ensure that the random seed state is consistent with Paddle Linear.
             self.weight = self.create_parameter(
-                shape=(
-                    [self.out_features, self.in_features]
-                    if self.backend == "transformer_engine"
-                    else [self.in_features, self.out_features]
-                ),
+                shape=([self.in_features, self.out_features]),
                 attr=self._weight_attr,
                 dtype=self._dtype,
                 is_bias=False,
             )
+            # TE linear weight is in column major
+            if self.backend == "transformer_engine":
+                with paddle.no_grad():
+                    clone_weight = self.weight.clone().t().contiguous()
+                    self.weight.get_tensor()._share_data_with(clone_weight.get_tensor())
+
         set_weight_tensor_dist_attr(
             self.weight, self.tensor_parallel, self.parallel_mode, self.backend
         )
