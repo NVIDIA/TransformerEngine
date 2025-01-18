@@ -591,10 +591,21 @@ class FusedAttnRunner:
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
 
-        self.mask_pspec = PartitionSpec(
+        mask_pspec = PartitionSpec(
             self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
         )
-        self.mask_sharding = NamedSharding(self.mesh, self.mask_pspec)
+        self.mask_sharding = NamedSharding(self.mesh, mask_pspec)
+
+        match self.seq_desc_format:
+            case SeqDescFormat.Mask:
+                self.seq_desc_sharding = self.mask_sharding
+            case _:
+
+                def to_dp_shardings(x):
+                    pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    return NamedSharding(self.mesh, pspec)
+
+                self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
@@ -657,11 +668,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
-            jax.device_put(self.mask_for_customcall, self.mask_sharding),
-            jax.device_put(self.seqlens_q, self.seq_length_offset_sharding),
-            jax.device_put(self.seqlens_kv, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_q, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_kv, self.seq_length_offset_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
@@ -744,11 +751,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
-            jax.device_put(self.mask_for_customcall, self.mask_sharding),
-            jax.device_put(self.seqlens_q, self.seq_length_offset_sharding),
-            jax.device_put(self.seqlens_kv, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_q, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_kv, self.seq_length_offset_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
@@ -790,11 +793,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
-                self.mask_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
+                self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
             out_shardings=(None, grad_shardings),
