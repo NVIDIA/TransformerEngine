@@ -303,7 +303,6 @@ def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
         ).squeeze(-1)
 
     offsets = _find_offsets(segment_ids)
-    seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
     return seqlens, offsets
 
 
