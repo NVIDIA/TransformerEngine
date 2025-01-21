@@ -24,7 +24,7 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, QKVLayout
+from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..softmax import SoftmaxType
@@ -267,6 +267,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
 
@@ -276,7 +277,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         query: Array,
         key: Array,
         value: Array,
-        mask: Optional[Array] = None,
+        sequence_descriptor: Optional[SequenceDescriptor] = None,
         bias: Optional[Array] = None,
         *,
         dropout_rng: Optional[PRNGKey] = None,
@@ -293,8 +294,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             scale_factor = self.scale_factor
         del self.scale_factor
 
-        # TODO(rewang): integrate THD format
-        if self.qkv_layout == QKVLayout.BS3HD:
+        if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
             key: ignore
@@ -306,7 +306,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (qkv_packed,),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -315,10 +315,11 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
-        elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
+        elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
             query: query tensor, shape = [..., h, d]
             key: kvpacked tensor, shape = [..., 2, h, d]
@@ -331,7 +332,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (query, kv_packed),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -340,10 +341,11 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
-        elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+        elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 key = key.transpose([1, 0, 2, 3])
@@ -351,7 +353,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (query, key, value),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -360,6 +362,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
@@ -502,6 +505,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
 
@@ -511,7 +515,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         query: Array,
         key: Array,
         value: Array,
-        mask: Optional[Array] = None,
+        mask: Optional[Union[SequenceDescriptor, Array]] = None,
         bias: Optional[Array] = None,
         *,
         deterministic: bool = False,
@@ -604,16 +608,18 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if not use_fused_attn:
             # unfused attention only supports splitted query, key, value
-            if qkv_layout == QKVLayout.BS3HD:
+            if qkv_layout.is_qkvpacked():
                 query, key, value = jnp.split(query, [1, 2], axis=-3)
                 query, key, value = map(
                     functools.partial(jnp.squeeze, axis=-3), [query, key, value]
                 )
-            elif qkv_layout == QKVLayout.BSHD_BS2HD:
+            elif qkv_layout.is_kvpacked():
                 key, value = jnp.split(key, [1], axis=-3)
                 key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
             else:
-                assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+                assert qkv_layout.is_separate()
+
+            assert isinstance(mask, jnp.ndarray)
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
@@ -637,6 +643,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
