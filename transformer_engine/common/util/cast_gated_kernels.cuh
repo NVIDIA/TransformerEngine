@@ -80,25 +80,25 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       DIVUP(dshmem_unaligned_as_uint, static_cast<uint64_t>(ALIGNMENT_SIZE)) * ALIGNMENT_SIZE;
   char *dshmem = reinterpret_cast<char *>(dshmem_aligned_as_uint);
 
-  const size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
-  const size_t buff_elems_total = BUFFERS_NUM * buff_elems;
-  const size_t buff_size_aligned_in =
+  constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
+  constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
+  constexpr size_t buff_size_aligned_in =
       DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
-  const size_t buff_size_aligned_out =
+  constexpr size_t buff_size_aligned_out =
       DIVUP(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
 
-  const size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
+  constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
 
-  const size_t in_act_mem = buff_size_aligned_in;
-  const size_t in_gate_mem = buff_size_aligned_in;
-  const size_t in_mem = in_act_mem + in_gate_mem;
+  constexpr size_t in_act_mem = buff_size_aligned_in;
+  constexpr size_t in_gate_mem = buff_size_aligned_in;
+  constexpr size_t in_mem = in_act_mem + in_gate_mem;
 
-  const size_t out_act_mem = buff_size_aligned_out;
-  const size_t out_gate_mem = buff_size_aligned_out;
-  const size_t out_mem = out_act_mem + out_gate_mem;
+  constexpr size_t out_act_mem = buff_size_aligned_out;
+  constexpr size_t out_gate_mem = buff_size_aligned_out;
+  constexpr size_t out_mem = out_act_mem + out_gate_mem;
 
   // const size_t in_transaction_size = grad_mem + in_mem;
-  const size_t in_transaction_size = (IS_DGATED ? 3 : 2) * buff_elems * sizeof(IType);
+  constexpr size_t in_transaction_size = buff_elems * sizeof(IType);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_grad_sh = reinterpret_cast<IType *>(dshmem);
@@ -118,44 +118,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[ITERATIONS];
 
-  if (is_master_thread) {
-// Initialize barrier. All `blockDim.x * blockDim.y` threads in block participate.
-#pragma unroll
-    for (int it = 0; it < ITERATIONS; ++it) {
-      ptx::mbarrier_init(&mbar[it], THREADS_PER_CHUNK);
-    }
-    ptx::fence_proxy_async_shared_cta();
-  }
-  // Syncthreads so initialized barrier is visible to all threads.
-  __syncthreads();
+  initialize_barriers<ITERATIONS, THREADS_PER_CHUNK>(mbar, is_master_thread);
 
   int parity = 0;
 
   // Prefetch data of the first stage
-  if (is_master_thread) {
-    // Initiate bulk tensor copy
-    if constexpr (IS_DGATED) {
-      // Grad
-      ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(&in_grad_sh[0]),
-                                                    TMAP_grad_in, chunk_offset_X, chunk_offset_Y,
-                                                    &mbar[0]);
-    }
 
-    // Act
-    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(&in_act_sh[0]),
-                                                  TMAP_gate_in, chunk_offset_X, chunk_offset_Y,
-                                                  &mbar[0]);
-
-    // Gate
-    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(&in_gate_sh[0]),
-                                                  TMAP_gate_in, chunk_offset_X + cols,
-                                                  chunk_offset_Y, &mbar[0]);
-
-    // Arrive on the barrier and tell how many bytes are expected to come in.
-    ptx::mbarrier_arrive_expect_tx(&mbar[0], in_transaction_size);
+  if constexpr (IS_DGATED) {
+    copy_2d_to_sharedx3(in_grad_sh, TMAP_grad_in, chunk_offset_X, chunk_offset_Y,
+                        in_act_sh, TMAP_gate_in, chunk_offset_X, chunk_offset_Y,
+                        in_gate_sh, TMAP_gate_in, chunk_offset_X + cols, chunk_offset_Y,
+                        in_transaction_size, &mbar[0], is_master_thread);
   } else {
-    // Other threads just arrive
-    ptx::mbarrier_arrive(&mbar[0]);
+    copy_2d_to_sharedx2(in_act_sh, TMAP_gate_in, chunk_offset_X, chunk_offset_Y,
+                        in_gate_sh, TMAP_gate_in, chunk_offset_X + cols, chunk_offset_Y,
+                        in_transaction_size, &mbar[0], is_master_thread);
   }
 
 #pragma unroll
@@ -163,31 +140,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int buff = it % BUFFERS_NUM;
     const int next_it = it + 1;
     if (next_it < ITERATIONS) {
-      if (is_master_thread) {
-        const int next_buff = next_it % BUFFERS_NUM;
-        const int chunk_it_offset_y = chunk_offset_Y + next_it * BUFFER_DIM_Y;
-        const int chunk_it_offset_x = chunk_offset_X;
-        // Initiate bulk tensor copy
-        if constexpr (IS_DGATED) {
-          // Grad
-          ptx::cp_async_bulk_tensor_2d_global_to_shared(
-              reinterpret_cast<uint64_t *>(&in_grad_sh[next_buff * buff_elems]), TMAP_grad_in,
-              chunk_it_offset_x, chunk_it_offset_y, &mbar[next_it]);
-        }
-        // Act
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&in_act_sh[next_buff * buff_elems]), TMAP_gate_in,
-            chunk_it_offset_x, chunk_it_offset_y, &mbar[next_it]);
-        // Gate
-        ptx::cp_async_bulk_tensor_2d_global_to_shared(
-            reinterpret_cast<uint64_t *>(&in_gate_sh[next_buff * buff_elems]), TMAP_gate_in,
-            chunk_it_offset_x + cols, chunk_it_offset_y, &mbar[next_it]);
-
-        // Arrive on the barrier and tell how many bytes are expected to come in.
-        ptx::mbarrier_arrive_expect_tx(&mbar[next_it], in_transaction_size);
+      const int next_buff = next_it % BUFFERS_NUM;
+      const int chunk_it_offset_y = chunk_offset_Y + next_it * BUFFER_DIM_Y;
+      const int chunk_it_offset_x = chunk_offset_X;
+      if constexpr (IS_DGATED) {
+        copy_2d_to_sharedx3(&in_grad_sh[next_buff * buff_elems], TMAP_grad_in,
+                            chunk_it_offset_x, chunk_it_offset_y,
+                            &in_act_sh[next_buff * buff_elems], TMAP_gate_in,
+                            chunk_it_offset_x, chunk_it_offset_y,
+                            &in_gate_sh[next_buff * buff_elems], TMAP_gate_in,
+                            chunk_it_offset_x + cols, chunk_it_offset_y,
+                            in_transaction_size, &mbar[next_it], is_master_thread);
       } else {
-        // Other threads just arrive
-        ptx::mbarrier_arrive(&mbar[next_it]);
+        copy_2d_to_sharedx2(&in_act_sh[next_buff * buff_elems], TMAP_gate_in,
+                            chunk_it_offset_x, chunk_it_offset_y,
+                            &in_gate_sh[next_buff * buff_elems], TMAP_gate_in,
+                            chunk_it_offset_x + cols, chunk_it_offset_y,
+                            in_transaction_size, &mbar[next_it], is_master_thread);
       }
     }
 
@@ -697,9 +666,9 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
   }
 
-  NVTE_CHECK(!output->has_columnwise_data(), "Only cast supported in this function.");
-  const size_t rows = gated_input.data.shape[0];
-  const size_t cols = gated_input.data.shape[1] / 2;
+  NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
@@ -899,19 +868,25 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
   CheckInputTensor(grad, "dgated_act_grad");
   CheckInputTensor(input, "dgated_act_input");
   CheckOutputTensor(*output, "dgated_act_output");
-  NVTE_CHECK(grad.data.shape.size() == 2, "Grad must have 2 dimensions.");
-  NVTE_CHECK(input.data.shape.size() == 2, "Input must have 2 dimensions.");
-  NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
-  NVTE_CHECK(output->data.shape[0] == grad.data.shape[0],
-             "Output shape[0] must be equal to grad shape[0].");
-  NVTE_CHECK(output->data.shape[1] == grad.data.shape[1] * 2,
-             "Output shape[1] must be 2x larger than grad shape[1].");
-  NVTE_CHECK(input.data.shape == output->data.shape, "Input and output shapes must match.");
+  NVTE_CHECK(output->flat_first_dim() == grad.flat_first_dim(),
+             "Wrong output shape. Expected (after flattenting) [",
+             grad.flat_first_dim(), ", *], got [",
+             output->flat_first_dim(), ", ",
+             output->flat_last_dim(), "].");
+  NVTE_CHECK(output->flat_last_dim() == grad.flat_last_dim() * 2,
+             "Wrong output shape. Expected (after flattenting) [*, ",
+             grad.flat_last_dim() * 2, "], got [",
+             output->flat_first_dim(), ", ",
+             output->flat_last_dim(), "].");
+  NVTE_CHECK(input.data.shape == output->data.shape,
+             "Input and output shapes must match. Input shape: ",
+             input.data.shape, ", output shape: ",
+             output->data.shape, ".");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType,
+      input.dtype(), IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType,
+          output->dtype(), OType,
 
           if (!is_fp8_dtype(output->data.dtype) ||
               is_delayed_tensor_scaling(output->scaling_mode)) {
@@ -919,8 +894,11 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
             DGatedActivationKernelLauncher<nvec, fp32, ParamOP, ActOP, DActOP>(
                 reinterpret_cast<const IType *>(grad.data.dptr),
                 reinterpret_cast<const IType *>(input.data.dptr),
-                reinterpret_cast<OType *>(output->data.dptr), grad.data.shape[0],
-                grad.data.shape[1], {}, stream);
+                reinterpret_cast<OType *>(output->data.dptr),
+                reinterpret_cast<const fp32 *>(output->scale.dptr),
+                reinterpret_cast<fp32 *>(output->amax.dptr),
+                reinterpret_cast<fp32 *>(output->scale_inv.dptr), grad.flat_first_dim(),
+                grad.flat_last_dim(), {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -936,20 +914,18 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   CheckInputTensor(gated_input, "gated_input");
   CheckOutputTensor(*output, "output");
 
-  const size_t rows = gated_input.data.shape[0];
-  const size_t cols = gated_input.data.shape[1] / 2;
-  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
+  NVTE_CHECK(gated_input.flat_last_dim() % 2 == 0, "Number of columns must be even.");
 
-  NVTE_CHECK(gated_input.data.shape[1] % 2 == 0, "Number of columns must be even.");
-  NVTE_CHECK(gated_input.data.shape.size() == 2, "Gated input must have 2 dimensions.");
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
+  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
   if constexpr (IS_DGATED) {
     CheckInputTensor(grad, "grad");
     NVTE_CHECK(!is_fp8_dtype(grad.data.dtype), "Grad input must be in higher precision.");
     NVTE_CHECK(grad.data.dtype == gated_input.data.dtype, "Types of both inputs must match.");
-    NVTE_CHECK(grad.data.shape.size() == 2, "Grad input must have 2 dimensions.");
-    NVTE_CHECK(grad.data.shape[0] == rows, "Wrong dimension of the grad input.");
-    NVTE_CHECK(grad.data.shape[1] == cols, "Wrong dimension of the grad input.");
+    NVTE_CHECK(grad.flat_first_dim() == rows, "Wrong dimension of the grad input.");
+    NVTE_CHECK(grad.flat_last_dim() == cols, "Wrong dimension of the grad input.");
   }
 
   NVTE_CHECK(output->has_data() || output->has_columnwise_data(),
@@ -959,15 +935,13 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   bool is_fp8_colwise_output = true;
   if (output->has_data()) {
     is_fp8_rowwise_output = is_fp8_dtype(output->data.dtype);
-    NVTE_CHECK(output->data.shape.size() == 2, "Output must have 2 dimensions.");
-    NVTE_CHECK(output->data.shape[0] == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->data.shape[1] == output_cols, "Wrong dimension of the output.");
+    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
+    NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
   if (output->has_columnwise_data()) {
     is_fp8_colwise_output = is_fp8_dtype(output->columnwise_data.dtype);
-    NVTE_CHECK(output->columnwise_data.shape.size() == 2, "Output must have 2 dimensions.");
-    NVTE_CHECK(output->columnwise_data.shape[0] == rows, "Wrong dimension of the output.");
-    NVTE_CHECK(output->columnwise_data.shape[1] == output_cols, "Wrong dimension of the output.");
+    NVTE_CHECK(output->flat_first_dim() == rows, "Wrong dimension of the output.");
+    NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
   const bool is_full_tile = (rows % CHUNK_DIM_Y == 0) && (cols % CHUNK_DIM_X == 0);
@@ -987,7 +961,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     if (use_tma_kernels) {
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
-      NVTE_ERROR("MX FP8 quantization supports full tiles only.");
+      NVTE_ERROR("MXFP8 quantization supports full tiles only.");
     }
   } else {
     NVTE_ERROR("Not supported scaling mode");

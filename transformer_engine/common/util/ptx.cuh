@@ -167,6 +167,144 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 
 }  // namespace ptx
+
+namespace {
+
+template <int num_barriers, int THREADS_PER_BLOCK>
+__forceinline__ __device__ void initialize_barriers(uint64_t *mbar, const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (is_master_thread) {
+    // Initialize barrier. All `blockDim.x * blockDim.y` threads in block participate.
+#pragma unroll
+    for (int iter = 0; iter < num_barriers; ++iter) {
+      ptx::mbarrier_init(&mbar[iter], THREADS_PER_BLOCK);
+    }
+    ptx::fence_proxy_async_shared_cta();
+  }
+  // Syncthreads so initialized barrier is visible to all threads.
+  __syncthreads();
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+template <int num_barriers>
+__forceinline__ __device__ void destroy_barriers(uint64_t *mbar, const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  // Destroy barrier. This invalidates the memory region of the barrier. If
+  // further computations were to take place in the kernel, this allows the
+  // memory location of the shared memory barrier to be reused.
+  if (is_master_thread) {
+#pragma unroll
+    for (int iter = 0; iter < num_barriers; ++iter) {
+      ptx::mbarrier_invalid(&mbar[iter]);
+    }
+  }
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__forceinline__ __device__ void copy_1d_to_shared(void *dst, const void *src,
+                                                  const size_t num_bytes, uint64_t *barrier,
+                                                  const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (is_master_thread) {
+    // Initiate bulk tensor copy
+    ptx::cp_async_bulk_tensor_1d_global_to_shared(reinterpret_cast<uint64_t *>(dst),
+                                                  reinterpret_cast<const uint64_t *>(src),
+                                                  num_bytes, barrier);
+
+    // Arrive on the barrier and tell how many bytes are expected to come in.
+    ptx::mbarrier_arrive_expect_tx(barrier, num_bytes);
+  } else {
+    // Other threads just arrive
+    ptx::mbarrier_arrive(barrier);
+  }
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__forceinline__ __device__ void copy_2d_to_shared(void *dst, const void *src, const size_t chunk_X,
+                                                  const size_t chunk_Y, const size_t num_bytes,
+                                                  uint64_t *barrier, const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (is_master_thread) {
+    // Initiate bulk tensor copy
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst),
+                                                  reinterpret_cast<const uint64_t *>(src), chunk_X,
+                                                  chunk_Y, barrier);
+
+    // Arrive on the barrier and tell how many bytes are expected to come in.
+    ptx::mbarrier_arrive_expect_tx(barrier, num_bytes);
+  } else {
+    // Other threads just arrive
+    ptx::mbarrier_arrive(barrier);
+  }
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__forceinline__ __device__ void copy_2d_to_sharedx2(void *dst, const void *src,
+                                                    const size_t chunk_X1,
+                                                    const size_t chunk_Y1,
+                                                    void *dst2, const void *src2,
+                                                    const size_t chunk_X2,
+                                                    const size_t chunk_Y2,
+                                                    const size_t num_bytes,
+                                                    uint64_t *barrier,
+                                                    const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (is_master_thread) {
+    // Initiate bulk tensor copy
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst),
+                                                  reinterpret_cast<const uint64_t *>(src), chunk_X1,
+                                                  chunk_Y1, barrier);
+
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst2),
+                                                  reinterpret_cast<const uint64_t *>(src2), chunk_X2,
+                                                  chunk_Y2, barrier);
+
+    // Arrive on the barrier and tell how many bytes are expected to come in.
+    ptx::mbarrier_arrive_expect_tx(barrier, 2 * num_bytes);
+  } else {
+    // Other threads just arrive
+    ptx::mbarrier_arrive(barrier);
+  }
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__forceinline__ __device__ void copy_2d_to_sharedx3(void *dst, const void *src,
+                                                    const size_t chunk_X1,
+                                                    const size_t chunk_Y1,
+                                                    void *dst2, const void *src2,
+                                                    const size_t chunk_X2,
+                                                    const size_t chunk_Y2,
+                                                    void *dst3, const void *src3,
+                                                    const size_t chunk_X3,
+                                                    const size_t chunk_Y3,
+                                                    const size_t num_bytes,
+                                                    uint64_t *barrier,
+                                                    const bool is_master_thread) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  if (is_master_thread) {
+    // Initiate bulk tensor copy
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst),
+                                                  reinterpret_cast<const uint64_t *>(src), chunk_X1,
+                                                  chunk_Y1, barrier);
+
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst2),
+                                                  reinterpret_cast<const uint64_t *>(src2), chunk_X2,
+                                                  chunk_Y2, barrier);
+
+    ptx::cp_async_bulk_tensor_2d_global_to_shared(reinterpret_cast<uint64_t *>(dst3),
+                                                  reinterpret_cast<const uint64_t *>(src3), chunk_X3,
+                                                  chunk_Y3, barrier);
+
+    // Arrive on the barrier and tell how many bytes are expected to come in.
+    ptx::mbarrier_arrive_expect_tx(barrier, 3 * num_bytes);
+  } else {
+    // Other threads just arrive
+    ptx::mbarrier_arrive(barrier);
+  }
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+}  // namespace
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_PTX_CUH_

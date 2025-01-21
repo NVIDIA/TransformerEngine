@@ -752,4 +752,15 @@ int32_t getDeviceComputeCapability()
     return 10 * deviceProp.major + deviceProp.minor;
 }
 
+size_t first_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 0;
+  if (shape.size() == 1) return 1;
+  return product(shape, 0, shape.size() - 1);
+}
+
+size_t last_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 0;
+  return shape[shape.size() - 1];
+}
+
 }  // namespace test

@@ -169,8 +169,7 @@ void compute_ref_x2(const ProcessingMethod processing_method,
 
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void performTest_x1(const ProcessingMethod processing_method,
-                    const size_t rows,
-                    const size_t cols,
+                    const std::vector<size_t>& shape,
                     const bool rowwise,
                     const bool colwise,
                     InputsFillCase fill_case) {
@@ -178,6 +177,9 @@ void performTest_x1(const ProcessingMethod processing_method,
     using EncodingType = fp32;
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
 
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
@@ -196,9 +198,9 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t blocks_X = ((unpadded_blocks_X + block_alignment_X - 1) / block_alignment_X) * block_alignment_X;
     const size_t scales_stride = blocks_X;
 
-    Tensor input({ rows, cols }, itype);
-    Tensor act_input({ rows, cols }, itype);
-    Tensor output_c({ rows, cols }, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor input(shape, itype);
+    Tensor act_input(shape, itype);
+    Tensor output_c(shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias({ cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
@@ -301,8 +303,7 @@ void performTest_x1(const ProcessingMethod processing_method,
  */
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void performTest_x2(const ProcessingMethod processing_method,
-                    const size_t rows,
-                    const size_t cols,
+                    const std::vector<size_t>& shape,
                     const size_t block_size_rows,
                     const size_t block_size_cols,
                     InputsFillCase fill_case) {
@@ -310,6 +311,9 @@ void performTest_x2(const ProcessingMethod processing_method,
     using EncodingType = fp32;
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
+
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
 
     const size_t unpadded_blocks_Y_rowwise = rows;
     const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
@@ -328,9 +332,9 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t scales_stride_rowwise = blocks_X_rowwise;
     const size_t scales_stride_colwise = blocks_X_colwise;
 
-    Tensor input({ rows, cols }, itype);
-    Tensor act_input({ rows, cols }, itype);
-    Tensor output({ rows, cols }, otype, true, true, NVTE_MXFP8_1D_SCALING);
+    Tensor input(shape, itype);
+    Tensor act_input(shape, itype);
+    Tensor output(shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias({ cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
@@ -429,18 +433,25 @@ void performTest_x2(const ProcessingMethod processing_method,
     }
 }
 
-std::vector<std::pair<size_t, size_t>> matrix_sizes = {
-    {1, 16},
-    {16, 48},
-    {65, 96},
-    {128, 128},
-    {256, 256},
-    {993, 512},
-    {768, 1024},
-    // {2048, 12288},
-    // {65536, 128},
-    // {16384, 1632},
-    // {16384, 6144},
+std::vector<std::vector<size_t>> matrix_sizes = {
+  {1, 16},
+  {32},
+  {65536},
+  {128, 128},
+  {256, 256},
+  {768, 1024},
+  {993, 512},
+  {256, 65536},
+  {2048, 12288},
+  {65536, 128},
+  {65536, 160},
+  {16384, 1632},
+  {1, 128},
+  {1, 1296},
+  {1, 32},
+  {5, 160},
+  {5, 4, 3, 160},
+  {217, 256},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -480,7 +491,7 @@ std::vector<ActivationType> Activation_types = {
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
                 ActivationType,
-                std::pair<size_t, size_t>,
+                std::vector<size_t>,
                 std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 transformer_engine::DType,
@@ -544,11 +555,11 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
                 TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
                     if (block_size.first == 1 || block_size.second == 1) {
                         performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             rowwise, colwise, fill_case);
                     } else {
                         performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             block_size.first, block_size.second, fill_case);
                     }
                 );
@@ -560,11 +571,11 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
                 TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
                     if (block_size.first == 1 || block_size.second == 1) {
                         performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             rowwise, colwise, fill_case);
                     } else {
                         performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             block_size.first, block_size.second, fill_case);
                     }
                 );
@@ -609,13 +620,15 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_scenarios)),
     [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param)) + "X" +
-                           to_string(std::get<1>(info.param)) + "X" +
-                           std::to_string(std::get<2>(info.param).first) + "X" +
-                           std::to_string(std::get<2>(info.param).second) + "X" +
-                           std::to_string(std::get<3>(info.param).first) + "X" +
-                           std::to_string(std::get<3>(info.param).second) + "X" +
-                           test::typeName(std::get<4>(info.param)) + "X" +
-                           test::typeName(std::get<5>(info.param)) + "X" +
-                           test::caseName(std::get<6>(info.param));
+                           to_string(std::get<1>(info.param));
+      const auto& shape = std::get<2>(info.param);
+      for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+      }
+      name += "X" + std::to_string(std::get<3>(info.param).first) +
+              "X" + std::to_string(std::get<3>(info.param).second) +
+              "X" + test::typeName(std::get<4>(info.param)) +
+              "X" + test::typeName(std::get<5>(info.param)) +
+              "X" + test::caseName(std::get<6>(info.param));
         return name;
     });

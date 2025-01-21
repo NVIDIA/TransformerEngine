@@ -407,6 +407,10 @@ inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
 size_t typeToSize(DType type);
 size_t product(const NVTEShape &shape);
+size_t product(const std::vector<size_t> &shape);
+
+size_t first_dimension(const std::vector<size_t> &shape);
+size_t last_dimension(const std::vector<size_t> &shape);
 
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
