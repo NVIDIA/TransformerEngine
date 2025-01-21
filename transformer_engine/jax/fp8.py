@@ -28,6 +28,32 @@ _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
+def _check_fp4_support(gpu_id) -> Tuple[bool, str]:
+    """Return if fp4 support is available"""
+    gpu_arch = get_device_compute_capability(gpu_id)
+    if gpu_arch >= 100:  # hopper and above
+        return True, ""
+    if gpu_arch < 100:  # pre-ada
+        return False, "Device compute capability 8.9 or lower not supported."
+    return True, ""
+
+def is_fp4_available(gpu_id=None) -> Tuple[bool, str]:
+    """Return if fp4 support is available"""
+    if gpu_id is not None:
+        return _check_fp4_support(gpu_id)
+
+    global _is_fp4_available, _reason_for_no_fp4
+    if _is_fp4_available is None:
+        _is_fp4_available = True
+        # JAX doesn't provide the local GPU id.
+        for local_gpu_id in range(len(jax.local_devices())):
+            ret, msg = _check_fp4_support(local_gpu_id)
+            if ret is False:
+                _is_fp4_available = ret
+                _reason_for_no_fp4 = msg
+            break
+
+    return _is_fp4_available, _reason_for_no_fp4
 
 def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""

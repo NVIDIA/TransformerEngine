@@ -58,10 +58,12 @@ simplifying mixed precision training for users.
 Highlights
 ==========
 
-* Easy-to-use modules for building Transformer layers with FP8 support
+* Easy-to-use modules for building Transformer layers with FP8 support and FP4 support
 * Optimizations (e.g. fused kernels) for Transformer models
-* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
+* Support for FP8 on NVIDIA Hopper, NVIDIA Ada GPUs and NVIDIA Blackwell GPUs
+* Support for FP4 on NVIDIA Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
+* Support for (FP32, BF16) on NVIDIA Turing GPU architecture.
 
 Examples
 ========
@@ -149,7 +151,7 @@ Installation
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
 * Linux x86_64
-* CUDA 12.0+ for Hopper and CUDA 12.1+ for Ada
+* CUDA 12.0+ for Hopper, CUDA 12.1+ for Ada and Cuda 12.7+ for Blackwell
 * NVIDIA Driver supporting CUDA 12.0 or later
 * cuDNN 8.1 or later
 * For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
