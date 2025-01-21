@@ -63,7 +63,7 @@ Highlights
 * Support for FP8 on NVIDIA Hopper, NVIDIA Ada GPUs and NVIDIA Blackwell GPUs
 * Support for FP4 on NVIDIA Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
-* Support for (FP32, BF16) on NVIDIA Turing GPU architecture.
+* Support for (FP32) on NVIDIA Turing GPU architecture.
 
 Examples
 ========
