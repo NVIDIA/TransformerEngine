@@ -28,6 +28,7 @@ _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
 
+
 def _check_fp8_support(gpu_id) -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     gpu_arch = get_device_compute_capability(gpu_id)
