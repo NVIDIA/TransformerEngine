@@ -208,28 +208,40 @@ std::vector<py::object> fused_attn_fwd(
   std::vector<py::object> output_tensors;
   output_tensors.push_back(o_python);
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
     // allocate memory for nvte_aux_tensor_pack.tensors
     at::Tensor output_tensor;
     if (nvte_aux_tensor_pack.size >= 2) {
       if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI) && (Bias.has_value())) {
         if (i < nvte_aux_tensor_pack.size - 2) {
-          output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+          NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+          output_tensor = allocateSpace(
+              nvte_shape_to_vector(temp_shape),
+              static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
         } else if (i == nvte_aux_tensor_pack.size - 2) {
           output_tensor = rng_state;
         } else if (i == nvte_aux_tensor_pack.size - 1) {
           output_tensor = Bias.value();
         }
       } else {
-        output_tensor = (i < nvte_aux_tensor_pack.size - 1)
-                            ? allocateSpace(tensor->data.shape, tensor->data.dtype, false)
-                            : rng_state;
+        NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+        output_tensor =
+            (i < nvte_aux_tensor_pack.size - 1)
+                ? allocateSpace(
+                      nvte_shape_to_vector(temp_shape),
+                      static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false)
+                : rng_state;
       }
     } else {
-      output_tensor = allocateSpace(tensor->data.shape, tensor->data.dtype, false);
+      NVTEShape temp_shape = nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i]);
+      output_tensor = allocateSpace(
+          nvte_shape_to_vector(temp_shape),
+          static_cast<DType>(nvte_tensor_type(nvte_aux_tensor_pack.tensors[i])), false);
     }
     output_tensors.push_back(py::cast(output_tensor));
-    tensor->data.dptr = output_tensor.data_ptr();
+    NVTEBasicTensor temp_data = {output_tensor.data_ptr(),
+                                 nvte_tensor_type(nvte_aux_tensor_pack.tensors[i]),
+                                 nvte_tensor_shape(nvte_aux_tensor_pack.tensors[i])};
+    nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
   // execute the kernel
@@ -425,11 +437,14 @@ std::vector<py::object> fused_attn_bwd(
   nvte_tensor_pack_create(&nvte_aux_tensor_pack);
   nvte_aux_tensor_pack.size = Aux_CTX_Tensors.size();
   for (size_t i = 0; i < nvte_aux_tensor_pack.size; ++i) {
-    auto tensor = reinterpret_cast<transformer_engine::Tensor *>(nvte_aux_tensor_pack.tensors[i]);
-    tensor->data.dptr = Aux_CTX_Tensors[i].data_ptr();
     std::vector<int64_t> tmp(Aux_CTX_Tensors[i].sizes().vec());
-    tensor->data.shape = std::vector<size_t>(tmp.begin(), tmp.end());
-    tensor->data.dtype = GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type());
+    auto temp_vec = std::vector<size_t>(tmp.begin(), tmp.end());
+    const NVTEShape temp_shape = {temp_vec.data(), temp_vec.size()};
+    NVTEBasicTensor temp_data = {
+        Aux_CTX_Tensors[i].data_ptr(),
+        static_cast<NVTEDType>(GetTransformerEngineDType(Aux_CTX_Tensors[i].scalar_type())),
+        temp_shape};
+    nvte_set_tensor_param(&nvte_aux_tensor_pack.tensors[i], kNVTERowwiseData, &temp_data);
   }
 
   // create dBias the same shape as Bias

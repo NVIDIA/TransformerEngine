@@ -190,7 +190,6 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
   CheckScaleTensorShape(t, name);
 }
-
 }  // namespace transformer_engine
 
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
