@@ -5,3 +5,6 @@
 	path = 3rdparty/cudnn-frontend
 	url = ../../../cudnn/cudnn_frontend.git
 	branch = develop
+[submodule "dlfw-ci"]
+	path = dlfw-ci
+	url = ../../devops/dlfw-ci
