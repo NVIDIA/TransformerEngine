@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
-from enum import Enum
+from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
@@ -28,12 +28,11 @@ from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
-    QKVFormat,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
-    fused_attn_thd,
     make_swa_mask,
+    SequenceDescriptor,
     CPStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
@@ -199,8 +198,8 @@ def get_seqlens_and_offsets(segment_ids):
         ).squeeze(-1)
 
     offsets = _find_offsets(segment_ids)
-    offsets = jnp.insert(offsets, -1, values=-1, axis=-1)
-    seqlens = jnp.insert(seqlens, -1, values=0, axis=-1)
+    offsets = jnp.insert(offsets, offsets.shape[-1], values=-1, axis=-1)
+    seqlens = jnp.insert(seqlens, seqlens.shape[-1], values=0, axis=-1)
     seqlens = jnp.where(seqlens, seqlens, -1)
     return seqlens, offsets
 
@@ -239,11 +238,7 @@ def customcall_fused_dpa(
     key,
     value,
     bias,
-    mask,
-    seqlens_q,
-    seqlens_kv,
-    offsets_q,
-    offsets_kv,
+    sequence_descriptor,
     dropout_rng,
     **kwargs,
 ):
@@ -264,19 +259,9 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    if not qkv_layout.is_thd():
-        kwargs.pop("max_segments_per_seq")
-        return fused_attn(qkv_args, bias, mask, dropout_rng, **kwargs).astype(query.dtype)
-    return fused_attn_thd(
-        qkv_args,
-        bias,
-        seqlens_q,
-        seqlens_kv,
-        offsets_q,
-        offsets_kv,
-        dropout_rng,
-        **kwargs,
-    ).astype(query.dtype)
+    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, **kwargs).astype(
+        query.dtype
+    )
 
 
 class BiasShape(Enum):
@@ -288,6 +273,12 @@ class BiasShape(Enum):
     _B1SS = "B1SS"
     _BHSS = "BHSS"
     _11SS = "11SS"
+
+
+class SeqDescFormat(Enum):
+    Mask = auto()
+    Seqlens = auto()
+    SegmentIDs = auto()
 
 
 @dataclass
@@ -309,7 +300,8 @@ class FusedAttnRunner:
     is_training: bool
     qkv_layout: QKVLayout
     bias_shape: BiasShape
-    window_size: Optional[Tuple[int, int]] = None
+    window_size: Tuple[int, int]
+    seq_desc_format: SeqDescFormat
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -327,11 +319,14 @@ class FusedAttnRunner:
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
-        if 90400 <= get_cudnn_version() < 90500:
-            return self.num_segments_per_seq
+        if self.qkv_layout.is_thd():
+            if 90400 <= get_cudnn_version() < 90500:
+                return self.num_segments_per_seq
+            else:
+                # +1 for testing runtime_segments < max_segments
+                return self.num_segments_per_seq + 1
         else:
-            # +1 for testing runtime_segments < max_segments
-            return self.num_segments_per_seq + 1
+            return 1
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
@@ -462,11 +457,11 @@ class FusedAttnRunner:
         ):
             rng = np.random.default_rng(seed=seed)
             # [1, 1, 1, 2, 2, 3, 3, 3, 3, 0, 0], 0 means pad
-            segment_ids = np.zeros((batch_size, sequence_length), dtype=int)
-            segment_pos = np.zeros((batch_size, sequence_length), dtype=int)
+            segment_ids = np.zeros((batch_size, sequence_length), dtype=np.int32)
+            segment_pos = np.zeros((batch_size, sequence_length), dtype=np.int32)
             # [0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 0]
             # [0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1], 1 means pad
-            segment_pad = np.zeros((batch_size, sequence_length), dtype=int)
+            segment_pad = np.zeros((batch_size, sequence_length), dtype=np.int32)
 
             # Not include paddings
             max_segment_size = sequence_length // num_segments
@@ -541,16 +536,47 @@ class FusedAttnRunner:
             self.window_size,
         )
 
+        # Test different input formats
         if self.qkv_layout.is_thd():
-            self.mask_for_customcall = None  # THD format doesn't support mask
+            match self.seq_desc_format:
+                case SeqDescFormat.Mask:
+                    pytest.skip("THD doesn't support mask input")
+                case SeqDescFormat.Seqlens:
+                    self.sequence_desciptor = SequenceDescriptor.from_seqlens_and_offsets(
+                        (self.seqlens_q, self.seqlens_kv),
+                        (self.offsets_q, self.offsets_kv),
+                    )
+                case SeqDescFormat.SegmentIDs:
+                    self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
+                        (self.segment_ids_q, self.segment_ids_kv),
+                        (self.segment_pos_q, self.segment_pos_kv),
+                    )
+                case _:
+                    raise ValueError(f"Unknown {self.seq_desc_format=}")
         else:
-            self.mask_for_customcall = make_mask(
-                self.segment_ids_q,
-                self.segment_ids_kv,
-                self.segment_pos_q,
-                self.segment_pos_kv,
-                self.attn_mask_type,
-            )
+            match self.seq_desc_format:
+                case SeqDescFormat.Mask:
+                    self.sequence_desciptor = make_mask(
+                        self.segment_ids_q,
+                        self.segment_ids_kv,
+                        self.segment_pos_q,
+                        self.segment_pos_kv,
+                        self.attn_mask_type,
+                    )
+                case SeqDescFormat.Seqlens:
+                    self.sequence_desciptor = SequenceDescriptor.from_seqlens(
+                        (
+                            self.segment_ids_q.sum(axis=-1).astype(jnp.int32),
+                            self.segment_ids_kv.sum(axis=-1).astype(jnp.int32),
+                        ),
+                    )
+                case SeqDescFormat.SegmentIDs:
+                    self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
+                        (self.segment_ids_q, self.segment_ids_kv),
+                        None,
+                    )
+                case _:
+                    raise ValueError(f"Unknown {self.seq_desc_format=}")
 
         self.dropout_rng = dropout_key if self.dropout_prob > 0 else None
         self.scaling_factor = 1.0 / sqrt(self.head_dim)
@@ -565,10 +591,21 @@ class FusedAttnRunner:
         )
         self.qkvo_sharding = NamedSharding(self.mesh, self.qkvo_psec)
 
-        self.mask_pspec = PartitionSpec(
+        mask_pspec = PartitionSpec(
             self.mesh_resource.dp_resource, None, self.mesh_resource.cp_resource, None
         )
-        self.mask_sharding = NamedSharding(self.mesh, self.mask_pspec)
+        self.mask_sharding = NamedSharding(self.mesh, mask_pspec)
+
+        match self.seq_desc_format:
+            case SeqDescFormat.Mask:
+                self.seq_desc_sharding = self.mask_sharding
+            case _:
+
+                def to_dp_shardings(x):
+                    pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    return NamedSharding(self.mesh, pspec)
+
+                self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
 
         if self.bias_shape == BiasShape._1HSS:
             self.bias_pspec = PartitionSpec(
@@ -631,11 +668,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
-            jax.device_put(self.mask_for_customcall, self.mask_sharding),
-            jax.device_put(self.seqlens_q, self.seq_length_offset_sharding),
-            jax.device_put(self.seqlens_kv, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_q, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_kv, self.seq_length_offset_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
@@ -659,11 +692,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
-                self.mask_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
+                self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ],
         )
@@ -722,11 +751,7 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
-            jax.device_put(self.mask_for_customcall, self.mask_sharding),
-            jax.device_put(self.seqlens_q, self.seq_length_offset_sharding),
-            jax.device_put(self.seqlens_kv, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_q, self.seq_length_offset_sharding),
-            jax.device_put(self.offsets_kv, self.seq_length_offset_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
@@ -768,11 +793,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
-                self.mask_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
-                self.seq_length_offset_sharding,
+                self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
             out_shardings=(None, grad_shardings),
@@ -883,10 +904,7 @@ class FusedAttnRunner:
 @pytest.mark.parametrize(
     "b, s_q, s_kv, h_q, h_kv, d, dtype",
     [
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.bfloat16, id="4-128-128-16-16-64-BF16-SELF"),
-        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
         pytest.param(2, 2048, 2048, 12, 12, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-BF16-SELF"),
-        pytest.param(4, 128, 256, 16, 16, 64, jnp.bfloat16, id="4-128-256-16-16-64-BF16-CROSS"),
         pytest.param(
             2,
             2048,
@@ -897,8 +915,8 @@ class FusedAttnRunner:
             jnp.bfloat16,
             id="2-2048-1024-12-12-64-BF16-CROSS",
         ),
-        pytest.param(4, 128, 128, 16, 8, 64, jnp.bfloat16, id="4-128-128-16-8-64-BF16-GQA"),
         pytest.param(2, 2048, 2048, 12, 6, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-BF16-GQA"),
+        pytest.param(4, 128, 128, 16, 16, 64, jnp.float16, id="4-128-128-16-16-64-FP16-SELF"),
     ],
 )
 @pytest.mark.parametrize(
@@ -913,6 +931,14 @@ class FusedAttnRunner:
     [
         pytest.param(False, id="NO_SWA"),
         pytest.param(True, id="SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Mask, id="Mask"),
+        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
+        pytest.param(SeqDescFormat.SegmentIDs, id="SegmentIDs"),
     ],
 )
 class TestFusedAttn:
@@ -953,6 +979,7 @@ class TestFusedAttn:
         qkv_layout,
         bias_shape,
         swa,
+        seq_desc_format,
     ):
         """
         Test forward with parameterized configs
@@ -977,6 +1004,7 @@ class TestFusedAttn:
             qkv_layout,
             bias_shape,
             window_size,
+            seq_desc_format,
         )
         runner.test_forward()
 
@@ -1002,6 +1030,7 @@ class TestFusedAttn:
         qkv_layout,
         bias_shape,
         swa,
+        seq_desc_format,
     ):
         """
         Test backward with parameterized configs
@@ -1024,5 +1053,6 @@ class TestFusedAttn:
             qkv_layout,
             bias_shape,
             window_size,
+            seq_desc_format,
         )
         runner.test_backward()
