@@ -187,6 +187,8 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
             state = {}
             state["scaling_fwd"] = self.fp8_meta["scaling_fwd"].to_numpy()
             state["scaling_bwd"] = self.fp8_meta["scaling_bwd"].to_numpy()
+            get_global_fp8_state().get_fp8_fwd_buffer().wait()
+            get_global_fp8_state().get_fp8_bwd_buffer().wait()
             state["global_fp8_fwd_buffer"] = get_global_fp8_state().get_fp8_fwd_buffer().to_numpy()
             state["global_fp8_bwd_buffer"] = get_global_fp8_state().get_fp8_bwd_buffer().to_numpy()
             # Store other pickelable values.
@@ -224,7 +226,10 @@ class TransformerEngineBaseLayer(paddle.nn.Layer, ABC):
         if state is None:
             return
 
-        state = pickle.loads(state.numpy().tobytes())
+        if isinstance(state, paddle.Tensor):
+            state = pickle.loads(state.numpy().tobytes())
+        else:
+            state = pickle.loads(state.tobytes())
         if state is None:
             return
 
