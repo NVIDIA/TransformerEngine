@@ -5,7 +5,6 @@
 
 import argparse
 import numpy as np
-from functools import partial
 from mpi4py import MPI
 
 import jax

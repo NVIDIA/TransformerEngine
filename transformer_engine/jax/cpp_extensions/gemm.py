@@ -212,10 +212,6 @@ class CollectiveGemmPrimitive(BasePrimitive):
             lhs_aval.shape[lhs_outer_dim],
             rhs_aval.shape[rhs_outer_dim],
         ]
-        extra_out_shape = extra_out_aval.shape
-        expected_extra_out_shape = [0]
-        extra_out_dtype = dtypes.canonicalize_dtype(extra_out_aval.dtype)
-        expected_extra_out_dtype = jnp.bfloat16
         if batched_output:
             assert out_aval.ndim > 2, "Batched output buffer is missing batch dimensions."
         else:
@@ -224,6 +220,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 expected_out_shape[-1],
             ]
 
+        expected_extra_out_shape = [0]
+        expected_extra_out_dtype = jnp.bfloat16
         workspace_size = get_cublas_workspace_size_bytes()
         if comm_overlap_config is not None:
             comm_type = comm_overlap_config.get("comm_type", None)
@@ -239,17 +237,21 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 # of the appropriate size
                 workspace_size *= _NUM_MAX_COMPUTE_STREAMS
 
-                if comm_type == tex.CommOverlapType.AG:
+                if comm_type == tex.CommOverlapType.AG and extra_out_aval.size > 0:
                     expected_extra_out_shape = list(lhs_aval.shape).copy()
-                elif comm_type == tex.CommOverlapType.RS:
-                    expected_extra_out_shape = list(expected_out_shape).copy()
                     expected_extra_out_dtype = lhs_dtype
+                elif comm_type == tex.CommOverlapType.RS:
+                    assert extra_out_aval.size > 0, (
+                        "GEMM+RS overlap requires extra output buffer."
+                    )
+                    expected_extra_out_shape = list(expected_out_shape).copy()
 
                 if sharded_abstract:
                     if comm_type == tex.CommOverlapType.AG:
                         expected_out_shape[-2] *= tp_size
-                        expected_extra_out_shape[-2] *= tp_size
-                    else:
+                        if extra_out_aval.size > 0:
+                            expected_extra_out_shape[-2] *= tp_size
+                    elif comm_type == tex.CommOverlapType.RS:
                         expected_extra_out_shape[-2] = expected_extra_out_shape[-2] // tp_size
 
         assert out_aval.ndim == len(expected_out_shape), (
@@ -261,23 +263,25 @@ class CollectiveGemmPrimitive(BasePrimitive):
             + f"expected {expected_out_shape=} but found {out_aval.shape=}"
         )
 
-        assert extra_out_dtype == expected_extra_out_dtype, (
-            "Extra output has incorrect dtype: "
-            + f"expected {expected_extra_out_dtype} but found {extra_out_dtype}"
-        )
-        assert extra_out_aval.ndim == len(expected_extra_out_shape), (
-            "Extra output buffer has incorrect number of dimensions: "
-            + f"expected {len(expected_extra_out_shape)} but found {extra_out_aval.ndim}"
-        )
-        assert all(
-            [
-                extra_out_aval.shape[i] == expected_extra_out_shape[i]
-                for i in range(extra_out_aval.ndim)
-            ]
-        ), (
-            "Extra output buffer has incorrect shape: "
-            + f"expected {expected_extra_out_shape=} but found {extra_out_aval.shape=}"
-        )
+        if extra_out_aval.size > 0:
+            extra_out_dtype = dtypes.canonicalize_dtype(extra_out_aval.dtype)
+            assert extra_out_dtype == expected_extra_out_dtype, (
+                "Extra output has incorrect dtype: "
+                + f"expected {expected_extra_out_dtype} but found {extra_out_dtype}"
+            )
+            assert extra_out_aval.ndim == len(expected_extra_out_shape), (
+                "Extra output buffer has incorrect number of dimensions: "
+                + f"expected {len(expected_extra_out_shape)} but found {extra_out_aval.ndim}"
+            )
+            assert all(
+                [
+                    extra_out_aval.shape[i] == expected_extra_out_shape[i]
+                    for i in range(extra_out_aval.ndim)
+                ]
+            ), (
+                "Extra output buffer has incorrect shape: "
+                + f"expected {expected_extra_out_shape=} but found {extra_out_aval.shape=}"
+            )
 
         # Validate bias/bias_grad shape against output bufer
         bias_dtype = jnp.bfloat16 if jax_dtype_is_fp8(out_dtype) else out_dtype
@@ -317,7 +321,8 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
         pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        extra_out_updated_aval = extra_out_aval.update(shape=extra_out_shape, dtype=extra_out_dtype)
+        extra_out_updated_aval = extra_out_aval.update(shape=expected_extra_out_shape,
+                                                       dtype=expected_extra_out_dtype)
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         return (
@@ -381,7 +386,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         Fused attention fwd lowering rules
         """
         del batched_output, sharded_abstract
-        lhs_aval, _, rhs_aval, _, bias_aval, *_ = ctx.avals_in
+        lhs_aval, _, rhs_aval, _, bias_aval, *_, extra_out_aval = ctx.avals_in
         lhs_inner_dim, rhs_inner_dim = map(
             sanitize_dims, contracting_dims, (lhs_aval.ndim, rhs_aval.ndim)
         )
@@ -407,8 +412,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
             6: 0,  # out         <-->  out_updated
             7: 1,  # out_amax    <-->  out_amax_updated
             8: 2,  # out_scale   <-->  out_scale_updated
-            9: 5,  # extra_out   <-->  extra_out_updated
         }
+        if extra_out_aval.size > 0:
+            operand_output_aliases[9] = 5  # extra_out  <-->  extra_out_updated
 
         if is_ffi_enabled():
             name = "te_gemm_ffi"
@@ -570,7 +576,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         batched_extra_out = False
         if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
             comm_type = comm_overlap_config["comm_type"]
-            if comm_type == tex.CommOverlapType.AG:
+            if comm_type == tex.CommOverlapType.AG and extra_out.size > 0:
                 # Extra output is global LHS, we can collapse but need to recover batches later
                 batched_extra_out = len(lhs_batch_dims) > 0
             elif comm_type == tex.CommOverlapType.RS:
@@ -701,7 +707,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         result_infos,
     ):
         del accumulate, use_split_accumulator, sharded_abstract, result_infos
-        lhs, _, rhs, *_ = arg_infos
+        lhs, _, rhs, *_, extra_out = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
 
         lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
@@ -778,7 +784,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Validate operand sharding for comm+GEMM overlap and adust extra output sharding
         extra_out_spec = [None]
-        if comm_overlap_config is not None:
+        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
             comm_type = comm_overlap_config.get("comm_type", None)
             tp_resource = comm_overlap_config.get("tp_resource", global_mesh_resource().tp_resource)
             if comm_type == tex.CommOverlapType.AG:
@@ -796,8 +802,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
                     "AG+GEMM overlap requires the contracting dimension of the RHS operand "
                     + "to be unsharded."
                 )
-                extra_out_spec = list(lhs_spec).copy()
-                extra_out_spec[lhs_outer_dim] = None
+                if extra_out.size > 0:
+                    extra_out_spec = list(lhs_spec).copy()
+                    extra_out_spec[lhs_outer_dim] = None
 
             elif comm_type == tex.CommOverlapType.RS:
                 # RS overlap requires the contracting dimensions of both LHS and RHS to be
@@ -821,6 +828,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                 )
                 extra_out_spec = list(out_spec).copy()
                 extra_out_spec[-2] = tp_resource
+
         extra_out_sharding = NamedSharding(mesh, PartitionSpec(*extra_out_spec))
 
         return (
@@ -848,7 +856,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
         result_infos,
     ):
         del sharded_abstract, result_infos
-        lhs, _, rhs, *_ = arg_infos
+        lhs, _, rhs, *_, extra_out = arg_infos
         lhs_spec, rhs_spec = map(get_padded_spec, [lhs, rhs])
 
         lhs_inner_dim, rhs_inner_dim = map(sanitize_dims, contracting_dims, (lhs.ndim, rhs.ndim))
@@ -900,9 +908,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
 
         # Extra output sharding for comm+GEMM overlap
         extra_out_spec = [None]
-        if comm_overlap_config is not None:
+        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
             comm_type = comm_overlap_config.get("comm_type", None)
-            if comm_type == tex.CommOverlapType.AG:
+            if comm_type == tex.CommOverlapType.AG and extra_out.size > 0:
                 extra_out_spec = list(lhs_spec).copy()
                 extra_out_spec[lhs_outer_dim] = None
             elif comm_type == tex.CommOverlapType.RS:
@@ -1029,14 +1037,12 @@ def gemm_impl(
         out = jnp.zeros(out_shape, dtype=lhs.dtype)
 
     if extra_out is None:
-        extra_out_shape = 0
-        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
-            comm_type = comm_overlap_config["comm_type"]
-            if comm_type == tex.CommOverlapType.AG:
-                extra_out_shape = list(lhs.shape).copy()
-            elif comm_type == tex.CommOverlapType.RS:
-                extra_out_shape = list(out_shape).copy()
-        extra_out = jnp.zeros(extra_out_shape, dtype=lhs.dtype)
+        extra_out_shape = (0,)
+        if (comm_overlap_config is not None
+            and comm_overlap_config["method"] != "bulk"
+            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+            extra_out_shape = list(out_shape).copy()
+        extra_out = jnp.zeros(extra_out_shape, dtype=jnp.bfloat16)
 
     if not fuse_bias:
         bias = jnp.zeros(0, dtype=lhs.dtype)
@@ -1119,13 +1125,11 @@ def fp8_gemm_impl(
         out_dtype = out.dtype
 
     if extra_out is None:
-        extra_out_shape = 0
-        if comm_overlap_config is not None and comm_overlap_config["method"] != "bulk":
-            comm_type = comm_overlap_config["comm_type"]
-            if comm_type == tex.CommOverlapType.AG:
-                extra_out_shape = list(lhs.shape).copy()
-            elif comm_type == tex.CommOverlapType.RS:
-                extra_out_shape = list(out_shape).copy()
+        extra_out_shape = (0,)
+        if (comm_overlap_config is not None
+            and comm_overlap_config["method"] != "bulk"
+            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+            extra_out_shape = list(out_shape).copy()
         extra_out = jnp.zeros(extra_out_shape, dtype=jnp.bfloat16)
 
     if jax_dtype_is_fp8(out_dtype):

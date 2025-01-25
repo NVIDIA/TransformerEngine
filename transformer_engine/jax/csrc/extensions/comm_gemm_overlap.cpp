@@ -258,8 +258,10 @@ Error_Type CommGemmOverlapFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type 
              "out_amax not bound to out_amax_updated in TE/JAX comm+GEMM overlap.");
   NVTE_CHECK(out_scale_ptr == out_scale_updated_ptr,
              "out_scale not bound to out_scale_updated in TE/JAX comm+GEMM overlap.");
-  NVTE_CHECK(extra_out_ptr == extra_out_updated_ptr,
-             "extra_out not bound to extra_out_updated in TE/JAX comm+GEMM overlap.");
+  if (extra_out.element_count() > 0) {
+    NVTE_CHECK(extra_out_ptr == extra_out_updated_ptr,
+               "extra_out not bound to extra_out_updated in TE/JAX comm+GEMM overlap.");
+  }
 
   CommGemmOverlapImpl(
       lhs_ptr, lhs_shape, lhs_dtype, lhs_scale_inv_ptr, lhs_trans, rhs_ptr, rhs_shape, rhs_dtype,
