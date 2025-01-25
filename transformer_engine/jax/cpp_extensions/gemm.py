@@ -241,9 +241,7 @@ class CollectiveGemmPrimitive(BasePrimitive):
                     expected_extra_out_shape = list(lhs_aval.shape).copy()
                     expected_extra_out_dtype = lhs_dtype
                 elif comm_type == tex.CommOverlapType.RS:
-                    assert extra_out_aval.size > 0, (
-                        "GEMM+RS overlap requires extra output buffer."
-                    )
+                    assert extra_out_aval.size > 0, "GEMM+RS overlap requires extra output buffer."
                     expected_extra_out_shape = list(expected_out_shape).copy()
 
                 if sharded_abstract:
@@ -321,8 +319,9 @@ class CollectiveGemmPrimitive(BasePrimitive):
         )
         pre_gelu_out_aval = gelu_input_aval.update(shape=gelu_shape, dtype=bias_dtype)
         bias_grad_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
-        extra_out_updated_aval = extra_out_aval.update(shape=expected_extra_out_shape,
-                                                       dtype=expected_extra_out_dtype)
+        extra_out_updated_aval = extra_out_aval.update(
+            shape=expected_extra_out_shape, dtype=expected_extra_out_dtype
+        )
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
         return (
@@ -1038,9 +1037,11 @@ def gemm_impl(
 
     if extra_out is None:
         extra_out_shape = (0,)
-        if (comm_overlap_config is not None
+        if (
+            comm_overlap_config is not None
             and comm_overlap_config["method"] != "bulk"
-            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS
+        ):
             extra_out_shape = list(out_shape).copy()
         extra_out = jnp.zeros(extra_out_shape, dtype=jnp.bfloat16)
 
@@ -1126,9 +1127,11 @@ def fp8_gemm_impl(
 
     if extra_out is None:
         extra_out_shape = (0,)
-        if (comm_overlap_config is not None
+        if (
+            comm_overlap_config is not None
             and comm_overlap_config["method"] != "bulk"
-            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS):
+            and comm_overlap_config["comm_type"] == tex.CommOverlapType.RS
+        ):
             extra_out_shape = list(out_shape).copy()
         extra_out = jnp.zeros(extra_out_shape, dtype=jnp.bfloat16)
 
