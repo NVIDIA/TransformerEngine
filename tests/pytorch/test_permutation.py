@@ -24,7 +24,7 @@ torch.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 
 
-def pytorch_permute_indice_map(tokens, indices, num_out_tokens: int = None):
+def pytorch_permute_index_map(tokens, indices, num_out_tokens: int = None):
     """
     Permute the tokens based on the indices. Token with the same index will be grouped together.
     The input indices shape is [tokens, top_k], it indicates which experts were selected by each token separately.
@@ -56,7 +56,7 @@ def pytorch_permute_indice_map(tokens, indices, num_out_tokens: int = None):
     return permuted_tokens, sorted_indices
 
 
-def pytorch_unpermute_indice_map(
+def pytorch_unpermute_index_map(
     permuted_tokens: torch.Tensor,
     sorted_indices: torch.Tensor,
     probs: torch.Tensor = None,
@@ -181,30 +181,24 @@ def pytorch_sort_chunks_by_index(
     return output
 
 
-def dtype_tols(te_dtype: tex.DType, has_tolerance: bool = True) -> Dict[str, float]:
+def dtype_tols(te_dtype: tex.DType) -> Dict[str, float]:
     """Estimated tolerances for a datatype
 
     Based on tolerances for torch.testing.assert_close.
 
     """
-    if has_tolerance:
-        if te_dtype == tex.DType.kFloat32:
-            return dict(rtol=1.0e-6, atol=1.0e-6)
-        if te_dtype == tex.DType.kFloat16:
-            return dict(rtol=3.0e-3, atol=1.0e-5)
-        if te_dtype == tex.DType.kBFloat16:
-            return dict(rtol=2.0e-2, atol=1.0e-5)
-        if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
-            return dict(rtol=2.0e-1, atol=1.0e-1)
-        raise ValueError(f"Unsuppored dtype ({te_dtype})")
-    else:
-        if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
-            return dict(rtol=2.0e-1, atol=1.0e-1)
-        else:
-            return dict(rtol=0.0, atol=0.0)
+    if te_dtype == tex.DType.kFloat32:
+        return dict(rtol=1.0e-6, atol=1.0e-6)
+    if te_dtype == tex.DType.kFloat16:
+        return dict(rtol=3.0e-3, atol=1.0e-5)
+    if te_dtype == tex.DType.kBFloat16:
+        return dict(rtol=2.0e-2, atol=1.0e-5)
+    if te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3:
+        return dict(rtol=2.0e-1, atol=1.0e-1)
+    raise ValueError(f"Unsuppored dtype ({te_dtype})")
 
 
-def _test_permutation_indice_map(
+def _test_permutation_index_map(
     te_dtype,
     num_tokens,
     num_expert,
@@ -224,7 +218,7 @@ def _test_permutation_indice_map(
         num_out_tokens = num_tokens * topK
 
     print(
-        "indice map:"
+        "index map:"
         f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {te_dtype}"
     )
 
@@ -291,7 +285,7 @@ def _test_permutation_indice_map(
     # PyTorch Permutation
     #
     ###################################################################################################################################
-    pytorch_permute_output, sorted_indices = pytorch_permute_indice_map(
+    pytorch_permute_output, sorted_indices = pytorch_permute_index_map(
         pytorch_permute_fwd_input, indices, num_out_tokens
     )
     pytorch_permute_output.backward(pytorch_permute_bwd_input, retain_graph=True)
@@ -299,7 +293,7 @@ def _test_permutation_indice_map(
     pytorch_unpermute_fwd_input = pytorch_permute_output.detach()
     pytorch_unpermute_fwd_input.requires_grad_(True)
 
-    pytorch_unpermute_output = pytorch_unpermute_indice_map(
+    pytorch_unpermute_output = pytorch_unpermute_index_map(
         pytorch_unpermute_fwd_input, sorted_indices, probs=probs
     )
     pytorch_unpermute_output.backward(pytorch_unpermute_bwd_input, retain_graph=True)
@@ -397,7 +391,7 @@ def _test_permutation_indice_map(
 
     if BENCHMARK:
         t1 = perf_test_cuda_kernel(
-            lambda: pytorch_permute_indice_map(pytorch_permute_fwd_input, indices, num_out_tokens)
+            lambda: pytorch_permute_index_map(pytorch_permute_fwd_input, indices, num_out_tokens)
         )
         t2 = perf_test_cuda_kernel(
             lambda: te_permute(te_permute_fwd_input, indices, num_out_tokens, map_type="index")
@@ -425,7 +419,7 @@ def _test_permutation_indice_map(
         print(f"permute\t\tbwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
         t1 = perf_test_cuda_kernel(
-            lambda: pytorch_unpermute_indice_map(
+            lambda: pytorch_unpermute_index_map(
                 pytorch_unpermute_fwd_input, sorted_indices, probs=probs
             )
         )
@@ -592,7 +586,6 @@ def _test_permutation_mask_map(
     #
     ###################################################################################################################################
     tols = dtype_tols(te_dtype)
-    non_tols = dtype_tols(te_dtype, False)
 
     if fp8:
         te_permute_output_ = te_permute_output.from_float8(torch.float32)
@@ -609,7 +602,7 @@ def _test_permutation_mask_map(
         pytorch_permute_output.float(),
         te_permute_output_,
         msg=f"Mismatch in te_permute fwd",
-        **non_tols,
+        **tols,
     )
     torch.testing.assert_close(
         pytorch_permute_fwd_input.grad.float(),
@@ -627,7 +620,7 @@ def _test_permutation_mask_map(
         pytorch_unpermute_fwd_input.grad.float(),
         te_unpermute_fwd_input_grad,
         msg=f"Mismatch in te_unpermute bwd",
-        **(tols if with_probs else non_tols),
+        **tols,
     )
     if with_probs:
         torch.testing.assert_close(
@@ -802,7 +795,7 @@ def _test_moe_chunk_sort(
     # Results Check
     #
     ###################################################################################################################################
-    tols = dtype_tols(te_dtype, False)
+    tols = dtype_tols(te_dtype)
 
     if fp8:
         te_output_ = te_output.from_float8(torch.float32)
@@ -906,7 +899,7 @@ if is_bf16_compatible():
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("topK", [1, 2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
-def test_permutation_indice_map(
+def test_permutation_index_map(
     te_dtype,
     num_tokens,
     num_expert,
@@ -917,7 +910,7 @@ def test_permutation_indice_map(
     with_probs = True
     BENCHMARK = False
 
-    _test_permutation_indice_map(
+    _test_permutation_index_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
@@ -969,7 +962,7 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 @pytest.mark.parametrize("hidden_size", [4096])
 @pytest.mark.parametrize("topK", [1, 2, 5])
 @pytest.mark.parametrize("num_out_tokens", [None, 2039])
-def test_permutation_indice_map_fp8(
+def test_permutation_index_map_fp8(
     te_dtype,
     num_tokens,
     num_expert,
@@ -980,7 +973,7 @@ def test_permutation_indice_map_fp8(
     with_probs = True
     BENCHMARK = False
 
-    _test_permutation_indice_map(
+    _test_permutation_index_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
@@ -1026,7 +1019,7 @@ def test_permutation_mask_map_fp8(
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [8, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
-def test_permutation_indice_map_topk1_no_probs(
+def test_permutation_index_map_topk1_no_probs(
     te_dtype,
     num_tokens,
     num_expert,
@@ -1037,7 +1030,7 @@ def test_permutation_indice_map_topk1_no_probs(
     with_probs = False
     BENCHMARK = False
 
-    _test_permutation_indice_map(
+    _test_permutation_index_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
@@ -1081,7 +1074,7 @@ def test_permutation_mask_map_topk1_no_probs(
 @pytest.mark.parametrize("num_expert", [8, 16])
 @pytest.mark.parametrize("tp_size", [1, 2, 8])
 @pytest.mark.parametrize("hidden_size", [4096])
-def test_chunk_permuation(
+def test_chunk_permutation(
     te_dtype,
     num_tokens,
     num_expert,
@@ -1117,7 +1110,7 @@ def test_permutation_single_case():
     with_probs = True
     Benchmark = True
 
-    _test_permutation_indice_map(
+    _test_permutation_index_map(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
