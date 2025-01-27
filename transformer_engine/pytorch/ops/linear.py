@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -91,24 +91,24 @@ class Linear(FusedOperation):
 
         # Construct basic ops
         ops = []
-        linear_kwargs = dict(
-            in_features=in_features,
-            out_features=out_features,
-            device=device,
-            dtype=dtype,
-            tensor_parallel_mode=tensor_parallel_mode,
-            tensor_parallel_group=tensor_parallel_group,
-            sequence_parallel=sequence_parallel,
-            rng_state_tracker_function=rng_state_tracker_function,
-            accumulate_into_main_grad=accumulate_into_main_grad,
-        )
-        bias_kwargs = dict(
-            size=out_features,
-            device=device,
-            dtype=dtype,
-            tensor_parallel=(tensor_parallel_mode is not None),
-            tensor_parallel_group=tensor_parallel_group,
-        )
+        linear_kwargs = {
+            "in_features": in_features,
+            "out_features": out_features,
+            "device": device,
+            "dtype": dtype,
+            "tensor_parallel_mode": tensor_parallel_mode,
+            "tensor_parallel_group": tensor_parallel_group,
+            "sequence_parallel": sequence_parallel,
+            "rng_state_tracker_function": rng_state_tracker_function,
+            "accumulate_into_main_grad": accumulate_into_main_grad,
+        }
+        bias_kwargs = {
+            "size": out_features,
+            "device": device,
+            "dtype": dtype,
+            "tensor_parallel": (tensor_parallel_mode is not None),
+            "tensor_parallel_group": tensor_parallel_group,
+        }
         if tensor_parallel_mode == "row":
             # Row TP: GEMM + bias + reduction
             linear_kwargs["in_features"] = local_in_features
@@ -133,6 +133,38 @@ class Linear(FusedOperation):
         # Initialize base class
         super().__init__(ops)
 
-        # Register parameters
-        self.register_parameter("weight", self.basic_ops[0].weight)
-        self.register_parameter("bias", self.basic_ops[1].bias if bias else None)
+        self._has_bias: bool = bias
+
+    @property
+    def weight(self) -> torch.nn.Parameter:
+        """Weight tensor
+
+        Parameter is owned by `BasicLinear` operation.
+
+        """
+        return self.basic_ops[0].weight
+
+    @weight.setter
+    def weight(self, value: Optional[torch.nn.Parameter]) -> None:
+        self.basic_ops[0].weight = value
+
+    @property
+    def bias(self) -> Optional[torch.nn.Parameter]:
+        """Bias tensor
+
+        Parameter is owned by `Bias` operation.
+
+        """
+        if self._has_bias:
+            return self.basic_ops[1].bias
+        return None
+
+    @bias.setter
+    def bias(self, value: Optional[torch.nn.Parameter]) -> None:
+        if self._has_bias:
+            self.basic_ops[1].bias = value
+        elif value is not None:
+            raise ValueError(
+                "Attempted to set bias parameter in Linear operation "
+                "that does not have bias enabled"
+            )

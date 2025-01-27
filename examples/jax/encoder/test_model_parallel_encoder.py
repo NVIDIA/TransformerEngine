@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Encoder training on multi-GPU with tesnor parallelism"""
@@ -21,6 +21,8 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+
+from common import is_bf16_supported
 
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"
@@ -434,6 +436,7 @@ class TestEncoder(unittest.TestCase):
         """Run 3 epochs for testing"""
         cls.args = encoder_parser(["--epochs", "3"])
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)
@@ -446,6 +449,7 @@ class TestEncoder(unittest.TestCase):
         actual = train_and_evaluate(self.args)
         assert actual[0] < 0.45 and actual[1] > 0.79
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_sp(self):
         """Test Transformer Engine with BF16 + SP"""
         self.args.enable_sp = True

@@ -1,11 +1,10 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 from contextlib import nullcontext
-import functools
-import operator
 from typing import Callable, List, Sequence, Union
+import os
 
 import jax
 import jax.numpy as jnp
@@ -14,12 +13,18 @@ import pytest
 from jax import jit, value_and_grad
 from flax import linen as nn
 
-from utils import assert_allclose
+from utils import assert_allclose, assert_tree_like_allclose
 from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
 from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
 from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
 from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
+from transformer_engine.jax.cpp_extensions.transpose import (
+    _jax_transpose,
+    _jax_cast_transpose,
+    _jax_dbias_cast_transpose,
+)
+from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax import cpp_extensions as tex
 
 
@@ -500,7 +505,6 @@ class TestActivationLuFP8(TestActivationLu):
                         scale_inv,
                         FP8Helper.BWD_DTYPE,
                         -1,
-                        -2,
                         self.activation_type,
                     )
                 )
@@ -746,3 +750,130 @@ class TestNorm:
             assert_allclose(primitive_gamma_grad, ref_gamma_grad, dtype=FP8Helper.BWD_DTYPE)
             if beta is not None:
                 assert_allclose(primitive_beta_grad, ref_beta_grad, dtype=FP8Helper.BWD_DTYPE)
+
+
+@pytest.mark.parametrize(
+    "in_dtype",
+    [
+        pytest.param(jnp.float32, id="input_float32"),
+        pytest.param(jnp.float16, id="input_float16"),
+        pytest.param(jnp.bfloat16, id="input_bfloat16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "input_shape, transpose_axis",
+    [
+        pytest.param((16, 16), 1, id="(16, 16)-1"),
+        pytest.param((256, 128), 1, id="(256, 128)-1"),
+        pytest.param((128, 512), 1, id="(128, 512)-1"),
+        pytest.param((64, 16, 4, 256), 1, id="(64, 16, 4, 256)-1"),
+        pytest.param((64, 16, 4, 256), 2, id="(64, 16, 4, 256)-2"),
+        pytest.param((64, 16, 4, 256), 3, id="(64, 16, 4, 256)-3"),
+    ],
+)
+class TestTranspose:
+    def test_transpose(self, in_dtype, input_shape, transpose_axis):
+        key = jax.random.PRNGKey(0)
+        input_tensor = jax.random.uniform(key, input_shape, in_dtype)
+        static_axis_boundary = -1
+        jax_output = _jax_transpose(input_tensor, static_axis_boundary, transpose_axis)
+        os.environ["NVTE_JAX_WITH_FFI"] = "0"
+        noffi_output = tex.transpose(input_tensor, static_axis_boundary, transpose_axis)
+        os.environ["NVTE_JAX_WITH_FFI"] = "1"
+        ffi_output = tex.transpose(input_tensor, static_axis_boundary, transpose_axis)
+        assert_allclose(jax_output, noffi_output)
+        assert_allclose(noffi_output, ffi_output)
+
+    @pytest.mark.parametrize(
+        "out_dtype",
+        [
+            pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
+            pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+        ],
+    )
+    def test_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
+        amax = jnp.zeros(1, jnp.float32)
+        scale = jnp.ones(1, jnp.float32)
+        scale_inv = jnp.ones(1, jnp.float32)
+        key = jax.random.PRNGKey(0)
+        input = jax.random.uniform(key, input_shape, in_dtype)
+        static_axis_boundary = -1
+        jax_output = _jax_cast_transpose(
+            input, scale, amax, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "0"
+        noffi_output = tex.cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "1"
+        ffi_output = tex.cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        assert_tree_like_allclose(jax_output, ffi_output)
+        assert_tree_like_allclose(noffi_output, ffi_output)
+
+    @pytest.mark.parametrize(
+        "out_dtype",
+        [
+            pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
+            pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+        ],
+    )
+    def test_dbias_cast_transpose(self, in_dtype, input_shape, transpose_axis, out_dtype):
+        amax = jnp.zeros(1, jnp.float32)
+        scale = jnp.ones(1, jnp.float32)
+        scale_inv = jnp.ones(1, jnp.float32)
+        key = jax.random.PRNGKey(0)
+        input = jax.random.uniform(key, input_shape, in_dtype)
+        static_axis_boundary = -1
+        jax_output = _jax_dbias_cast_transpose(
+            input, amax, scale, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "0"
+        noffi_output = tex.dbias_cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        os.environ["NVTE_JAX_WITH_FFI"] = "1"
+        ffi_output = tex.dbias_cast_transpose(
+            input, amax, scale, scale_inv, out_dtype, static_axis_boundary, transpose_axis
+        )
+        assert_tree_like_allclose(jax_output, ffi_output)
+        assert_tree_like_allclose(noffi_output, ffi_output)
+
+
+@pytest.mark.skipif(not is_fp8_supported, reason=reason)
+@pytest.mark.parametrize(
+    "input_shape",
+    [
+        pytest.param((256, 128), id="(256, 128)"),
+        pytest.param((128, 512, 8), id="(128, 512, 8)"),
+    ],
+)
+@pytest.mark.parametrize(
+    "in_dtype",
+    [
+        pytest.param(jnp.float32, id="input_float32"),
+        pytest.param(jnp.float16, id="input_float16"),
+        pytest.param(jnp.bfloat16, id="input_bfloat16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "out_dtype",
+    [
+        pytest.param(jnp.float8_e4m3fn, id="output_float8_e4m3fn"),
+        pytest.param(jnp.float8_e5m2, id="output_float8_e5m2"),
+    ],
+)
+def test_quantize(input_shape, in_dtype, out_dtype):
+    amax = jnp.zeros(1, jnp.float32)
+    scale = jnp.ones(1, jnp.float32)
+    scale_inv = jnp.ones(1, jnp.float32)
+    key = jax.random.PRNGKey(0)
+    input = jax.random.uniform(key, input_shape, in_dtype)
+    jax_output = _jax_cast_fp8(input, scale, amax, out_dtype)
+    os.environ["NVTE_JAX_WITH_FFI"] = "0"
+    noffi_output = tex.cast_fp8(input, amax, scale, scale_inv, out_dtype)
+    os.environ["NVTE_JAX_WITH_FFI"] = "1"
+    ffi_output = tex.cast_fp8(input, amax, scale, scale_inv, out_dtype)
+    assert_tree_like_allclose(jax_output, ffi_output)
+    assert_tree_like_allclose(noffi_output, ffi_output)

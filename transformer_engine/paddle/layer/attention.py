@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Attntion API"""
@@ -1008,6 +1008,7 @@ class MultiHeadAttention(paddle.nn.Layer):
         else:
             raise ValueError(f"hidden_states should have 2 or 3 dimensions, got {input_dim}.")
 
+        layernorm_output = None
         if self.attention_type == "self":
             if self.input_layernorm:
                 layernorm_qkv_outputs = self.layernorm_qkv(

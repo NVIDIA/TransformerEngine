@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,6 +14,11 @@ from .float8_tensor import Float8Tensor
 __all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
+
+
+def is_cpu_offload_enabled() -> bool:
+    """Check if CPU offloading is currently enabled."""
+    return CPUOffloadEnabled
 
 
 class CpuOffloadSavedTensorHook:
@@ -156,6 +161,7 @@ class GroupCommitFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, tensor, cpu_offload_handler):
+        # pylint: disable=missing-function-docstring
         cpu_offload_handler.on_group_commit_forward()
         ctx.cpu_offload_handler = cpu_offload_handler
         # return the identical tensor
@@ -163,6 +169,7 @@ class GroupCommitFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        # pylint: disable=missing-function-docstring
         cpu_offload_handler = ctx.cpu_offload_handler
         cpu_offload_handler.on_group_commit_backward()
         return grad_output, None

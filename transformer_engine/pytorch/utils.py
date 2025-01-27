@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -218,8 +218,12 @@ def safely_set_viewless_tensor_data(tensor: torch.Tensor, new_data_tensor: torch
 
 def cast_if_needed(tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """Cast tensor to dtype"""
+    if tensor is None:
+        return None
+    if tensor.dtype == dtype:
+        return tensor
     with torch.enable_grad():
-        return tensor if tensor is None or tensor.dtype == dtype else tensor.to(dtype)
+        return tensor.to(dtype=dtype)
 
 
 def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:

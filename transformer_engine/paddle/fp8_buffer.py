@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """FP8 meta buffer for FP8 amax reduction"""
@@ -100,6 +100,7 @@ class FP8MetaBufferBase(ABC):
             self._dp_amax_reduce_interval = int(os.getenv("NVTE_DP_AMAX_REDUCE_INTERVAL", "1"))
 
         tp_amax_reduce = False
+        reduce_group = -1  # Set value that will raise error if not set. `None` is a valid group.
         if self._dp_amax_reduce_idx == 0:
             reduce_group = fp8_meta["fp8_group"]
         else:

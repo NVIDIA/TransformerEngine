@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -57,13 +57,23 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
+        assert (
+            os.getenv("MPI_HOME") is not None
+        ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
+    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
+
     # Project directory root
     root_path = Path(__file__).resolve().parent
 
     return CMakeExtension(
         name="transformer_engine",
         cmake_path=root_path / Path("transformer_engine/common"),
-        cmake_flags=["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())],
+        cmake_flags=cmake_flags,
     )
 
 
@@ -93,7 +103,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch", "flash-attn>=2.0.6,<=2.6.3,!=2.0.9,!=2.1.0"])
+            install_reqs.extend(["torch"])
             test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])

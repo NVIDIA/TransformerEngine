@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,7 +6,7 @@ set -e
 
 : "${TE_PATH:=/opt/transformerengine}"
 
-pip install cpplint==1.6.0 pylint==2.13.5
+pip install cpplint==1.6.0 pylint==3.3.1
 if [ -z "${PYTHON_ONLY}" ]
 then
   cd $TE_PATH

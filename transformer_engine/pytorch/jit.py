@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -7,6 +7,8 @@ import os
 from typing import Callable, Optional, Tuple
 
 import torch
+
+# pylint: disable=unnecessary-lambda-assignment
 
 jit_fuser = torch.jit.script
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
@@ -109,7 +111,7 @@ def dgelu_fused_(grad_output: torch.Tensor, inp: torch.Tensor) -> torch.Tensor:
 def bias_gelu_fused(inp: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     """Disable native AMP for bias_gelu_fused_"""
     with torch.cuda.amp.autocast(enabled=False):
-        if bias.numel() != 0:
+        if bias is not None and bias.numel() != 0:
             return bias_gelu_fused_(inp, bias)
         return gelu_fused_(inp)
 
@@ -119,7 +121,7 @@ def bgrad_dgelu_fused(
 ) -> Tuple[Optional[torch.Tensor], torch.Tensor]:
     """Disable native AMP for `bgrad_dgelu_fused_`"""
     with torch.cuda.amp.autocast(enabled=False):
-        if bias.numel() != 0:
+        if bias is not None and bias.numel() != 0:
             return bgrad_dgelu_fused_(grad_output, inp, bias)
         return None, dgelu_fused_(grad_output, inp)
 

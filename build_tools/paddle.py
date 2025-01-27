@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -25,7 +25,7 @@ def setup_paddle_extension(
     # Source files
     csrc_source_files = Path(csrc_source_files)
     sources = [
-        csrc_source_files / "extensions.cu",
+        csrc_source_files / "extensions.cpp",
         csrc_source_files / "common.cpp",
         csrc_source_files / "custom_ops.cu",
     ]

@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -51,3 +51,9 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+
+.. autoapifunction:: transformer_engine.pytorch.initialize_ub
+
+.. autoapifunction:: transformer_engine.pytorch.destroy_ub

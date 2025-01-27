@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
@@ -8,7 +8,7 @@ from functools import reduce, partial
 
 import jax
 import jax.numpy as jnp
-from jax import core, dtypes
+from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax.extend import ffi
@@ -98,7 +98,7 @@ class ActLuPrimitive(BasePrimitive):
         assert x_shape[-2] == 2 or x_shape[-2] == 1
         hidden_size = x_shape[-1]
         batch_shapes = x_shape[:-2]
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
         out_shape = (batch_shapes) + (hidden_size,)
         out_aval = out_aval.update(shape=out_shape, dtype=dtype)
 
@@ -225,7 +225,7 @@ class DActLuPrimitive(BasePrimitive):
         i_hidden_size = dz_aval.shape[-1]
         g_hidden_size = x_aval.shape[-1]
         assert i_hidden_size == g_hidden_size
-        out_aval = core.raise_to_shaped(x_aval)
+        out_aval = x_aval
 
         return out_aval
 
@@ -383,37 +383,43 @@ class ActLuFp8Primitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-        ir_amax_type = ir.RankedTensorType(amax.type)
-        ir_amax_dtype = ir_amax_type.element_type
-        ir_amax_shape = ir_amax_type.shape
-        ir_scale_shape = ir_amax_shape
-        ir_scale_inv_shape = ir_amax_shape
+        if is_ffi_enabled():
+            name = "te_act_lu_fp8_ffi"
+            out = ffi.ffi_lowering(name, operand_output_aliases={1: 1})(
+                ctx, x, amax, scale, scale_inv, act_enum=act_enum
+            )
+        else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+            ir_amax_type = ir.RankedTensorType(amax.type)
+            ir_amax_dtype = ir_amax_type.element_type
+            ir_amax_shape = ir_amax_type.shape
+            ir_scale_shape = ir_amax_shape
+            ir_scale_inv_shape = ir_amax_shape
 
-        hidden_size = ir_x_shape[-1]
-        batch_shape = ir_x_shape[:-2]
-        batch_size = reduce(operator.mul, batch_shape)
-        out_shape = batch_shape + [hidden_size]
-        out_types = [
-            ir.RankedTensorType.get(out_shape, ir_out_dtype),
-            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-        ]
-        operands = [x, amax, scale, scale_inv]
-        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            hidden_size = ir_x_shape[-1]
+            batch_shape = ir_x_shape[:-2]
+            batch_size = reduce(operator.mul, batch_shape)
+            out_shape = batch_shape + [hidden_size]
+            out_types = [
+                ir.RankedTensorType.get(out_shape, ir_out_dtype),
+                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ]
+            operands = [x, amax, scale, scale_inv]
+            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            (batch_size, hidden_size),
-            jax_dtype_to_te_dtype(x_aval.dtype),
-            jax_dtype_to_te_dtype(out_dtype),
-            act_enum,
-        )
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                (batch_size, hidden_size),
+                jax_dtype_to_te_dtype(x_aval.dtype),
+                jax_dtype_to_te_dtype(out_dtype),
+                act_enum,
+            )
 
-        out = custom_caller(
-            ActLuFp8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
-        )
+            out = custom_caller(
+                ActLuFp8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
+            )
 
         return out
 

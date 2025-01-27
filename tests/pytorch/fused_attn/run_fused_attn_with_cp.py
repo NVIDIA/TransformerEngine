@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,16 +11,24 @@ from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.common.recipe import DelayedScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 
 
 def run_dpa_with_cp(
-    dtype="bf16", model=None, qkv_format="bshd", kernel_backend="FlashAttention", cp_comm_type="p2p"
+    dtype="bf16",
+    model=None,
+    qkv_format="bshd",
+    kernel_backend="FlashAttention",
+    cp_comm_type="p2p",
+    fp8_mha=False,
 ):
     """Test DotProductAttention module with context parallelism"""
 
+    # args are passed as strings
+    fp8_mha = fp8_mha == "True"
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
     if kernel_backend == "FlashAttention":
@@ -34,7 +42,7 @@ def run_dpa_with_cp(
         "causal",
         "no_mask",
     ], f"{config.attn_mask_type} is an unsupported attention mask type!"
-    if kernel_backend == "FusedAttention" and qkv_format == "thd":
+    if qkv_format == "thd":
         if "causal" in config.attn_mask_type:
             config.attn_mask_type = "padding_causal"
         else:
@@ -59,9 +67,20 @@ def run_dpa_with_cp(
     cp_comm_ranks = range(world_size)
     assert rank in cp_comm_ranks
     cp_comm_group = dist.new_group(cp_comm_ranks, backend="nccl")
+    if cp_comm_type == "a2a+p2p":
+        assert (
+            world_size % 2 == 0
+        ), "Assuming CP size for A2A is 2, and CP size for P2P is (world_size // 2)!"
+        cp_comm_sub_ranks = [range(i * 2, (i + 1) * 2) for i in range(world_size // 2)]
+        cp_comm_sub_ranks += [range(i, world_size, 2) for i in range(2)]
+        cp_comm_sub_groups = []
+        for sub_ranks in cp_comm_sub_ranks:
+            sub_group = dist.new_group(sub_ranks, backend="nccl")
+            if rank in sub_ranks:
+                cp_comm_sub_groups.append(sub_group)
 
     if dtype == "fp8":
-        fp8_recipe = DelayedScaling(fp8_dpa=True)
+        fp8_recipe = DelayedScaling(fp8_dpa=True, fp8_mha=fp8_mha)
 
     # instantiate core attn module
     core_attn = DotProductAttention(
@@ -144,12 +163,10 @@ def run_dpa_with_cp(
                 torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
-        if kernel_backend == "FlashAttention":
-            cu_seqlens_q = cu_seqlens_q_padded[:-1]
-        else:
-            cu_seqlens_q = torch.cat(
-                [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
-            ).cuda()
+        cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
+        if kernel_backend == "FusedAttention":
+            cu_seqlens_q[1:-1] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+        cu_seqlens_q[-1] = cu_seqlens_q[-2]
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
     else:
@@ -166,13 +183,6 @@ def run_dpa_with_cp(
         bias = torch.randn(*attn_bias_shape, dtype=dtypes[dtype]).cuda()
     else:
         bias = None
-
-    # make sure all GPU ranks have same inputs
-    for x in [q, k, v, dout] + ([] if bias is None else [bias]):
-        dist.broadcast(x, 0, group=cp_comm_group)
-    if qkv_format == "thd":
-        for x in [cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded]:
-            dist.broadcast(x, 0, group=cp_comm_group)
 
     # run core_attn without CP
     for x in [q, k, v]:
@@ -192,12 +202,14 @@ def run_dpa_with_cp(
             core_attention_bias=bias,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
-        out.backward(dout)
+        if fp8_mha:
+            dout_fp8 = Float8Tensor.to_float8(dout, fp8_dtype=tex.DType.kFloat8E5M2)
+            out.backward(dout_fp8)
+        else:
+            out.backward(dout)
 
     # run core_attn wit CP
     q_, k_, v_, dout_, *rest = [
@@ -239,7 +251,10 @@ def run_dpa_with_cp(
         bias_ = bias_.index_select(2, seq_idx)
         bias_ = bias_.view(*bias_.shape[:2], -1, bias_.shape[-1])
     core_attn.set_context_parallel_group(
-        cp_comm_group, cp_comm_ranks, torch.cuda.Stream(), cp_comm_type
+        cp_comm_sub_groups if cp_comm_type == "a2a+p2p" else cp_comm_group,
+        cp_comm_ranks,
+        torch.cuda.Stream(),
+        cp_comm_type,
     )
 
     if dtype == "fp8":
@@ -257,12 +272,14 @@ def run_dpa_with_cp(
             core_attention_bias=bias_,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
-        out_.backward(dout_)
+        if fp8_mha:
+            dout_fp8_ = Float8Tensor.to_float8(dout_, fp8_dtype=tex.DType.kFloat8E5M2)
+            out_.backward(dout_fp8_)
+        else:
+            out_.backward(dout_)
 
     for x in [out_, q_.grad, k_.grad, v_.grad]:
         assert torch.all(~torch.isnan(x))
@@ -288,7 +305,7 @@ def run_dpa_with_cp(
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [q.grad, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [k.grad, v.grad]]
         dq_, dk_, dv_, out_ = [q_.grad, k_.grad, v_.grad, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
         )
@@ -304,7 +321,7 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
         cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
             cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
         )

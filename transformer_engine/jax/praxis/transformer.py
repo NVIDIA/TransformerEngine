@@ -1,9 +1,10 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
 Praxis Modules related Transformer
 """
+from dataclasses import field
 from functools import partial
 from typing import Optional, Sequence, Tuple
 import warnings
@@ -80,6 +81,7 @@ class DotProductAttention(TransformerEngineBaseLayer):
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
+    window_size: Optional[Tuple[int, int]] = None
 
     def setup(self) -> None:
         """setup"""
@@ -102,6 +104,7 @@ class DotProductAttention(TransformerEngineBaseLayer):
             qkv_layout=self.qkv_layout,
             scale_factor=self.scale_factor,
             transpose_batch_sequence=self.transpose_batch_sequence,
+            window_size=self.window_size,
         )
 
         self.create_layer("dot_product_attention", dpa_cls)
@@ -136,7 +139,9 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     return_layernorm_output: bool = False
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     attn_mask_type: str = "causal"
     attn_bias_type: Optional[str] = None
     enable_rotary_pos_emb: bool = False
@@ -151,6 +156,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
     float32_logits: bool = False
+    window_size: Optional[Tuple[int, int]] = None
 
     # Deprecated parameters
     num_heads: Optional[int] = None
@@ -233,6 +239,7 @@ class MultiHeadAttention(TransformerEngineBaseLayer):
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init,
             float32_logits=self.float32_logits,
+            window_size=self.window_size,
         )
 
         self.create_layer("multi_head_attn", mha_cls)
@@ -271,7 +278,9 @@ class TransformerLayer(TransformerEngineBaseLayer):
     dropout_rng_name: str = "dropout"
     mlp_activations: Sequence[str] = ("relu",)
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     apply_residual_connection_post_layernorm: bool = False
     output_layernorm: bool = False
     float32_attention_logits: bool = False
@@ -292,6 +301,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
     enable_sequence_parallel: bool = False
     scale_attn_logits: bool = False
     scaled_query_init: bool = True
+    window_size: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -371,6 +381,7 @@ class TransformerLayer(TransformerEngineBaseLayer):
             enable_sequence_parallel=self.enable_sequence_parallel,
             scale_attn_logits=self.scale_attn_logits,
             scaled_query_init=self.scaled_query_init,
+            window_size=self.window_size,
         )
 
         self.create_layer("transformerlayer", transformerlayer_cls)

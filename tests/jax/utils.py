@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
@@ -7,6 +7,7 @@ import functools
 import math
 import operator
 from typing import Any, Callable, Dict, Tuple, Sequence, Union, Iterable, Optional
+import os
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +19,11 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
+from transformer_engine.jax.attention import (
+    AttnMaskType,
+    canonicalize_attn_mask_type,
+    make_swa_mask,
+)
 from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
@@ -28,6 +34,9 @@ PrecisionLike = Union[
     None, str, lax.Precision, Tuple[str, str], Tuple[lax.Precision, lax.Precision]
 ]
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
+
+# Enables verbose printing of tensor numerics for debug.
+NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
 
 
 def is_devices_enough(required):
@@ -902,6 +911,25 @@ class RelativePositionBiases(nn.Module):
         return values[jnp.newaxis, ...]
 
 
+def apply_swa_mask(
+    attn_mask_type: str,
+    original_mask: Array,
+    window_size: Tuple[int, int] = (-1, -1),
+) -> Array:
+    """Apply the sliding window mask to a given mask"""
+    _attn_mask_type = canonicalize_attn_mask_type(attn_mask_type)
+    assert _attn_mask_type is not None
+    batch = original_mask.shape[0]
+    max_seqlen_q = original_mask.shape[-2]
+    max_seqlen_kv = original_mask.shape[-1]
+    pos_q = jnp.broadcast_to(jnp.arange(max_seqlen_q), (batch, max_seqlen_q))
+    pos_kv = jnp.broadcast_to(jnp.arange(max_seqlen_kv), (batch, max_seqlen_kv))
+    swa_mask = make_swa_mask(pos_q, pos_kv, window_size, original_mask.dtype)
+    # In swa_mask and original_mask 0 is masked out
+    new_mask = jnp.where(original_mask == 1, swa_mask, original_mask)
+    return new_mask
+
+
 class EncoderLayer(nn.Module):
     """Transformer encoder layer."""
 
@@ -934,7 +962,8 @@ class EncoderLayer(nn.Module):
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
     self_attn_bias_type: Any = None
-    self_attn_mask_type: Any = None
+    self_attn_mask_type: str = "no_mask"
+    window_size: Tuple[int, int] = (-1, -1)
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -943,7 +972,13 @@ class EncoderLayer(nn.Module):
 
     @nn.compact
     def __call__(self, inputs, encoder_mask=None, deterministic=False):
-        del self.self_attn_mask_type  # dummy, just align to TE's impl
+        # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
+        encoder_mask = apply_swa_mask(
+            self.self_attn_mask_type,
+            encoder_mask,
+            self.window_size,
+        )
+
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -1087,7 +1122,8 @@ class DecoderLayer(nn.Module):
     fuse_qkv_params: bool = True
     fuse_mlp_wi: bool = True
     self_attn_bias_type: Any = None
-    self_attn_mask_type: Any = None
+    self_attn_mask_type: str = "no_mask"
+    window_size: Tuple[int, int] = (-1, -1)
 
     def __post_init__(self):
         if self.num_gqa_groups is None:
@@ -1105,7 +1141,18 @@ class DecoderLayer(nn.Module):
         decode=False,
         max_decode_length=None,
     ):
-        del self.self_attn_mask_type  # dummy, just align to TE's impl
+        decoder_mask = apply_swa_mask(
+            self.self_attn_mask_type,
+            decoder_mask,
+            self.window_size,
+        )
+
+        encoder_decoder_mask = apply_swa_mask(
+            "padding",
+            encoder_decoder_mask,
+            self.window_size,
+        )
+
         # Relative position embedding as attention biases.
         sequence_dim = 0 if self.transpose_batch_sequence else 1
         batch_dim = 1 - sequence_dim
@@ -1419,3 +1466,23 @@ def sync_params_values(dst, src, transformations, sep="/"):
     synced_dst = jax.tree_util.tree_unflatten(dst_tree_def, synced_dst_values)
 
     return jax.tree_util.tree_map(lambda x, y: x.reshape(y.shape), synced_dst, dst)
+
+
+@functools.partial(jax.jit, static_argnums=[0, 2])
+def print_debug_tensor_stats(prefix, tensor, hist=False):
+    if NVTE_DEBUG_NUMERICS:
+        args = [
+            jnp.mean(tensor),
+            jnp.min(tensor),
+            jnp.max(tensor),
+            jnp.cumprod(jnp.array(tensor.shape))[-1] if len(tensor.shape) >= 1 else 1,
+            jnp.count_nonzero(tensor),
+        ]
+        fmt = prefix + " mean={}, min={}, max={}, numel={}, nzcnt={}"
+
+        if hist:
+            h = jnp.histogram(tensor.astype(jnp.float32), bins=10)
+            args += [h[0], h[1]]
+            fmt = fmt + "\n  {}\n  {}"
+
+        jax.debug.print(fmt, *args)

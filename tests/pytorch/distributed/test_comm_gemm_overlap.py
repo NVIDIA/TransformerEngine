@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import os
@@ -21,8 +21,10 @@ SEQ_LENGTH: int = 512
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 12
 HEAD_DIM: int = 64
+
+# NOTE: te.Linear is intentionally omitted here and manually added later for testing both
+#       row and column parallel layouts.
 TE_LAYERS = [
-    te.Linear,
     te.LayerNormLinear,
     te.LayerNormMLP,
     te.MultiheadAttention,
@@ -41,6 +43,9 @@ if not tex.device_supports_multicast():
 
 # Force GPU kernels to launch in the order they're executed by the host CPU
 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+
+# Clear torch.dynamo caches
+torch._dynamo.reset()
 
 
 def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggregate):
@@ -83,7 +88,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, fp8, fp8_init):
+def _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -94,6 +99,8 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
         f"--head-dim={HEAD_DIM}",
         f"--layer-type={layer_type}",
     ]
+    if layer_type == te.Linear.__name__:
+        test_cmd.append(f"--linear-parallel-mode={linear_parallel_mode}")
 
     if fp8:
         if not fp8_available:
@@ -206,25 +213,51 @@ def test_atomic_gemm_overlaps(ag_type, rs_type, p2p, fp8_out):
 
 
 @pytest.mark.parametrize(
-    "comm_type,fp8",
+    "comm_type, fp8, connections",
     [
-        ("AG", False),
-        ("RS", False),
-        ("RS", True),
+        ("AG", False, 1),
+        ("RS", False, 1),
+        ("RS", True, 1),
+        ("AG", False, 8),
+        ("RS", False, 8),
+        ("RS", True, 8),
     ],
-    ids=[" ALL-GATHER     - BF16 ", " REDUCE-SCATTER - BF16 ", " REDUCE-SCATTER - FP8 "],
+    ids=[
+        "ALL-GATHER - BF16 - 1 connections",
+        "REDUCE-SCATTER - BF16 - 1 connections",
+        "REDUCE-SCATTER - FP8 - 1 connections",
+        "ALL-GATHER - BF16 - 8 connections",
+        "REDUCE-SCATTER - BF16 - 8 connections",
+        "REDUCE-SCATTER - FP8 - 8 connections",
+    ],
 )
-def test_bulk_overlaps(comm_type, fp8):
+def test_bulk_overlaps(comm_type, fp8, connections):
     """
     Test bulk overlaps with direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
     """
-    _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+    if connections == 8:
+        if torch.cuda.get_device_properties(0).major != 9:
+            pytest.skip(
+                "CUDA_DEVICE_MAX_CONNECTIONS=8 test only applies to devices with compute capability"
+                " 9.0 (HOPPER ARCH)."
+            )
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "8"
+        _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+    else:
+        _run_gemm_with_overlap(comm_type, True, False, False, fp8, False, False)
 
 
 @pytest.mark.parametrize(
-    "layer_type",
-    [layer.__name__ for layer in TE_LAYERS],
-    ids=[(" " + layer.__name__ + " ") for layer in TE_LAYERS],
+    "layer_type,linear_parallel_mode",
+    (
+        [(te.Linear.__name__, "row"), (te.Linear.__name__, "column")]
+        + list(zip([layer.__name__ for layer in TE_LAYERS], [None for _ in range(len(TE_LAYERS))]))
+    ),
+    ids=(
+        [f" {te.Linear.__name__} (row-parallel) ", f" {te.Linear.__name__} (column-parallel) "]
+        + [(" " + layer.__name__ + " ") for layer in TE_LAYERS]
+    ),
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
@@ -239,8 +272,8 @@ def test_bulk_overlaps(comm_type, fp8):
         " FP8  GEMM - FP8  PARAMS ",
     ],
 )
-def test_layers_with_overlap(layer_type, fp8, fp8_init):
+def test_layers_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, fp8, fp8_init)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init)

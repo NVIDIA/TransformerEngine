@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -37,11 +37,7 @@ class ForwardLinearBiasAdd(FusedOperation):
     ) -> None:
 
         # Basic operations that comprise this fused operation
-        op_idxs = dict(
-            linear=0,
-            bias=None,
-            add=None,
-        )
+        op_idxs = {"linear": 0, "bias": None, "add": None}
         ops = [linear]
         if bias is not None:
             op_idxs["bias"] = len(ops)
@@ -95,6 +91,11 @@ class ForwardLinearBiasAdd(FusedOperation):
             if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
                 grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
 
+        # Get autocast dtype if needed
+        dtype = None
+        if torch.is_autocast_enabled():
+            dtype = torch.get_autocast_dtype("cuda")
+
         # Linear forward
         output = basic_op_extra_inputs[self._op_idxs["add"]][0]
         output, x_local, _ = BasicLinear._functional_forward(
@@ -102,7 +103,6 @@ class ForwardLinearBiasAdd(FusedOperation):
             weight=linear_op.weight,
             bias=bias,
             device=linear_op.device,
-            dtype=linear_op.dtype,
             out=output,
             accumulate_into_out=True,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
@@ -120,6 +120,7 @@ class ForwardLinearBiasAdd(FusedOperation):
         linear_op_ctx.weight_fp8_meta = weight_fp8_meta
         linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
         linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        linear_op_ctx.dtype = dtype
         linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad

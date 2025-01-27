@@ -1,9 +1,10 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
 Praxis Modules
 """
+from dataclasses import field
 from functools import partial
 from typing import Callable, Iterable, Sequence, Tuple, Union
 
@@ -74,7 +75,9 @@ class LayerNorm(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     transpose_batch_sequence: bool = False
 
@@ -129,7 +132,9 @@ class Linear(TransformerEngineBaseLayer):
     out_features: int = 512
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = True
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -174,11 +179,15 @@ class LayerNormLinear(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = WeightInit.Constant(1.0)
+    ln_bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=1.0)
+    )
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False
     low_rank_adaptation_dim: int = 32
@@ -237,12 +246,16 @@ class LayerNormMLP(TransformerEngineBaseLayer):
     zero_centered_gamma: bool = False
     scale_init: WeightInit = None
     scale_axes: Tuple[str, ...] = ()
-    ln_bias_init: WeightInit = WeightInit.Constant(1.0)
+    ln_bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=1.0)
+    )
     ln_bias_axes: Tuple[str, ...] = ()
     kernel_axes_1: Tuple[str, ...] = ()
     kernel_axes_2: Tuple[str, ...] = ()
     use_bias: bool = False
-    bias_init: WeightInit = WeightInit.Constant(0.0)
+    bias_init: WeightInit = field(  # pylint: disable=invalid-field-call
+        default_factory=partial(WeightInit.Constant, scale=0.0)
+    )
     bias_axes_1: Tuple[str, ...] = ()
     bias_axes_2: Tuple[str, ...] = ()
     enable_low_rank_adaptation: bool = False

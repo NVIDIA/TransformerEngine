@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -179,7 +179,7 @@ struct AdamFunctorMaster {
   }
 };
 
-template <typename T, typename FULL_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
 struct AdamFunctor {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -199,10 +199,10 @@ struct AdamFunctor {
     index_t chunk_idx = tl.block_to_chunk[blockIdx.x];
     index_t n = tl.sizes[tensor_loc];
 
-    T *g = reinterpret_cast<T *>(tl.addresses[0][tensor_loc]);
+    GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_loc]);
     g += chunk_idx * chunk_size;
 
-    T *p = reinterpret_cast<T *>(tl.addresses[1][tensor_loc]);
+    PARAM_T *p = reinterpret_cast<PARAM_T *>(tl.addresses[1][tensor_loc]);
     p += chunk_idx * chunk_size;
 
     FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
@@ -223,10 +223,10 @@ struct AdamFunctor {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          r_g[ii] = g[i];
-          r_p[ii] = p[i];
-          r_m[ii] = m[i];
-          r_v[ii] = v[i];
+          r_g[ii] = static_cast<MATH_T>(g[i]);
+          r_p[ii] = static_cast<MATH_T>(p[i]);
+          r_m[ii] = static_cast<MATH_T>(m[i]);
+          r_v[ii] = static_cast<MATH_T>(v[i]);
         } else {
           r_g[ii] = MATH_T(0);
           r_p[ii] = MATH_T(0);
@@ -259,9 +259,9 @@ struct AdamFunctor {
       for (int ii = 0; ii < ILP; ii++) {
         int i = i_start + threadIdx.x + ii * blockDim.x;
         if (i < n && i < chunk_size) {
-          p[i] = r_p[ii];
-          m[i] = r_m[ii];
-          v[i] = r_v[ii];
+          p[i] = static_cast<PARAM_T>(r_p[ii]);
+          m[i] = static_cast<FULL_T>(r_m[ii]);
+          v[i] = static_cast<FULL_T>(r_v[ii]);
         }
       }
     }
@@ -491,6 +491,7 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
     }
   }
 
+  const auto g_in_type = tensor_lists[0][0].scalar_type();
   const auto p_in_type = tensor_lists[1][0].scalar_type();
   auto tl_size = tensor_lists.size();
 
@@ -503,13 +504,15 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
       // Assume single type across p,g,m1,m2 now
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
-          multi_tensor_apply<4>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                                AdamFunctor<scalar_t_0, float, int64_t>(), beta1, beta2,
-                                bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                                weight_decay);)
+          DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+              g_in_type, 1, "adam",
+              multi_tensor_apply<4>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
+                                    tensor_lists,
+                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int64_t>(), beta1,
+                                    beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    (adamMode_t)mode, weight_decay);));
     } else {
       // g, p, m, v, p_master
-      const auto g_in_type = tensor_lists[0][0].scalar_type();
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
           DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
@@ -525,12 +528,13 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
       // Assume single type across p,g,m1,m2 now
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
-          multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                AdamFunctor<scalar_t_0, float, int32_t>(), beta1, beta2,
-                                bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                                weight_decay);)
+          DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+              g_in_type, 1, "adam",
+              multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
+                                    AdamFunctor<scalar_t_0, scalar_t_1, float, int32_t>(), beta1,
+                                    beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                    (adamMode_t)mode, weight_decay);));
     } else {
-      const auto g_in_type = tensor_lists[0][0].scalar_type();
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
           DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(

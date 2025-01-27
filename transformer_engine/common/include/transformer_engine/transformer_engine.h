@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -24,7 +24,7 @@ extern "C" {
 enum NVTEDType {
   kNVTEByte = 0,       /*!< Byte */
   kNVTEInt32 = 1,      /*!< 32-bit integer */
-  kNVTEInt64 = 2,      /*!< 32-bit integer */
+  kNVTEInt64 = 2,      /*!< 64-bit integer */
   kNVTEFloat32 = 3,    /*!< 32-bit float */
   kNVTEFloat16 = 4,    /*!< 16-bit float (E5M10) */
   kNVTEBFloat16 = 5,   /*!< 16-bit bfloat (E8M7) */
@@ -78,13 +78,13 @@ NVTETensor nvte_create_tensor(void *dptr, const NVTEShape shape, const NVTEDType
  */
 void nvte_destroy_tensor(NVTETensor tensor);
 
-/*! \brief Get a tensor's data type.
+/*! \brief Get a raw pointer to the tensor's data.
  *
  *  \param[in] tensor Tensor.
  *
- *  \return A data type of the input tensor.
+ *  \return A raw pointer to tensor's data.
  */
-NVTEDType nvte_tensor_type(const NVTETensor tensor);
+void *nvte_tensor_data(const NVTETensor tensor);
 
 /*! \brief Get a tensor's data shape.
  *
@@ -94,13 +94,46 @@ NVTEDType nvte_tensor_type(const NVTETensor tensor);
  */
 NVTEShape nvte_tensor_shape(const NVTETensor tensor);
 
-/*! \brief Get a raw pointer to the tensor's data.
+/*! \brief Get a tensor's number of dimensions.
  *
  *  \param[in] tensor Tensor.
  *
- *  \return A raw pointer to tensor's data.
+ *  \return Number of tensor dimensions.
  */
-void *nvte_tensor_data(const NVTETensor tensor);
+size_t nvte_tensor_ndims(const NVTETensor tensor);
+
+/*! \brief Get the size of a specific tensor dimension.
+ *
+ *  \param[in] tensor Tensor.
+ *  \param[in] size_t Dimension index.
+ *
+ *  \return Size of the tensor at the specified dimension.
+ */
+size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim);
+
+/*! \brief Get a tensor's total number of elements.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Number of elements in the tensor.
+ */
+size_t nvte_tensor_numel(const NVTETensor tensor);
+
+/*! \brief Get the byte size for the tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return Byte size of the tensor's data type.
+ */
+size_t nvte_tensor_element_size(const NVTETensor tensor);
+
+/*! \brief Get a tensor's data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A data type of the input tensor.
+ */
+NVTEDType nvte_tensor_type(const NVTETensor tensor);
 
 /*! \brief Get a pointer to the tensor's amax data.
  *
@@ -265,6 +298,56 @@ class TensorWrapper {
     return nvte_tensor_shape(tensor_);
   }
 
+  /*! \brief Get the size of this TensorWrapper in the given dimension.
+   *
+   *  \param[in] size_t Dimension index.
+   *
+   *  \return Size of this TensorWrapper in given dimension.
+   */
+  size_t size(const size_t dim) const {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_size(tensor_, dim);
+  }
+
+  /*! \brief Get the number of dimensions for this TensorWrapper.
+   *
+   *  \return Number of dimensions for this TensorWrapper.
+   */
+  size_t ndim() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_ndims(tensor_);
+  }
+
+  /*! \brief Get the number of allocated elements in the tensor. This will return 0 for tensors
+   *         with nullptr data even if the TensorWrapper has a non-zero shape.
+   *
+   *
+   *  \return Number of elements in the tensor.
+   */
+  size_t numel() const noexcept {
+    if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
+    return nvte_tensor_numel(tensor_);
+  }
+
+  /*! \brief Get the tensor's element size in bytes.
+   *
+   *  \return Element size in bytes.
+   */
+  size_t element_size() const noexcept {
+    if (tensor_ == nullptr) return 0;
+    return nvte_tensor_element_size(tensor_);
+  }
+
+  /*! \brief Get the tensor's allocated size in bytes. This will return 0 for tensors with nullptr
+   *         data even if the TensorWrapper has a non-zero shape and valid dtype.
+   *
+   *  \return Total tensor size in bytes.
+   */
+  size_t bytes() const noexcept {
+    if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
+    return nvte_tensor_numel(tensor_) * nvte_tensor_element_size(tensor_);
+  }
+
   /*! \brief Get the data type of this TensorWrapper.
    *
    *  \return Data type of this TensorWrapper.
@@ -317,6 +400,6 @@ class TensorWrapper {
 
 }  // namespace transformer_engine
 
-#endif
+#endif  // __cplusplus
 
 #endif  // TRANSFORMER_ENGINE_TRANSFORMER_ENGINE_H_

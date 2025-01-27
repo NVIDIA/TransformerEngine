@@ -1,15 +1,15 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 set -e
 
 : ${TE_PATH:=/opt/transformerengine}
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
 
-pip install prettytable
-git clone https://github.com/NVIDIA/Megatron-LM.git
-cd Megatron-LM
-git checkout b3375a0e38c10e2300ef4be031f7dcabab52b448
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_convergence.py
-python $TE_PATH/tests/pytorch/distributed/print_logs.py
+pip install pytest==8.2.1
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops.py
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops_with_userbuffers.py
+pytest -v -s $TE_PATH/tests/pytorch/distributed/test_torch_fsdp2.py
+pytest -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn_with_cp.py

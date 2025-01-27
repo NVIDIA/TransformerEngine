@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -109,8 +109,6 @@ class FP8GlobalStateManager:
         cls.fp8_available = None
         cls.reason_for_no_fp8 = ""
         cls.autocast_arguments = {}
-        cls.autocast_to_fp8_params = {}
-        cls.fp8_param_to_autocast = {}
         cls.skip_fp8_weight_update_tensor = None
 
     @classmethod
@@ -156,28 +154,25 @@ class FP8GlobalStateManager:
     def get_key_in_buffer(
         cls,
         forward: bool,
-        fp8_weights: bool,
         fp8_recipe: DelayedScaling,
         fp8_group: dist_group_type,
     ) -> str:
         """Returns a key into the global FP8 buffers."""
         autocast_key = cls.get_unique_autocast_key(fp8_recipe, fp8_group)
         fwd_bwd_key = cls.get_fwd_bwd_key(forward)
-        return f"{fwd_bwd_key}_{fp8_weights}_{autocast_key}"
+        return f"{fwd_bwd_key}_{autocast_key}"
 
     @classmethod
-    def split_key_in_buffer(cls, key: str) -> Tuple[bool, bool, str]:
+    def split_key_in_buffer(cls, key: str) -> Tuple[bool, str]:
         """Splits buffer key into relevant parts."""
-        forward, fp8_weights, autocast_key = key.split("_", 2)
+        forward, autocast_key = key.split("_", 1)
         forward = forward == "forward"
-        fp8_weights = fp8_weights == "True"
-        return forward, fp8_weights, autocast_key
+        return forward, autocast_key
 
     @classmethod
     def add_fp8_tensors_to_global_buffer(
         cls,
         fp8_meta: Dict[str, Any],
-        fp8_weights: Optional[List[torch.Tensor]] = None,
     ) -> None:
         """
         The amax reduction process happens completely outside the FP8 modules.
@@ -202,33 +197,12 @@ class FP8GlobalStateManager:
 
         fp8_meta[index_in_buffer] = []
         for forward in (True, False):
-            # This algorithm creates a two-way map with `autocast_to_fp8_params` and
-            # `fp8_param_to_autocast`. This is used for keeping track of FP8 weights
-            # in an autocasted region and cross reference them in `float8_tensor.py`
-            # to perform the forward amax reduction.
             fp8_meta_tensor_key = cls.get_meta_tensor_key(forward=forward)
             if fp8_meta_tensor_key not in fp8_meta:
                 # Handles non-parameter FP8 modules, e.g. DPA.
                 continue
 
-            if forward and fp8_weights is not None:
-                autocast_key = cls.get_unique_autocast_key(
-                    fp8_meta["recipe"], fp8_meta["fp8_group"]
-                )
-                fp8_weight_set = {id(w._data) for w in fp8_weights}
-                if autocast_key not in cls.autocast_to_fp8_params:
-                    cls.autocast_to_fp8_params[autocast_key] = fp8_weight_set
-                else:
-                    cls.autocast_to_fp8_params[autocast_key] = cls.autocast_to_fp8_params[
-                        autocast_key
-                    ].union(fp8_weight_set)
-                # Identify correct autocast key for a given param.
-                for w in fp8_weight_set:
-                    cls.fp8_param_to_autocast[w] = autocast_key
-
-            key = cls.get_key_in_buffer(
-                forward, fp8_weights is not None, fp8_meta["recipe"], fp8_meta["fp8_group"]
-            )
+            key = cls.get_key_in_buffer(forward, fp8_meta["recipe"], fp8_meta["fp8_group"])
 
             if key not in cls.global_amax_buffer:
                 cls.global_amax_buffer[key] = [fp8_meta[fp8_meta_tensor_key].amax_history[0]]
@@ -277,7 +251,9 @@ class FP8GlobalStateManager:
     @classmethod
     def get_fp8_recipe(cls) -> DelayedScaling:
         """Return the fp8 recipe"""
-        return cls.FP8_RECIPE
+        if cls.FP8_RECIPE is not None:
+            return cls.FP8_RECIPE
+        return get_default_fp8_recipe()
 
     @classmethod
     def get_fp8_group(cls) -> Union[dist_group_type, None]:
@@ -325,19 +301,12 @@ class FP8GlobalStateManager:
     def reduce_and_update_fp8_tensors(
         cls,
         forward: bool = True,
-        fp8_weights: bool = False,
     ) -> None:
         """Concatenate, reduce, and split amaxes in the global buffer."""
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             # Check for forward or backward reduction.
-            fwd_update, fp8_weights_update, autocast_key = cls.split_key_in_buffer(buffer_key)
+            fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
             if fwd_update != forward:
-                continue
-            # Only skip a forward update when `fp8_weights` is explicitly set to `True`
-            # (inside optimizer) and the current key is not an `fp8_weight_update` key.
-            # For other cases, we need to reduce because of activation tensors.
-            # TODO(ksivaman) consider separate weight and activation fp8_tensors.
-            if fwd_update and fp8_weights and not fp8_weights_update:
                 continue
             if len(amax_buffer) == 0:
                 continue
@@ -432,7 +401,7 @@ class FP8GlobalStateManager:
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
         if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
-            cls.reduce_and_update_fp8_tensors(forward=True, fp8_weights=False)
+            cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
@@ -473,16 +442,16 @@ class FP8GlobalStateManager:
         stashed_fp8_meta = cls.fp8_tensors_recompute_buffer[fp8_meta[buffer_position_key]].popleft()
 
         # Replace amaxes and scales with stashed values for phase 2 forward
-        fp8_meta["scaling_fwd"].amax_history = stashed_fp8_meta[0]
-        fp8_meta["scaling_fwd"].scale = stashed_fp8_meta[1]
-        fp8_meta["scaling_fwd"].scale_inv = stashed_fp8_meta[2]
+        fp8_meta["scaling_fwd"].amax_history.copy_(stashed_fp8_meta[0])
+        fp8_meta["scaling_fwd"].scale.copy_(stashed_fp8_meta[1])
+        fp8_meta["scaling_fwd"].scale_inv.copy_(stashed_fp8_meta[2])
 
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-        fp8_meta["scaling_fwd"].amax_history = fp8_meta["updated_amax_history_fwd"]
-        fp8_meta["scaling_fwd"].scale = fp8_meta["updated_scale_fwd"]
-        fp8_meta["scaling_fwd"].scale_inv = fp8_meta["updated_scale_inv_fwd"]
+        fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
+        fp8_meta["scaling_fwd"].scale.copy_(fp8_meta["updated_scale_fwd"])
+        fp8_meta["scaling_fwd"].scale_inv.copy_(fp8_meta["updated_scale_inv_fwd"])
 
 
 @contextmanager

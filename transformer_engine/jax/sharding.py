@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -197,7 +197,7 @@ class MeshResource:
         The axis name in Mesh used to split the batch and weights along.
         If it is None, then full-sharded data parallelism is disabled.
     pp_resource : str, default = None
-        The axis name in Mesh used to split model layers. along.
+        The axis name in Mesh used to split model layers along.
         If it is None, then pipeline parallelism is disabled.
     cp_resource : str, default = None
         The axis name in Mesh used to split sequence (context) dimensions along

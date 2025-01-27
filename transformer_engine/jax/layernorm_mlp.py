@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX MLP modules"""
@@ -516,7 +516,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                     dactivation_lu_scale_inv,
                     bwd_dtype,
                     static_axis_boundary=-1,
-                    transpose_axis_boundary=-2,
                     activation_type=activation_type,
                 )
             )

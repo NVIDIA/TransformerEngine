@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Encoder training on single GPU"""
@@ -18,6 +18,8 @@ from flax.training import train_state
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+
+from common import is_bf16_supported
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"
@@ -321,6 +323,7 @@ class TestEncoder(unittest.TestCase):
         """Run 4 epochs for testing"""
         cls.args = encoder_parser(["--epochs", "3"])
 
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
         actual = train_and_evaluate(self.args)

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
@@ -9,6 +9,7 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.extend import ffi
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType
@@ -20,6 +21,7 @@ from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     jax_dtype_to_ir_dtype,
+    is_ffi_enabled,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
@@ -84,30 +86,36 @@ class CastFP8Primitive(BasePrimitive):
         assert amax_aval.dtype == jnp.float32
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
-        ir_x_type = ir.RankedTensorType(x.type)
-        ir_x_shape = ir_x_type.shape
-        ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
-        ir_amax_type = ir.RankedTensorType(amax.type)
-        ir_amax_dtype = ir_amax_type.element_type
-        ir_amax_shape = ir_amax_type.shape
-        ir_scale_shape = ir_amax_shape
-        ir_scale_inv_shape = ir_amax_shape
+        if is_ffi_enabled():
+            name = "te_quantize_ffi"
+            out = ffi.ffi_lowering(name, operand_output_aliases={1: 1})(
+                ctx, x, amax, scale, scale_inv
+            )
+        else:
+            ir_x_type = ir.RankedTensorType(x.type)
+            ir_x_shape = ir_x_type.shape
+            ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
+            ir_amax_type = ir.RankedTensorType(amax.type)
+            ir_amax_dtype = ir_amax_type.element_type
+            ir_amax_shape = ir_amax_type.shape
+            ir_scale_shape = ir_amax_shape
+            ir_scale_inv_shape = ir_amax_shape
 
-        out_types = [
-            ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
-            ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
-        ]
-        operands = [x, amax, scale, scale_inv]
-        operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
-        args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+            out_types = [
+                ir.RankedTensorType.get(ir_x_shape, ir_out_dtype),
+                ir.RankedTensorType.get(ir_amax_shape, ir_amax_dtype),
+            ]
+            operands = [x, amax, scale, scale_inv]
+            operand_shapes = [ir_x_shape, ir_amax_shape, ir_scale_shape, ir_scale_inv_shape]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
 
-        opaque = transformer_engine_jax.pack_common_descriptor(
-            ir_x_shape, jax_dtype_to_te_dtype(x_aval.dtype), jax_dtype_to_te_dtype(out_dtype)
-        )
+            opaque = transformer_engine_jax.pack_common_descriptor(
+                ir_x_shape, jax_dtype_to_te_dtype(x_aval.dtype), jax_dtype_to_te_dtype(out_dtype)
+            )
 
-        out = custom_caller(
-            CastFP8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
-        )
+            out = custom_caller(
+                CastFP8Primitive.name, args, opaque, False, operand_output_aliases={1: 1}
+            )
 
         return out
 

@@ -1,10 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "../common.h"
+#include "../cudnn_utils.h"
 #include "../util/system.h"
 #include "fused_attn_fp8.h"
 #include "utils.h"

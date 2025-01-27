@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -24,25 +24,27 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
+#include <transformer_engine/comm_gemm_overlap.h>
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/gemm.h>
-#include <transformer_engine/layer_norm.h>
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/padding.h>
 #include <transformer_engine/permutation.h>
 #include <transformer_engine/recipe.h>
-#include <transformer_engine/rmsnorm.h>
 #include <transformer_engine/softmax.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
+#include <cassert>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
 #include "common/util/logging.h"
