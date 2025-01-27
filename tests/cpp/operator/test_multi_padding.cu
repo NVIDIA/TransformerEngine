@@ -95,8 +95,8 @@ void performTest() {
     ref_input_list.emplace_back(height*width);
     ref_output_list.emplace_back(padded_height*width);
 
-    std::copy(input.cpu_dptr<InputType>(),
-              input.cpu_dptr<InputType>() + height * width,
+    std::copy(input.rowwise_cpu_dptr<InputType>(),
+              input.rowwise_cpu_dptr<InputType>() + height * width,
               ref_input_list.back().begin());
     ref_height_list[tensor_id] = height;
     ref_width_list[tensor_id] = width;
@@ -134,6 +134,7 @@ void performTest() {
     compareResults("output",
                    output_list[tensor_id],
                    ref_output_list[tensor_id].data(),
+                   true,
                    atol, rtol);
   }
 }

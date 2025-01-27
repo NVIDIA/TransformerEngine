@@ -66,10 +66,10 @@ void performTestQ(const size_t N) {
   fillUniform(&input);
   setRandomScale(&output);
 
-  nvte_fp8_quantize(input.data(), output.data(), 0);
+  nvte_quantize(input.data(), output.data(), 0);
 
   float ref_amax;
-  compute_ref_q<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
+  compute_ref_q<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output.get(),
                                        N, &ref_amax, output.scale());
 
   cudaDeviceSynchronize();
@@ -79,7 +79,7 @@ void performTestQ(const size_t N) {
   auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
   compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
   auto [atol, rtol] = getTolerances(otype);
-  compareResults("output_q", output, ref_output.get(), atol, rtol);
+  compareResults("output_q", output, ref_output.get(), true, atol, rtol);
 }
 
 template <typename InputType, typename OutputType>
@@ -96,17 +96,17 @@ void performTestDQ(const size_t N) {
 
   fillUniform(&input);
 
-  nvte_fp8_dequantize(input.data(), output.data(), 0);
+  nvte_dequantize(input.data(), output.data(), 0);
 
-  compute_ref_dq<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output.get(),
-                                        N, input.scale_inv());
+  compute_ref_dq<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output.get(),
+                                        N, input.rowwise_scale_inv());
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   auto [atol, rtol] = getTolerances(otype);
-  compareResults("output_dq", output, ref_output.get(), atol, rtol);
+  compareResults("output_dq", output, ref_output.get(), true, atol, rtol);
 }
 
 std::vector<size_t> qdq_test_cases = {2048* 12288,

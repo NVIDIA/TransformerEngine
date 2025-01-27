@@ -12,11 +12,7 @@ import warnings
 import torch
 
 from transformer_engine_torch import CommOverlapAlgo
-from ...cpp_extensions import (
-    fp8_cast_transpose_bgrad_fused,
-    fp8_gemm,
-    gemm,
-)
+from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype

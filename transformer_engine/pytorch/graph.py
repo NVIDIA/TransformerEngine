@@ -11,7 +11,7 @@ from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from .fp8 import (
     fp8_autocast,
@@ -556,12 +556,16 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: DelayedScaling,
-) -> List[Any]:
+    fp8_recipe: Recipe,
+) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
+
+    if not isinstance(fp8_recipe, DelayedScaling):
+        return None
+
     fp8_tensors = []
     for module in modules:
         for m in module.modules():
@@ -579,9 +583,13 @@ def save_fp8_tensors(
 
 def restore_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_tensors: List[Any],
+    fp8_tensors: Optional[List[Any]],
 ) -> None:
     """Restore FP8 tensors."""
+
+    if fp8_tensors is None:
+        return
+
     for module in modules:
         for m in module.modules():
             module_tensors = fp8_tensors.pop(0)

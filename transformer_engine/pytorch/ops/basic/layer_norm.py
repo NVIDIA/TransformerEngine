@@ -13,13 +13,9 @@ from typing import Optional
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...cpp_extensions import (
-    layernorm_fwd_fp8,
-    layernorm_fwd_fp8_inf,
-    layernorm_fwd_inf,
-)
-from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...tensor import Float8Tensor, QuantizedTensor
+from ...fp8 import FP8GlobalStateManager
+from ...constants import TE_DType
+from ...tensor import QuantizedTensor
 from ...utils import (
     canonicalize_device,
     canonicalize_dtype,
@@ -213,60 +209,28 @@ class LayerNorm(BasicOperation):
         # Check if backward pass is needed
         requires_grad = ctx.requires_grad
 
-        # Check if FP8 is enabled
-        with_fp8_output = (
+        # Check if output is quantized
+        output_quantizer = None
+        if (
             FP8GlobalStateManager.is_fp8_enabled()
             and next_op is not None
-            and next_op.num_fp8_scales("input") > 0
-        )
-        output_fp8_meta = None
-        if with_fp8_output:
-            output_fp8_meta = next_op.get_fp8_meta("input")
+            and next_op.num_quantizers("forward") > 0
+        ):
+            output_quantizer = next_op.get_quantizer("forward", 0)
 
         # Compute layer norm
-        y = None
-        means = None
-        rstdevs = None
         sm_margin = self._sm_margins["forward" if requires_grad else "inference"]
-        if with_fp8_output:
-            fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-            fp8_dtype = get_fp8_te_dtype(output_fp8_meta["recipe"], fprop_tensor=True)
-            args = (
-                x,
-                w,
-                b,
-                self.eps,
-                output_fp8_meta[fp8_meta_key],
-                0,  # fp8_meta_index
-                fp8_dtype,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                data, means, rstdevs = layernorm_fwd_fp8(*args)
-            else:
-                data = layernorm_fwd_fp8_inf(*args)
-            y = Float8Tensor(
-                data=data,
-                fp8_meta=output_fp8_meta,
-                fp8_meta_forward=True,
-                fp8_meta_index=0,
-                fp8_dtype=fp8_dtype,
-                dtype=dtype,
-            )
-        else:
-            args = (
-                x,
-                w,
-                b,
-                self.eps,
-                sm_margin,
-                self.zero_centered_gamma,
-            )
-            if requires_grad:
-                y, means, rstdevs = layernorm_fwd(*args)
-            else:
-                y = layernorm_fwd_inf(*args)
+        y, means, rstdevs = layernorm_fwd(
+            x,
+            w,
+            b,
+            self.eps,
+            None,
+            output_quantizer,
+            TE_DType[dtype],
+            sm_margin,
+            self.zero_centered_gamma,
+        )
 
         # Save state for backward pass
         if requires_grad:

@@ -44,6 +44,13 @@ class VectorizedStorage {
     return *this;
   }
   inline __device__ ~VectorizedStorage() {}
+
+  /* \brief Access to separate elements. */
+  inline __device__ DType *separate() { return scratch_.separate; }
+
+  inline __device__ const DType *separate() const { return scratch_.separate; }
+
+  inline __device__ LType &aligned() { return scratch_.aligned; }
 };
 
 // Returns const LType is DType is const
@@ -167,9 +174,11 @@ constexpr int unary_kernel_threads = 512;
 template <int nvec, bool aligned, typename ComputeType, typename Param,
           ComputeType (*OP)(ComputeType, const Param &), typename InputType, typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
-    void unary_kernel(const InputType *input, OutputType *output, const ComputeType *scale,
-                      ComputeType *amax, ComputeType *scale_inv, Param p, const size_t N,
-                      const size_t num_aligned_elements) {
+    void unary_kernel(const InputType *input, const ComputeType *noop, OutputType *output,
+                      const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv, Param p,
+                      const size_t N, const size_t num_aligned_elements) {
+  if (noop != nullptr && noop[0] == 1.0f) return;
+
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
   VectorizedStorer<OutputType, nvec, aligned> storer(output, N);
   ComputeType max = 0;
@@ -322,9 +331,9 @@ Alignment CheckAlignment(const size_t lead_dim, const int nvec, const T... ptrs)
 
 template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typename InputType,
           typename OutputType>
-void VectorizedUnaryKernelLauncher(const InputType *input, OutputType *output, const fp32 *scale,
-                                   fp32 *amax, fp32 *scale_inv, const size_t N, const Param params,
-                                   cudaStream_t stream) {
+void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
+                                   const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
+                                   const Param params, cudaStream_t stream) {
   if (N != 0) {
     auto align = CheckAlignment(N, nvec, input, output);
 
@@ -337,16 +346,16 @@ void VectorizedUnaryKernelLauncher(const InputType *input, OutputType *output, c
     switch (align) {
       case Alignment::SAME_ALIGNED:
         unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
         unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
         unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
-            input, output, scale, amax, scale_inv, params, N, N);
+            input, noop, output, scale, amax, scale_inv, params, N, N);
         break;
       }
     }

@@ -21,58 +21,6 @@
 
 using namespace transformer_engine;
 
-namespace {
-
-// forward
-
-float gelu(const float x) {
-    return 0.5f * x * (1.0f + tanhf(0.79788456F * x * (1.0f + 0.044715f * x * x)));
-}
-
-float silu(const float x) {
-  return x / (1 + expf(-x));
-}
-
-float relu(const float x) {
-  return x > 0 ? x : 0;
-}
-
-float srelu(const float x) {
-  return x > 0 ? x * x : 0;
-}
-
-float qgelu(const float x) {
-  return x / (1 + expf(-1.702f * x));
-}
-
-// backward
-
-float dgelu(const float x) {
-  const float tanh_out = tanhf(0.79788456f * x * (1.f + 0.044715f * x * x));
-  return 0.5f * x * ((1.f - tanh_out * tanh_out) * (0.79788456f + 0.1070322243f * x * x)) +
-         0.5f * (1.f + tanh_out);
-}
-
-float dsilu(const float x) {
-  const float sigmoid = 1.f / (1 + expf(-x));
-  return x * sigmoid * (1.f - sigmoid) + sigmoid;
-}
-
-float drelu(const float x) {
-  return x > 0.f ? 1.f : 0.f;
-}
-
-float dsrelu(const float x) {
-  return fmaxf(2.f * x, 0.f);
-}
-
-float dqgelu(const float x) {
-  const float sigmoid = 1.f / (1 + expf(-1.702f * x));
-  return 1.702f * x * sigmoid * (1.f - sigmoid) + sigmoid;
-}
-
-}  // namespace
-
 template <float (*act)(const float), typename IT, typename OT, typename CT>
 void compute_ref_act_cast(const IT *input_h,
                           OT *output_h,
@@ -82,6 +30,7 @@ void compute_ref_act_cast(const IT *input_h,
                           const size_t H) {
   CT amax  = 0.;
 
+  #pragma omp parallel for schedule(static) reduction(max: amax) proc_bind(spread)
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT elt = static_cast<CT>(input_h[i * H + j]);
@@ -101,6 +50,7 @@ void compute_ref_dact_cast(const IT *input_h,
                            const size_t N,
                            const size_t H) {
   using CT = float;
+  #pragma omp parallel for schedule(static) proc_bind(spread)
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT elt = static_cast<CT>(input_h[i * H + j]);
@@ -118,6 +68,7 @@ void compute_ref_glu_act_cast(const IT *input_h, OT *output_h, const CT scale, C
 
   const int col = H * 2;
 
+  #pragma omp parallel for schedule(static) reduction(max: amax) proc_bind(spread)
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT gelu_elt = static_cast<CT>(input_h[i * col + j]);
@@ -139,6 +90,7 @@ void compute_ref_dglu_act_cast(const IT *input_h, const IT *grad_h, OT *output_h
   const int col = H * 2;
   using CT = float;
 
+  #pragma omp parallel for schedule(static) proc_bind(spread)
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT grad = static_cast<CT>(grad_h[i * H + j]);
@@ -179,7 +131,7 @@ void performTest(const size_t N, const size_t H) {
   nvte_act(input.data(), output.data(), 0);
 
   float ref_amax;
-  compute_ref_act_cast<ref_act>(input.cpu_dptr<IType>(), ref_output.get(),
+  compute_ref_act_cast<ref_act>(input.rowwise_cpu_dptr<IType>(), ref_output.get(),
                                 output.scale(), &ref_amax, N, H);
 
   cudaDeviceSynchronize();
@@ -195,7 +147,7 @@ void performTest(const size_t N, const size_t H) {
 
   nvte_dact(ograd.data(), input.data(), igrad.data(), 0);
 
-  compute_ref_dact_cast<ref_dact>(input.cpu_dptr<IType>(), ograd.cpu_dptr<IType>(),
+  compute_ref_dact_cast<ref_dact>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
                                   ref_igrad.get(), N, H);
 
   cudaDeviceSynchronize();
@@ -234,7 +186,7 @@ void performTestGLU(const size_t N, const size_t H) {
   nvte_act(input.data(), output.data(), 0);
 
   float ref_amax;
-  compute_ref_glu_act_cast<ref_act>(input.cpu_dptr<IType>(), ref_output.get(),
+  compute_ref_glu_act_cast<ref_act>(input.rowwise_cpu_dptr<IType>(), ref_output.get(),
                                     output.scale(), &ref_amax, N, H);
 
   cudaDeviceSynchronize();
@@ -250,7 +202,7 @@ void performTestGLU(const size_t N, const size_t H) {
 
   nvte_dact(ograd.data(), input.data(), igrad.data(), 0);
 
-  compute_ref_dglu_act_cast<ref_dact, ref_act>(input.cpu_dptr<IType>(), ograd.cpu_dptr<IType>(),
+  compute_ref_dglu_act_cast<ref_dact, ref_act>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
                                                ref_igrad.get(), N, H);
 
   cudaDeviceSynchronize();

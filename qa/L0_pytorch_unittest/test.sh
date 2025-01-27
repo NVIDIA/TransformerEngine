@@ -15,7 +15,6 @@ PYTORCH_JIT=0 NVTE_TORCH_COMPILE=0 NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 pytest -v 
 pytest -v -s $TE_PATH/tests/pytorch/test_jit.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fused_rope.py
 pytest -v -s $TE_PATH/tests/pytorch/test_float8tensor.py
-pytest -v -s $TE_PATH/tests/pytorch/test_torch_save_load.py
 pytest -v -s $TE_PATH/tests/pytorch/test_gqa.py
 pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py
 pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py

@@ -30,7 +30,7 @@ TE_LAYERS = [
 ]
 
 TEST_ROOT = Path(__file__).parent.resolve()
-NUM_PROCS: int = min(torch.cuda.device_count(), 4)
+NUM_PROCS: int = torch.cuda.device_count()
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python"]
@@ -67,14 +67,16 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
                 pytest.skip(reason_for_no_fp8)
             test_cmd.append("--fp8")
             if fp8_out:
+                if torch.cuda.get_device_properties().major == 10:
+                    pytest.skip("WIP: TE GEMM on Blackwell does not support FP8 output.")
                 test_cmd.append("--fp8-output")
         if p2p:
             test_cmd.append("--p2p")
         if aggregate:
             test_cmd.append("--aggregate")
         if atomic:
-            if torch.cuda.get_device_properties(0).major < 9:
-                pytest.skip("Device compute capability 9.0 or higher required for Atomic GEMM.")
+            if torch.cuda.get_device_properties(0).major != 9:
+                pytest.skip("Atomic GEMM requires device compute capability 9.x (Hopper).")
             test_cmd.append("--atomic")
 
     result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)

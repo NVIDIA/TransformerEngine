@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -429,7 +430,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
-        with fp8_model_init(enabled=True):
+        with fp8_model_init(enabled=True, recipe=DelayedScaling()):
             model = MultiheadAttention(
                 hidden_size=1024,
                 num_attention_heads=16,
