@@ -918,7 +918,7 @@ class Float8Tensor(QuantizedTensor):
         Should be called after any in-place operation.
         """
         self._transpose_invalid = True
-    
+
     def remove_caches(self) -> None:
         """
         Remove transpose cache and mark it as invalid.
