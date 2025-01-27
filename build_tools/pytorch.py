@@ -99,12 +99,10 @@ def setup_pytorch_extension(
         library_dirs.append(mpi_home / "lib")
         libraries.append("mpi")
     
-    # TODO: make this an option later
-    COMPILE_WITH_NVSHMEM=True
-    if COMPILE_WITH_NVSHMEM:
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
         assert (
             os.getenv("NVSHMEM_HOME") is not None
-        ), "NVSHMEM_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
         nvshmem_home = Path(os.getenv("NVSHMEM_HOME"))
         include_dirs.append(nvshmem_home / "include")
         library_dirs.append(nvshmem_home / "lib")
