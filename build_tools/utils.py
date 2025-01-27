@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+from importlib.util import find_spec
 
 
 @functools.lru_cache(maxsize=None)
@@ -302,16 +303,17 @@ def install_and_import(package):
 
 
 def uninstall_te_wheel_packages():
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "uninstall",
-            "-y",
-            "transformer_engine_cu12",
-            "transformer_engine_torch",
-            "transformer_engine_paddle",
-            "transformer_engine_jax",
-        ]
-    )
+    if find_spec("pip") is not None:
+        subprocess.check_call(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "uninstall",
+                "-y",
+                "transformer_engine_cu12",
+                "transformer_engine_torch",
+                "transformer_engine_paddle",
+                "transformer_engine_jax",
+            ]
+        )
