@@ -64,6 +64,12 @@ def setup_common_extension() -> CMakeExtension:
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
 
+    if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
+        assert (
+            os.getenv("NVSHMEM_HOME") is not None
+        ), "NVSHMEM_HOME must be set when compiling with NVTE_ENABLE_NVSHMEM=1"
+        cmake_flags.append("-DNVTE_ENABLE_NVSHMEM=ON")
+
     if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
         cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 

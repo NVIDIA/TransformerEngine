@@ -513,6 +513,19 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> padded_input_row_list);
 
 /***************************************************************************************************
+ * NVSHMEM APIs
+ **************************************************************************************************/
+
+namespace nvshmem_api {
+void init_nvshmem_backend(c10d::ProcessGroup *process_group);
+torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
+void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal);
+void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind);
+void nvshmem_finalize();
+void nvshmem_quiet();
+}  // namespace nvshmem_api
+
+/***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
