@@ -13,7 +13,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match
+from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -81,9 +81,9 @@ class MXFP8Quantizer(Quantizer):
 
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.empty(
-            math.prod(shape[:-1]),
-            shape[-1] // MXFP8_BLOCK_SCALING_SIZE,
+        scale_inv = torch.zeros(
+            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
             device=device,
         )
@@ -93,9 +93,9 @@ class MXFP8Quantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
-            columnwise_scale_inv = torch.empty(
-                math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
-                shape[-1],
+            columnwise_scale_inv = torch.zeros(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
             )

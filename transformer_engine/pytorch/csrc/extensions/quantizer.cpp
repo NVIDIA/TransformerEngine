@@ -181,21 +181,23 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     } else {
       data = at::empty(torch_shape, opts);
     }
-    rowwise_scale_inv = at::empty({numel / last_dim, last_dim / MXFP8_BLOCK_SIZE}, opts);
+    auto sinv0 = roundup(numel / last_dim, 128);
+    auto sinv1 = roundup(last_dim / MXFP8_BLOCK_SIZE, 4);
+    rowwise_scale_inv = at::zeros({sinv0, sinv1}, opts);
     tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
-    tensor.set_rowwise_scale_inv(
-        rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-        std::vector<size_t>{numel / last_dim, last_dim / MXFP8_BLOCK_SIZE});
-  } else {
+    tensor.set_rowwise_scale_inv(rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                 std::vector<size_t>{sinv0, sinv1});
   }
+
   if (columnwise_usage) {
+    auto sinv0 = roundup(numel / (last_dim * MXFP8_BLOCK_SIZE), 4);
+    auto sinv1 = roundup(last_dim, 128);
     columnwise_data = at::empty(torch_shape, opts);
-    columnwise_scale_inv = at::empty({numel / (last_dim * MXFP8_BLOCK_SIZE), last_dim}, opts);
+    columnwise_scale_inv = at::zeros({sinv0, sinv1}, opts);
 
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
-    tensor.set_columnwise_scale_inv(
-        columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
-        std::vector<size_t>{numel / (last_dim * MXFP8_BLOCK_SIZE), last_dim});
+    tensor.set_columnwise_scale_inv(columnwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
+                                    std::vector<size_t>{sinv0, sinv1});
   }
   this->set_quantization_params(&tensor);
 
