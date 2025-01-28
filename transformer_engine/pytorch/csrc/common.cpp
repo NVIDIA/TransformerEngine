@@ -143,13 +143,17 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
                                      scaling_mode);
 }
 
-size_t product(const std::vector<size_t>& shape) {
-  size_t ret = 1;
+template <typename T>
+T product(const std::vector<T>& shape) {
+  T ret = 1;
   for (auto s : shape) {
     ret *= s;
   }
   return ret;
 }
+
+template size_t product<size_t>(const std::vector<size_t>& shape);
+template int64_t product<int64_t>(const std::vector<int64_t>& shape);
 
 size_t product(const NVTEShape& shape, size_t begin, size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.ndim, "Attempted to access entries ", begin, " to ", end,
