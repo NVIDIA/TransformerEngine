@@ -199,14 +199,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
   
-
-  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend, "init nvshmem with helper", py::call_guard<py::gil_scoped_release>());
-  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor, "create nvshmem tensor", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_send_on_stream", &nvshmem_api::nvshmem_send_on_stream, "send on stream using nvshmem backend", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_wait_on_stream", &nvshmem_api::nvshmem_wait_on_stream, "wait on stream using nvshmem backend", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize, "tear down nvshmem backend", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_quiet", &nvshmem_api::nvshmem_quiet, "nvshmem_quiet", py::call_guard<py::gil_scoped_release>());
-  m.def("nvshmem_ag_from_p2p_on_stream", &nvshmem_api::nvshmem_ag_from_p2p_on_stream, "CE based AG implementation", py::call_guard<py::gil_scoped_release>());
+// nvshmem functions
+  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend, "Init nvshmem with helper", py::call_guard<py::gil_scoped_release>());
+  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor, "Create nvshmem tensor", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_send_on_stream", &nvshmem_api::nvshmem_send_on_stream, "Send on stream using nvshmem backend", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_wait_on_stream", &nvshmem_api::nvshmem_wait_on_stream, "Wait on stream using nvshmem backend", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize, "Tear down nvshmem backend", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_quiet", &nvshmem_api::nvshmem_quiet, "Ensure completion of all operations by the call src", py::call_guard<py::gil_scoped_release>());
 
 
 

@@ -100,6 +100,8 @@ def setup_pytorch_extension(
         include_dirs.append(nvshmem_home / "include")
         library_dirs.append(nvshmem_home / "lib")
         libraries.append("nvshmem_host")
+        cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
+        nvcc_flags.append("-DNVTE_ENABLE_NVSHMEM")
 
 
     # Construct PyTorch CUDA extension

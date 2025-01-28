@@ -6,16 +6,21 @@
 
 
 #include "../extensions.h"
+
+#ifdef NVTE_ENABLE_NVSHMEM
 #include <nvshmem.h>
 #include <nvshmemx.h>
 #include <nvshmem_api/nvshmem_waitkernel.h>
+#endif
+
 #include <torch/cuda.h>
 #include <cuda.h>
 #include <torch/extension.h>
 #include <cuda_fp8.h>
 
 namespace nvshmem_api {
- void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
+void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
+#ifdef NVTE_ENABLE_NVSHMEM
   nvshmemx_init_attr_t attr = {};
   nvshmemx_uniqueid_t id = {};
 
@@ -47,27 +52,41 @@ namespace nvshmem_api {
 
   assert(my_rank == nvshmem_my_pe());
   assert(num_ranks == nvshmem_n_pes());
+#else
+  NVTE_ERROR("Internal TE error: init_nvshmem_backend cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
 
 void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind){
+#ifdef NVTE_ENABLE_NVSHMEM
   uint64_t* sig_addr = (uint64_t*) signal.data_ptr();
   cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
 
   transformer_engine::nvshmem_wait_on_stream(sig_addr, wait_kind, cur_stream);
+#else
+  NVTE_ERROR("Internal TE error: nvshmem_wait_on_stream cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
 
 
 torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype){
+#ifdef NVTE_ENABLE_NVSHMEM
   auto option_gpu =
       at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(c10::cuda::current_device());
   auto size = torch::elementSize(dtype) *
               std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
   return at::from_blob(
       nvshmem_malloc(size), shape, [](void *ptr) { nvshmem_free(ptr); }, option_gpu);
-
+#else
+  NVTE_ERROR("Internal TE error: create_nvshmem_tensor cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
 
 void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal){
+#ifdef NVTE_ENABLE_NVSHMEM
   void* src_ptr = (void *) src.data_ptr();
   void* dst_ptr = (void *) dst.data_ptr();
   uint64_t* sig_addr = (uint64_t*) signal.data_ptr();
@@ -76,46 +95,26 @@ void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torc
   at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
 
   nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET, peer, (cudaStream_t)cur_stream);
+#else
+  NVTE_ERROR("Internal TE error: nvshmem_send_on_stream cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
 void nvshmem_finalize(){
+#ifdef NVTE_ENABLE_NVSHMEM
   nvshmem_finalize();
+#else
+  NVTE_ERROR("Internal TE error: nvshmem_finalize cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
 
 void nvshmem_quiet(){
+#ifdef NVTE_ENABLE_NVSHMEM
   nvshmem_quiet();
+#else
+  NVTE_ERROR("Internal TE error: nvshmem_quiet cannot be initialized with valid PyTorch ",
+             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+#endif
 }
-
-void nvshmem_ag_from_p2p_on_stream(torch::Tensor buf, torch::Tensor singals, int my_rank, const std::vector<int> &global_ranks){
-  // Draft implementation of CE based AG using ring-exchange; This function assumes that the gathered data on local rank is already in buf tensor
-  // global_ranks: global ranks for current process group
-  // my_rank: the local rank in current process group
-  // size of signals must be equal to the size of current process group
-  int num_ranks = global_ranks.size();
-  if (num_ranks == 1) return ;
-
-  char* buf_start_ptr = (char *) buf.data_ptr();
-  uint64_t* signal_start_addr = (uint64_t*) singals.data_ptr();
-  size_t perchunksize = buf.numel() * buf.element_size()/num_ranks;
-  at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
-  int cur_rank, recv_rank, dst_PE;
-  char* src_ptr;
-  uint64_t* send_sig_addr, *recv_sig_addr;
-  uint64_t signal_reset = 0;
-  uint64_t sigval = 1;
-
-
-  dst_PE =  global_ranks.at((my_rank + 1) % num_ranks);
-
-  for (int idx =0 ; idx < num_ranks-1; idx ++ ){
-    cur_rank = (my_rank - idx + num_ranks) % num_ranks;
-    recv_rank = (my_rank - idx - 1 + num_ranks)% num_ranks;
-    src_ptr = buf_start_ptr + cur_rank*perchunksize;
-    send_sig_addr = signal_start_addr + cur_rank;
-    nvshmemx_putmem_signal_on_stream((void *)src_ptr, (void *)src_ptr, perchunksize, send_sig_addr, sigval, NVSHMEM_SIGNAL_SET, dst_PE, (cudaStream_t)cur_stream);
-    recv_sig_addr = signal_start_addr + recv_rank;
-    cuStreamWaitValue64((CUstream)cur_stream, (CUdeviceptr)recv_sig_addr, (cuuint64_t)sigval, CU_STREAM_WAIT_VALUE_GEQ);
-    cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)recv_sig_addr, (cuuint64_t)signal_reset, CU_STREAM_WRITE_VALUE_DEFAULT);
-  }
-}
-
 }

@@ -8,7 +8,7 @@ project(nvshmemapi LANGUAGES CXX CUDA)
 
 # Configure dependencies
 find_package(CUDAToolkit REQUIRED)
-find_package(MPI REQUIRED)
+# find_package(MPI REQUIRED)
 set(NVSHMEM_HOME "$ENV{NVSHMEM_HOME}" CACHE STRING "Location of NVSHMEM installation")
 
 add_library(nvshmemapi SHARED nvshmem_waitkernel.cu)
