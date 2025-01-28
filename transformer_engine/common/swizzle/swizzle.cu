@@ -210,8 +210,8 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     return;
   }
 
-  CheckInputTensor(*input, "scaling_factor_input", true);
-  CheckInputTensor(*output, "scaling_factor_output", true);
+  CheckInputTensor(*input, "scaling_factor_input");
+  CheckInputTensor(*output, "scaling_factor_output");
 
   auto& scaling_mode = input->scaling_mode;
 

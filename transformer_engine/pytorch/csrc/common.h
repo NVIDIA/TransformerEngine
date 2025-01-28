@@ -39,6 +39,7 @@
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -251,6 +252,8 @@ at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
+
+int roundup(const int value, const int multiple);
 
 }  // namespace transformer_engine::pytorch
 
