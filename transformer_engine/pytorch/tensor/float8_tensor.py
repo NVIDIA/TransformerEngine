@@ -924,7 +924,6 @@ class Float8Tensor(QuantizedTensor):
         Remove transpose cache and mark it as invalid.
         """
         self._transpose_invalid = True
-        del self._transpose
         self._transpose = None
 
     @classmethod
