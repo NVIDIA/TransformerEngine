@@ -290,7 +290,7 @@ class BasicLinear(BasicOperation):
             quantizer = self.get_quantizer("forward", 1)
             quantizer.set_usage(
                 rowwise=True,
-                columnwise=torch.is_grad_enabled(),  ### TODO Get from heuristic
+                columnwise=torch.is_grad_enabled(),
             )
             with torch.no_grad():
                 weight = quantizer(weight)
@@ -336,7 +336,7 @@ class BasicLinear(BasicOperation):
         weight: torch.Tensor,
         *,
         bias: Optional[torch.Tensor] = None,
-        device: Optional[torch.device] = None,
+        device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         out: Optional[torch.Tensor] = None,
         accumulate_into_out: bool = False,
@@ -471,7 +471,10 @@ class BasicLinear(BasicOperation):
                     "Output tensor is quantized, "
                     "but row tensor parallelism does not support quantized output"
                 )
-            assert output_quantizer is not None  ### TODO Get quantizer from y
+            if output_quantizer is None:
+                output_quantizer = getattr(y, "_quantizer", None)
+            if output_quantizer is None:
+                raise ValueError("Output tensor is quantized, but quantizer was not provided")
         else:
             output_quantizer = None
         if output_quantizer is not None:
@@ -513,9 +516,10 @@ class BasicLinear(BasicOperation):
                 torch.distributed.all_reduce(y, group=tensor_parallel_group)
 
         # Configure input tensor for backward pass
-        ### TODO Restore
-        # if own_quantized_x_local:
-        #     x_local.update_usage(rowwise_usage=False)
+        if own_quantized_x_local:
+            ### TODO Restore once column-wise usage is supported by itself  # pylint: disable=fixme
+            # x_local.update_usage(rowwise_usage=False)
+            pass
 
         # Detach input tensor if needed
         # Note: PyTorch autograd produces esoteric errors if we save
@@ -533,7 +537,7 @@ class BasicLinear(BasicOperation):
         *,
         input_requires_grad: bool = True,
         weight_requires_grad: bool = True,
-        device: Optional[torch.device] = None,
+        device: Optional[torch.device] = None,  # pylint: disable=unused-argument
         dtype: Optional[torch.dtype] = None,
         grad_weight: Optional[torch.Tensor] = None,
         accumulate_into_grad_weight: bool = False,
@@ -729,7 +733,12 @@ class BasicLinear(BasicOperation):
                         "Grad input tensor is quantized, "
                         "but column tensor parallelism does not support quantized grad input"
                     )
-                assert grad_input_quantizer is not None  ### TODO Get quantizer from dx
+                if grad_input_quantizer is None:
+                    grad_input_quantizer = getattr(dx, "_quantizer", None)
+                if grad_input_quantizer is None:
+                    raise ValueError(
+                        "Grad input tensor is quantized, but quantizer was not provided"
+                    )
             else:
                 grad_input_quantizer = None
 

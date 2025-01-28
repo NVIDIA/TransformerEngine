@@ -101,15 +101,12 @@ class _GroupedLinear(torch.autograd.Function):
         inputmats = []
 
         weight_requires_grad = weights[0].requires_grad
-        backward_needs_input = is_grad_enabled and weight_requires_grad  # #TODO
 
         if input_quantizers[0] is not None:
             for input_quantizer in input_quantizers:
                 input_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=(
-                        is_grad_enabled and weight_requires_grad
-                    ),  # TODO: and not sequence parallel?
+                    columnwise=(is_grad_enabled and weight_requires_grad),
                 )
             columnwise_usage = is_grad_enabled and inp.requires_grad
             if not columnwise_usage:
@@ -312,11 +309,8 @@ class _GroupedLinear(torch.autograd.Function):
                 # Deallocate input tensor
                 clear_tensor_data(*inputmats)
 
-                # clear_tensor_data(*weights) # TODO: 2 cases - own and do not won weight
-
-                # TODO - handle it later
-                """def handle_custom_ddp_from_mcore(w, wgrad):
-                    if w.requires_grad:
+                def handle_custom_ddp_from_mcore(w, wgrad):
+                    if ctx.weights_requires_grad:
                         if ctx.fuse_wgrad_accumulation and hasattr(w, "grad_added_to_main_grad"):
                             w.grad_added_to_main_grad = True
                             if getattr(w, "zero_out_wgrad", False):
@@ -341,7 +335,7 @@ class _GroupedLinear(torch.autograd.Function):
 
                 wgrad_list = [
                     handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
-                ]"""
+                ]
             else:
                 wgrad_list = [None] * ctx.num_gemms
 

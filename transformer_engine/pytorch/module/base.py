@@ -878,11 +878,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         # FP8 with all-gather: unfused bgrad, fused cast + transpose
         if gather_grad_output:
+            grad_bias = None
             if ctx.use_bias:
-                # TODO: We know it creates spike in memory usage, we should WAR that
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
-            else:
-                grad_bias = None
             if ctx.ub_overlap_ag:
                 # TODO: Implement
                 raise NotImplementedError(

@@ -4,6 +4,8 @@
 
 """Linear layer backward with Userbuffers communication."""
 
+# pylint: skip-file  ### TODO Debug Userbuffers support
+
 from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
@@ -44,6 +46,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         bias: Optional[Bias],
         reduce_scatter: Optional[ReduceScatter],
     ) -> None:
+
+        ### TODO Debug Userbuffers support
+        raise NotImplementedError("Userbuffers support has been broken by recent refactors")
 
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": None, "bias": None, "reduce_scatter": None}
@@ -701,6 +706,8 @@ def fuse_userbuffers_backward_linear(
         Updated forward pass operations
 
     """
+
+    return ops  ### TODO Debug Userbuffers support
 
     # Return immediately if environment is not distributed
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:
