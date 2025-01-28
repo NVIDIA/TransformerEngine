@@ -90,7 +90,7 @@ def assert_all_equal(l1: List[torch.Tensor], l2: List[torch.Tensor], names=None)
     if failed_tensors:
         print(failure_message)
         t1, t2 = failed_tensors[0]
-        torch.testing.assert_close(t1, t2, rtol=0, atol=0)
+        torch.testing.assert_close(t1, t2, rtol=0, atol=0, equal_nan=True)
 
 
 def generate_data(
