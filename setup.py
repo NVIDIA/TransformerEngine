@@ -63,7 +63,7 @@ def setup_common_extension() -> CMakeExtension:
             os.getenv("MPI_HOME") is not None
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
-    
+
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
         assert (
             os.getenv("NVSHMEM_HOME") is not None

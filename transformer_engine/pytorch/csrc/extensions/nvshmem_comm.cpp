@@ -4,19 +4,18 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-
 #include "../extensions.h"
 
 #ifdef NVTE_ENABLE_NVSHMEM
 #include <nvshmem.h>
-#include <nvshmemx.h>
 #include <nvshmem_api/nvshmem_waitkernel.h>
+#include <nvshmemx.h>
 #endif
 
-#include <torch/cuda.h>
 #include <cuda.h>
-#include <torch/extension.h>
 #include <cuda_fp8.h>
+#include <torch/cuda.h>
+#include <torch/extension.h>
 
 namespace nvshmem_api {
 void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
@@ -27,13 +26,14 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
   int my_rank = process_group->getRank();
   int num_ranks = process_group->getSize();
   if (my_rank == 0) {
-       nvshmemx_get_uniqueid(&id);
+    nvshmemx_get_uniqueid(&id);
   }
 
   auto backend_is_nccl = (process_group->getBackendType() == c10d::ProcessGroup::BackendType::NCCL);
   NVTE_CHECK(backend_is_nccl, "Currently only support NCCL boostrap for NVSHMEM");
-  auto datatensor = torch::from_blob((void*)&id, {static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t) / sizeof(uint8_t))},
-                                     at::device(torch::kCPU).dtype(torch::kUInt8));
+  auto datatensor = torch::from_blob(
+      (void *)&id, {static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t) / sizeof(uint8_t))},
+      at::device(torch::kCPU).dtype(torch::kUInt8));
   auto datatmp = (backend_is_nccl) ? datatensor.cuda() : datatensor;
 
   c10d::BroadcastOptions bcast_opts;
@@ -58,9 +58,9 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 #endif
 }
 
-void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind){
+void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind) {
 #ifdef NVTE_ENABLE_NVSHMEM
-  uint64_t* sig_addr = (uint64_t*) signal.data_ptr();
+  uint64_t *sig_addr = (uint64_t *)signal.data_ptr();
   cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
 
   transformer_engine::nvshmem_wait_on_stream(sig_addr, wait_kind, cur_stream);
@@ -70,8 +70,7 @@ void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind){
 #endif
 }
 
-
-torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype){
+torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype) {
 #ifdef NVTE_ENABLE_NVSHMEM
   auto option_gpu =
       at::TensorOptions().dtype(dtype).device(at::kCUDA).device_index(c10::cuda::current_device());
@@ -85,22 +84,23 @@ torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::Scal
 #endif
 }
 
-void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal){
+void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal) {
 #ifdef NVTE_ENABLE_NVSHMEM
-  void* src_ptr = (void *) src.data_ptr();
-  void* dst_ptr = (void *) dst.data_ptr();
-  uint64_t* sig_addr = (uint64_t*) signal.data_ptr();
+  void *src_ptr = (void *)src.data_ptr();
+  void *dst_ptr = (void *)dst.data_ptr();
+  uint64_t *sig_addr = (uint64_t *)signal.data_ptr();
   auto nelement = src.numel() * src.element_size();
   uint64_t sigval = 1;
   at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
 
-  nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET, peer, (cudaStream_t)cur_stream);
+  nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET,
+                                   peer, (cudaStream_t)cur_stream);
 #else
   NVTE_ERROR("Internal TE error: nvshmem_send_on_stream cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
-void nvshmem_finalize(){
+void nvshmem_finalize() {
 #ifdef NVTE_ENABLE_NVSHMEM
   nvshmem_finalize();
 #else
@@ -109,7 +109,7 @@ void nvshmem_finalize(){
 #endif
 }
 
-void nvshmem_quiet(){
+void nvshmem_quiet() {
 #ifdef NVTE_ENABLE_NVSHMEM
   nvshmem_quiet();
 #else
@@ -117,4 +117,4 @@ void nvshmem_quiet(){
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
-}
+}  // namespace nvshmem_api

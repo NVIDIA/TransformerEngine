@@ -89,7 +89,7 @@ def setup_pytorch_extension(
         include_dirs.append(mpi_path / "include")
         cxx_flags.append("-DNVTE_UB_WITH_MPI")
         nvcc_flags.append("-DNVTE_UB_WITH_MPI")
-    
+
     library_dirs = []
     libraries = []
     if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", 0))):
@@ -102,7 +102,6 @@ def setup_pytorch_extension(
         libraries.append("nvshmem_host")
         cxx_flags.append("-DNVTE_ENABLE_NVSHMEM")
         nvcc_flags.append("-DNVTE_ENABLE_NVSHMEM")
-
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
