@@ -65,7 +65,11 @@ def apply_normalization(
         zero_centered_gamma,
     )
 
-    return (output_quantizer.quantize(output[0], out=ln_out), *output[1:]) if split_mxfp8_cast else output
+    return (
+        (output_quantizer.quantize(output[0], out=ln_out), *output[1:])
+        if split_mxfp8_cast
+        else output
+    )
 
 
 class _NoopCatFunc(torch.autograd.Function):
