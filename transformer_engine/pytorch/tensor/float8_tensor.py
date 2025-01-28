@@ -919,6 +919,13 @@ class Float8Tensor(QuantizedTensor):
         """
         self._transpose_invalid = True
 
+    def remove_caches(self) -> None:
+        """
+        Remove transpose cache and mark it as invalid.
+        """
+        self._transpose_invalid = True
+        self._transpose = None
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
