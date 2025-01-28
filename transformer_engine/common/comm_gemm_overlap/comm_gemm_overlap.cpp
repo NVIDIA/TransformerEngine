@@ -150,27 +150,29 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
     auto param_shape = AS_VECTOR(param.shape);
 
     if (param_dptr != nullptr) {
-      if (param_type == NVTETensorParam::kNVTERowwiseData
-          || param_type == NVTETensorParam::kNVTEColumnwiseData) {
+      if (param_type == NVTETensorParam::kNVTERowwiseData ||
+          param_type == NVTETensorParam::kNVTEColumnwiseData) {
         // Offset data pointer
         param_dptr += chunk_offset * typeToSize(param_dtype);
         param_shape = chunk_shape;
 
-        if (param_type == NVTETensorParam::kNVTEColumnwiseData
-            && source.scaling_mode() != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+        if (param_type == NVTETensorParam::kNVTEColumnwiseData &&
+            source.scaling_mode() != NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
           // Columnwise shape for non-block scaled tensors shifts the last dimension to the front
           auto last_dim = param_shape.back();
           param_shape.pop_back();
           param_shape.insert(param_shape.begin(), last_dim);
         }
-      } else if (source.scaling_mode() == NVTEScalingMode::NVTE_MXFP8_1D_SCALING
-                 && (param_type == NVTETensorParam::kNVTERowwiseScaleInv
-                     || param_type == NVTETensorParam::kNVTEColumnwiseScaleInv)) {
+      } else if (source.scaling_mode() == NVTEScalingMode::NVTE_MXFP8_1D_SCALING &&
+                 (param_type == NVTETensorParam::kNVTERowwiseScaleInv ||
+                  param_type == NVTETensorParam::kNVTEColumnwiseScaleInv)) {
         // Calculate block scaling offset and size
-        auto scaled_tensor_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv) ?
-                                      source.shape().data[0] : source.columnwise_shape().data[0];
-        auto scaled_chunk_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv) ?
-                                     chunk_shape.front() : chunk_shape.back();
+        auto scaled_tensor_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv)
+                                          ? source.shape().data[0]
+                                          : source.columnwise_shape().data[0];
+        auto scaled_chunk_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv)
+                                         ? chunk_shape.front()
+                                         : chunk_shape.back();
         auto chunk_scale_start = chunk_offset / 32;
         auto chunk_scale_end = (chunk_offset + scaled_chunk_dim_size) / 32;
         auto chunk_scale_size = chunk_scale_end - chunk_scale_start;
@@ -186,8 +188,9 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   return chunk;
 }
 
-TensorWrapper CommOverlapCore::get_buffer_chunk_like(
-    const TensorWrapper &source, size_t chunk_offset, const std::vector<size_t> &chunk_shape) {
+TensorWrapper CommOverlapCore::get_buffer_chunk_like(const TensorWrapper &source,
+                                                     size_t chunk_offset,
+                                                     const std::vector<size_t> &chunk_shape) {
   // Start with a chunk of the source tensor
   auto chunk = get_tensor_chunk(source, chunk_offset, chunk_shape);
 
@@ -472,8 +475,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           D.dtype(), fp8_type,
           reducescatter2_userbuff_stridedoutput_fp8<fp8_type>(
-              rs_output_ptr, D.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size,
-              m_chunk, n, m, _ub_comm, _stream_comm););
+              rs_output_ptr, D.scale_inv(), _ub_reg, (_num_splits - 1) * output_chunk_size, m_chunk,
+              n, m, _ub_comm, _stream_comm););
     } else {
       reducescatter2_userbuff_stridedoutput(rs_output_ptr, _ub_reg,
                                             (_num_splits - 1) * output_chunk_size, m_chunk, n, m,
@@ -605,7 +608,7 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
 }
 
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
-                                                        size_t chunk_id) {
+                                                         size_t chunk_id) {
   // Start with a chunk of the source tensor
   auto chunk = get_tensor_chunk(source, 0, AS_VECTOR(_ubufs[chunk_id].shape()));
 
@@ -784,12 +787,13 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       recv_offset = comm_bytes * recv_chunk_id;
 
       // GEMM
-      auto input_b_chunk = get_buffer_chunk_like(B, input_chunk_size * send_chunk_id,
-                                                 {n_chunk * 2, k});
+      auto input_b_chunk =
+          get_buffer_chunk_like(B, input_chunk_size * send_chunk_id, {n_chunk * 2, k});
       auto output_chunk = get_tensor_chunk(D, output_chunk_size * send_chunk_id, {n_chunk * 2, m});
-      auto aux_chunk = (do_gelu) ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id,
-                                                    {n_chunk * 2, k})
-                                 : TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
+      auto aux_chunk =
+          (do_gelu)
+              ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id, {n_chunk * 2, k})
+              : TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
@@ -830,9 +834,10 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       // GEMM
       auto input_b_chunk = get_buffer_chunk_like(B, input_chunk_size * send_chunk_id, {n_chunk, k});
       auto output_chunk = get_tensor_chunk(D, output_chunk_size * send_chunk_id, {n_chunk, m});
-      auto aux_chunk = (do_gelu) ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id,
-                                                    {n_chunk, k})
-                                 : TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
+      auto aux_chunk =
+          (do_gelu)
+              ? get_tensor_chunk(pre_gelu_out, output_chunk_size * send_chunk_id, {n_chunk, k})
+              : TensorWrapper(nullptr, std::vector<size_t>{0}, pre_gelu_out.dtype());
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
@@ -900,9 +905,8 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
   // Process GEMM chunks in the order that AG+GEMM places the output chunks.
   auto output_d = get_buffer_chunk_like(D, 0, AS_VECTOR(D.shape()));
   nvte_cublas_atomic_gemm(A.data(), B.data(), output_d.data(), bias.data(), pre_gelu_out.data(),
-                          transa, transb, grad, workspace.data(), accumulate,
-                          use_split_accumulator, _math_sms, 0, _tp_size, true, _counter.data(),
-                          stream_main);
+                          transa, transb, grad, workspace.data(), accumulate, use_split_accumulator,
+                          _math_sms, 0, _tp_size, true, _counter.data(), stream_main);
 
   // P2P communication chunk
   for (int i = 1; i < _tp_size; i++) {
@@ -979,8 +983,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
 
     auto input_b_chunk = get_tensor_chunk(B, input_b_chunk_id * input_chunk_size, {n_chunk, k});
     auto output_chunk = get_buffer_chunk_by_id(D, i);
-    auto workspace_chunk = get_tensor_chunk(workspace, stream_id * workspace_size_chunk,
-                                            {workspace_size_chunk});
+    auto workspace_chunk =
+        get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
 
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(), accumulate,

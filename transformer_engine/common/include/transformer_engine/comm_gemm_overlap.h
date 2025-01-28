@@ -220,7 +220,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
   cudaEvent_t _stop_send, _stop_recv;
 
  public:
-
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
 
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,

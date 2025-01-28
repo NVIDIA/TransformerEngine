@@ -131,10 +131,10 @@ def general_gemm(
         use_split_accumulator,
     )
     kwargs = {
-        'comm_overlap': ub,
-        'comm_type': ub_type,
-        'extra_output': extra_output,
-        'bulk_overlap': bulk_overlap,
+        "comm_overlap": ub,
+        "comm_type": ub_type,
+        "extra_output": extra_output,
+        "bulk_overlap": bulk_overlap,
     }
 
     if ub_type == tex.CommOverlapType.AG and ub.is_p2p_overlap():

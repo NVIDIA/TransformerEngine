@@ -886,8 +886,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
-                if not isinstance(grad_output,
-                                  (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
+                if not isinstance(
+                    grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)
+                ):
                     grad_output = quantizer(grad_output)
 
                 # Copy into communication buffer, and replace original gradient with it

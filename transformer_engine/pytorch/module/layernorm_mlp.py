@@ -156,8 +156,9 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            if (any([ub_overlap_ag, ub_overlap_rs])
-                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)):
+            if any([ub_overlap_ag, ub_overlap_rs]) and isinstance(
+                FP8GlobalStateManager.get_fp8_recipe(), BlockScaling
+            ):
                 raise NotImplementedError("Comm+GEMM overlap does not support MXFP8 block scaling")
 
         activation_func = _act_func(activation)[0]
@@ -200,8 +201,9 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, True)
         elif with_quantized_norm:
-            ln_out = fc1_input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype,
-                                                    device="cuda")
+            ln_out = fc1_input_quantizer.make_empty(
+                inputmat.shape, dtype=inputmat.dtype, device="cuda"
+            )
         else:
             ln_out = torch.empty_like(
                 inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format
@@ -536,12 +538,18 @@ class _LayerNormMLP(torch.autograd.Function):
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
         with torch.cuda.nvtx.range("_LayerNormMLP_backward"):
-            if (ctx.fp8
-                and any([ctx.ub_overlap_ag,
-                         ctx.ub_overlap_rs_dgrad,
-                         ctx.ub_bulk_dgrad,
-                         ctx.ub_bulk_wgrad])
-                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)):
+            if (
+                ctx.fp8
+                and any(
+                    [
+                        ctx.ub_overlap_ag,
+                        ctx.ub_overlap_rs_dgrad,
+                        ctx.ub_bulk_dgrad,
+                        ctx.ub_bulk_wgrad,
+                    ]
+                )
+                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)
+            ):
                 raise NotImplementedError("Comm+GEMM overlap does not support MXFP8 block scaling")
 
             saved_tensors = ctx.saved_tensors
@@ -624,10 +632,12 @@ class _LayerNormMLP(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             ln_out_total = None
             ln_out_total_work = None
-            if (ctx.fc1_weight_requires_grad
+            if (
+                ctx.fc1_weight_requires_grad
                 and ctx.tensor_parallel
                 and ctx.sequence_parallel
-                and not ctx.ub_bulk_dgrad):
+                and not ctx.ub_bulk_dgrad
+            ):
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.fc1_input_quantizer
@@ -666,9 +676,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 layout="NN",
                 grad=True,
                 quantization_params=(
-                    ctx.grad_fc1_output_quantizer
-                    if fc2_dgrad_gemm_gelu_fusion
-                    else None
+                    ctx.grad_fc1_output_quantizer if fc2_dgrad_gemm_gelu_fusion else None
                 ),  # high precision to activation
                 out_dtype=ctx.activation_dtype,
                 gelu=fc2_dgrad_gemm_gelu_fusion,
@@ -754,8 +762,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 # Overlap DGRAD+RS
                 ub_obj_fc1_dgrad = get_ub("fc1_dgrad")
                 ub_type_fc1_dgrad = tex.CommOverlapType.RS
-                fc1_dgrad_rs_out = torch.empty(fc1_dgrad_shape, dtype=ctx.activation_dtype,
-                                               device="cuda")
+                fc1_dgrad_rs_out = torch.empty(
+                    fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                )
 
             else:
                 if ctx.ub_bulk_dgrad:
@@ -815,8 +824,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         if ln_out._data is None:
                             # All-gather executed on columnwise data and result is in rowwise data,
                             # so we need to fix the interleaving before WGRAD.
-                            ln_out_total._fix_gathered_transpose(tp_size=ctx.tp_size,
-                                                                 from_rowwise=True)
+                            ln_out_total._fix_gathered_transpose(
+                                tp_size=ctx.tp_size, from_rowwise=True
+                            )
                         else:
                             # Otherwise, we would have all-gathered rowwise data and would need to
                             # create the transpose (on Hopper).
@@ -832,8 +842,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         ln_out_total._create_transpose()  # TODO(pgadzinski) - temporary
 
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
-                    fc1_dgrad_rs_out = torch.empty(fc1_dgrad_shape, dtype=ctx.activation_dtype,
-                                                   device="cuda")
+                    fc1_dgrad_rs_out = torch.empty(
+                        fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
+                    )
 
                 fc1_wgrad_outputs = general_gemm(
                     ln_out_total,
@@ -1169,14 +1180,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_overlap_rs = ub_overlap_rs and self.sequence_parallel
         self.ub_overlap_rs_dgrad = ub_overlap_rs_dgrad and self.sequence_parallel
         self.ub_bulk_wgrad = (
-            ub_bulk_wgrad
-            and self.sequence_parallel
-            and not self.ub_overlap_rs_dgrad
+            ub_bulk_wgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
         self.ub_bulk_dgrad = (
-            ub_bulk_dgrad
-            and self.sequence_parallel
-            and not self.ub_overlap_rs_dgrad
+            ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
 
         # Initialize params in FP8

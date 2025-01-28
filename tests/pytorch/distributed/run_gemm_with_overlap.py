@@ -295,11 +295,7 @@ def _main(opts):
     inp_shape = (opts.seq_length, opts.batch_size, hidden_size)
     outer_size = reduce(operator.mul, inp_shape[:-1], 1)
     buffer_dtype = torch.bfloat16
-    if (
-        opts.fp8
-        and not opts.bulk_overlap
-        and opts.comm_type == tex.CommOverlapType.AG
-    ):
+    if opts.fp8 and not opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.AG:
         buffer_dtype = torch.uint8
     ub_obj = (
         tex.CommOverlapP2P(
@@ -479,20 +475,23 @@ def _main(opts):
         inp_quantizer = Float8Quantizer(fp8_scales[0].clone(), fp8_amaxes[0].clone(), fp8_dtype)
         ker_quantizer = Float8Quantizer(fp8_scales[1].clone(), fp8_amaxes[1].clone(), fp8_dtype)
         if opts.fp8_output:
-            out_quantizer = Float8Quantizer(fp8_scales[2].clone(), fp8_amaxes[2].clone(),
-                                            fp8_dtype)
+            out_quantizer = Float8Quantizer(fp8_scales[2].clone(), fp8_amaxes[2].clone(), fp8_dtype)
 
         if opts.bulk_overlap and opts.comm_type == tex.CommOverlapType.RS:
-            bulk_inp_quantizer = Float8Quantizer(fp8_scales[5].clone(), fp8_amaxes[5].clone(),
-                                                 fp8_dtype)
+            bulk_inp_quantizer = Float8Quantizer(
+                fp8_scales[5].clone(), fp8_amaxes[5].clone(), fp8_dtype
+            )
         elif ub_obj2 is not None:
-            inp2_quantizer = Float8Quantizer(fp8_scales[3].clone(), fp8_amaxes[3].clone(),
-                                             fp8_dtype)
-            ker2_quantizer = Float8Quantizer(fp8_scales[4].clone(), fp8_amaxes[4].clone(),
-                                             fp8_dtype)
+            inp2_quantizer = Float8Quantizer(
+                fp8_scales[3].clone(), fp8_amaxes[3].clone(), fp8_dtype
+            )
+            ker2_quantizer = Float8Quantizer(
+                fp8_scales[4].clone(), fp8_amaxes[4].clone(), fp8_dtype
+            )
             if opts.fp8_output:
-                out2_quantizer = Float8Quantizer(fp8_scales[5].clone(), fp8_amaxes[5].clone(),
-                                                 fp8_dtype)
+                out2_quantizer = Float8Quantizer(
+                    fp8_scales[5].clone(), fp8_amaxes[5].clone(), fp8_dtype
+                )
 
         # Cast input to Float8Tensor
         inp_fp8 = inp_quantizer(inp)
@@ -541,11 +540,7 @@ def _main(opts):
             ub_obj.copy_into_buffer(bulk_inp, bulk_inp_quantizer, True)
             gemm_inp = inp
         else:
-            ub_obj.copy_into_buffer(
-                inp_fp8 if opts.fp8 else inp,
-                inp_quantizer,
-                True
-            )
+            ub_obj.copy_into_buffer(inp_fp8 if opts.fp8 else inp, inp_quantizer, True)
             gemm_inp = ub_obj.get_buffer(inp_quantizer, False, inp_g.size())
         if ub_obj2 is not None:
             if opts.fp8 and opts.fp8_output:
@@ -556,9 +551,7 @@ def _main(opts):
     else:
         if opts.bulk_overlap:
             ub_obj.copy_into_buffer(
-                bulk_inp_fp8 if opts.fp8 else bulk_inp,
-                bulk_inp_quantizer,
-                False
+                bulk_inp_fp8 if opts.fp8 else bulk_inp, bulk_inp_quantizer, False
             )
             if opts.fp8:
                 ub_obj.set_buffer_params(bulk_inp_quantizer)
@@ -581,16 +574,12 @@ def _main(opts):
             ub=ub_obj,
             ub_type=opts.comm_type,
             extra_output=rs_out,
-            bulk_overlap=opts.bulk_overlap
+            bulk_overlap=opts.bulk_overlap,
         )
 
     def _fp8_gemm2(gemm1_out):
         gemm2_inp = tex.gelu(
-            (
-                gemm1_out.dequantize()
-                if opts.fp8_output
-                else gemm1_out
-            ),
+            (gemm1_out.dequantize() if opts.fp8_output else gemm1_out),
             inp2_quantizer,
         )
         return tex.general_gemm(
@@ -615,7 +604,7 @@ def _main(opts):
             ub=ub_obj,
             ub_type=opts.comm_type,
             extra_output=rs_out,
-            bulk_overlap=opts.bulk_overlap
+            bulk_overlap=opts.bulk_overlap,
         )
 
     # Trigger GEMM
@@ -721,11 +710,7 @@ def _main(opts):
                     test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
                 else:
                     # AG Output: (M, K/P) -> T -> (K/P, M) -> gather -> (K, M) -> T -> (M, K)
-                    output = (
-                        all_outputs[0].dequantize()
-                        if opts.fp8_output
-                        else all_outputs[0]
-                    )
+                    output = all_outputs[0].dequantize() if opts.fp8_output else all_outputs[0]
                     test_out = torch.transpose(
                         te.distributed.gather_along_first_dim(
                             torch.transpose(output, 0, 1), tp_group

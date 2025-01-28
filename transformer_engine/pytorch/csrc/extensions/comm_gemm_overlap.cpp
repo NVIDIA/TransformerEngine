@@ -140,18 +140,18 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
  * CommOverlap
  **************************************************************************************************/
 
-CommOverlap::CommOverlap(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
-    int tp_size, int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
-    int comm_priority, int num_comm_sm, bool set_sm_margin,  bool atomic_gemm,
-    bool rs_overlap_first_gemm)
-    : te::CommOverlapBase(
-          buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
-          helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
-          tp_size, std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
-          comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, atomic_gemm,
-          rs_overlap_first_gemm) {}
+CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                         CommOverlapHelper *helper, int tp_size, int num_splits,
+                         int num_max_streams, int comm_cga_size, int gemm_priority,
+                         int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
+                         bool rs_overlap_first_gemm)
+    : te::CommOverlapBase(buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype),
+                          helper->myrank, helper->numranks, helper->mylocal, helper->numlocal,
+                          helper->mynode, helper->numnodes, tp_size,
+                          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+                          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
+                          num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
+                          set_sm_margin, atomic_gemm, rs_overlap_first_gemm) {}
 
 void CommOverlap::set_buffer_params(py::handle quantizer) {
   std::unique_ptr<te::pytorch::Quantizer> my_quantizer = te::pytorch::convert_quantizer(quantizer);
@@ -187,27 +187,24 @@ void CommOverlap::copy_into_buffer(py::handle input, py::handle quantizer, bool 
   at::cuda::CUDAStream stream_main = at::cuda::getCurrentCUDAStream();
   NVTE_CHECK_CUDA(cudaEventRecord(_start_d2dcopy, (cudaStream_t)stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent((cudaStream_t)_stream_comm, _start_d2dcopy, 0));
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(
-      ubuf_ptr, input_tensor.dptr(), input_tensor.numel() * input_tensor.element_size(),
-      cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(ubuf_ptr, input_tensor.dptr(),
+                                  input_tensor.numel() * input_tensor.element_size(),
+                                  cudaMemcpyDeviceToDevice, (cudaStream_t)_stream_comm));
 }
 
-py::object CommOverlap::get_buffer(
-      py::handle quantizer, bool local_chunk, std::optional<const std::vector<int64_t>> shape) {
+py::object CommOverlap::get_buffer(py::handle quantizer, bool local_chunk,
+                                   std::optional<const std::vector<int64_t>> shape) {
   using namespace te::pytorch;
   char *ubuf_wt_ptr = reinterpret_cast<char *>(_ubuf.dptr());
-  if (local_chunk)
-    ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
+  if (local_chunk) ubuf_wt_ptr += _ubuf.numel() / _tp_size * _tp_id * _ubuf.element_size();
 
   std::vector<int64_t> torch_shape;
   if (shape.has_value()) {
     torch_shape = shape.value();
     auto requested = product(torch_shape);
     auto expected = local_chunk ? _ubuf.numel() / _tp_size : _ubuf.numel();
-    NVTE_CHECK(requested == expected,
-               "Number of elements in the requested shape (", requested,
-               ") does not match allocated buffer size (", expected,
-               ")!");
+    NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
+               ") does not match allocated buffer size (", expected, ")!");
   } else {
     int64_t output_c_dim0 = (local_chunk) ? _ubuf.size(0) / _tp_size : _ubuf.size(0);
     int64_t output_c_dim1 = _ubuf.size(1);
@@ -219,8 +216,7 @@ py::object CommOverlap::get_buffer(
 
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   std::vector<size_t> te_shape;
-  for (auto s : torch_shape)
-    te_shape.emplace_back(static_cast<size_t>(s));
+  for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
 
   auto is_internal = my_quantizer->internal;
   my_quantizer->internal = false;
@@ -233,11 +229,12 @@ py::object CommOverlap::get_buffer(
  * CommOverlapP2P
  **************************************************************************************************/
 
-CommOverlapP2P::CommOverlapP2P(
-    const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype, CommOverlapHelper *helper,
-    int tp_size, te::CommOverlapType comm_type, int num_max_streams, int comm_cga_size,
-    int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
-    bool use_ce, bool aggregate)
+CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                               CommOverlapHelper *helper, int tp_size,
+                               te::CommOverlapType comm_type, int num_max_streams,
+                               int comm_cga_size, int gemm_priority, int comm_priority,
+                               int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
+                               bool aggregate)
     : te::CommOverlapP2PBase(
           buffer_shape, te::pytorch::GetTransformerEngineDType(buffer_dtype), helper->myrank,
           helper->numranks, helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes,
@@ -249,8 +246,7 @@ CommOverlapP2P::CommOverlapP2P(
 void CommOverlapP2P::set_buffer_params(py::handle quantizer) {
   std::unique_ptr<te::pytorch::Quantizer> my_quantizer = te::pytorch::convert_quantizer(quantizer);
   my_quantizer->set_quantization_params(&_ubuf);
-  for (size_t i = 0; i < _ubufs.size(); i++)
-    my_quantizer->set_quantization_params(&_ubufs[i]);
+  for (size_t i = 0; i < _ubufs.size(); i++) my_quantizer->set_quantization_params(&_ubufs[i]);
 }
 
 /*
@@ -283,8 +279,8 @@ void CommOverlapP2P::copy_into_buffer(py::handle input, py::handle quantizer, bo
   }
 }
 
-py::object CommOverlapP2P::get_buffer(
-    py::handle quantizer, bool local_chunk, std::optional<const std::vector<int64_t>> shape) {
+py::object CommOverlapP2P::get_buffer(py::handle quantizer, bool local_chunk,
+                                      std::optional<const std::vector<int64_t>> shape) {
   using namespace te::pytorch;
   char *ubuf_wt_ptr = reinterpret_cast<char *>(local_chunk ? _ubufs[_tp_id].dptr() : _ubuf.dptr());
 
@@ -293,10 +289,8 @@ py::object CommOverlapP2P::get_buffer(
     torch_shape = shape.value();
     auto requested = product(torch_shape);
     auto expected = local_chunk ? _ubufs[_tp_id].numel() : _ubuf.numel();
-    NVTE_CHECK(requested == expected,
-               "Number of elements in the requested shape (", requested,
-               ") does not match allocated buffer size (", expected,
-               ")!");
+    NVTE_CHECK(requested == expected, "Number of elements in the requested shape (", requested,
+               ") does not match allocated buffer size (", expected, ")!");
   } else {
     int64_t output_c_dim0 = (local_chunk) ? _ubuf.size(0) / _tp_size : _ubuf.size(0);
     int64_t output_c_dim1 = _ubuf.size(1);
@@ -307,8 +301,7 @@ py::object CommOverlapP2P::get_buffer(
 
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   std::vector<size_t> te_shape;
-  for (auto s : torch_shape)
-    te_shape.emplace_back(static_cast<size_t>(s));
+  for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
 
   auto is_internal = my_quantizer->internal;
   my_quantizer->internal = false;

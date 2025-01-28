@@ -267,16 +267,16 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             assert self._data is not None, "The tensor does not hold any rowwise data"
             data = self._data
         else:
-            assert self._transpose is not None,  "The tensor does not hold any columwise data"
+            assert self._transpose is not None, "The tensor does not hold any columwise data"
             assert not self._transpose_invalid, "The tensor's columnwise data is not valid"
             data = self._transpose
 
         if tp_size == 1:
             self._transpose = data
         else:
-            assert data.shape[0] % tp_size == 0, (
-                "Leading dimension of data is not divisble by TP size"
-            )
+            assert (
+                data.shape[0] % tp_size == 0
+            ), "Leading dimension of data is not divisble by TP size"
             interleaved_shape = [tp_size, data.shape[0] // tp_size, *data.shape[1:]]
             self._transpose = data.view(interleaved_shape).transpose(0, 1).contiguous()
         self._transpose_invalid = False

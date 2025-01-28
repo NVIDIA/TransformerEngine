@@ -181,8 +181,9 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
     } else {
       data = at::empty(torch_shape, opts);
     }
-    rowwise_scale_inv = at::empty({static_cast<int64_t>(numel / last_dim),
-                                   static_cast<int64_t>(last_dim / MXFP8_BLOCK_SIZE)}, opts);
+    rowwise_scale_inv = at::empty(
+        {static_cast<int64_t>(numel / last_dim), static_cast<int64_t>(last_dim / MXFP8_BLOCK_SIZE)},
+        opts);
     tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
     tensor.set_rowwise_scale_inv(
         rowwise_scale_inv.data_ptr(), DType::kFloat8E8M0,
@@ -192,7 +193,8 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   if (columnwise_usage) {
     columnwise_data = at::empty(torch_shape, opts);
     columnwise_scale_inv = at::empty({static_cast<int64_t>(numel / (last_dim * MXFP8_BLOCK_SIZE)),
-                                      static_cast<int64_t>(last_dim)}, opts);
+                                      static_cast<int64_t>(last_dim)},
+                                     opts);
 
     tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, shape);
     tensor.set_columnwise_scale_inv(

@@ -142,7 +142,7 @@ def _parse_args(argv=None, namespace=None):
         "--overlap-rs-dgrad",
         action="store_true",
         default=False,
-        help="Replace bulk DGRAD/WGRAD overlaps with DGRAD+RS in the backward pass for AG+GEMM."
+        help="Replace bulk DGRAD/WGRAD overlaps with DGRAD+RS in the backward pass for AG+GEMM.",
     )
     parser.add_argument(
         "--debug",
@@ -252,8 +252,8 @@ def _train(opts):
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
         ub_cfgs = {
-            "qkv_dgrad" : { "method" : "ring_exchange" },
-            "fc1_dgrad" : { "method" : "ring_exchange" },
+            "qkv_dgrad": {"method": "ring_exchange"},
+            "fc1_dgrad": {"method": "ring_exchange"},
         }
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],

@@ -28,7 +28,7 @@ TE_LAYERS = [
     te.MultiheadAttention,
     te.TransformerLayer,
 ]
-MAX_LAYER_NAME_LENGTH = max([ len(layer.__name__) for layer in TE_LAYERS ])
+MAX_LAYER_NAME_LENGTH = max([len(layer.__name__) for layer in TE_LAYERS])
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = torch.cuda.device_count()
@@ -124,7 +124,9 @@ def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, 
 
 
 @pytest.mark.parametrize(
-    "fp8", (False, True), ids=[" BF16 - RING-EXCHANGE ", " FP8  - RING-EXCHANGE "],
+    "fp8",
+    (False, True),
+    ids=[" BF16 - RING-EXCHANGE ", " FP8  - RING-EXCHANGE "],
 )
 def test_split_all_gather_overlaps(fp8):
     """
@@ -219,6 +221,7 @@ def test_bulk_overlaps(comm_type, fp8, connections):
     else:
         _run_gemm_with_overlap(comm_type, True, False, False, fp8)
 
+
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
     [
@@ -228,9 +231,14 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         (te.LayerNormLinear.__name__, "row", False),
         (te.LayerNormLinear.__name__, "column", False),
         (te.LayerNormLinear.__name__, "column", True),
-    ] + list(zip([layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
-                 [None] * len(TE_LAYERS[2:]) * 2,
-                 [False, True] * len(TE_LAYERS[2:]))),
+    ]
+    + list(
+        zip(
+            [layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
+            [None] * len(TE_LAYERS[2:]) * 2,
+            [False, True] * len(TE_LAYERS[2:]),
+        )
+    ),
     ids=[
         f" {te.Linear.__name__} - ROW-PARALLEL ",
         f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
@@ -238,10 +246,13 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",
-    ] + [
-        " " + " - ".join(test_name_parts) + " " for test_name_parts in
-        zip([layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
-            ["BULK DGRAD/WGRAD", "DGRAD+RS"] * len(TE_LAYERS[2:]))
+    ]
+    + [
+        " " + " - ".join(test_name_parts) + " "
+        for test_name_parts in zip(
+            [layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
+            ["BULK DGRAD/WGRAD", "DGRAD+RS"] * len(TE_LAYERS[2:]),
+        )
     ],
 )
 @pytest.mark.parametrize("fp8", (False, True), ids=[" BF16 ", " FP8  "])

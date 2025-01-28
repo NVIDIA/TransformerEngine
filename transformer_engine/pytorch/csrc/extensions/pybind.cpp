@@ -286,9 +286,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
            py::arg("intra_node_group") = py::none(), py::arg("inter_node_group") = py::none());
 
-  py::class_<CommOverlap,
-             std::shared_ptr<CommOverlap>,
-             transformer_engine::CommOverlapBase,
+  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
              transformer_engine::CommOverlapCore>(m, "CommOverlap")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
                     int, int, int, int, bool, bool, bool>(),
@@ -304,10 +302,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("shape") = std::nullopt)
       .def("set_buffer_params", &CommOverlap::set_buffer_params);
 
-  py::class_<CommOverlapP2P,
-             std::shared_ptr<CommOverlapP2P>,
-             transformer_engine::CommOverlapP2PBase,
-             transformer_engine::CommOverlapCore>(m, "CommOverlapP2P")
+  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
+             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
+      m, "CommOverlapP2P")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
                     transformer_engine::CommOverlapType, int, int, int, int, int, bool, bool, bool,
                     bool>(),

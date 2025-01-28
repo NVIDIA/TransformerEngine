@@ -130,23 +130,20 @@ class _LayerNormLinear(torch.autograd.Function):
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag_fprop = (
-            ub_overlap_ag_fprop
-            and is_grad_enabled
-            and not return_layernorm_output
+            ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
 
         weight_requires_grad = weight.requires_grad
         backward_needs_input = is_grad_enabled and weight_requires_grad
         with_input_all_gather = (
-            parallel_mode == "column"
-            and sequence_parallel
-            and not ub_overlap_ag_fprop
+            parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
 
         # Configure quantizer for normalization output
         if fp8:
-            if (any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
-                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)):
+            if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and isinstance(
+                FP8GlobalStateManager.get_fp8_recipe(), BlockScaling
+            ):
                 raise NotImplementedError("Comm+GEMM overlap does not support MXFP8 block scaling")
 
             if input_quantizer is None:
@@ -394,12 +391,18 @@ class _LayerNormLinear(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         with torch.cuda.nvtx.range("_LayerNormLinear_backward"):
-            if (ctx.fp8
-                and any([ctx.ub_overlap_ag,
-                         ctx.ub_overlap_rs_dgrad,
-                         ctx.ub_bulk_dgrad,
-                         ctx.ub_bulk_wgrad])
-                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)):
+            if (
+                ctx.fp8
+                and any(
+                    [
+                        ctx.ub_overlap_ag,
+                        ctx.ub_overlap_rs_dgrad,
+                        ctx.ub_bulk_dgrad,
+                        ctx.ub_bulk_wgrad,
+                    ]
+                )
+                and isinstance(FP8GlobalStateManager.get_fp8_recipe(), BlockScaling)
+            ):
                 raise NotImplementedError("Comm+GEMM overlap does not support MXFP8 block scaling")
 
             saved_tensors = ctx.saved_tensors
@@ -458,8 +461,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.ub_obj_gradout = get_ub(ctx.ub_name + "_dgrad")
                 ub_obj_dgrad = ctx.ub_obj_gradout
                 ub_type_dgrad = tex.CommOverlapType.RS
-                rs_out = torch.empty(dgrad_shape, dtype=ctx.activation_dtype,
-                                     device=inputmat.device)
+                rs_out = torch.empty(
+                    dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
+                )
 
             else:
                 if ctx.ub_bulk_dgrad:
@@ -494,10 +498,12 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             ln_out_total = None
             ln_out_total_work = None
-            if (ctx.requires_wgrad
+            if (
+                ctx.requires_wgrad
                 and ctx.parallel_mode == "column"
                 and ctx.sequence_parallel
-                and not ctx.ub_bulk_dgrad):
+                and not ctx.ub_bulk_dgrad
+            ):
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
@@ -527,7 +533,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 if grad_output._transpose is None:
                     grad_output._create_transpose()
 
-            dgrad, *_= general_gemm(
+            dgrad, *_ = general_gemm(
                 weight,
                 grad_output,
                 get_workspace(),
@@ -572,8 +578,9 @@ class _LayerNormLinear(torch.autograd.Function):
                         if ln_out._data is None:
                             # All-gather executed on columnwise data and result is in rowwise data,
                             # so we need to fix the interleaving before WGRAD.
-                            ln_out_total._fix_gathered_transpose(tp_size=ctx.tp_size,
-                                                                 from_rowwise=True)
+                            ln_out_total._fix_gathered_transpose(
+                                tp_size=ctx.tp_size, from_rowwise=True
+                            )
                         else:
                             # Otherwise, we would have all-gathered rowwise data and would need to
                             # create the transpose (on Hopper).
@@ -589,8 +596,9 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out_total._create_transpose()  # TODO(pgadzinski) - temporary
 
                 if ctx.ub_bulk_wgrad and ub_obj_wgrad.is_fp8_ubuf():
-                    rs_out = torch.empty(dgrad_shape, dtype=ctx.activation_dtype,
-                                        device=inputmat.device)
+                    rs_out = torch.empty(
+                        dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
+                    )
 
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
@@ -896,14 +904,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # Column-parallel overlaps
         self.ub_overlap_ag_fprop = (
-            ub_overlap_ag
-            and self.sequence_parallel
-            and self.parallel_mode == "column"
+            ub_overlap_ag and self.sequence_parallel and self.parallel_mode == "column"
         )
         self.ub_overlap_rs_dgrad = (
-            ub_overlap_rs_dgrad
-            and self.sequence_parallel
-            and self.parallel_mode == "column"
+            ub_overlap_rs_dgrad and self.sequence_parallel and self.parallel_mode == "column"
         )
         self.ub_bulk_wgrad = (
             ub_bulk_wgrad
@@ -920,23 +924,21 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         # Row-parallel overlaps
         self.ub_overlap_rs_fprop = (
-            ub_overlap_rs
-            and self.sequence_parallel
-            and self.parallel_mode == "row"
+            ub_overlap_rs and self.sequence_parallel and self.parallel_mode == "row"
         )
         self.ub_overlap_ag_dgrad = (
-            ub_overlap_ag
-            and self.sequence_parallel
-            and self.parallel_mode == "row"
+            ub_overlap_ag and self.sequence_parallel and self.parallel_mode == "row"
         )
-        if any([
-            self.ub_overlap_ag_fprop,
-            self.ub_overlap_rs_dgrad,
-            self.ub_bulk_dgrad,
-            self.ub_bulk_wgrad,
-            self.ub_overlap_rs_fprop,
-            self.ub_overlap_ag_dgrad,
-        ]):
+        if any(
+            [
+                self.ub_overlap_ag_fprop,
+                self.ub_overlap_rs_dgrad,
+                self.ub_bulk_dgrad,
+                self.ub_bulk_wgrad,
+                self.ub_overlap_rs_fprop,
+                self.ub_overlap_ag_dgrad,
+            ]
+        ):
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
 

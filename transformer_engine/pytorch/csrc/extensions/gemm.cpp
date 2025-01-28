@@ -176,8 +176,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       if (extra_output.has_value()) {
         extra_output_tensor = makeTransformerEngineTensor(*extra_output);
       } else {
-        extra_output_tensor = makeTransformerEngineTensor(
-            nullptr, std::vector<size_t>{0}, DType::kByte);
+        extra_output_tensor =
+            makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
       }
 
       // Direct GEMM call to the correct overlap
@@ -188,27 +188,25 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                    main_stream);
       } else if (comm_type.value() == CommOverlapType::AG) {
         if (comm_overlap->is_atomic_gemm()) {
-          comm_overlap->atomic_gemm_overlap_ag(
-              A_tensor, transa, B_tensor, transb,  D_tensor, bias_tensor, te_pre_gelu_out,
-              te_workspace, grad, accumulate, use_split_accumulator, extra_output_tensor,
-              main_stream);
+          comm_overlap->atomic_gemm_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                               bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                               accumulate, use_split_accumulator,
+                                               extra_output_tensor, main_stream);
         } else {
-          comm_overlap->split_overlap_ag(
-              A_tensor, transa, B_tensor, transb,  D_tensor, bias_tensor, te_pre_gelu_out,
-              te_workspace, grad, accumulate, use_split_accumulator, extra_output_tensor,
-              main_stream);
+          comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
+                                         te_pre_gelu_out, te_workspace, grad, accumulate,
+                                         use_split_accumulator, extra_output_tensor, main_stream);
         }
       } else {
         if (comm_overlap->is_atomic_gemm()) {
-          comm_overlap->atomic_gemm_overlap_rs(
-              A_tensor, transa, B_tensor, transb,  D_tensor, bias_tensor, te_pre_gelu_out,
-              te_workspace, grad, accumulate, use_split_accumulator, extra_output_tensor,
-              main_stream);
+          comm_overlap->atomic_gemm_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor,
+                                               bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                               accumulate, use_split_accumulator,
+                                               extra_output_tensor, main_stream);
         } else {
-          comm_overlap->split_overlap_rs(
-              A_tensor, transa, B_tensor, transb,  D_tensor, bias_tensor, te_pre_gelu_out,
-              te_workspace, grad, accumulate, use_split_accumulator, extra_output_tensor,
-              main_stream);
+          comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, D_tensor, bias_tensor,
+                                         te_pre_gelu_out, te_workspace, grad, accumulate,
+                                         use_split_accumulator, extra_output_tensor, main_stream);
         }
       }
     } else {
