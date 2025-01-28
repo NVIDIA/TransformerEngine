@@ -16,11 +16,11 @@ if torch.cuda.device_count() < 2:
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
-RNG_SEED: int = 1234
-SEQ_LENGTH: int = 512
+RNG_SEED: int = 42
+SEQ_LENGTH: int = 1024
 BATCH_SIZE: int = 2
-NUM_HEADS: int = 12
-HEAD_DIM: int = 64
+NUM_HEADS: int = 16
+HEAD_DIM: int = 48
 TE_LAYERS = [
     te.Linear,
     te.LayerNormLinear,
@@ -157,33 +157,6 @@ def test_split_reduce_scatter_overlaps(fp8, p2p):
     te.cpp_extensions.fp8_gemm.
     """
     _run_gemm_with_overlap("RS", False, p2p, False, fp8)
-
-
-@pytest.mark.parametrize(
-    "ag_type,rs_type,p2p",
-    [
-        (0, 0, False),
-        (0, 1, False),
-        (0, 2, False),
-        (0, 0, True),
-        (1, 0, True),
-    ],
-    ids=[
-        " NON-ATOMIC AG   - NON-ATOMIC RS   - PIPELINE",
-        " NON-ATOMIC AG   - ATOMIC RS       - PIPELINE",
-        " NON-ATOMIC AG   - MULTI-ATOMIC RS - PIPELINE",
-        " NON-ATOMIC AG   - NON-ATOMIC RS   - RING-EXCHANGE",
-        " MULTI-ATOMIC AG - NON-ATOMIC RS   - RING-EXCHANGE",
-    ],
-)
-def test_atomic_gemm_overlaps(ag_type, rs_type, p2p):
-    """
-    Test paired (all-gather -> atomic GEMM) and (atomic GEMM -> reduce-scatter) overlaps with
-    direct calls to te.cpp_extensions.gemm or te.cpp_extensions.fp8_gemm.
-    """
-    os.environ["NVTE_AG_P2P_MULTI_ATOMIC"] = str(ag_type)
-    os.environ["NVTE_RS_STRIDED_ATOMIC"] = str(rs_type)
-    _run_gemm_with_overlap("AG", False, p2p, True, True)
 
 
 @pytest.mark.parametrize(

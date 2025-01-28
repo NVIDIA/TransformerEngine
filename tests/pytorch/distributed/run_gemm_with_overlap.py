@@ -47,14 +47,14 @@ def _mapped_argtype(opt, typemap):
 def _parse_args(argv=None, namespace=None):
     parser = argparse.ArgumentParser(description="Test comm+GEMM overlap with Userbuffers.")
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
-    parser.add_argument("-s", "--seq-length", type=int, default=512, help="Input sequence length.")
+    parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
-        "-n", "--num-heads", type=int, default=12, help="Number of attention heads."
+        "-n", "--num-heads", type=int, default=16, help="Number of attention heads."
     )
     parser.add_argument(
-        "-d", "--head-dim", type=int, default=64, help="Dimension of each attention head."
+        "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
-    parser.add_argument("--seed", type=int, default=1234, help="RNG seed.")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
     )
