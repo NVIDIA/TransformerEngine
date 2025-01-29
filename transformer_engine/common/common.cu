@@ -104,8 +104,8 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
 
   const int TMA_needed_size = TMA_gmem_alignment / type_size;
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. Expected multiple of " +
-                                                 std::to_string(TMA_needed_size) + ", got " +
-                                                 std::to_string(globalX));
+                                                 TMA_needed_size + ", got " +
+                                                 globalX);
 
   // Create the tensor descriptor.
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
