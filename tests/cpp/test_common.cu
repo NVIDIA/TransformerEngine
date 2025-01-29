@@ -587,7 +587,7 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                   const size_t row_blocks, const size_t col_blocks, const size_t stride)
-{  
+{
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int idx = i * stride + j;

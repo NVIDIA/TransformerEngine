@@ -99,12 +99,13 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   void *dataPtr = reinterpret_cast<void *>(tensor.dptr);
 
   constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
-  NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment), "Tensor data pointer must be 16B aligned");
+  NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment),
+             "Tensor data pointer must be 16B aligned");
 
   const int TMA_needed_size = TMA_gmem_alignment / type_size;
   NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. Expected multiple of " +
-                                              std::to_string(TMA_needed_size) + ", got " +
-                                              std::to_string(globalX));
+                                                 std::to_string(TMA_needed_size) + ", got " +
+                                                 std::to_string(globalX));
 
   // Create the tensor descriptor.
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(
