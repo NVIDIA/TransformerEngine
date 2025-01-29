@@ -16,7 +16,7 @@ from ..utils import get_default_init_method
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 
 
-_use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "1")))
+_use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 
 def _get_normalization_func(normalization: str, forward: bool):
