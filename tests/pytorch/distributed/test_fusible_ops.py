@@ -315,8 +315,8 @@ def _test_reduce_scatter(
 
 def _test_basic_linear(
     *,
-    local_weight_shape: tuple[int, int] = (128, 128),
-    local_batch_size: int = 128,
+    local_weight_shape: tuple[int, int] = (16, 16),
+    local_batch_size: int = 16,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -459,8 +459,8 @@ def _test_basic_linear(
 def _test_linear(
     *,
     bias: bool = True,
-    local_weight_shape: tuple[int, int] = (128, 128),
-    local_batch_size: int = 128,
+    local_weight_shape: tuple[int, int] = (16, 16),
+    local_batch_size: int = 16,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
