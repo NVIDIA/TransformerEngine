@@ -361,8 +361,6 @@ at::Tensor rowwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
 at::Tensor columnwise_swizzle(at::Tensor input, at::Tensor scale_inv);
 
-at::Tensor pad_scale_inv(at::Tensor scale_inv, bool rowwise);
-
 /***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
