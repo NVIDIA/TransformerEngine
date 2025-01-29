@@ -111,7 +111,9 @@ void compute_ref_x1(const ProcessingMethod processing_method,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride)
+{
     std::vector<float> output_dbias_fp32(cols, 0);
 
     const size_t blocks_Y = (rows + block_size_Y - 1) / block_size_Y;
@@ -123,7 +125,7 @@ void compute_ref_x1(const ProcessingMethod processing_method,
         for (size_t jj = 0; jj < blocks_X; ++jj) {
             const size_t j_min = jj * block_size_X;
             const size_t j_max = std::min((jj + 1) * block_size_X, cols);
-            const size_t scale_idx = ii * blocks_X + jj;
+            const size_t scale_idx = ii * scales_stride + jj;
             scale_block<InputType, OutputType, OP>(
                 processing_method, input, act_input, output_c, output_dbias_fp32.data(),
                 output_scales, scale_idx, i_min, i_max, j_min, j_max, cols);
@@ -146,13 +148,15 @@ void compute_ref_x2(const ProcessingMethod processing_method,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride_rowwise,
+                    const size_t scales_stride_colwise) {
     compute_ref_x1<InputType, OutputType, OP>(
         processing_method, input, act_input, output_rowwise, scales_rowwise, output_dbias,
-        rows, cols, 1, block_size_X);
+        rows, cols, 1, block_size_X, scales_stride_rowwise);
     compute_ref_x1<InputType, OutputType, OP>(
         processing_method, input, act_input, output_colwise, scales_colwise, output_dbias,
-        rows, cols, block_size_Y, 1);
+        rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
 /**
@@ -177,9 +181,20 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num = blocks_Y * blocks_X;
+    const size_t unpadded_blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
+    const size_t unpadded_blocks_X = (cols + block_size_cols - 1) / block_size_cols;
+
+    const size_t block_alignment_X = rowwise
+                                     ? scale_tensor_alignment_X_rowwise
+                                     : scale_tensor_alignment_X_colwise;
+    const size_t block_alignment_Y = rowwise
+                                     ? scale_tensor_alignment_Y_rowwise
+                                     : scale_tensor_alignment_Y_colwise;
+
+    // Roundup to the nearest multiple
+    const size_t blocks_Y = ((unpadded_blocks_Y + block_alignment_Y - 1) / block_alignment_Y) * block_alignment_Y;
+    const size_t blocks_X = ((unpadded_blocks_X + block_alignment_X - 1) / block_alignment_X) * block_alignment_X;
+    const size_t scales_stride = blocks_X;
 
     Tensor input({ rows, cols }, itype);
     Tensor act_input({ rows, cols }, itype);
@@ -254,16 +269,18 @@ void performTest_x1(const ProcessingMethod processing_method,
                                               rows,
                                               cols,
                                               block_size_rows,
-                                              block_size_cols);
+                                              block_size_cols,
+                                              scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-    if (rowwise) {
-      compare_e8m0_scaling_factors("scales", output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
-    }
-    if (colwise) {
-      compare_e8m0_scaling_factors("scales", output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
-    }
+
+    const uint8_t * const gpu_scales_ptr = rowwise
+                                           ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+                                           : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+
+    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
@@ -294,10 +311,22 @@ void performTest_x2(const ProcessingMethod processing_method,
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num_rowwise = rows * blocks_X;
-    const size_t blocks_num_colwise = blocks_Y * cols;
+    const size_t unpadded_blocks_Y_rowwise = rows;
+    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
+    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X_colwise = cols;
+
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                                 scale_tensor_alignment_Y_rowwise);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                                 scale_tensor_alignment_X_rowwise);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                                 scale_tensor_alignment_Y_colwise);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                                 scale_tensor_alignment_X_colwise);
+
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
+    const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor input({ rows, cols }, itype);
     Tensor act_input({ rows, cols }, itype);
@@ -306,8 +335,8 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(rows * blocks_X);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y * cols);
+    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
 
     fillCase<EncodingType>(&input, fill_case);
@@ -376,15 +405,19 @@ void performTest_x2(const ProcessingMethod processing_method,
                                               rows,
                                               cols,
                                               block_size_rows,
-                                              block_size_cols);
+                                              block_size_cols,
+                                              scales_stride_rowwise,
+                                              scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
     compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), blocks_num_rowwise);
+                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), blocks_num_colwise);
+                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                                 unpadded_blocks_X_colwise, scales_stride_colwise);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
@@ -397,10 +430,16 @@ void performTest_x2(const ProcessingMethod processing_method,
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
+    {1, 16},
+    {3, 32},
+    {16, 48},
+    {21, 64},
+    {37, 96},
     {128, 128},
     {256, 256},
+    {993, 512},
     {768, 1024},
-    // {256, 65536},
+    {256, 65536},
     // {2048, 12288},
     // {65536, 128},
     // {16384, 6144},

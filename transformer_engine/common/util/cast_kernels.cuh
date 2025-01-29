@@ -908,10 +908,6 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
-  const int TMA_needed_size = 16 / typeToSize(output->data.dtype);
-  NVTE_CHECK(cols % TMA_needed_size == 0, "Shape not supported. Expected multiple of " +
-                                              std::to_string(TMA_needed_size) + ", got " +
-                                              std::to_string(cols));
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
   NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
 
@@ -949,7 +945,9 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           if constexpr (IS_DACT) {
             create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, FP8_SHMEM_DIM_Y,
                                  FP8_SHMEM_DIM_X, sizeof(IType));
-          } create_2D_tensor_map(tensor_map_output, output->data, rows, cols, FP8_SHMEM_DIM_Y,
+          }
+          
+          create_2D_tensor_map(tensor_map_output, output->data, rows, cols, FP8_SHMEM_DIM_Y,
                                  FP8_SHMEM_DIM_X, sizeof(OType));
 
           cast_fp8_2D_kernel<IS_DBIAS, IS_DACT, ParamOP, OP, IType, OType>
@@ -995,16 +993,30 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const size_t chunks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
   const size_t blocks_Y = DIVUP(chunks_Y, MXFP8_CHUNKS_PER_BLOCK_Y);
   const size_t blocks_X = DIVUP(chunks_X, MXFP8_CHUNKS_PER_BLOCK_X);
-  const size_t scale_stride_rowwise = DIVUP(cols, scale_dim_X_rowwise);
-  const size_t scale_stride_colwise = cols;
 
-  const bool isFullTile = (rows % MXFP8_CHUNK_DIM_Y == 0) && (cols % MXFP8_CHUNK_DIM_X == 0);
-  NVTE_CHECK(isFullTile, "Only full tiles are supported.");
+  const size_t unpadded_scales_Y_rowwise = rows;
+  const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
+  const size_t unpadded_scales_X_colwise = cols;
 
-  e8m0_t *const scales_rowwise_ptr =
-      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
-  e8m0_t *const scales_colwise_ptr =
-      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+  const size_t scales_Y_rowwise = DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise)
+                                  * scale_tensor_alignment_Y_rowwise;
+  const size_t scales_X_rowwise = DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise)
+                                  * scale_tensor_alignment_X_rowwise;
+  const size_t scales_Y_colwise = DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise)
+                                  * scale_tensor_alignment_Y_colwise;
+  const size_t scales_X_colwise = DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise)
+                                  * scale_tensor_alignment_X_colwise;
+
+  const size_t scale_stride_rowwise = scales_X_rowwise;
+  const size_t scale_stride_colwise = scales_X_colwise;
+
+  e8m0_t *const scales_rowwise_ptr = use_rowwise_scaling
+                                     ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr)
+                                     : nullptr;
+  e8m0_t *const scales_colwise_ptr = use_colwise_scaling
+                                     ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
+                                     : nullptr;
   const size_t dbias_rows = blocks_Y;
   const size_t dbias_cols = cols;
 
