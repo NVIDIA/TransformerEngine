@@ -174,6 +174,10 @@ std::pair<TensorWrapper, py::object> MXFP8Quantizer::create_tensor(
   opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
   auto last_dim = torch_shape.back();
 
+  NVTE_CHECK(last_dim % MXFP8_BLOCK_SIZE == 0 && (numel / last_dim) % MXFP8_BLOCK_SIZE == 0,
+             "MXFP8 requires tensor dims that are divisble by ", MXFP8_BLOCK_SIZE,
+             " (got shape=", torch_shape, ")");
+
   at::Tensor data;
   if (rowwise_usage) {
     if (rowwise_data.has_value()) {

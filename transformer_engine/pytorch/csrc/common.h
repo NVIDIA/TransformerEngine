@@ -39,7 +39,6 @@
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
-#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>

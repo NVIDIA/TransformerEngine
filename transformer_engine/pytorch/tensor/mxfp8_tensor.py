@@ -79,6 +79,14 @@ class MXFP8Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
+        assert (
+            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
+            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
+        ), (
+            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
+            f" {MXFP8_BLOCK_SCALING_SIZE}"
+        )
+
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
         scale_inv = torch.zeros(
