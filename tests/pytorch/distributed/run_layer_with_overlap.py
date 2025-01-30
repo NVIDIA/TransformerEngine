@@ -95,7 +95,7 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument("-l", "--layer-type", type=_te_layer_argtype, default=te.LayerNormMLP)
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
-    parser.add_argument("-s", "--seq-length", type=int, default=1048, help="Input sequence length.")
+    parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
         "-n", "--num-heads", type=int, default=16, help="Number of attention heads."
     )

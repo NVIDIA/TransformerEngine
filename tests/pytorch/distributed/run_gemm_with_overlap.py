@@ -723,25 +723,6 @@ def _main(opts):
                 output = rs_out.to(dtype=torch.float32)
                 test_out = te.distributed.gather_along_first_dim(output, tp_group)[0]
 
-            # if opts.fp8:
-            #     dist_print("GEMM1 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
-            #     fp8_meta_info = (
-            #         f"amax_reference  = {fp8_meta.amax_history[1][:3].tolist()}\n"
-            #         + f"amax_history    = {fp8_meta.amax_history[0][:3].tolist()}\n"
-            #         + f"scale           = {fp8_meta.scale[:3].tolist()}\n"
-            #         + f"scale_inv       = {fp8_meta.scale_inv[:3].tolist()}"
-            #     )
-            #     dist_print(fp8_meta_info, src=0, group=tp_group)
-            #     if ub_obj2 is not None:
-            #         dist_print("GEMM2 FP8 metas = [INPUT, WEIGHT, OUTPUT]", src=0, section=True)
-            #         fp8_meta_info = (
-            #             f"amax_reference  = {fp8_meta.amax_history[1][3:].tolist()}\n"
-            #             + f"amax_history    = {fp8_meta.amax_history[0][3:].tolist()}\n"
-            #             + f"scale           = {fp8_meta.scale[3:].tolist()}\n"
-            #             + f"scale_inv       = {fp8_meta.scale_inv[3:].tolist()}"
-            #         )
-            #         dist_print(fp8_meta_info, src=0, group=tp_group)
-
             ref_out = ref2_g if ub_obj2 is not None else ref_g
             test_nonzeros = torch.count_nonzero(test_out)
             ref_nonzeros = torch.count_nonzero(ref_out)

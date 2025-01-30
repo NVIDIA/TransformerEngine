@@ -17,10 +17,6 @@
 
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
 
-#define NOT_IMPLEMENTED_ERROR() NVTE_ERROR("Operation is not implemented.")
-
-#define NOT_SUPPORTED_ERROR() NVTE_ERROR("Operation not supported.")
-
 namespace transformer_engine {
 
 /* \brief Check if Userbufers bootstraps with direct calls to MPI collectives.
@@ -103,7 +99,7 @@ class CommOverlapCore {
                             TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                             bool accumulate, bool use_split_accumulator, CommOverlapType comm_type,
                             TensorWrapper &rs_output, cudaStream_t stream_main) {
-    NOT_IMPLEMENTED_ERROR();
+    NVTE_ERROR("Operation is not implemented.");
   }
 
   virtual void atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -111,7 +107,7 @@ class CommOverlapCore {
                                       TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                       bool grad, bool accumulate, bool use_split_accumulator,
                                       TensorWrapper &rs_output, cudaStream_t stream_main) {
-    NOT_IMPLEMENTED_ERROR();
+    NVTE_ERROR("Operation is not implemented.");
   }
 
   virtual void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -119,7 +115,7 @@ class CommOverlapCore {
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator,
                                 TensorWrapper &rs_output, cudaStream_t stream_main) {
-    NOT_IMPLEMENTED_ERROR();
+    NVTE_ERROR("Operation is not implemented.");
   }
 
   virtual void atomic_gemm_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -127,7 +123,7 @@ class CommOverlapCore {
                                       TensorWrapper &pre_gelu_out, TensorWrapper &workspace,
                                       bool grad, bool accumulate, bool use_split_accumulator,
                                       TensorWrapper &B_copy, cudaStream_t stream_main) {
-    NOT_IMPLEMENTED_ERROR();
+    NVTE_ERROR("Operation is not implemented.");
   }
 
   virtual void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -135,7 +131,7 @@ class CommOverlapCore {
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
-    NOT_IMPLEMENTED_ERROR();
+    NVTE_ERROR("Operation is not implemented.");
   }
 };  // CommOverlapCore
 
@@ -174,7 +170,7 @@ class CommOverlapBase : public CommOverlapCore {
                               TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                               bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                               cudaStream_t stream_main) override {
-    NOT_SUPPORTED_ERROR();
+    NVTE_ERROR("Operation not supported.");
   }
 
   void split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
@@ -182,7 +178,7 @@ class CommOverlapBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main) override {
-    NOT_SUPPORTED_ERROR();
+    NVTE_ERROR("Operation not supported.");
   }
 
   /*
@@ -239,7 +235,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                     TensorWrapper &workspace, bool grad, bool accumulate,
                     bool use_split_accumulator, CommOverlapType comm_type, TensorWrapper &rs_output,
                     cudaStream_t stream_main) override {
-    NOT_SUPPORTED_ERROR();
+    NVTE_ERROR("Operation not supported.");
   }
 
   /*

@@ -960,7 +960,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     inp = torch.reshape(scratchpad[offset:-offset], (N, N))
     weight = torch.reshape(scratchpad[offset * 2 :], (N, N))
 
-    _, _, _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
+    _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
     torch.cuda.synchronize()
 
 

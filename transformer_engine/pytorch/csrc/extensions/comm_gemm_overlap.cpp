@@ -218,10 +218,15 @@ py::object CommOverlap::get_buffer(py::handle quantizer, bool local_chunk,
   std::vector<size_t> te_shape;
   for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
 
+  // Always output a rowwise-only QuantizedTensor
+  // TODO (Alp): This needs to produce an un-interleaved transpose when required.
   auto is_internal = my_quantizer->internal;
+  auto uses_columnwise = my_quantizer->columnwise_usage;
   my_quantizer->internal = false;
+  my_quantizer->columnwise_usage = false;
   auto [te_tensor, py_tensor] = my_quantizer->create_tensor(te_shape, _ubuf.dtype(), ubuf_tensor);
   my_quantizer->internal = is_internal;
+  my_quantizer->columnwise_usage = uses_columnwise;
   return py_tensor;
 }
 
@@ -303,9 +308,14 @@ py::object CommOverlapP2P::get_buffer(py::handle quantizer, bool local_chunk,
   std::vector<size_t> te_shape;
   for (auto s : torch_shape) te_shape.emplace_back(static_cast<size_t>(s));
 
+  // Always output a rowwise-only QuantizedTensor
+  // TODO (Alp): This needs to produce an un-interleaved transpose when required.
   auto is_internal = my_quantizer->internal;
+  auto uses_columnwise = my_quantizer->columnwise_usage;
   my_quantizer->internal = false;
+  my_quantizer->columnwise_usage = false;
   auto [te_tensor, py_tensor] = my_quantizer->create_tensor(te_shape, _ubuf.dtype(), ubuf_tensor);
   my_quantizer->internal = is_internal;
+  my_quantizer->columnwise_usage = uses_columnwise;
   return py_tensor;
 }

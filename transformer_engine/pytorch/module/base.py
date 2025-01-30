@@ -875,8 +875,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not ctx.ub_overlap_ag:
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
                 else:
-                    ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, True)
-                    grad_output = ctx.ub_obj_gradout.get_buffer(quantizer, False)
+                    ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, local_chunk=True)
+                    grad_output = ctx.ub_obj_gradout.get_buffer(quantizer)
             return grad_output, None
 
         # FP8 with all-gather: unfused bgrad, fused cast + transpose
@@ -892,8 +892,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output = quantizer(grad_output)
 
                 # Copy into communication buffer, and replace original gradient with it
-                ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, True)
-                grad_output = ctx.ub_obj_gradout.get_buffer(quantizer, False)
+                ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, local_chunk=True)
+                grad_output = ctx.ub_obj_gradout.get_buffer(quantizer)
             else:
                 grad_output, _ = gather_along_first_dim(
                     grad_output,

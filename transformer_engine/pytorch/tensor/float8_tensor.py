@@ -261,29 +261,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
         self._transpose_invalid = False
 
-    def _fix_gathered_transpose(self, tp_size=1, from_rowwise=False):
-        assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
-        if from_rowwise:
-            assert self._data is not None, "The tensor does not hold any rowwise data"
-            data = self._data
-        else:
-            assert self._transpose is not None, "The tensor does not hold any columwise data"
-            assert not self._transpose_invalid, "The tensor's columnwise data is not valid"
-            data = self._transpose
-
-        if tp_size == 1:
-            self._transpose = data
-        else:
-            assert (
-                data.shape[0] % tp_size == 0
-            ), "Leading dimension of data is not divisble by TP size"
-            interleaved_shape = [tp_size, data.shape[0] // tp_size, *data.shape[1:]]
-            self._transpose = data.view(interleaved_shape).transpose(0, 1).contiguous()
-        self._transpose_invalid = False
-
-        if from_rowwise:
-            self._data = None
-
     def update_usage(self, rowwise_usage=True, columnwise_usage=True):
         assert rowwise_usage or columnwise_usage, "Could not disable all usages of the tensor"
         if rowwise_usage:

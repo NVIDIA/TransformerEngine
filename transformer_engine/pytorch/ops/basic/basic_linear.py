@@ -496,7 +496,7 @@ class BasicLinear(BasicOperation):
         x_async = None
 
         # Perform GEMM
-        y, _, _ = general_gemm(
+        y, *_ = general_gemm(
             w,
             x,
             get_workspace(),
@@ -756,7 +756,7 @@ class BasicLinear(BasicOperation):
                     )
 
             # Perform dgrad GEMM
-            dx, _, _ = general_gemm(
+            dx, *_= general_gemm(
                 w,
                 dy,
                 get_workspace(),
@@ -807,7 +807,7 @@ class BasicLinear(BasicOperation):
                 dw_dtype = dw.dtype
 
             # Perform wgrad GEMM
-            dw, _, _ = general_gemm(
+            dw, *_ = general_gemm(
                 x,
                 dy,
                 get_workspace(),

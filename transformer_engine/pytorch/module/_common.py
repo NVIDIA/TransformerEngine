@@ -6,12 +6,15 @@
 
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
+from functools import reduce
+from operator import mul as multiply_op
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..utils import get_default_init_method
+from ..tensor.float8_tensor import Float8Tensor
 
 
 def _get_normalization_func(normalization: str, forward: bool):
@@ -27,6 +30,29 @@ def _get_normalization_func(normalization: str, forward: bool):
     if forward:
         return fwd_normalization_funcs[normalization]
     return bwd_normalization_funcs[normalization]
+
+
+# TODO (Alp): This should ideally be done in CommOverlap::get_buffer instead
+def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
+    assert isinstance(fp8_tensor, Float8Tensor), "Tensor is not a Float8Tensor"
+    assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
+    assert fp8_tensor._data is not None, "The tensor does not hold any rowwise data"
+    assert (
+        fp8_tensor._data.shape[0] % tp_size == 0
+    ), "Leading dimension of data is not divisble by TP size"
+
+    data = fp8_tensor._data
+    batched_size = reduce(multiply_op, data.shape[1:])
+    interleaved_shape = [tp_size, data.shape[0] // tp_size, batched_size]
+    transposed_shape = [data.shape[0] // tp_size, batched_size * tp_size]
+    fp8_tensor._transpose = data.view(
+        interleaved_shape
+    ).transpose(0, 1).contiguous().view(transposed_shape)
+
+    fp8_tensor._transpose_invalid = False
+    fp8_tensor._data = None
+
+    return fp8_tensor
 
 
 def apply_normalization(
