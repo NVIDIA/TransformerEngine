@@ -256,14 +256,13 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled_state.mul_(rscale)
             scaled_state.copy_(unscaled_state)
 
-    def get_unscaled_state(self, param, state_name, store_param_remainders=False):
+    def get_unscaled_state(self, param, state_name):
         """Return the unscaled state corresponding to the input `param` and `state_name`.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
-            store_param_remainders (bool): Option to store trailing parameter remainder bits only
         """
         state = self.state[param]
         dtype = self.name_to_dtype_map[state_name]
@@ -275,7 +274,7 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
-            if store_param_remainders and state_name == "master_param":
+            if self.store_param_remainders and state_name == "master_param" and param.dtype == torch.bfloat16:
                 assert state[state_name].dtype == torch.int16
             else:
                 assert state[state_name].dtype == torch.float32
@@ -494,8 +493,12 @@ class FusedAdam(torch.optim.Optimizer):
                 unscaled_state = {}
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
-                        unscaled = self.get_unscaled_state(p, name, store_param_remainders)
-                        unscaled_state[name] = unscaled
+                        if name == "master_param" and store_param_remainders:
+                            unscaled_state[name] = self.state[p][name]
+                            assert unscaled_state[name].dtype = torch.int16
+                        else:
+                            unscaled = self.get_unscaled_state(p, name, store_param_remainders)
+                            unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
@@ -542,6 +545,11 @@ class FusedAdam(torch.optim.Optimizer):
                     raise RuntimeError(
                         "FusedAdam does not support a mix of float16 and bfloat16 model weights."
                     )
+
+                    if self.store_param_remainders:
+                        raise RuntimeError(
+                            "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param remainder."
+                        )
 
             def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
                 # Closures defined in a loop can have unexpected
