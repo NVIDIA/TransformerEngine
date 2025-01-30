@@ -153,7 +153,6 @@ class FusedAdam(torch.optim.Optimizer):
         if capturable and store_param_remainders:
             raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
-
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
         defaults = {
