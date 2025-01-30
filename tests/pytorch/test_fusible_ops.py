@@ -148,7 +148,7 @@ def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     if name == "mxfp8":
-        return transformer_engine.common.recipe.BlockScaling(
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")

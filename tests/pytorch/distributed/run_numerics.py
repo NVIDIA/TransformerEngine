@@ -16,7 +16,7 @@ from torch import nn
 import torch.distributed as dist
 
 from transformer_engine.common.recipe import (
-    BlockScaling,
+    MXFP8BlockScaling,
     DelayedScaling,
     Format,
     Recipe,
@@ -44,7 +44,7 @@ def quantization_recipe() -> Recipe:
             fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
         )
     if QUANTIZATION == "mxfp8":
-        return BlockScaling()
+        return MXFP8BlockScaling()
     return te.fp8.get_default_fp8_recipe()
 
 
