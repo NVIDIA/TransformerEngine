@@ -90,6 +90,13 @@ class FusedAdam(torch.optim.Optimizer):
             instead of ".grad" for reading gradients. It's useful when the dtypes
             of grad and param are different.
             (default: False)
+        store_param_remainders (bool, optional): Whether to store entire FP32 master
+            params or just store the trailing 16 remainder bits. Whole FP32 master can be
+            reconstructed from BF16 params plus the trailing remainder bits. Works only
+            when param type is BF16 and master weight type is FP32, no effect otherwise.
+            Useful memory saving optimization.
+            (default: False)
+
 
     .. _Adam - A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
@@ -114,6 +121,7 @@ class FusedAdam(torch.optim.Optimizer):
         exp_avg_dtype=torch.float32,
         exp_avg_sq_dtype=torch.float32,
         use_decoupled_grad=False,
+        store_param_remainders=False,
     ):
 
         if amsgrad:
@@ -138,6 +146,8 @@ class FusedAdam(torch.optim.Optimizer):
             raise RuntimeError("Capturable mode only supports fp32 exp_avg.")
         if capturable and exp_avg_sq_dtype != torch.float32:
             raise RuntimeError("Capturable mode only supports fp32 exp_avg_sq")
+        if capturable and store_param_remainders:
+            raise RuntimeError("Capturable mode doesn't support storing param remainders")
 
         # If the optimizer is capturable then LR should be a tensor (on GPU)
         lr = torch.tensor(lr, dtype=torch.float32) if capturable else lr
@@ -168,6 +178,7 @@ class FusedAdam(torch.optim.Optimizer):
         # Skip buffer
         self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
         self.multi_tensor_adam = tex.multi_tensor_adam
+        self.multi_tensor_adam_param_remainder = tex.multi_tensor_adam_param_remainder
         self.multi_tensor_adam_fp8 = tex.multi_tensor_adam_fp8
         self.multi_tensor_adam_capturable = tex.multi_tensor_adam_capturable
         self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
@@ -188,6 +199,10 @@ class FusedAdam(torch.optim.Optimizer):
         }
         self._scales = {}
         self.use_decoupled_grad = use_decoupled_grad
+        # Works only when master params is in FP32
+        self.store_param_remainders = (
+            store_param_remainders and master_weights and master_weight_dtype == torch.float32
+        )
 
     def zero_grad(self):
         # pylint: disable=missing-function-docstring
@@ -260,7 +275,14 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
-            assert state[state_name].dtype == torch.float32
+            if (
+                self.store_param_remainders
+                and state_name == "master_param"
+                and param.dtype == torch.bfloat16
+            ):
+                assert state[state_name].dtype == torch.int16
+            else:
+                assert state[state_name].dtype == torch.float32
             unscaled = state[state_name]
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/fp32.")
@@ -278,10 +300,19 @@ class FusedAdam(torch.optim.Optimizer):
                 and 'master_param`.
             unscaled_state (torch.Tensor): The original high-precision(FP32) state.
         """
-        assert unscaled_state.dtype == torch.float32
+        store_param_remainders = (
+            self.store_param_remainders
+            and state_name == "master_param"
+            and param.dtype == torch.bfloat16
+        )
+
+        if store_param_remainders:
+            assert unscaled_state.dtype == torch.int16
+        else:
+            assert unscaled_state.dtype == torch.float32
         state = self.state[param]
         if state_name not in state:
-            self._initialize_state(param, state_name, False)
+            self._initialize_state(param, state_name, False, store_param_remainders)
 
         dtype = self.name_to_dtype_map[state_name]
         if dtype != torch.float32:
@@ -290,7 +321,9 @@ class FusedAdam(torch.optim.Optimizer):
         else:
             state[state_name].copy_(unscaled_state)
 
-    def _initialize_state(self, param, state_name, zero_buffer: bool):
+    def _initialize_state(
+        self, param, state_name, zero_buffer: bool, store_param_remainders: bool = False
+    ):
         """Initialize one of the optimizer states according to `state_name`.
 
         Arguments:
@@ -298,9 +331,13 @@ class FusedAdam(torch.optim.Optimizer):
             state_name (string): Name of optimizer states, can be one of 'exp_avg', 'exp_avg_sq',
                 and 'master_param`.
             zero_buffer (bool): Whether to initialize the optimizer state with zeros.
+            store_param_remainders (bool): Store only trailing remainder bits.
         """
         dtype = self.name_to_dtype_map[state_name]
-        data = torch.empty_like(param, dtype=dtype)
+        if store_param_remainders:
+            data = torch.zeros_like(param, dtype=torch.int16)
+        else:
+            data = torch.empty_like(param, dtype=dtype)
         if zero_buffer:
             data.zero_()
 
@@ -324,17 +361,24 @@ class FusedAdam(torch.optim.Optimizer):
                 [1], dtype=torch.float32, device=param.device
             )
 
-    def initialize_state(self, param):
+    def initialize_state(self, param, store_param_remainders):
         """Initialize optimizer states.
 
         Arguments:
             param (torch.nn.Parameter): One of parameters in this optimizer.
+            store_param_remainders (bool): Store trailing remainder bits.
         """
         self._initialize_state(param, "exp_avg", zero_buffer=True)
         self._initialize_state(param, "exp_avg_sq", zero_buffer=True)
         if self.master_weights:
-            self._initialize_state(param, "master_param", zero_buffer=False)
-            self.set_scaled_state(param, "master_param", param.clone().detach().float())
+            self._initialize_state(
+                param,
+                "master_param",
+                zero_buffer=False,
+                store_param_remainders=store_param_remainders,
+            )
+            if not store_param_remainders:
+                self.set_scaled_state(param, "master_param", param.clone().detach().float())
 
     def state_dict(self):
         """Override the state_dict() of pytorch. Before returning the state_dict, cast all
@@ -379,7 +423,16 @@ class FusedAdam(torch.optim.Optimizer):
                 param = id_map[k]
                 self.state[param] = {}
                 for name in v:
-                    if v[name] is not None:
+                    if v[name] is None:
+                        continue
+                    if (
+                        self.store_param_remainders
+                        and name == "master_param"
+                        and param.dtype == torch.bfloat16
+                    ):
+                        self.set_scaled_state(param, name, v[name])
+                        assert v[name].dtype == torch.int16
+                    else:
                         self.set_scaled_state(param, name, v[name].float())
 
     def step(self, closure=None, grad_scaler=None):
@@ -447,9 +500,11 @@ class FusedAdam(torch.optim.Optimizer):
             for p in group["params"]:
                 state = self.state[p]
 
+                store_param_remainders = self.store_param_remainders and p.dtype == torch.bfloat16
+
                 # State initialization
                 if len(state) == 0:
-                    self.initialize_state(p)
+                    self.initialize_state(p, store_param_remainders)
 
                 if self.use_decoupled_grad:
                     p_grad = p.decoupled_grad if hasattr(p, "decoupled_grad") else None
@@ -465,8 +520,12 @@ class FusedAdam(torch.optim.Optimizer):
                 unscaled_state = {}
                 for name in ["exp_avg", "exp_avg_sq", "master_param"]:
                     if name in state:
-                        unscaled = self.get_unscaled_state(p, name)
-                        unscaled_state[name] = unscaled
+                        if name == "master_param" and store_param_remainders:
+                            unscaled_state[name] = self.state[p][name]
+                            assert unscaled_state[name].dtype == torch.int16
+                        else:
+                            unscaled = self.get_unscaled_state(p, name)
+                            unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
@@ -513,6 +572,12 @@ class FusedAdam(torch.optim.Optimizer):
                     raise RuntimeError(
                         "FusedAdam does not support a mix of float16 and bfloat16 model weights."
                     )
+
+                    if self.store_param_remainders:
+                        raise RuntimeError(
+                            "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param"
+                            " remainder."
+                        )
 
             def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
                 # Closures defined in a loop can have unexpected
@@ -602,7 +667,14 @@ class FusedAdam(torch.optim.Optimizer):
                         v_of_f16_model,
                         p_main_of_f16_model,
                     ]
-                    apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
+                    if self.store_param_remainders and has_bf16 and not has_fp16:
+                        # When you have BF16 params and need FP32 master params, you can reconstruct
+                        # the FP32 master params with BF16 params + int16 remainders
+                        apply_multi_tensor_adam(
+                            self.multi_tensor_adam_param_remainder, tensor_lists
+                        )
+                    else:
+                        apply_multi_tensor_adam(self.multi_tensor_adam, tensor_lists)
                 if len(p_fp8_model) > 0:
                     tensor_lists = [
                         g_of_fp8_model,
