@@ -303,6 +303,24 @@ class AttentionParams:
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
 
+    def __eq__(self, other):
+        """
+        Overwrite dataclass.__eq__ so that only fp8_meta["recipe"] is compared,
+        since all other entries of fp8_meta are unused in get_attention_backend.
+        """
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        for field in fields(self):
+            fname = field.name
+            sf = getattr(self, fname)
+            of = getattr(other, fname)
+            if fname != "fp8_meta":
+                if sf != of:
+                    return False
+            elif sf["recipe"] != of["recipe"]:
+                return False
+        return True
+
 
 _alibi_cache = {
     "_num_heads": None,
@@ -1586,7 +1604,7 @@ def flash_attn_fwd_softmax_lse_correction(
     """Merge softmax stats of each step in Attention with context parallelism"""
     max_scale = torch.max(softmax_lse, softmax_lse_per_step)
     min_scale = torch.min(softmax_lse, softmax_lse_per_step)
-    new_scale = max_scale + torch.log(1 + torch.exp(min_scale - max_scale))
+    new_scale = max_scale + torch.log1p(torch.exp(min_scale - max_scale))
     softmax_lse.copy_(new_scale)
 
 
