@@ -299,13 +299,15 @@ class FusedAdam(torch.optim.Optimizer):
                 and 'master_param`.
             unscaled_state (torch.Tensor): The original high-precision(FP32) state.
         """
-        if self.store_param_remainders and state_name == "master_param" and param.dtype == torch.bfloat16:
+        store_param_remainders = self.store_param_remainders and state_name == "master_param" and param.dtype == torch.bfloat16
+
+        if store_param_remainders:
             assert unscaled_state.dtype == torch.int16
         else:
             assert unscaled_state.dtype == torch.float32
         state = self.state[param]
         if state_name not in state:
-            self._initialize_state(param, state_name, False)
+            self._initialize_state(param, state_name, False, store_param_remainders)
 
         dtype = self.name_to_dtype_map[state_name]
         if dtype != torch.float32:
@@ -413,7 +415,7 @@ class FusedAdam(torch.optim.Optimizer):
                 param = id_map[k]
                 self.state[param] = {}
                 for name in v:
-                    if self.store_param_remainders and state_name == "master_param" and param.dtype == torch.bfloat16:
+                    if self.store_param_remainders and name == "master_param" and param.dtype == torch.bfloat16:
                         self.set_scaled_state(param, name, v[name])
                         assert v[name].dtype == torch.int16
                     else:
