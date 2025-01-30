@@ -179,7 +179,7 @@ struct AdamFunctorMaster {
   }
 };
 
-template <typename PARAM_T, typename GRAD_T, typename FULL_T, typename index_t>
+template <typename GRAD_T, typename FULL_T, typename index_t>
 struct AdamFunctorMasterParamRemainder {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<5> &tl,  // NOLINT(*)
@@ -701,6 +701,8 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
 
   // case 5:  g, p, m, v, p_master
   TORCH_CHECK(tl_size == 5, "tensor list must contain 5");
+  TORCH_CHECK(p_in_type == at::ScalarType::BFloat16,
+              "Adam with BF16 param remainders requires BF16 params");
 
   if (requires_64bit_indexing) {
     // g, p, m, v, p_master
@@ -711,16 +713,6 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
             multi_tensor_apply<5>(
                 (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
                 AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int64_t>(), beta1,
-                beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                weight_decay);));
-  } else {
-    DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-        p_in_type, 0, "adam",
-        DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-            g_in_type, 1, "adam",
-            multi_tensor_apply<5>(
-                BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                AdamFunctorMasterParamRemainder<scalar_t_0, scalar_t_1, float, int32_t>(), beta1,
                 beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
                 weight_decay);));
   }
