@@ -678,23 +678,6 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
     bias_correction2 = 1 - std::pow(beta2, step);
   }
 
-  size_t max_size = 0;
-  bool requires_64bit_indexing = false;
-  for (auto it = tensor_lists.begin(); it != tensor_lists.end(); it++) {
-    for (auto it2 = it->begin(); it2 != it->end(); it2++) {
-      if (it2->numel() > max_size) {
-        max_size = it2->numel();
-        if (max_size >= INT_MAX) {
-          requires_64bit_indexing = true;
-          break;
-        }
-      }
-    }
-    if (requires_64bit_indexing) {
-      break;
-    }
-  }
-
   const auto g_in_type = tensor_lists[0][0].scalar_type();
   const auto p_in_type = tensor_lists[1][0].scalar_type();
   auto tl_size = tensor_lists.size();
@@ -704,18 +687,17 @@ void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag
   TORCH_CHECK(p_in_type == at::ScalarType::BFloat16,
               "Adam with BF16 param remainders requires BF16 params");
 
-  if (requires_64bit_indexing) {
-    // g, p, m, v, p_master
-    DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-        p_in_type, 0, "adam",
-        DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
-            g_in_type, 1, "adam",
-            multi_tensor_apply<5>(
-                (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                AdamFunctorMasterParamRemainder<scalar_t_1, float, int64_t>(), beta1,
-                beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
-                weight_decay);));
-  }
+  // g, p, m, v, p_master
+  DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+      p_in_type, 0, "adam",
+      DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+          g_in_type, 1, "adam",
+          multi_tensor_apply<5>(
+              (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+              AdamFunctorMasterParamRemainder<scalar_t_1, float, int64_t>(), beta1,
+              beta2, bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode,
+              weight_decay);));
+  
   AT_CUDA_CHECK(cudaGetLastError());
 }
 

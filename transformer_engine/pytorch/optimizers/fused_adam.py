@@ -495,9 +495,9 @@ class FusedAdam(torch.optim.Optimizer):
                     if name in state:
                         if name == "master_param" and store_param_remainders:
                             unscaled_state[name] = self.state[p][name]
-                            assert unscaled_state[name].dtype = torch.int16
+                            assert unscaled_state[name].dtype == torch.int16
                         else:
-                            unscaled = self.get_unscaled_state(p, name, store_param_remainders)
+                            unscaled = self.get_unscaled_state(p, name)
                             unscaled_state[name] = unscaled
                         if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
