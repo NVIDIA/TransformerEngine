@@ -274,7 +274,11 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name].float()
             unscaled.mul_(self._scales[param][state_name])
         elif dtype == torch.float32:
-            if self.store_param_remainders and state_name == "master_param" and param.dtype == torch.bfloat16:
+            if (
+                self.store_param_remainders
+                and state_name == "master_param"
+                and param.dtype == torch.bfloat16
+            ):
                 assert state[state_name].dtype == torch.int16
             else:
                 assert state[state_name].dtype == torch.float32
@@ -548,7 +552,8 @@ class FusedAdam(torch.optim.Optimizer):
 
                     if self.store_param_remainders:
                         raise RuntimeError(
-                            "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param remainder."
+                            "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param"
+                            " remainder."
                         )
 
             def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
