@@ -99,7 +99,7 @@ class FusedAdam(torch.optim.Optimizer):
             reconstructed from BF16 params plus the trailing remainder bits. Works only
             when param type is BF16 and master weight type is FP32, no effect otherwise.
             Useful memory saving optimization.
-            (default: True)
+            (default: False)
 
 
     .. _Adam - A Method for Stochastic Optimization:
@@ -125,7 +125,7 @@ class FusedAdam(torch.optim.Optimizer):
         exp_avg_dtype=torch.float32,
         exp_avg_sq_dtype=torch.float32,
         use_decoupled_grad=False,
-        store_param_remainders=True,
+        store_param_remainders=False,
     ):
 
         if amsgrad:
