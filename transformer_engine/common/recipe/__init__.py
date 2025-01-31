@@ -53,7 +53,6 @@ class Recipe:
 @dataclass()
 class DelayedScaling(Recipe):
     """
-
     Use the FP8 with delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.
 

@@ -15,9 +15,9 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
-    MXFP8RecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
+    MXFP8RecipeState,
     RecipeState,
 )
 from ..tensor import Quantizer
