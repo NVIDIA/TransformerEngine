@@ -811,11 +811,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.set_activation_dtype(inp)
             self.init_fp8_metadata(num_gemms=num_gemms)
 
-            if (
-                self.fp8
-                and self.sequence_parallel
-                and self.fp8_meta["recipe"].is_delayed_scaling
-            ):
+            if self.fp8 and self.sequence_parallel and self.fp8_meta["recipe"].is_delayed_scaling:
                 assert self.fp8_meta["recipe"].reduce_amax, (
                     "Amax reduction across tensor parallel group is "
                     "necessary when using sequence parallelism with FP8."
