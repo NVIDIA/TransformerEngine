@@ -15,7 +15,7 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
-    MXFP8BlockScalingRecipeState,
+    MXFP8RecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -260,7 +260,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = self._fp8_metas[mode][fp8_meta_key]
             need_to_reset_recipe_state = (
                 recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState)
-            ) or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
+            ) or (recipe.is_mxfp8() and not isinstance(recipe_state, MXFP8RecipeState))
             if need_to_reset_recipe_state:
                 self._reset_quantization_recipe_state(recipe=recipe)
                 return
@@ -283,23 +283,21 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = fp8_meta[fp8_meta_key]
 
             # Reallocate amax history if needed
-            if recipe.mxfp8():
-                continue
-
-            current_length = recipe_state.amax_history.size(0)
-            target_length = recipe.amax_history_len
-            if current_length != target_length:
-                with torch.no_grad():
-                    if target_length < current_length:
-                        recipe_state.amax_history = recipe_state.amax_history[
-                            :target_length
-                        ].clone()
-                    else:
-                        recipe_state.amax_history = torch.nn.functional.pad(
-                            recipe_state.amax_history,
-                            pad=(0, 0, 0, target_length - current_length),
-                        )
-                self._quantizers[mode] = recipe_state.make_quantizers()
+            if recipe.delayed():
+                current_length = recipe_state.amax_history.size(0)
+                target_length = recipe.amax_history_len
+                if current_length != target_length:
+                    with torch.no_grad():
+                        if target_length < current_length:
+                            recipe_state.amax_history = recipe_state.amax_history[
+                                :target_length
+                            ].clone()
+                        else:
+                            recipe_state.amax_history = torch.nn.functional.pad(
+                                recipe_state.amax_history,
+                                pad=(0, 0, 0, target_length - current_length),
+                            )
+                    self._quantizers[mode] = recipe_state.make_quantizers()
 
     def get_quantizer(
         self,

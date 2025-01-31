@@ -44,19 +44,20 @@ class Recipe:
     Base recipe class.
     """
 
-    def mxfp8(self):
-        """Whether the given recipe is MXFP8 block scaling."""
-        return isinstance(self, MXFP8BlockScaling)
+    def is_mxfp8(self) -> bool:
+        """Whether the given recipe is MXFP8."""
+        return False
 
-    def delayed(self):
-        """Whether the given recipe is delayed scaling."""
-        return isinstance(self, DelayedScaling)
+    def delayed(self) -> bool:
+        """Whether the given recipe is FP8 with delayed scaling."""
+        return False
 
 
 @dataclass()
 class DelayedScaling(Recipe):
     """
-    Use the delayed scaling factor strategy. Use scale factor from previous
+
+    Use the FP8 with delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.
 
     Parameters
@@ -151,6 +152,10 @@ class DelayedScaling(Recipe):
                 DeprecationWarning,
             )
 
+    def delayed(self) -> bool:
+        """Whether the given recipe is FP8 with delayed scaling."""
+        return True
+
     def __repr__(self) -> str:
         return (
             f"margin={self.margin}, "
@@ -162,9 +167,9 @@ class DelayedScaling(Recipe):
 
 
 @dataclass()
-class MXFP8BlockScaling(Recipe):
+class MXFP8Recipe(Recipe):
     """
-    Use the current scaling factor strategy.
+    Use the MXFP8 1D strategy.
 
     Parameters
     ----------
@@ -182,6 +187,10 @@ class MXFP8BlockScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def is_mxfp8(self) -> bool:
+        """Whether the given recipe is MXFP8."""
+        return True
 
     def __repr__(self) -> str:
         return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"

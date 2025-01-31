@@ -13,7 +13,7 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe, DelayedScaling, Format, MXFP8BlockScaling
+from transformer_engine.common.recipe import Recipe, DelayedScaling, Format, MXFP8Recipe
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -46,7 +46,7 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
-        return MXFP8BlockScaling()
+        return MXFP8Recipe()
     return DelayedScaling()
 
 
@@ -211,7 +211,7 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Every module must call this function exactly once since
@@ -414,7 +414,7 @@ class FP8GlobalStateManager:
         if enabled:
             fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
             assert fp8_available, reason_for_no_fp8
-            if isinstance(fp8_recipe, MXFP8BlockScaling):
+            if isinstance(fp8_recipe, MXFP8Recipe):
                 mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
                 assert mxfp8_available, reason_for_no_mxfp8
 
@@ -434,7 +434,7 @@ class FP8GlobalStateManager:
         to ensure both forward steps are numerically same.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        if not fp8_meta["recipe"].delayed():
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -460,7 +460,7 @@ class FP8GlobalStateManager:
         1 forward for indentical numerical outputs.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -479,7 +479,7 @@ class FP8GlobalStateManager:
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
 
-        if fp8_meta["recipe"].mxfp8():
+        if not fp8_meta["recipe"].delayed():
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -741,8 +741,8 @@ class RecipeState(abc.ABC):
         cls = None
         if recipe.delayed():
             cls = DelayedScalingRecipeState
-        elif recipe.mxfp8():
-            cls = MXFP8BlockScalingRecipeState
+        elif recipe.is_mxfp8():
+            cls = MXFP8RecipeState
         else:
             raise ValueError("{recipe.__class__.__name__} is not supported")
         return cls(
@@ -813,20 +813,20 @@ class DelayedScalingRecipeState(RecipeState):
         ]
 
 
-class MXFP8BlockScalingRecipeState(RecipeState):
+class MXFP8RecipeState(RecipeState):
     """Configuration for MXFP8 quantization.
 
     MXFP8 quantization does not require state.
 
     """
 
-    recipe: MXFP8BlockScaling
+    recipe: MXFP8Recipe
     mode: str
     dtype: tex.DType
 
     def __init__(
         self,
-        recipe: MXFP8BlockScaling,
+        recipe: MXFP8Recipe,
         *,
         mode: str,
         num_quantizers: int = 1,

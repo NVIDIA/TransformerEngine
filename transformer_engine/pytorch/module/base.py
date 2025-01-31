@@ -22,7 +22,7 @@ from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta
 from ..fp8 import (
-    MXFP8BlockScalingRecipeState,
+    MXFP8RecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -540,7 +540,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
-            if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+            if recipe.is_mxfp8() and isinstance(recipe_state, MXFP8RecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

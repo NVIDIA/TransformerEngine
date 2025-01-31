@@ -16,9 +16,9 @@ from torch import nn
 import torch.distributed as dist
 
 from transformer_engine.common.recipe import (
-    MXFP8BlockScaling,
     DelayedScaling,
     Format,
+    MXFP8Recipe,
     Recipe,
 )
 from run_layer_with_overlap import _compare_tensors
@@ -44,7 +44,7 @@ def quantization_recipe() -> Recipe:
             fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
         )
     if QUANTIZATION == "mxfp8":
-        return MXFP8BlockScaling()
+        return MXFP8Recipe()
     return te.fp8.get_default_fp8_recipe()
 
 
