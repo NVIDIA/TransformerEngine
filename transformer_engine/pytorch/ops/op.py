@@ -15,7 +15,7 @@ import torch
 
 from transformer_engine.common.recipe import Recipe
 from ..fp8 import (
-    BlockScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -260,7 +260,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = self._fp8_metas[mode][fp8_meta_key]
             need_to_reset_recipe_state = (
                 recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState)
-            ) or (recipe.block() and not isinstance(recipe_state, BlockScalingRecipeState))
+            ) or (recipe.mxfp8() and not isinstance(recipe_state, MXFP8BlockScalingRecipeState))
             if need_to_reset_recipe_state:
                 self._reset_quantization_recipe_state(recipe=recipe)
                 return
@@ -283,7 +283,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = fp8_meta[fp8_meta_key]
 
             # Reallocate amax history if needed
-            if recipe.block():
+            if recipe.mxfp8():
                 continue
 
             current_length = recipe_state.amax_history.size(0)

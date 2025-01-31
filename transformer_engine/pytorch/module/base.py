@@ -22,7 +22,7 @@ from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta
 from ..fp8 import (
-    BlockScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -540,7 +540,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
-            if recipe.block() and isinstance(recipe_state, BlockScalingRecipeState):
+            if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -946,6 +946,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert (
                     quantizer is not None
                 )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                quantizer.internal = False
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above

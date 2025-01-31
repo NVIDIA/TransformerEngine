@@ -13,7 +13,7 @@ import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match
+from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -79,11 +79,19 @@ class MXFP8Quantizer(Quantizer):
         if device is None:
             device = torch.device("cuda")
 
+        assert (
+            shape[-1] % MXFP8_BLOCK_SCALING_SIZE == 0
+            and math.prod(shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE == 0
+        ), (
+            f"Incorrect shape {shape} for MXFP8. Tensor dims must be divisible by"
+            f" {MXFP8_BLOCK_SCALING_SIZE}"
+        )
+
         # Allocate FP8 data
         data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_inv = torch.empty(
-            math.prod(shape[:-1]),
-            shape[-1] // MXFP8_BLOCK_SCALING_SIZE,
+        scale_inv = torch.zeros(
+            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
             dtype=torch.uint8,
             device=device,
         )
@@ -93,9 +101,9 @@ class MXFP8Quantizer(Quantizer):
         columnwise_scale_inv = None
         if self.columnwise_usage:
             columnwise_data = torch.empty_like(data)
-            columnwise_scale_inv = torch.empty(
-                math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
-                shape[-1],
+            columnwise_scale_inv = torch.zeros(
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
                 dtype=torch.uint8,
                 device=device,
             )
@@ -421,16 +429,36 @@ class _ViewFunc(torch.autograd.Function):
         if shape is None:
             return tensor
 
+        # Canonicalize shape
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
+            shape = shape[0]
+        if -1 in shape:
+            shape = list(shape)
+            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            for i, d in enumerate(shape):
+                if d == -1:
+                    shape[i] = d_inferred
+                    break
+        if shape[-1] != ctx.shape[-1]:
+            raise RuntimeError(
+                "MXFP8Tensor does not support reshaping inner dimension "
+                f"(attempted to reshape dims={tuple(tensor.shape)} to {tuple(shape)})"
+            )
+
         # Construct new tensor if shape is provided
-        new_data = tensor._data.view(*shape) if tensor._data is not None else None
+        new_rowwise_data = None
+        new_columnwise_data = None
+        if tensor._rowwise_data is not None:
+            new_rowwise_data = tensor._rowwise_data.view(*shape)
         if tensor._columnwise_data is not None:
-            new_columnwise_data = tensor._columnwise_data.view(shape)
-        else:
-            new_columnwise_data = None
+            columnwise_shape = [shape[-1]] + list(shape[:-1])
+            new_columnwise_data = tensor._columnwise_data.view(columnwise_shape)
         return MXFP8Tensor(
             shape,
             tensor.dtype,
-            rowwise_data=new_data,
+            rowwise_data=new_rowwise_data,
             rowwise_scale_inv=tensor._rowwise_scale_inv,
             columnwise_data=new_columnwise_data,
             columnwise_scale_inv=tensor._columnwise_scale_inv,
@@ -488,7 +516,9 @@ class _ReshapeFunc(torch.autograd.Function):
             return tensor
 
         # Canonicalize shape
-        if len(shape) == 1 and isinstance(shape, Iterable):
+        if not isinstance(shape, Iterable):
+            shape = [shape]
+        elif len(shape) == 1 and isinstance(shape[0], Iterable):
             shape = shape[0]
         if -1 in shape:
             shape = list(shape)
