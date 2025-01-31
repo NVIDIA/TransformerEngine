@@ -86,7 +86,7 @@ class _GroupedLinear(torch.autograd.Function):
         device = inp.device
 
         # TODO Support MXFP8  # pylint: disable=fixme
-        if fp8 and not FP8GlobalStateManager.get_fp8_recipe().is_delayed_scaling():
+        if fp8 and not FP8GlobalStateManager.get_fp8_recipe().is_delayed_scaling:
             raise NotImplementedError("GroupedLinear only supports FP8 delayed scaling")
 
         # Make sure input dimensions are compatible

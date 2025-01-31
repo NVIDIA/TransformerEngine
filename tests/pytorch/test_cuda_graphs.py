@@ -315,7 +315,7 @@ def test_make_graphed_callables(
         pytest.skip("FP8 needed for FP8 parameters.")
     if fp8_weight_caching and not fp8:
         pytest.skip("FP8 needed for FP8 parameters.")
-    if fp8_recipe.is_mxfp8() and not mxfp8_available:
+    if fp8_recipe.is_mxfp8 and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     # Run model with different CUDA graph settings.

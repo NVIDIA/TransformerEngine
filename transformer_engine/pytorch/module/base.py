@@ -537,10 +537,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Return early if recipe state matches recipe
         if self.fp8_meta_tensors_initialized:
             recipe_state = self.fp8_meta[fp8_meta_tensor_key]
-            if recipe.is_delayed_scaling() and isinstance(recipe_state, DelayedScalingRecipeState):
+            if recipe.is_delayed_scaling and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
-            if recipe.is_mxfp8() and isinstance(recipe_state, MXFP8RecipeState):
+            if recipe.is_mxfp8 and isinstance(recipe_state, MXFP8RecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -635,7 +635,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # Copy tensors to CPU and store
             state = {}
             state["recipe"] = self.fp8_meta["recipe"]
-            if state["recipe"].is_delayed_scaling():
+            if state["recipe"].is_delayed_scaling:
                 state["scale_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].scale)
                 state["amax_history_fwd"] = to_cpu(self.fp8_meta["scaling_fwd"].amax_history)
                 state["scale_bwd"] = to_cpu(self.fp8_meta["scaling_bwd"].scale)
@@ -694,7 +694,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             dst.copy_(src, non_blocking=True)
 
         # Load tensors
-        if self.fp8_meta["recipe"].is_delayed_scaling():
+        if self.fp8_meta["recipe"].is_delayed_scaling:
             copy_tensor(state["scale_fwd"], self.fp8_meta["scaling_fwd"].scale)
             copy_tensor(state["amax_history_fwd"], self.fp8_meta["scaling_fwd"].amax_history)
             copy_tensor(state["scale_bwd"], self.fp8_meta["scaling_bwd"].scale)
@@ -814,7 +814,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if (
                 self.fp8
                 and self.sequence_parallel
-                and self.fp8_meta["recipe"].is_delayed_scaling()
+                and self.fp8_meta["recipe"].is_delayed_scaling
             ):
                 assert self.fp8_meta["recipe"].reduce_amax, (
                     "Amax reduction across tensor parallel group is "

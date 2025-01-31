@@ -6,7 +6,7 @@
 from __future__ import annotations
 import warnings
 from enum import Enum
-from typing import Literal, Optional, Union, Callable, NamedTuple
+from typing import Callable, ClassVar, Literal, NamedTuple, Optional, Union
 from pydantic.dataclasses import dataclass
 
 
@@ -44,13 +44,10 @@ class Recipe:
     Base recipe class.
     """
 
-    def is_mxfp8(self) -> bool:
-        """Whether the given recipe is MXFP8."""
-        return False
-
-    def is_delayed_scaling(self) -> bool:
-        """Whether the given recipe is FP8 with delayed scaling."""
-        return False
+    # Whether the recipe is MXFP8
+    is_delayed_scaling: bool = False
+    # Whether the recipe is FP8 with delayed scaling
+    is_mxfp8: bool = False
 
 
 @dataclass()
@@ -142,6 +139,7 @@ class DelayedScaling(Recipe):
     reduce_amax: bool = True
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    is_delayed_scaling: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
@@ -151,10 +149,6 @@ class DelayedScaling(Recipe):
                 "It will be removed in an upcoming release.",
                 DeprecationWarning,
             )
-
-    def is_delayed_scaling(self) -> bool:
-        """Whether the given recipe is FP8 with delayed scaling."""
-        return True
 
     def __repr__(self) -> str:
         return (
@@ -184,13 +178,10 @@ class MXFP8Recipe(Recipe):
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    is_mxfp8: ClassVar[bool] = True
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-
-    def is_mxfp8(self) -> bool:
-        """Whether the given recipe is MXFP8."""
-        return True
 
     def __repr__(self) -> str:
         return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"
