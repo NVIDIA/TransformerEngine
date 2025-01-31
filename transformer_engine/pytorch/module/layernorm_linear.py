@@ -166,7 +166,8 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
         elif with_quantized_norm:
-            input_quantizer.set_usage(rowwise=True, columnwise=False)
+            if with_input_all_gather:
+                input_quantizer.set_usage(rowwise=True, columnwise=False)
             ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
         else:
             ln_out = torch.empty_like(
