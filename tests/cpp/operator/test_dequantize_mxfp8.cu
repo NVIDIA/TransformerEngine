@@ -187,7 +187,7 @@ void performTest_x1(const size_t rows,
                                                                  scale_tensor_alignment_Y_colwise);
     const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
                                                                  scale_tensor_alignment_X_colwise);
-    
+
     const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
     const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
 
