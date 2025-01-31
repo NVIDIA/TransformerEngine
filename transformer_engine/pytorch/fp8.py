@@ -211,7 +211,7 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        if not fp8_meta["recipe"].delayed():
+        if not fp8_meta["recipe"].is_delayed_scaling():
             return
 
         # Every module must call this function exactly once since
@@ -434,7 +434,7 @@ class FP8GlobalStateManager:
         to ensure both forward steps are numerically same.
         """
 
-        if not fp8_meta["recipe"].delayed():
+        if not fp8_meta["recipe"].is_delayed_scaling():
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -460,7 +460,7 @@ class FP8GlobalStateManager:
         1 forward for indentical numerical outputs.
         """
 
-        if not fp8_meta["recipe"].delayed():
+        if not fp8_meta["recipe"].is_delayed_scaling():
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -479,7 +479,7 @@ class FP8GlobalStateManager:
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
 
-        if not fp8_meta["recipe"].delayed():
+        if not fp8_meta["recipe"].is_delayed_scaling():
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -739,7 +739,7 @@ class RecipeState(abc.ABC):
         """
 
         cls = None
-        if recipe.delayed():
+        if recipe.is_delayed_scaling():
             cls = DelayedScalingRecipeState
         elif recipe.is_mxfp8():
             cls = MXFP8RecipeState

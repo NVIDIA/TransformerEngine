@@ -259,7 +259,8 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
                 continue
             recipe_state = self._fp8_metas[mode][fp8_meta_key]
             need_to_reset_recipe_state = (
-                recipe.delayed() and not isinstance(recipe_state, DelayedScalingRecipeState)
+                recipe.is_delayed_scaling()
+                and not isinstance(recipe_state, DelayedScalingRecipeState)
             ) or (recipe.is_mxfp8() and not isinstance(recipe_state, MXFP8RecipeState))
             if need_to_reset_recipe_state:
                 self._reset_quantization_recipe_state(recipe=recipe)
@@ -283,7 +284,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = fp8_meta[fp8_meta_key]
 
             # Reallocate amax history if needed
-            if recipe.delayed():
+            if recipe.is_delayed_scaling():
                 current_length = recipe_state.amax_history.size(0)
                 target_length = recipe.amax_history_len
                 if current_length != target_length:

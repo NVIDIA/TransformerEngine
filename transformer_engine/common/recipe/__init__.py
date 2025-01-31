@@ -48,7 +48,7 @@ class Recipe:
         """Whether the given recipe is MXFP8."""
         return False
 
-    def delayed(self) -> bool:
+    def is_delayed_scaling(self) -> bool:
         """Whether the given recipe is FP8 with delayed scaling."""
         return False
 
@@ -152,7 +152,7 @@ class DelayedScaling(Recipe):
                 DeprecationWarning,
             )
 
-    def delayed(self) -> bool:
+    def is_delayed_scaling(self) -> bool:
         """Whether the given recipe is FP8 with delayed scaling."""
         return True
 

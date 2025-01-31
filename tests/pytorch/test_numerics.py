@@ -1416,7 +1416,7 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, f
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            if recipe.delayed():
+            if recipe.is_delayed_scaling():
                 split_size = 16
             if recipe.is_mxfp8():
                 split_size = 128
@@ -1465,7 +1465,7 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if recipe.is_mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and not recipe.delayed():  # TODO(ksivamani): debug mismatches
+    if fp8 and not recipe.is_delayed_scaling():  # TODO(ksivamani): debug mismatches
         pytest.skip("Grouped linear only supports FP8 delayed scaling")
 
     config = model_configs[model]
@@ -1650,7 +1650,7 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if recipe.is_mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and not recipe.delayed():  # TODO(ksivamani): debug mismatches
+    if fp8 and not recipe.is_delayed_scaling():  # TODO(ksivamani): debug mismatches
         pytest.skip("Grouped linear only supports FP8 delayed scaling.")
 
     config = model_configs[model]
