@@ -497,10 +497,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const int left_bound = dbias_rowwise_offset_X;
           const int right_bound = dbias_rowwise_offset_X + ELEMS_PER_THREAD - 1;
 
-          #pragma unroll
+#pragma unroll
           for (int i = 0; i < Y; ++i) {
             other_row_dbias.load_from(&shmem_partial_dbias_rowwise[c][i][tid_rowwise_X]);
-            #pragma unroll
+#pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; ++j) {
               partial_dbias_rowwise[c].data.elt[j] += other_row_dbias.data.elt[j];
             }
@@ -512,7 +512,8 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           } else if (left_bound < cols && right_bound >= cols) {
             // Element-by-element store when some elements cross the boundaries
             const int in_bound_elts_count = cols - left_bound;
-            partial_dbias_rowwise[c].store_to_elts(&dbias_workspace[dbias_offset], 0, in_bound_elts_count);
+            partial_dbias_rowwise[c].store_to_elts(&dbias_workspace[dbias_offset], 0,
+                                                   in_bound_elts_count);
           }
         }
       }
