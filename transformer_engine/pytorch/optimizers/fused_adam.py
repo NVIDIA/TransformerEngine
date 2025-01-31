@@ -568,16 +568,16 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 if has_fp16 and has_bf16:
-                    # simple to add support for this, but not needed for now
-                    raise RuntimeError(
-                        "FusedAdam does not support a mix of float16 and bfloat16 model weights."
-                    )
-
                     if self.store_param_remainders:
                         raise RuntimeError(
                             "FusedAdam doesn't support a mix of FP16/BF16 weights + Store param"
                             " remainder."
                         )
+
+                    # simple to add support for this, but not needed for now
+                    raise RuntimeError(
+                        "FusedAdam does not support a mix of float16 and bfloat16 model weights."
+                    )
 
             def apply_multi_tensor_adam(adam_func, tensor_lists, inv_scale=None, out_dtype=None):
                 # Closures defined in a loop can have unexpected
