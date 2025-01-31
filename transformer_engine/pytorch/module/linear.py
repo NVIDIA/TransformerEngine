@@ -93,7 +93,7 @@ class _Linear(torch.autograd.Function):
         ub_bulk_dgrad: bool,
         ub_bulk_wgrad: bool,
         ub_name: str,
-        fp8_output: bool,
+        fp8_output: bool,  # pylint: disable=unused-argument
         fsdp_group: Union[dist_group_type, None],
         module: torch.nn.Module,
         skip_fp8_weight_update: bool,
@@ -329,10 +329,8 @@ class _Linear(torch.autograd.Function):
                 )
 
             saved_tensors = ctx.saved_tensors
-            inputmat, weight_fp8, weight, bias = (
-                restore_from_saved(  # pylint: disable=unbalanced-tuple-unpacking
-                    ctx.tensor_objects, saved_tensors
-                )
+            inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
+                restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
@@ -491,8 +489,9 @@ class _Linear(torch.autograd.Function):
                         if inputmat._data is None:
                             # All-gather executed on columnwise data and result is in rowwise data,
                             # so we need to fix the interleaving before WGRAD.
-                            inputmat_total = _fix_gathered_fp8_transpose(inputmat_total,
-                                                                         ctx.tp_size)
+                            inputmat_total = _fix_gathered_fp8_transpose(
+                                inputmat_total, ctx.tp_size
+                            )
                         elif not non_tn_fp8_gemm_supported():
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.

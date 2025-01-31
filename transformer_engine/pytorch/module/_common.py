@@ -49,9 +49,9 @@ def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float
     batched_size = reduce(multiply_op, data.shape[1:])
     interleaved_shape = [tp_size, data.shape[0] // tp_size, batched_size]
     transposed_shape = [data.shape[0] // tp_size, batched_size * tp_size]
-    fp8_tensor._transpose = data.view(
-        interleaved_shape
-    ).transpose(0, 1).contiguous().view(transposed_shape)
+    fp8_tensor._transpose = (
+        data.view(interleaved_shape).transpose(0, 1).contiguous().view(transposed_shape)
+    )
 
     fp8_tensor._transpose_invalid = False
     fp8_tensor._data = None

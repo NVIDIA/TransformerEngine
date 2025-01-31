@@ -194,6 +194,7 @@ def test_bulk_overlaps(comm_type, fp8, connections):
     else:
         _run_gemm_with_overlap(comm_type, True, False, False, fp8)
 
+
 @pytest.mark.parametrize("fp8", (False, True), ids=[" BF16 ", " FP8  "])
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",

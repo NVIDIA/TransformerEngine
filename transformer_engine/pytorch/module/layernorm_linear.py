@@ -31,7 +31,6 @@ from ..utils import (
     assert_dim_for_fp8_exec,
     clear_tensor_data,
     requires_grad,
-    non_tn_fp8_gemm_supported,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -412,9 +411,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
 
             saved_tensors = ctx.saved_tensors
-            inputmat, weight, _, bias, ln_weight, ln_out, mu, rsigma = restore_from_saved(
-                ctx.tensor_objects, saved_tensors
-            )
+            (  # pylint: disable=unbalanced-tuple-unpacking
+                inputmat,
+                weight,
+                _,
+                bias,
+                ln_weight,
+                ln_out,
+                mu,
+                rsigma,
+            ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (

@@ -100,7 +100,7 @@ def general_gemm(
         )
 
     if ub is not None:
-        assert ub_type is not None, f"Comm+GEMM overlap requires a valid `comm_type` argument."
+        assert ub_type is not None, "Comm+GEMM overlap requires a valid `comm_type` argument."
         if ub_type == tex.CommOverlapType.RS:
             if not (bulk_overlap and not ub.is_fp8_ubuf()):
                 assert extra_output is not None, "GEMM+RS overlap requires extra output tensor."

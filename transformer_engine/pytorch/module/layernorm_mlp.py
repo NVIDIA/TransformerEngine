@@ -785,8 +785,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     #       which then needs to be interleaved correctly before WGRAD.
                     ub_obj_fc1_dgrad = get_ub("fc1_dgrad")
                     ub_type_fc1_dgrad = tex.CommOverlapType.AG
-                    ub_obj_fc1_dgrad.copy_into_buffer(ln_out, ctx.fc1_input_quantizer,
-                                                      local_chunk=True)
+                    ub_obj_fc1_dgrad.copy_into_buffer(
+                        ln_out, ctx.fc1_input_quantizer, local_chunk=True
+                    )
 
                 if ctx.ub_bulk_wgrad:
                     # Overlap FC1 DGRAD reduce-scatter with WGRAD compute
@@ -976,7 +977,7 @@ class _LayerNormMLP(torch.autograd.Function):
             fc1_wgrad,
             fc1_bias_grad if ctx.use_fc1_bias else None,
             None,  # use_fc1_bias
-            fc2_wgrad,
+            fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
             fc2_bias_grad if ctx.use_fc2_bias else None,
             None,  # use_fc2_bias
             None,  # eps

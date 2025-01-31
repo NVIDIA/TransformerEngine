@@ -756,7 +756,7 @@ class BasicLinear(BasicOperation):
                     )
 
             # Perform dgrad GEMM
-            dx, *_= general_gemm(
+            dx, *_ = general_gemm(
                 w,
                 dy,
                 get_workspace(),
