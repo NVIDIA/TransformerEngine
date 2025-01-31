@@ -65,7 +65,7 @@ void CheckNoopTensor(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckScaleTensorShape(const Tensor &t, bool check_scale_inv_alignment) {
+void CheckScaleTensorShape(const Tensor &t) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
     // per-tensor scaling
@@ -80,7 +80,6 @@ void CheckScaleTensorShape(const Tensor &t, bool check_scale_inv_alignment) {
     }
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
-      if (!check_scale_inv_alignment) return;
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul / typeToSize(t.scale_inv.dtype),
                                                  4ul / typeToSize(t.scale_inv.dtype)};
@@ -111,7 +110,7 @@ void CheckScaleTensorShape(const Tensor &t, bool check_scale_inv_alignment) {
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale_inv_alignment) {
+void CheckInputTensor(const Tensor &t, const std::string &name) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -143,11 +142,10 @@ void CheckInputTensor(const Tensor &t, const std::string &name, bool check_scale
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, check_scale_inv_alignment);
+  CheckScaleTensorShape(t);
 }
 
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty,
-                       bool check_scale_inv_alignment) {
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
@@ -189,7 +187,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output ", name, " is not allocated!");
   }
 
-  CheckScaleTensorShape(t, check_scale_inv_alignment);
+  CheckScaleTensorShape(t);
 }
 
 }  // namespace transformer_engine
