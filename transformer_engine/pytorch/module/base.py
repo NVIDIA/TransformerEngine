@@ -946,6 +946,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert (
                     quantizer is not None
                 )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                quantizer.internal = False
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
