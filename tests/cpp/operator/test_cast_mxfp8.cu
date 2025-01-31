@@ -432,12 +432,14 @@ void performTest_x2(const ProcessingMethod processing_method,
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
     {1, 16},
     {16, 48},
+    {65, 96},
     {128, 128},
     {256, 256},
     {993, 512},
     {768, 1024},
     // {2048, 12288},
     // {65536, 128},
+    // {16384, 1632},
     // {16384, 6144},
 };
 

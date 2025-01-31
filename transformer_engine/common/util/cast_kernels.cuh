@@ -261,6 +261,9 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     const int chunk_offset_Y = block_offset_Y + chunk_Y * MXFP8_CHUNK_DIM_Y;
     const int chunk_offset_X = block_offset_X + chunk_X * MXFP8_CHUNK_DIM_X;
 
+    const int dbias_rowwise_offset_X = dbias_rowwise_block_offset_X + chunk_X * MXFP8_CHUNK_DIM_X;
+    const int dbias_colwise_offset_X = dbias_colwise_block_offset_X + chunk_X * MXFP8_CHUNK_DIM_X;
+
     const int scales_rowwise_chunk_offset_Y =
         scales_rowwise_block_offset_Y + chunk_Y * SCALES_ROWWISE_PER_CHUNK_Y;
     const int scales_rowwise_chunk_offset_X =
@@ -289,6 +292,8 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
     for (int iter = 0; iter < MXFP8_ITERATIONS; ++iter) {
       const int buff = iter % MXFP8_BUFFERS_NUM;
       const int next_iter = iter + MXFP8_PREFETCH_BUFFERS_NUM;
+      const size_t row_base = chunk_offset_Y + iter * MXFP8_BUFFER_DIM_Y;
+
       if (next_iter < MXFP8_ITERATIONS) {
         const int next_buff = next_iter % MXFP8_BUFFERS_NUM;
         const int chunk_it_offset_y = chunk_offset_Y + next_iter * MXFP8_BUFFER_DIM_Y;
@@ -321,6 +326,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y_ROWWISE;
           const int shmem_offset_y = thread_offset_Y + stage_offset_Y;
           const int shmem_offset_x = thread_offset_X_rowwise;
+
+          const size_t row = row_base + shmem_offset_y;
+          const bool row_out_of_bounds = (row >= rows);
+
           in.load_from(&in_sh[buff][shmem_offset_y][shmem_offset_x]);
           if constexpr (IS_DACT) {
             act_in.load_from(&act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
@@ -331,6 +340,9 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 
 #pragma unroll
           for (int j = 0; j < ELEMS_PER_THREAD; ++j) {
+            const bool col_out_of_bounds = (dbias_rowwise_offset_X + j >= cols);
+            const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
+
             float elt = static_cast<float>(in.data.elt[j]);
             if constexpr (IS_ACT || IS_DACT) {
               elt = OP(elt, {});
@@ -339,10 +351,14 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
               elt *= static_cast<float>(act_in.data.elt[j]);
             }
             if constexpr (IS_DBIAS && COMPUTE_DBIAS_IN_ROWWISE_SECTION) {
-              partial_dbias_rowwise[chunk_X].data.elt[j] += elt;
+              if (!out_of_bounds) {
+                partial_dbias_rowwise[chunk_X].data.elt[j] += elt;
+              }
             }
             in_compute[j] = elt;
-            thread_amax = fmaxf(thread_amax, fabsf(elt));
+            if (!out_of_bounds) {
+              thread_amax = fmaxf(thread_amax, fabsf(elt));
+            }
           }
 
           __builtin_assume(block_amax >= 0);
@@ -375,11 +391,16 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       }
 
       if constexpr (USE_COLWISE_SCALING) {
+        const bool col_out_of_bounds = (dbias_colwise_offset_X >= cols);
         float in_compute[SCALE_DIM_Y];
 
         float amax = 0;
 #pragma unroll
         for (int i = 0; i < SCALE_DIM_Y; ++i) {
+          const size_t row = row_base + i;
+          const bool row_out_of_bounds = (row >= rows);
+          const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
+
           float elt = static_cast<float>(in_sh[buff][i][tid_colwise_X]);
           if constexpr (IS_ACT || IS_DACT) {
             elt = OP(elt, {});
@@ -388,10 +409,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             elt *= static_cast<float>(act_in_sh[buff][i][tid_colwise_X]);
           }
           if constexpr (IS_DBIAS) {
-            partial_dbias_colwise[chunk_X] += elt;
+            if (!out_of_bounds) {
+              partial_dbias_colwise[chunk_X] += elt;
+            }
           }
           in_compute[i] = elt;
-          if (isfinite(elt)) {
+          if (!out_of_bounds) {
             amax = fmaxf(amax, fabsf(elt));
           }
         }
@@ -468,17 +491,29 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
 #pragma unroll
         for (int c = 0; c < MXFP8_CHUNKS_PER_BLOCK_X; ++c) {
           Vec<float, ELEMS_PER_THREAD> other_row_dbias;
-#pragma unroll
+          const int dbias_rowwise_offset_X = dbias_rowwise_block_offset_X + c * MXFP8_CHUNK_DIM_X;
+          const int dbias_offset = dbias_rowwise_offset_Y * dbias_stride + dbias_rowwise_offset_X;
+
+          const int left_bound = dbias_rowwise_offset_X;
+          const int right_bound = dbias_rowwise_offset_X + ELEMS_PER_THREAD - 1;
+
+          #pragma unroll
           for (int i = 0; i < Y; ++i) {
             other_row_dbias.load_from(&shmem_partial_dbias_rowwise[c][i][tid_rowwise_X]);
-#pragma unroll
+            #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; ++j) {
               partial_dbias_rowwise[c].data.elt[j] += other_row_dbias.data.elt[j];
             }
           }
-          const int dbias_rowwise_offset_X = dbias_rowwise_block_offset_X + c * MXFP8_CHUNK_DIM_X;
-          const int dbias_offset = dbias_rowwise_offset_Y * dbias_stride + dbias_rowwise_offset_X;
-          partial_dbias_rowwise[c].store_to(&dbias_workspace[dbias_offset]);
+
+          // Vectorized store when all elements are inside the boundaries
+          if (right_bound < cols) {
+            partial_dbias_rowwise[c].store_to(&dbias_workspace[dbias_offset]);
+          } else if (left_bound < cols && right_bound >= cols) {
+            // Element-by-element store when some elements cross the boundaries
+            const int in_bound_elts_count = cols - left_bound;
+            partial_dbias_rowwise[c].store_to_elts(&dbias_workspace[dbias_offset], 0, in_bound_elts_count);
+          }
         }
       }
     } else {
@@ -486,7 +521,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       for (int i = 0; i < MXFP8_CHUNKS_PER_BLOCK_X; ++i) {
         const int dbias_colwise_offset_X = dbias_colwise_block_offset_X + i * MXFP8_CHUNK_DIM_X;
         const int dbias_offset = dbias_colwise_offset_Y * dbias_stride + dbias_colwise_offset_X;
-        dbias_workspace[dbias_offset] = partial_dbias_colwise[i];
+        const bool col_out_of_bounds = (dbias_colwise_offset_X >= cols);
+        if (!col_out_of_bounds) {
+          dbias_workspace[dbias_offset] = partial_dbias_colwise[i];
+        }
       }
     }
   }
