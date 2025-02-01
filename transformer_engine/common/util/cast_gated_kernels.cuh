@@ -802,12 +802,10 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
-  e8m0_t *const scales_rowwise_ptr = USE_ROWWISE_SCALING
-                                     ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr)
-                                     : nullptr;
-  e8m0_t *const scales_colwise_ptr = USE_COLWISE_SCALING
-                                     ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
-                                     : nullptr;
+  e8m0_t *const scales_rowwise_ptr =
+      USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
 
   const dim3 block_dim(THREADS_PER_CHUNK);
   const dim3 grid_dim(blocks_X, blocks_Y);
