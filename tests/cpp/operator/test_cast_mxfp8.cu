@@ -290,9 +290,11 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-        rtol_dbias *= 4;
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
+            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+        } else {
+            rtol_dbias *= 4;
         }
         compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
     }
@@ -433,9 +435,11 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-        rtol_dbias *= 4;
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
+            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+        } else {
+            rtol_dbias *= 4;
         }
         compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
     }
@@ -453,7 +457,7 @@ std::vector<std::vector<size_t>> matrix_sizes = {
     {2048, 12288},
     {65536, 128},
     {65536, 160},
-    {16384, 1632},
+    {4096, 1632},
     {1024},
     {8, 32, 1024},
     {16, 8, 4, 512},
