@@ -125,14 +125,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Prefetch data of the first stage
 
   if constexpr (IS_DGATED) {
-    copy_2d_to_sharedx3(in_grad_sh, TMAP_grad_in, chunk_offset_X, chunk_offset_Y,
-                        in_act_sh, TMAP_gate_in, chunk_offset_X, chunk_offset_Y,
-                        in_gate_sh, TMAP_gate_in, chunk_offset_X + cols, chunk_offset_Y,
-                        in_transaction_size, &mbar[0], is_master_thread);
+    copy_2d_to_sharedx3(in_grad_sh, TMAP_grad_in, chunk_offset_X, chunk_offset_Y, in_act_sh,
+                        TMAP_gate_in, chunk_offset_X, chunk_offset_Y, in_gate_sh, TMAP_gate_in,
+                        chunk_offset_X + cols, chunk_offset_Y, in_transaction_size, &mbar[0],
+                        is_master_thread);
   } else {
-    copy_2d_to_sharedx2(in_act_sh, TMAP_gate_in, chunk_offset_X, chunk_offset_Y,
-                        in_gate_sh, TMAP_gate_in, chunk_offset_X + cols, chunk_offset_Y,
-                        in_transaction_size, &mbar[0], is_master_thread);
+    copy_2d_to_sharedx2(in_act_sh, TMAP_gate_in, chunk_offset_X, chunk_offset_Y, in_gate_sh,
+                        TMAP_gate_in, chunk_offset_X + cols, chunk_offset_Y, in_transaction_size,
+                        &mbar[0], is_master_thread);
   }
 
 #pragma unroll
@@ -144,19 +144,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int chunk_it_offset_y = chunk_offset_Y + next_it * BUFFER_DIM_Y;
       const int chunk_it_offset_x = chunk_offset_X;
       if constexpr (IS_DGATED) {
-        copy_2d_to_sharedx3(&in_grad_sh[next_buff * buff_elems], TMAP_grad_in,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            &in_act_sh[next_buff * buff_elems], TMAP_gate_in,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            &in_gate_sh[next_buff * buff_elems], TMAP_gate_in,
-                            chunk_it_offset_x + cols, chunk_it_offset_y,
-                            in_transaction_size, &mbar[next_it], is_master_thread);
+        copy_2d_to_sharedx3(
+            &in_grad_sh[next_buff * buff_elems], TMAP_grad_in, chunk_it_offset_x, chunk_it_offset_y,
+            &in_act_sh[next_buff * buff_elems], TMAP_gate_in, chunk_it_offset_x, chunk_it_offset_y,
+            &in_gate_sh[next_buff * buff_elems], TMAP_gate_in, chunk_it_offset_x + cols,
+            chunk_it_offset_y, in_transaction_size, &mbar[next_it], is_master_thread);
       } else {
-        copy_2d_to_sharedx2(&in_act_sh[next_buff * buff_elems], TMAP_gate_in,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            &in_gate_sh[next_buff * buff_elems], TMAP_gate_in,
-                            chunk_it_offset_x + cols, chunk_it_offset_y,
-                            in_transaction_size, &mbar[next_it], is_master_thread);
+        copy_2d_to_sharedx2(&in_act_sh[next_buff * buff_elems], TMAP_gate_in, chunk_it_offset_x,
+                            chunk_it_offset_y, &in_gate_sh[next_buff * buff_elems], TMAP_gate_in,
+                            chunk_it_offset_x + cols, chunk_it_offset_y, in_transaction_size,
+                            &mbar[next_it], is_master_thread);
       }
     }
 
@@ -869,19 +866,14 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
   CheckInputTensor(input, "dgated_act_input");
   CheckOutputTensor(*output, "dgated_act_output");
   NVTE_CHECK(output->flat_first_dim() == grad.flat_first_dim(),
-             "Wrong output shape. Expected (after flattenting) [",
-             grad.flat_first_dim(), ", *], got [",
-             output->flat_first_dim(), ", ",
-             output->flat_last_dim(), "].");
+             "Wrong output shape. Expected (after flattenting) [", grad.flat_first_dim(),
+             ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(output->flat_last_dim() == grad.flat_last_dim() * 2,
-             "Wrong output shape. Expected (after flattenting) [*, ",
-             grad.flat_last_dim() * 2, "], got [",
-             output->flat_first_dim(), ", ",
-             output->flat_last_dim(), "].");
+             "Wrong output shape. Expected (after flattenting) [*, ", grad.flat_last_dim() * 2,
+             "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(input.data.shape == output->data.shape,
-             "Input and output shapes must match. Input shape: ",
-             input.data.shape, ", output shape: ",
-             output->data.shape, ".");
+             "Input and output shapes must match. Input shape: ", input.data.shape,
+             ", output shape: ", output->data.shape, ".");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype(), IType,

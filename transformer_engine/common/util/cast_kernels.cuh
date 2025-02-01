@@ -180,11 +180,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_stage_offset_Y = chunk_offset_Y + prefetch_buff * MXFP8_BUFFER_DIM_Y;
       const int chunk_stage_offset_X = chunk_offset_X;
       if constexpr (IS_DACT) {
-        copy_2d_to_sharedx2(&in_sh[prefetch_buff], &tensor_map_input,
-                            chunk_stage_offset_X, chunk_stage_offset_Y,
-                            &act_in_sh[prefetch_buff],
-                            &tensor_map_act_input, chunk_stage_offset_X, chunk_stage_offset_Y,
-                            shmem_buff_size, &mbar[prefetch_buff], is_master_thread);
+        copy_2d_to_sharedx2(&in_sh[prefetch_buff], &tensor_map_input, chunk_stage_offset_X,
+                            chunk_stage_offset_Y, &act_in_sh[prefetch_buff], &tensor_map_act_input,
+                            chunk_stage_offset_X, chunk_stage_offset_Y, shmem_buff_size,
+                            &mbar[prefetch_buff], is_master_thread);
       } else {
         copy_2d_to_shared(&in_sh[prefetch_buff], &tensor_map_input, chunk_stage_offset_X,
                           chunk_stage_offset_Y, shmem_buff_size, &mbar[prefetch_buff],
@@ -203,11 +202,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
         const int chunk_it_offset_y = chunk_offset_Y + next_iter * MXFP8_BUFFER_DIM_Y;
         const int chunk_it_offset_x = chunk_offset_X;
         if constexpr (IS_DACT) {
-          copy_2d_to_sharedx2(&in_sh[next_buff], &tensor_map_input,
-                              chunk_it_offset_x, chunk_it_offset_y,
-                              &act_in_sh[next_buff], &tensor_map_act_input,
-                              chunk_it_offset_x, chunk_it_offset_y,
-                              shmem_buff_size, &mbar[next_iter], is_master_thread);
+          copy_2d_to_sharedx2(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
+                              chunk_it_offset_y, &act_in_sh[next_buff], &tensor_map_act_input,
+                              chunk_it_offset_x, chunk_it_offset_y, shmem_buff_size,
+                              &mbar[next_iter], is_master_thread);
         } else {
           copy_2d_to_shared(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
                             chunk_it_offset_y, shmem_buff_size, &mbar[next_iter], is_master_thread);
@@ -522,11 +520,10 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     const int chunk_stage_offset_Y = chunk_offset_Y + prefetch_buff * FP8_BUFFER_DIM_Y;
     const int chunk_stage_offset_X = chunk_offset_X;
     if constexpr (IS_DACT) {
-      copy_2d_to_sharedx2(&in_sh[prefetch_buff], &tensor_map_input,
-                          chunk_stage_offset_X, chunk_stage_offset_Y,
-                          &act_in_sh[prefetch_buff], &tensor_map_act_input,
-                          chunk_stage_offset_X, chunk_stage_offset_Y,
-                          shmem_buff_size, &mbar[prefetch_buff], is_master_thread);
+      copy_2d_to_sharedx2(&in_sh[prefetch_buff], &tensor_map_input, chunk_stage_offset_X,
+                          chunk_stage_offset_Y, &act_in_sh[prefetch_buff], &tensor_map_act_input,
+                          chunk_stage_offset_X, chunk_stage_offset_Y, shmem_buff_size,
+                          &mbar[prefetch_buff], is_master_thread);
     } else {
       copy_2d_to_shared(&in_sh[prefetch_buff], &tensor_map_input, chunk_stage_offset_X,
                         chunk_stage_offset_Y, shmem_buff_size, &mbar[prefetch_buff],
@@ -544,11 +541,10 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
       const int chunk_it_offset_x = chunk_offset_X;
       if constexpr (IS_DACT) {
-        copy_2d_to_sharedx2(&in_sh[next_buff], &tensor_map_input,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            &act_in_sh[next_buff], &tensor_map_act_input,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            shmem_buff_size, &mbar[next_iter], is_master_thread);
+        copy_2d_to_sharedx2(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
+                            chunk_it_offset_y, &act_in_sh[next_buff], &tensor_map_act_input,
+                            chunk_it_offset_x, chunk_it_offset_y, shmem_buff_size, &mbar[next_iter],
+                            is_master_thread);
       } else {
         copy_2d_to_shared(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
                           chunk_it_offset_y, shmem_buff_size, &mbar[next_iter], is_master_thread);
