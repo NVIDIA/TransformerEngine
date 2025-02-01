@@ -181,6 +181,10 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
+    if (shape.size() < 2 && colwise) {
+      GTEST_SKIP();
+    }
+
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
     const size_t unpadded_blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
