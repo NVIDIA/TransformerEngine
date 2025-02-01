@@ -81,8 +81,7 @@ void CheckScaleTensorShape(const Tensor &t) {
   } else {
     if (t.scaling_mode == NVTE_MXFP8_1D_SCALING) {
       // Need (4, 128) alignment even for e8 scaling factor
-      auto block_alignment = std::vector<size_t>{128ul,
-                                                 4ul};
+      auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
       if (t.has_data()) {
         alignment = block_alignment[0];
