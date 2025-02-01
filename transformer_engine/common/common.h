@@ -420,6 +420,12 @@ struct is_fp8<fp8e4m3> : std::true_type {};
 template <>
 struct is_fp8<fp8e5m2> : std::true_type {};
 
+// [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
