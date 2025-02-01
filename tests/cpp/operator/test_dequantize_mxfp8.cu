@@ -356,6 +356,7 @@ std::vector<std::pair<size_t, size_t>> tensor_dims = {
     {128, 128},
     {256, 256},
     {993, 512},
+    {512, 993},
     {768, 1024},
     // {2048, 12288},
     // {65536, 128},
@@ -399,6 +400,14 @@ TEST_P(DequantizeMXFP8TestSuite, TestDequantizeMXFP8)
 
     // Skip tests for dequantization along both dimensions
     if (rowwise && colwise) {
+        GTEST_SKIP();
+    }
+
+    // Skip cases with invalid alignment
+    if (rowwise && tensor_size.second % 32 != 0) {
+        GTEST_SKIP();
+    }
+    if (colwise && tensor_size.first % 32 != 0) {
         GTEST_SKIP();
     }
 
