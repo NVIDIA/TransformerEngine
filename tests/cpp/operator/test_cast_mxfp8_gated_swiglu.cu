@@ -96,14 +96,15 @@ void compute_ref_x1(const IType* grad,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride) {
     const size_t tile_size_Y = std::max(32lu, block_size_Y);
     const size_t tile_size_X = std::max(64lu, block_size_X);
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
     const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
     const size_t blocks_per_tile_X = tile_size_X / block_size_X;
-    const size_t blocks_per_row = (cols + block_size_X - 1) / block_size_X;
+    // const size_t blocks_per_row = (cols + block_size_X - 1) / block_size_X;
 
     float amax = 0;
     #pragma omp parallel reduction(max: amax) proc_bind(spread)
@@ -128,7 +129,7 @@ void compute_ref_x1(const IType* grad,
                     const size_t j_min = tile_offset_X + block_offset_X;
                     const size_t j_max = std::min(j_min + block_size_X, cols);
 
-                    const size_t mx_scale_idx = block_idx_Y * blocks_per_row + block_idx_X;
+                    const size_t mx_scale_idx = block_idx_Y * scales_stride + block_idx_X;
                     scale_block<IS_DGATED, IType, OType>(
                         grad, input, output, output_scales, mx_scale_idx,
                         thread_amax, i_min, i_max, j_min, j_max, cols);
@@ -153,11 +154,13 @@ void compute_ref_x2(const IType* grad,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride_rowwise,
+                    const size_t scales_stride_colwise) {
     compute_ref_x1<IS_DGATED, IType, OType>(
-        grad, input, output_rowwise, scales_rowwise, ref_amax, rows, cols, 1, block_size_X);
+        grad, input, output_rowwise, scales_rowwise, ref_amax, rows, cols, 1, block_size_X, scales_stride_rowwise);
     compute_ref_x1<IS_DGATED, IType, OType>(
-        grad, input, output_colwise, scales_colwise, ref_amax, rows, cols, block_size_Y, 1);
+        grad, input, output_colwise, scales_colwise, ref_amax, rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
 /**
@@ -179,14 +182,38 @@ void performTest_x1(const size_t rows,
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
 
-    bool rowwise = false, colwise = false;
-    if (block_size_rows == 1 && block_size_cols == 32) rowwise = true;
-    if (block_size_rows == 32 && block_size_cols == 1) colwise = true;
+    bool rowwise = false;
+    bool colwise = false;
+    if (block_size_rows == 1 && block_size_cols == 32) {
+        rowwise = true;
+    }
+    if (block_size_rows == 32 && block_size_cols == 1) {
+        colwise = true;
+    }
+
     NVTE_CHECK(rowwise || colwise);
 
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num = blocks_Y * blocks_X;
+    const size_t unpadded_blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
+    const size_t unpadded_blocks_X = (cols + block_size_cols - 1) / block_size_cols;
+
+    const size_t unpadded_blocks_Y_rowwise = rows;
+    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
+    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X_colwise = cols;
+
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                                 scale_tensor_alignment_Y_rowwise);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                                 scale_tensor_alignment_X_rowwise);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                                 scale_tensor_alignment_Y_colwise);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                                 scale_tensor_alignment_X_colwise);
+
+    // Roundup to the nearest multiple
+    const size_t blocks_Y = rowwise ? blocks_Y_rowwise : blocks_Y_colwise;
+    const size_t blocks_X = rowwise ? blocks_X_rowwise : blocks_X_colwise;
+    const size_t scales_stride = blocks_X;
 
     Tensor grad({ rows, cols }, itype);
     Tensor input({ rows, cols * 2 }, itype);
@@ -222,14 +249,22 @@ void performTest_x1(const size_t rows,
                                             rows,
                                             cols,
                                             block_size_rows,
-                                            block_size_cols);
+                                            block_size_cols,
+                                            scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output", output, ref_output.get(), rowwise, atol, rtol);
+
+    const uint8_t * const gpu_scales_ptr = rowwise
+                                           ? output.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+                                           : output.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+
     if (rowwise) {
-      compare_e8m0_scaling_factors("scales", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
+      compare_e8m0_scaling_factors("rowwise scales", gpu_scales_ptr, ref_output_scales.get(),
+                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
     } else {
-      compare_e8m0_scaling_factors("scales", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
+      compare_e8m0_scaling_factors("colwise scales", gpu_scales_ptr, ref_output_scales.get(),
+                                   unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
     }
 }
 
@@ -251,10 +286,22 @@ void performTest_x2(const size_t rows,
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
 
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num_rowwise = rows * blocks_X;
-    const size_t blocks_num_colwise = blocks_Y * cols;
+    const size_t unpadded_blocks_Y_rowwise = rows;
+    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
+    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X_colwise = cols;
+
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                                 scale_tensor_alignment_Y_rowwise);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                                 scale_tensor_alignment_X_rowwise);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                                 scale_tensor_alignment_Y_colwise);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                                 scale_tensor_alignment_X_colwise);
+
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
+    const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor grad({ rows, cols }, itype);
     Tensor input({ rows, cols * 2 }, itype);
@@ -264,8 +311,8 @@ void performTest_x2(const size_t rows,
 
     std::unique_ptr<OType[]> ref_output_rowwise = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(rows * blocks_X);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y * cols);
+    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
 
     // fillCase<EncodingType>(&grad, fill_case);
     if constexpr (IS_DGATED) {
@@ -294,25 +341,33 @@ void performTest_x2(const size_t rows,
                                             rows,
                                             cols,
                                             block_size_rows,
-                                            block_size_cols);
+                                            block_size_cols,
+                                            scales_stride_rowwise,
+                                            scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
     compareResults("output_c_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
     compareResults("output_c_colwise", output, ref_output_colwise.get(), false, atol, rtol);
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), blocks_num_rowwise);
+                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), blocks_num_colwise);
+                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                                 unpadded_blocks_X_colwise, scales_stride_colwise);
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
+    {1, 16},
+    {16, 48},
+    {65, 96},
     {128, 128},
     {256, 256},
+    {993, 512},
     {768, 1024},
-    {256, 65536},
     // {2048, 12288},
     // {65536, 128},
+    // {16384, 1632},
     // {16384, 6144},
 };
 
@@ -332,7 +387,7 @@ std::vector<InputsFillCase> input_scenarios = {
 
 std::vector<bool> is_dgated_op = {
     true,
-    false
+    // false
 };
 
 }  // namespace

@@ -772,21 +772,42 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   const size_t scale_dim_X_rowwise = USE_ROWWISE_SCALING ? 32 : 1;
   const size_t scale_dim_Y_colwise = USE_COLWISE_SCALING ? 32 : 1;
 
-  const size_t rows = gated_input.data.shape[0];
-  const size_t cols = gated_input.data.shape[1] / 2;
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
-  const size_t scale_stride_rowwise = DIVUP(cols, scale_dim_X_rowwise);
-  const size_t scale_stride_colwise = cols;
+
+  const size_t unpadded_scales_Y_rowwise = rows;
+  const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
+  const size_t unpadded_scales_X_colwise = cols;
+
+  const size_t scales_Y_rowwise =
+      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
+      scale_tensor_alignment_Y_rowwise;
+  const size_t scales_X_rowwise =
+      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
+      scale_tensor_alignment_X_rowwise;
+  const size_t scales_Y_colwise =
+      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
+      scale_tensor_alignment_Y_colwise;
+  const size_t scales_X_colwise =
+      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
+      scale_tensor_alignment_X_colwise;
+
+  const size_t scale_stride_rowwise = scales_X_rowwise;
+  const size_t scale_stride_colwise = scales_X_colwise;
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
-  e8m0_t *const scales_rowwise_ptr =
-      USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
-  e8m0_t *const scales_colwise_ptr =
-      USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_rowwise_ptr = USE_ROWWISE_SCALING
+                                     ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr)
+                                     : nullptr;
+  e8m0_t *const scales_colwise_ptr = USE_COLWISE_SCALING
+                                     ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
+                                     : nullptr;
 
   const dim3 block_dim(THREADS_PER_CHUNK);
   const dim3 grid_dim(blocks_X, blocks_Y);
@@ -970,8 +991,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->columnwise_data.shape[1] == output_cols, "Wrong dimension of the output.");
   }
 
-  const bool is_full_tile = (rows % CHUNK_DIM_Y == 0) && (cols % CHUNK_DIM_X == 0);
-  const bool use_tma_kernels = is_full_tile && is_fp8_rowwise_output && is_fp8_colwise_output;
+  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output;
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
