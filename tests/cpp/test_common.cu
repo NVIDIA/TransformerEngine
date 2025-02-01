@@ -753,13 +753,13 @@ int32_t getDeviceComputeCapability()
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {
-  if (shape.size() == 0) return 0;
+  if (shape.size() == 0) return 1;
   if (shape.size() == 1) return 1;
   return product(shape, 0, shape.size() - 1);
 }
 
 size_t last_dimension(const std::vector<size_t> &shape) {
-  if (shape.size() == 0) return 0;
+  if (shape.size() == 0) return 1;
   return shape[shape.size() - 1];
 }
 

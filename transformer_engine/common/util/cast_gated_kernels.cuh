@@ -866,10 +866,10 @@ void cast_dgated(const Tensor &grad, const Tensor &input, Tensor *output, cudaSt
   CheckInputTensor(input, "dgated_act_input");
   CheckOutputTensor(*output, "dgated_act_output");
   NVTE_CHECK(output->flat_first_dim() == grad.flat_first_dim(),
-             "Wrong output shape. Expected (after flattenting) [", grad.flat_first_dim(),
+             "Wrong output shape. Expected (after flattening) [", grad.flat_first_dim(),
              ", *], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(output->flat_last_dim() == grad.flat_last_dim() * 2,
-             "Wrong output shape. Expected (after flattenting) [*, ", grad.flat_last_dim() * 2,
+             "Wrong output shape. Expected (after flattening) [*, ", grad.flat_last_dim() * 2,
              "], got [", output->flat_first_dim(), ", ", output->flat_last_dim(), "].");
   NVTE_CHECK(input.data.shape == output->data.shape,
              "Input and output shapes must match. Input shape: ", input.data.shape,
