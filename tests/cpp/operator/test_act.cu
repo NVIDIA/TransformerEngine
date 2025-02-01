@@ -197,7 +197,7 @@ void performTestGLU(const size_t N, const size_t H) {
     auto [atol, rtol] = getTolerances(DType::kFloat32);
     compareResults("amax", output.amax(), ref_amax, atol, rtol);
     if (output.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
-      const float ref_scale = 1.f; // assuming input scale is 1.f
+      const float ref_scale = 1.f / output.scale();
       compareResults("scale_inv", *output.rowwise_cpu_scale_inv_ptr<float>(), ref_scale, atol, rtol);
     }
   }
