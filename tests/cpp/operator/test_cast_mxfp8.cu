@@ -316,6 +316,10 @@ void performTest_x2(const ProcessingMethod processing_method,
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
+    if (shape.size() < 2) {
+      GTEST_SKIP();
+    }
+
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
