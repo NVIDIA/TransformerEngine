@@ -449,7 +449,7 @@ class BasicLinear(BasicOperation):
         if with_quantized_compute and not w_is_quantized:
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            weight_quantizer.set_usage(rowwise=True, columnwise=False)
+            weight_quantizer.set_usage(rowwise=True)
             w = weight_quantizer(w)
         elif not with_quantized_compute and w_is_quantized:
             w = w.dequantize()
@@ -666,7 +666,7 @@ class BasicLinear(BasicOperation):
             if with_quantized_compute:
                 if input_quantizer is None:
                     raise ValueError("Missing quantizer for input tensor")
-                input_quantizer.set_usage(rowwise=True, columnwise=True)
+                input_quantizer.set_usage(columnwise=True)
                 if with_x_all_gather:
                     x, x_async = gather_along_first_dim(
                         x_local,
@@ -705,7 +705,7 @@ class BasicLinear(BasicOperation):
             if with_quantized_compute and not w_is_quantized:
                 if weight_quantizer is None:
                     raise ValueError("Missing quantizer for weight tensor")
-                weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                weight_quantizer.set_usage(columnwise=True)
                 w = weight_quantizer(w)
             elif not with_quantized_compute and w_is_quantized:
                 w = w.dequantize()
@@ -833,6 +833,10 @@ class BasicLinear(BasicOperation):
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
 
+        # Check which grads are required
+        input_requires_grad = ctx.requires_grad and input_.requires_grad
+        weight_requires_grad = ctx.requires_grad and self.weight.requires_grad
+
         # FP8 metadata
         with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
         input_quantizer = None
@@ -841,6 +845,8 @@ class BasicLinear(BasicOperation):
         grad_output_quantizer = None
         grad_input_quantizer = None
         if with_quantized_compute:
+
+            # Get quantizers
             input_quantizer = self.get_quantizer("forward", 0)
             weight_quantizer = self.get_quantizer("forward", 1)
             if next_op is not None and next_op.num_quantizers("forward") > 0:
@@ -848,6 +854,12 @@ class BasicLinear(BasicOperation):
             grad_output_quantizer = self.get_quantizer("backward", 0)
             if prev_op is not None and prev_op.num_quantizers("backward") > 0:
                 grad_input_quantizer = prev_op.get_quantizer("backward", 0)
+
+            # Configure quantizers
+            # Note: We cache the quantized input for backward pass,
+            # but discard the quantized weights.
+            input_quantizer.set_usage(columnwise=weight_requires_grad)
+            weight_quantizer.set_usage(columnwise=False)
 
         # Get autocast dtype if needed
         dtype = None
@@ -876,8 +888,8 @@ class BasicLinear(BasicOperation):
         ctx.grad_output_quantizer = grad_output_quantizer
         ctx.grad_input_quantizer = grad_input_quantizer
         ctx.dtype = dtype
-        ctx.input_requires_grad = input_.requires_grad
-        ctx.weight_requires_grad = self.weight.requires_grad
+        ctx.input_requires_grad = input_requires_grad
+        ctx.weight_requires_grad = weight_requires_grad
         ctx.has_prev_op = prev_op is not None
 
         return output

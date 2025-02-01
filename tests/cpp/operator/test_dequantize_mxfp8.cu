@@ -58,7 +58,8 @@ void compute_ref_x1(const InputType* input,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X)
+                    const size_t block_size_X,
+                    const size_t scales_stride)
 {
     const size_t blocks_Y = (rows + block_size_Y - 1) / block_size_Y;
     const size_t blocks_X = (cols + block_size_X - 1) / block_size_X;
@@ -69,7 +70,7 @@ void compute_ref_x1(const InputType* input,
         for (size_t jj = 0; jj < blocks_X; ++jj) {
             const size_t j_min = jj * block_size_X;
             const size_t j_max = std::min((jj + 1) * block_size_X, cols);
-            const size_t scale_idx = ii * blocks_X + jj;
+            const size_t scale_idx = ii * scales_stride + jj;
             dequantize_block<InputType, OutputType>(
                 input, output, scales, scale_idx, i_min, i_max, j_min, j_max, cols);
         }
@@ -85,10 +86,12 @@ void compute_ref_x2(const InputType* input,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X)
+                    const size_t block_size_X,
+                    const size_t scales_stride_rowwise,
+                    const size_t scales_stride_colwise)
 {
-    compute_ref_x1<InputType, OutputType>(input, output_rowwise, scales_rowwise, rows, cols, 1, block_size_X);
-    compute_ref_x1<InputType, OutputType>(input, output_colwise, scales_colwise, rows, cols, block_size_Y, 1);
+    compute_ref_x1<InputType, OutputType>(input, output_rowwise, scales_rowwise, rows, cols, 1, block_size_X, scales_stride_rowwise);
+    compute_ref_x1<InputType, OutputType>(input, output_colwise, scales_colwise, rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
 void generate_scales(fp8e8m0 * const scales_ref,
@@ -170,9 +173,26 @@ void performTest_x1(const size_t rows,
 
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num = blocks_Y * blocks_X;
+
+    const size_t unpadded_blocks_Y_rowwise = rows;
+    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
+    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X_colwise = cols;
+
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                                 scale_tensor_alignment_Y_rowwise);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                                 scale_tensor_alignment_X_rowwise);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                                 scale_tensor_alignment_Y_colwise);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                                 scale_tensor_alignment_X_colwise);
+
+    const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
+    const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
+
+    const size_t blocks_num = rowwise ? blocks_num_rowwise : blocks_num_colwise;
+    const size_t scales_stride = rowwise ? blocks_X_rowwise : blocks_X_colwise;
 
     Tensor input({ rows, cols }, itype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
@@ -183,7 +203,7 @@ void performTest_x1(const size_t rows,
     std::unique_ptr<fp8e8m0[]> scales = std::make_unique<fp8e8m0[]>(blocks_num);
 
     fill_tensor_data<InputType>(input, scales.get(), scales.get(), rowwise, colwise, rows, cols,
-                                blocks_num, blocks_num);
+                                blocks_num_rowwise, blocks_num_colwise);
 
     nvte_dequantize(input.data(), output.data(), 0);
 
@@ -201,7 +221,8 @@ void performTest_x1(const size_t rows,
                                           rows,
                                           cols,
                                           block_size_rows,
-                                          block_size_cols);
+                                          block_size_cols,
+                                          scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output", output, ref_output.get(), true, atol, rtol);
@@ -273,18 +294,32 @@ void performTest_x2(const size_t rows,
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num_rowwise = rows * blocks_X;
-    const size_t blocks_num_colwise = blocks_Y * cols;
+    const size_t unpadded_blocks_Y_rowwise = rows;
+    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
+    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X_colwise = cols;
+
+    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
+                                                                 scale_tensor_alignment_Y_rowwise);
+    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
+                                                                 scale_tensor_alignment_X_rowwise);
+    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
+                                                                 scale_tensor_alignment_Y_colwise);
+    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
+                                                                 scale_tensor_alignment_X_colwise);
+
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
+    const size_t scales_stride_colwise = blocks_X_colwise;
+    const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
+    const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
 
     Tensor input({ rows, cols }, itype, true, true, NVTE_MXFP8_1D_SCALING);
     Tensor output({ rows, cols }, otype);
 
     std::unique_ptr<OutputType[]> ref_output_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_colwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(rows * blocks_X);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y * cols);
+    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_num_rowwise);
+    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_num_colwise);
 
     constexpr bool rowwise = true;
     constexpr bool colwise = true;
@@ -305,7 +340,9 @@ void performTest_x2(const size_t rows,
                                           rows,
                                           cols,
                                           block_size_rows,
-                                          block_size_cols);
+                                          block_size_cols,
+                                          scales_stride_rowwise,
+                                          scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_rowwise", output, ref_output_rowwise.get(), true, atol, rtol);
@@ -313,14 +350,17 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
+    {1, 16},
+    {16, 48},
+    {65, 96},
     {128, 128},
     {256, 256},
+    {993, 512},
     {768, 1024},
-    // {256, 65536},
     // {2048, 12288},
     // {65536, 128},
+    // {16384, 1632},
     // {16384, 6144},
-    // {2048, 16384},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {

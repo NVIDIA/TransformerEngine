@@ -515,6 +515,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
         # Quantize to FP8
         assert self._quantizer is not None, "Can't quantize without a quantizer"
+        self._quantizer.internal = False
         self.data = self._quantizer.quantize(tensor)
         if self.requires_grad != tensor.requires_grad:
             self.requires_grad_(requires_grad=tensor.requires_grad)

@@ -44,9 +44,9 @@ class Recipe:
     Base recipe class.
     """
 
-    def block(self):
-        """Whether the given recipe is block scaling."""
-        return isinstance(self, BlockScaling)
+    def mxfp8(self):
+        """Whether the given recipe is MXFP8 block scaling."""
+        return isinstance(self, MXFP8BlockScaling)
 
     def delayed(self):
         """Whether the given recipe is delayed scaling."""
@@ -162,7 +162,7 @@ class DelayedScaling(Recipe):
 
 
 @dataclass()
-class BlockScaling(Recipe):
+class MXFP8BlockScaling(Recipe):
     """
     Use the current scaling factor strategy.
 

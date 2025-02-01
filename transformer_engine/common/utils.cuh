@@ -965,7 +965,7 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 }
 
 __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
-  return exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
 }  // namespace transformer_engine

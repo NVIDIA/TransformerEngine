@@ -319,3 +319,10 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
 def get_sm_count() -> int:
     """Returns the number of streaming multiprocessors in the current device."""
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+
+
+def round_up_to_nearest_multiple(value, multiple):
+    """Round up `value` to the next mutiple of `multiple`"""
+    if multiple == 0:
+        raise ValueError("multiple cannot be zero.")
+    return ((value + multiple - 1) // multiple) * multiple

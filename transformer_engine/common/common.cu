@@ -97,7 +97,14 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
   void *dataPtr = reinterpret_cast<void *>(tensor.dptr);
-  NVTE_CHECK(isPointerAligned(dataPtr, 16), "Tensor data must be 16B aligned");
+
+  constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
+  NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment),
+             "Tensor data pointer must be 16B aligned");
+
+  const int TMA_needed_size = TMA_gmem_alignment / type_size;
+  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_size,
+             "-byte data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 
   // Create the tensor descriptor.
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(

@@ -586,8 +586,22 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
 }
 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                    size_t N) {
-  for (int i = 0; i < N; i++){
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride)
+{
+  for (int i = 0; i < row_blocks; ++i) {
+    for (int j = 0; j < col_blocks; ++j) {
+      const int idx = i * stride + j;
+      ASSERT_FALSE(test[idx] != ref[idx]) << "Error in " << name << std::endl
+        << "Mismatch: " << static_cast<int>(test[idx]) << " vs "
+        << static_cast<int>(ref[idx]) << " at index " << idx;
+    }
+  }
+}
+
+void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
+                                  const size_t N)
+{
+  for (int i = 0; i < N; i++) {
     ASSERT_FALSE(test[i] != ref[i]) << "Error in " << name << std::endl
       << "Mismatch: " << static_cast<int>(test[i]) << " vs "
       << static_cast<int>(ref[i]) << " at index " << i;
