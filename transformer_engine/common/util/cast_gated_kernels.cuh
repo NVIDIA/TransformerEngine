@@ -955,9 +955,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
-  const bool use_tma_kernels = is_fp8_rowwise_output &&
-                               is_fp8_colwise_output &&
-                               cols % 16 == 0;
+  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 16 == 0;
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
