@@ -402,6 +402,14 @@ TEST_P(DequantizeMXFP8TestSuite, TestDequantizeMXFP8)
         GTEST_SKIP();
     }
 
+    // Skip cases with invalid alignment
+    if (rowwise && tensor_size.second % 32 != 0) {
+        GTEST_SKIP();
+    }
+    if (colwise && tensor_size.first % 32 != 0) {
+        GTEST_SKIP();
+    }
+
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(input_type, InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(output_type, OutputType,
             if (quantize_then_dequantize) {
