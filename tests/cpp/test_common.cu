@@ -120,29 +120,34 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    NVTE_CHECK(shape.ndim == 2,
-               "Invalid shape of the tensor. Expected 2 dimensions for fine granularity scaling.");
+    std::vector<size_t> shape_vec;
+    for (size_t i = 0; i < shape.ndim; ++i) {
+      shape_vec.push_back(shape.data[i]);
+    }
+    size_t first_dim = first_dimension(shape_vec);
+    size_t last_dim = last_dimension(shape_vec);
+
     scale_inv_meta ret_rowwise, ret_colwise;
 
     auto block_alignment = std::vector<size_t>{128ul,4ul};
     {
       auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(shape.data[0],
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
                                      static_cast<size_t>(1)),
                                alignment) * alignment;
       alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(shape.data[1],
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
                                      static_cast<size_t>(32)),
                                alignment) * alignment;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(shape.data[0],
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
                                      static_cast<size_t>(32)),
                                alignment) * alignment;
       alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(shape.data[1],
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
                                      static_cast<size_t>(1)),
                                alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
@@ -750,6 +755,17 @@ int32_t getDeviceComputeCapability()
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, 0);
     return 10 * deviceProp.major + deviceProp.minor;
+}
+
+size_t first_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 1;
+  if (shape.size() == 1) return 1;
+  return product(shape, 0, shape.size() - 1);
+}
+
+size_t last_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 1;
+  return shape[shape.size() - 1];
 }
 
 }  // namespace test

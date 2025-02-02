@@ -64,17 +64,20 @@ void compute_ref_cast_dbias_dgelu(const IT *input,
 }
 
 template <typename IType, typename OType>
-void performTest(const size_t N, const size_t H) {
+void performTest(const std::vector<size_t>& shape) {
   using namespace test;
   using CType = fp32;
 
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({N, H}, itype);
-  Tensor gelu_input({N, H}, itype);
+  const size_t N = first_dimension(shape);
+  const size_t H = last_dimension(shape);
 
-  Tensor output_c({N, H}, otype);
+  Tensor input(shape, itype);
+  Tensor gelu_input(shape, itype);
+
+  Tensor output_c(shape, otype);
   // dbias has the same data type with "output grad"
   Tensor dbias({H}, itype);
 
@@ -132,7 +135,7 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_dbias", dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {
+std::vector<std::vector<size_t>> test_cases = {
   {128, 128},
   {256, 256},
   {768, 1024},
@@ -140,12 +143,12 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   {2048, 12288},
   {65536, 128},
   {65536, 160},
-  {16384, 6144},
   {16384, 1616},
   {1, 128},
   {1, 1296},
   {1, 16},
   {5, 160},
+  {5, 4, 3, 160},
   {217, 256},
 };
 
@@ -154,7 +157,7 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
 
 class CastDBiasDGeluTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
                                                                            transformer_engine::DType,
-                                                                           std::pair<size_t, size_t>>> {};
+                                                                           std::vector<size_t>>> {};
 
 TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
     using namespace transformer_engine;
@@ -170,7 +173,7 @@ TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<InputType, OutputType>(size.first, size.second);
+        performTest<InputType, OutputType>(size);
       );
     );
 }
@@ -184,8 +187,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(test_cases)),
     [](const testing::TestParamInfo<CastDBiasDGeluTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
-                         test::typeName(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param).first) + "X" +
-                         std::to_string(std::get<2>(info.param).second);
+                         test::typeName(std::get<1>(info.param));
+      const auto& shape = std::get<2>(info.param);
+      for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+      }
       return name;
     });
