@@ -14,6 +14,7 @@
 #include <mutex>
 
 #include "../common.h"
+#include "../util/handle_manager.h"
 #include "../util/logging.h"
 
 namespace {
@@ -46,9 +47,15 @@ uint32_t _getAlignment(uintptr_t address) {
   }
 }
 
+inline void CreateCublasHandle(cublasLtHandle_t *handle) {
+  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
+}
+
 }  // namespace
 
 namespace transformer_engine {
+
+using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
 
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
@@ -98,8 +105,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  cublasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
+  cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
   cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;

@@ -57,9 +57,13 @@ cudnn_frontend::DataType_t get_cudnn_fe_dtype(const transformer_engine::DType t)
   }
 }
 
-void nvte_cudnn_handle_init() {
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
-}
+void nvte_cudnn_handle_init() { auto _ = cudnnExecutionPlanManager::Instance().GetHandle(); }
+
+namespace detail {
+
+void CreateCuDNNHandle(cudnnHandle_t* handle) { NVTE_CHECK_CUDNN(cudnnCreate(handle)); }
+
+}  // namespace detail
 
 }  // namespace transformer_engine
 
@@ -68,6 +72,6 @@ namespace cudnn_frontend {
 // This is needed to define the symbol `cudnn_dlhandle`
 // When using the flag NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING
 // to enable dynamic loading.
-void *cudnn_dlhandle = nullptr;
+void* cudnn_dlhandle = nullptr;
 
 }  // namespace cudnn_frontend
