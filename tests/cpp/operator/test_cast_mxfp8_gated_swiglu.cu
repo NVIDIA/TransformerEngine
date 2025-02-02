@@ -104,7 +104,6 @@ void compute_ref_x1(const IType* grad,
     const size_t tiles_num_X = (cols + tile_size_X - 1) / tile_size_X;
     const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
     const size_t blocks_per_tile_X = tile_size_X / block_size_X;
-    // const size_t blocks_per_row = (cols + block_size_X - 1) / block_size_X;
 
     float amax = 0;
     #pragma omp parallel reduction(max: amax) proc_bind(spread)
@@ -387,7 +386,7 @@ std::vector<InputsFillCase> input_scenarios = {
 
 std::vector<bool> is_dgated_op = {
     true,
-    // false
+    false
 };
 
 }  // namespace
