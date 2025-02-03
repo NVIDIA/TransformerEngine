@@ -137,12 +137,9 @@ def general_gemm(
         "bulk_overlap": bulk_overlap,
     }
 
-    if ub_type == tex.CommOverlapType.AG and ub.is_p2p_overlap():
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-    else:
-        original_scale_inverses = swizzle_inputs(A, B, layout)
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
-        reset_swizzled_inputs(A, B, original_scale_inverses)
+    original_scale_inverses = swizzle_inputs(A, B, layout)
+    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    reset_swizzled_inputs(A, B, original_scale_inverses)
 
     return out, bias_grad, gelu_input, extra_output
 

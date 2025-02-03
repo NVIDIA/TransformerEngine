@@ -269,11 +269,14 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     loss.backward()
     torch.cuda.synchronize()
 
+    failed_grads = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
-            assert torch.count_nonzero(p.main_grad) > 0, "Gradient not accumulated."
+            if not torch.count_nonzero(p.main_grad) > 0:
+                failed_grads.append(name)
+    assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
