@@ -94,6 +94,8 @@ class Quantizer {
       const std::vector<size_t>& shape, DType dtype,
       std::optional<at::Tensor> rowwise_data = std::nullopt) const = 0;
 
+  virtual ~Quantizer() = default;
+
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;

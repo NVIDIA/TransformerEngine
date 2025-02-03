@@ -274,6 +274,20 @@ class Tensor {
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
+// [128,4] rowwise and [4,128] colwise alignment requirement
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+
+inline size_t divide_round_up(const size_t N, const size_t M) {
+    return (N - 1 + M) / M;
+}
+
+inline size_t round_up_to_nearest_multiple(const size_t N, const size_t M) {
+    return divide_round_up(N, M) * M;
+}
+
 template <typename T>
 struct Numeric_Traits {
     static constexpr double minSubnorm = 1.0;
@@ -393,6 +407,10 @@ inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
 size_t typeToSize(DType type);
 size_t product(const NVTEShape &shape);
+size_t product(const std::vector<size_t> &shape);
+
+size_t first_dimension(const std::vector<size_t> &shape);
+size_t last_dimension(const std::vector<size_t> &shape);
 
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
@@ -403,7 +421,10 @@ void compareResults(const std::string &name, const float test, const float ref,
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                    size_t N);
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride);
+void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
+                                  const size_t N);
+
 
 std::pair<double, double> getTolerances(const DType type);
 
