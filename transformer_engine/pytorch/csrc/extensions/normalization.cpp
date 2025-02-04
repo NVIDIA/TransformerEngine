@@ -99,7 +99,6 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
   py::object ln_output;
 
-
   if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
     // Use high precision output from normalization
     NoneQuantizer q{none};
