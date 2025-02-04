@@ -221,6 +221,10 @@ void performTest_x1(const size_t rows,
     std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
 
+    for (size_t i = 0; i < blocks_Y * blocks_X; ++i) {
+      ref_output_scales[i] = 0;
+    }
+
     // fillCase<EncodingType>(&grad, fill_case);
     if constexpr (IS_DGATED) {
         fillUniform(&grad);
@@ -308,6 +312,13 @@ void performTest_x2(const size_t rows,
     std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
     std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
+
+    for (size_t i = 0; i < blocks_Y_rowwise * blocks_X_rowwise; ++i) {
+      ref_scales_rowwise[i] = 0;
+    }
+    for (size_t i = 0; i < blocks_Y_colwise * blocks_X_colwise; ++i) {
+      ref_scales_colwise[i] = 0;
+    }
 
     // fillCase<EncodingType>(&grad, fill_case);
     if constexpr (IS_DGATED) {

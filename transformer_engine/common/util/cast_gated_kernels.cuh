@@ -495,7 +495,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       if constexpr (USE_ROWWISE_SCALING) {
-        if constexpr (IS_DGRAD) {
+        if constexpr (IS_DGATED) {
           // dgate
           float amax = fabsf(after_dgate_reg[stage]);
           const float mx_block_X_amax = warp_reduce_max_broadcast(amax);
@@ -962,7 +962,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   checkCuDriverContext(stream);
   constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
-  CheckOutputTensor(*output, "output", allow_empty, IS_DGATED);
+  CheckOutputTensor(*output, "output", allow_empty);
 
   NVTE_CHECK(gated_input.flat_last_dim() % 2 == 0, "Number of columns must be even.");
 
