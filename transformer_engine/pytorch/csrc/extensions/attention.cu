@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -1420,7 +1420,7 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
 
-  int batch, num_heads, total_tokens;
+  int batch, num_heads, lse_seqlen, second_half_lse_seqlen;
 
   if (lse_packed) {
     NVTE_CHECK(lse.dim() == 2);
@@ -1428,48 +1428,50 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
 
     batch = cu_seqlens.size(0) - 1;
     num_heads = lse.size(0);
-    total_tokens = lse.size(1);
+    lse_seqlen = lse.size(1);
+    second_half_lse_seqlen = lse_per_step.size(1);
 
     NVTE_CHECK(lse_per_step.size(0) == num_heads);
-    NVTE_CHECK(lse_per_step.size(1) == total_tokens / 2);
+    NVTE_CHECK(second_half_lse_seqlen >= lse_seqlen / 2);
   } else {
     NVTE_CHECK(lse.dim() == 3);
     NVTE_CHECK(lse_per_step.dim() == 3);
 
     batch = lse.size(0);
     num_heads = lse.size(1);
-    total_tokens = lse.size(2);
+    lse_seqlen = lse.size(2);
+    second_half_lse_seqlen = lse_per_step.size(2);
 
     NVTE_CHECK(lse_per_step.size(0) == batch);
     NVTE_CHECK(lse_per_step.size(1) == num_heads);
-    NVTE_CHECK(lse_per_step.size(2) == total_tokens / 2);
+    NVTE_CHECK(second_half_lse_seqlen == lse_seqlen / 2);
     NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
   }
 
   constexpr unsigned int block = 256;
-  unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
+  unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
   if (lse_packed) {
     thd_lse_kernel<double, true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
-            batch, num_heads, total_tokens);
+            batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
     thd_lse_kernel<double, false, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
-            batch, num_heads, total_tokens);
+            batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   }
 }
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
-                                    bool lse_packed) {
+                                    bool lse_packed, int second_half_lse_seqlen) {
   NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
 
-  int batch, num_heads, total_tokens;
+  int batch, num_heads, lse_seqlen;
   std::vector<int64_t> shape;
 
   if (lse_packed) {
@@ -1477,37 +1479,40 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
 
     batch = cu_seqlens.size(0) - 1;
     num_heads = lse.size(0);
-    total_tokens = lse.size(1);
+    lse_seqlen = lse.size(1);
 
-    shape = {num_heads, total_tokens / 2};
+    NVTE_CHECK(second_half_lse_seqlen >= lse_seqlen / 2);
+
+    shape = {num_heads, second_half_lse_seqlen};
   } else {
     NVTE_CHECK(lse.dim() == 3);
 
     batch = lse.size(0);
     num_heads = lse.size(1);
-    total_tokens = lse.size(2);
+    lse_seqlen = lse.size(2);
 
     NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
+    NVTE_CHECK(second_half_lse_seqlen == lse_seqlen / 2);
 
-    shape = {batch, num_heads, total_tokens / 2};
+    shape = {batch, num_heads, second_half_lse_seqlen};
   }
 
   at::Tensor half_lse = at::zeros(shape, at::CUDA(lse.scalar_type()));
 
   constexpr unsigned int block = 256;
-  unsigned int grid_x = (total_tokens / 2 + block - 1) / block;
+  unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
   if (lse_packed) {
     thd_lse_kernel<float, true, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-            num_heads, total_tokens);
+            num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
     thd_lse_kernel<float, false, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
-            num_heads, total_tokens);
+            num_heads, lse_seqlen, second_half_lse_seqlen);
   }
 
   return half_lse;
@@ -1534,23 +1539,25 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   NVTE_CHECK(out_per_step.size(1) == num_heads);
   NVTE_CHECK(out_per_step.size(2) == dim_per_head);
 
-  int batch, lse_seqlen;
+  int batch, lse_seqlen, lse_per_step_seqlen;
   if (lse_packed) {
     batch = cu_seqlens.size(0) - 1;
-    lse_seqlen = total_tokens;
+    lse_seqlen = lse.size(1);
+    lse_per_step_seqlen = lse_per_step.size(1);
 
     NVTE_CHECK(lse.size(0) == num_heads);
-    NVTE_CHECK(lse.size(1) == lse_seqlen);
+    NVTE_CHECK(lse_seqlen >= total_tokens);
     NVTE_CHECK(lse_per_step.size(0) == num_heads);
-    NVTE_CHECK(lse_per_step.size(1) == lse_seqlen / (only_second_half + 1));
+    NVTE_CHECK(lse_per_step_seqlen >= lse_seqlen / (only_second_half + 1));
   } else {
     batch = lse.size(0);
     lse_seqlen = lse.size(2);
+    lse_per_step_seqlen = lse_per_step.size(2);
 
     NVTE_CHECK(lse.size(1) == num_heads);
     NVTE_CHECK(lse_per_step.size(0) == batch);
     NVTE_CHECK(lse_per_step.size(1) == num_heads);
-    NVTE_CHECK(lse_per_step.size(2) == lse_seqlen / (only_second_half + 1));
+    NVTE_CHECK(lse_per_step_seqlen == lse_seqlen / (only_second_half + 1));
     NVTE_CHECK(cu_seqlens.size(0) == batch + 1);
   }
 
@@ -1565,13 +1572,13 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
-            dim_per_head, lse_seqlen);
+            dim_per_head, lse_seqlen, lse_per_step_seqlen);
   } else {
     thd_out_correction_kernel<dtype, only_second_half, tile, false>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
-            dim_per_head, lse_seqlen);
+            dim_per_head, lse_seqlen, lse_per_step_seqlen);
   }
 }
 

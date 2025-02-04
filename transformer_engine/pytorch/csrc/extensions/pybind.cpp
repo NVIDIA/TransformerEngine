@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -212,6 +212,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_adam_param_remainder", &multi_tensor_adam_param_remainder_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer"
+        "where the master parameters only store the remainder bits",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam_fp8", &multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",

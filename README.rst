@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -264,10 +264,10 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`_
 * `Levanter <https://github.com/stanford-crfm/levanter>`_
+* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_
 * `Hugging Face Nanotron <https://github.com/huggingface/nanotron>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
-* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!
 
 
 Contributing

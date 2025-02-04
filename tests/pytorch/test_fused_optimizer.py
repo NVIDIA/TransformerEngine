@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -184,6 +184,7 @@ class TestFusedAdam(TestFusedOptimizer):
         grad_dtype,
         exp_avg_dtype,
         exp_avg_sq_dtype,
+        store_param_remainders=False,
         model_rtol=None,
         model_atol=None,
         master_rtol=None,
@@ -220,6 +221,7 @@ class TestFusedAdam(TestFusedOptimizer):
             "weight_decay": 0,
             "amsgrad": False,
         }
+
         ref_optim = torch.optim.Adam(ref_params, **options)
         tst_optim = te.optimizers.FusedAdam(
             model_params,
@@ -228,6 +230,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_dtype=exp_avg_dtype,
             exp_avg_sq_dtype=exp_avg_sq_dtype,
             use_decoupled_grad=True,
+            store_param_remainders=store_param_remainders,
             **options,
         )
 
@@ -237,7 +240,7 @@ class TestFusedAdam(TestFusedOptimizer):
                 p.decoupled_grad = p_ref.grad.clone().to(grad_dtype)
             ref_optimizer.step()
             tst_optimizer.step()
-            if use_master_weights:
+            if use_master_weights and not store_param_remainders:
                 master_weights_to_fp32 = [
                     tst_optim.get_unscaled_state(p, "master_param") for p in model_params
                 ]
@@ -270,6 +273,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_dtype=exp_avg_dtype,
             exp_avg_sq_dtype=exp_avg_sq_dtype,
             use_decoupled_grad=True,
+            store_param_remainders=store_param_remainders,
             **options,
         )
         tst_optim.load_state_dict(state_dict)
@@ -298,6 +302,19 @@ class TestFusedAdam(TestFusedOptimizer):
             grad_dtype=torch.float32,
             exp_avg_dtype=torch.float32,
             exp_avg_sq_dtype=torch.float32,
+        )
+
+    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    def test_fp32_master_store_param_remainders(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.bfloat16,
+            use_master_weights=True,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.float32,
+            exp_avg_sq_dtype=torch.float32,
+            store_param_remainders=True,
         )
 
     @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")

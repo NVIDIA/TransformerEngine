@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -373,7 +373,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ub=ub_obj_lnout if ub_overlap_ag else None,
                 extra_output_tensor=ln_out if ub_overlap_ag else None,
             )
-            if not is_grad_enabled:
+            if not is_grad_enabled and not return_layernorm_output:
                 clear_tensor_data(ln_out_total)
 
             if bias_gelu_nvfusion:

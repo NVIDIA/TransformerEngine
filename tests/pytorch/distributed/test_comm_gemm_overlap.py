@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import os
@@ -21,8 +21,10 @@ SEQ_LENGTH: int = 512
 BATCH_SIZE: int = 2
 NUM_HEADS: int = 12
 HEAD_DIM: int = 64
+
+# NOTE: te.Linear is intentionally omitted here and manually added later for testing both
+#       row and column parallel layouts.
 TE_LAYERS = [
-    te.Linear,
     te.LayerNormLinear,
     te.LayerNormMLP,
     te.MultiheadAttention,
@@ -86,7 +88,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8_in, fp8_out, aggreg
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, fp8, fp8_init):
+def _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -97,6 +99,8 @@ def _run_layer_with_overlap(layer_type, fp8, fp8_init):
         f"--head-dim={HEAD_DIM}",
         f"--layer-type={layer_type}",
     ]
+    if layer_type == te.Linear.__name__:
+        test_cmd.append(f"--linear-parallel-mode={linear_parallel_mode}")
 
     if fp8:
         if not fp8_available:
@@ -245,9 +249,15 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 
 
 @pytest.mark.parametrize(
-    "layer_type",
-    [layer.__name__ for layer in TE_LAYERS],
-    ids=[(" " + layer.__name__ + " ") for layer in TE_LAYERS],
+    "layer_type,linear_parallel_mode",
+    (
+        [(te.Linear.__name__, "row"), (te.Linear.__name__, "column")]
+        + list(zip([layer.__name__ for layer in TE_LAYERS], [None for _ in range(len(TE_LAYERS))]))
+    ),
+    ids=(
+        [f" {te.Linear.__name__} (row-parallel) ", f" {te.Linear.__name__} (column-parallel) "]
+        + [(" " + layer.__name__ + " ") for layer in TE_LAYERS]
+    ),
 )
 @pytest.mark.parametrize(
     "fp8,fp8_init",
@@ -262,8 +272,8 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         " FP8  GEMM - FP8  PARAMS ",
     ],
 )
-def test_layers_with_overlap(layer_type, fp8, fp8_init):
+def test_layers_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, fp8, fp8_init)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, fp8, fp8_init)

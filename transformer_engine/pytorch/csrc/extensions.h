@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -444,7 +444,7 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
                                     const at::Tensor &cu_seqlens, bool lse_packed);
 
 at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_seqlens,
-                                    bool lse_packed);
+                                    bool lse_packed, int second_half_lse_seqlen);
 
 void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at::Tensor &lse,
                         const at::Tensor &lse_per_step, const at::Tensor &cu_seqlens,
@@ -478,6 +478,12 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                             const float beta1, const float beta2, const float epsilon,
                             const int step, const int mode, const int bias_correction,
                             const float weight_decay);
+
+void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag,
+                                            std::vector<std::vector<at::Tensor>> tensor_lists,
+                                            const float lr, const float beta1, const float beta2,
+                                            const float epsilon, const int step, const int mode,
+                                            const int bias_correction, const float weight_decay);
 
 void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                                 std::vector<std::vector<at::Tensor>> tensor_lists, const float lr,

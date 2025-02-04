@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -514,7 +514,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
         #
         # (1) PyTorch's "extra state" infrastructure might be able to
         #     support any picklable type, but they make no guarantees.
-        #     It seems that ONNX export experiences issues with
+        #     We have experienced problems (e.g. in ONNX export) with
         #     non-tensor extra state.
         # (2) PyTorch's checkpointing infrastructure does not remap
         #     devices for "extra state" like it does for "state dict".

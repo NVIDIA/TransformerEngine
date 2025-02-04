@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -64,13 +64,14 @@ list(APPEND transformer_engine_SOURCES
      fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
@@ -146,6 +147,14 @@ set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
                             fused_softmax/scaled_aligned_causal_masked_softmax.cu
                             PROPERTIES
                             COMPILE_OPTIONS "--use_fast_math")
+option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
+if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
+  set_source_files_properties(activation/gelu.cu
+                              activation/relu.cu
+                              activation/swiglu.cu
+                              PROPERTIES
+                              COMPILE_OPTIONS "--use_fast_math")
+endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
