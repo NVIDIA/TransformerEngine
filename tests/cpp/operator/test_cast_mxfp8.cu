@@ -4,13 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cstring>
-#include <iomanip>
-#include <iostream>
-#include <memory>
-#include <random>
-#include <limits>
-
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -187,26 +180,15 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
-    const size_t unpadded_blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t unpadded_blocks_X = (cols + block_size_cols - 1) / block_size_cols;
 
-    const size_t unpadded_blocks_Y_rowwise = rows;
-    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
-    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
-    const size_t unpadded_blocks_X_colwise = cols;
+    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
+    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
+                                                                  block_size_cols, size_of_e8m0);
 
-    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
-                                                                 scale_tensor_alignment_Y_rowwise);
-    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
-                                                                 scale_tensor_alignment_X_rowwise);
-    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
-                                                                 scale_tensor_alignment_Y_colwise);
-    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
-                                                                 scale_tensor_alignment_X_colwise);
-
-    // Roundup to the nearest multiple
-    const size_t blocks_Y = rowwise ? blocks_Y_rowwise : blocks_Y_colwise;
-    const size_t blocks_X = rowwise ? blocks_X_rowwise : blocks_X_colwise;
+    const size_t unpadded_blocks_Y = scale_dims[0];
+    const size_t unpadded_blocks_X = scale_dims[1];
+    const size_t blocks_Y = scale_dims[2];
+    const size_t blocks_X = scale_dims[3];
     const size_t scales_stride = blocks_X;
 
     Tensor input(shape, itype);
@@ -332,21 +314,20 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    const size_t unpadded_blocks_Y_rowwise = rows;
-    const size_t unpadded_blocks_X_rowwise = divide_round_up(cols, block_size_cols);
-    const size_t unpadded_blocks_Y_colwise = divide_round_up(rows, block_size_rows);
-    const size_t unpadded_blocks_X_colwise = cols;
+    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32, size_of_e8m0);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1, size_of_e8m0);
 
-    const size_t blocks_Y_rowwise = round_up_to_nearest_multiple(unpadded_blocks_Y_rowwise,
-                                                                 scale_tensor_alignment_Y_rowwise);
-    const size_t blocks_X_rowwise = round_up_to_nearest_multiple(unpadded_blocks_X_rowwise,
-                                                                 scale_tensor_alignment_X_rowwise);
-    const size_t blocks_Y_colwise = round_up_to_nearest_multiple(unpadded_blocks_Y_colwise,
-                                                                 scale_tensor_alignment_Y_colwise);
-    const size_t blocks_X_colwise = round_up_to_nearest_multiple(unpadded_blocks_X_colwise,
-                                                                 scale_tensor_alignment_X_colwise);
-
+    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
+    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
+    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
+    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
     const size_t scales_stride_rowwise = blocks_X_rowwise;
+
+    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
+    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
+    const size_t blocks_Y_colwise = scale_dims_colwise[2];
+    const size_t blocks_X_colwise = scale_dims_colwise[3];
     const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor input(shape, itype);

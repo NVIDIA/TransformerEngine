@@ -304,6 +304,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_offset_Y = tid_Y;
   const int thread_offset_X = tid_X;
 
+  const bool col_out_of_bounds = (chunk_offset_X + thread_offset_X >= cols);
+
   float thread_amax = 0;
 
   extern __shared__ char dshmem_unaligned[];
@@ -408,6 +410,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   for (int it = 0; it < ITERATIONS; ++it) {
     const int buff = it % BUFFERS_NUM;
     const int next_it = it + 1;
+    const size_t row_base = chunk_offset_Y + it * BUFFER_DIM_Y;
     if (next_it < ITERATIONS) {
       if (is_master_thread) {
         const int next_buff = next_it % BUFFERS_NUM;
@@ -465,6 +468,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int shmem_offset_x = thread_offset_X;
       const int shmem_idx = shmem_offset_y * SHMEM_DIM_X + shmem_offset_x;
 
+      const size_t row = row_base + shmem_offset_y;
+      const bool row_out_of_bounds = (row >= rows);
+      const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
+
       float act_elt = static_cast<float>(in_act_sh_curr[shmem_idx]);
       float gate_elt = static_cast<float>(in_gate_sh_curr[shmem_idx]);
       float amax_gated_elem;
@@ -510,7 +517,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
         // Only single thread writes the computed scaling factor
-        if (tid_X % SCALE_DIM_X == 0) {
+        if ((tid_X % SCALE_DIM_X == 0) && !out_of_bounds) {
           const int global_scales_offset_Y =
               iteration_scale_rowwise_offset_Y + stage_offset_Y + thread_offset_Y;
           const int global_scales_offset_X = scales_rowwise_chunk_offset_X + tid_X / SCALE_DIM_X;
@@ -555,9 +562,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
       const float scale_reciprocal = exp2f_rcp(biased_exponent);
 
+      const bool row_out_of_bounds = (row_base >= rows);
+      const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
+
       // Only single thread writes the computed scaling factor
       // Also assuming one iteration covers exactly 32 rows
-      if (tid_Y == 0) {
+      if ((tid_Y == 0) && !out_of_bounds) {
         const int global_scales_offset_Y = iteration_scale_colwise_offset_Y;
         const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_X;
         const int scale_idx =
@@ -690,7 +700,9 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           if constexpr (IS_DGATED) {
             create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X,
                                  sizeof(IType));
-          } create_2D_tensor_map(tensor_map_gated_input, gated_input.data, rows, cols * 2,
+          }
+          
+          create_2D_tensor_map(tensor_map_gated_input, gated_input.data, rows, cols * 2,
                                  SHMEM_DIM_Y, SHMEM_DIM_X, sizeof(IType));
           create_2D_tensor_map(tensor_map_output, output->data, rows, output_cols, SHMEM_DIM_Y,
                                SHMEM_DIM_X, sizeof(OType));
@@ -745,26 +757,8 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
 
-  const size_t unpadded_scales_Y_rowwise = rows;
-  const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
-  const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
-  const size_t unpadded_scales_X_colwise = cols;
-
-  const size_t scales_Y_rowwise =
-      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
-      scale_tensor_alignment_Y_rowwise;
-  const size_t scales_X_rowwise =
-      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
-      scale_tensor_alignment_X_rowwise;
-  const size_t scales_Y_colwise =
-      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
-      scale_tensor_alignment_Y_colwise;
-  const size_t scales_X_colwise =
-      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
-      scale_tensor_alignment_X_colwise;
-
-  const size_t scale_stride_rowwise = scales_X_rowwise;
-  const size_t scale_stride_colwise = scales_X_colwise;
+  size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
+  size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
@@ -921,9 +915,9 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
 void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
                     cudaStream_t stream) {
   checkCuDriverContext(stream);
-
+  constexpr bool allow_empty = false;
   CheckInputTensor(gated_input, "gated_input");
-  CheckOutputTensor(*output, "output");
+  CheckOutputTensor(*output, "output", allow_empty, IS_DGATED);
 
   NVTE_CHECK(gated_input.flat_last_dim() % 2 == 0, "Number of columns must be even.");
 
@@ -972,7 +966,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                 "by 32, got input of shape ", gated_input.data.shape);
+                 "by 16, got input of shape ", gated_input.data.shape);
     }
   } else {
     NVTE_ERROR("Not supported scaling mode");

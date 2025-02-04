@@ -429,8 +429,9 @@ constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
-void CheckInputTensor(const Tensor &t, const std::string &name);
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false);
+void CheckInputTensor(const Tensor &t, const std::string &name, const bool is_gated_mxfp8_tensor = false);
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty = false,
+                       const bool is_gated_mxfp8_tensor = false);
 
 bool is_fp8_dtype(const DType t);
 
