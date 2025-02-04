@@ -201,7 +201,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if ub_overlap_ag:
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-        else:
+        elif not with_quantized_norm:
             ln_out = torch.empty_like(
                 inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
             )
