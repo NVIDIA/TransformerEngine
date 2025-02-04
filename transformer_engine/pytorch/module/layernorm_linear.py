@@ -634,7 +634,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
                 # Deallocate input tensor
                 if not ctx.return_layernorm_output:
-                    clear_tensor_data(ln_out_total)  # TODO (pgadzinski) - deallocate transpose only
+                    # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
+                    clear_tensor_data(ln_out_total)
 
             # Don't return grad bias if not needed
             if not ctx.use_bias:

@@ -252,7 +252,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     slice_end = (rank + 1) * ln_out.size(0)
                     ln_out = ln_out_total[
                         slice_start:slice_end, ...
-                    ]  # TODO(pgadzinski) - check this
+                    ]  # TODO(pgadzinski) - check this  # pylint: disable=fixme
                 else:
                     ln_out = ln_out_total
 
@@ -585,7 +585,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_weight.main_grad = fc1_weight_main_grad
                 fc2_weight.main_grad = fc2_weight_main_grad
 
-            # TODO: Fix this
+            # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves
@@ -610,7 +610,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.grad_fc2_output_quantizer is not None:
                 ctx.grad_fc2_output_quantizer.set_usage(
                     rowwise=True,
-                    columnwise=True,  # TODO(pgadzinski) - remove
+                    columnwise=True,
                 )
 
             ub_obj_fc2_dgrad = None

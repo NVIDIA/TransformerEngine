@@ -36,8 +36,18 @@ def _get_normalization_func(normalization: str, forward: bool):
     return bwd_normalization_funcs[normalization]
 
 
-# TODO (Alp): This should ideally be done in CommOverlap::get_buffer instead
 def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
+    """Reorder FP8 transposes after Userbuffers gather.
+
+    The all-gather is performed in-place in the Float8Tensor's
+    row-wise data, and afterwards we need to do a transpose to get the
+    correct ordering. This misuses data fields in Float8Tensor and
+    should be considered an evil hack. It would be best to move
+    transpose logic into CommOverlap::get_buffer.
+
+    Responsibility for fixing: adener, tmoon
+
+    """
     assert isinstance(fp8_tensor, Float8Tensor), "Tensor is not a Float8Tensor"
     assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
     assert fp8_tensor._data is not None, "The tensor does not hold any rowwise data"
