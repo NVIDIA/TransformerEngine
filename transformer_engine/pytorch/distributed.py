@@ -944,7 +944,7 @@ def _all_gather_mxfp8(
         flattened_in_shape0 = math.prod(in_shape[:-1])
         if in_scale_inv.size(0) != flattened_in_shape0:
             in_scale_inv = in_scale_inv[:flattened_in_shape0]
-            out_scale_inv = out_scale_inv[:flattened_in_shape0 * world_size]
+            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
         # Launch all-gathers
         with torch.distributed._coalescing_manager(
