@@ -171,7 +171,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
         else:
             ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format
+                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
             )
 
         # Apply normalization
