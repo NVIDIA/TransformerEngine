@@ -884,15 +884,15 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           alignas(64) CUtensorMap tensor_map_output{};
 
           create_2D_tensor_map(tensor_map_input, input.data, rows, cols, FP8_SHMEM_DIM_Y,
-                               FP8_SHMEM_DIM_X, sizeof(IType));
+                               FP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
 
           if constexpr (IS_DACT) {
             create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols, FP8_SHMEM_DIM_Y,
-                                 FP8_SHMEM_DIM_X, sizeof(IType));
+                                 FP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
           }
 
           create_2D_tensor_map(tensor_map_output, output->data, rows, cols, FP8_SHMEM_DIM_Y,
-                               FP8_SHMEM_DIM_X, sizeof(OType));
+                               FP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
 
           cast_fp8_2D_kernel<IS_DBIAS, IS_DACT, ParamOP, OP, IType, OType>
           <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_act_input, tensor_map_output,
@@ -981,21 +981,21 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   alignas(64) CUtensorMap tensor_map_output_colwise{};
 
                   create_2D_tensor_map(tensor_map_input, input.data, rows, cols, MXFP8_SHMEM_DIM_Y,
-                                       MXFP8_SHMEM_DIM_X, sizeof(IType));
+                                       MXFP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
 
                   if constexpr (IS_DACT) {
                     create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, sizeof(IType));
+                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
                   }
 
                   if (use_rowwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, sizeof(OType));
+                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
                   }
 
                   if (use_colwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows,
-                                         cols, MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, sizeof(OType));
+                                         cols, MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
                   }
 
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
