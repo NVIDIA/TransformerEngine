@@ -24,6 +24,7 @@ void scale_block(const IType* grad,
                  OType* output,
                  fp8e8m0* output_scales,
                  const size_t scale_idx,
+                 const size_t scale_idx_gate,
                  float& thread_amax,
                  const size_t i_min,
                  const size_t i_max,
@@ -32,6 +33,7 @@ void scale_block(const IType* grad,
                  const size_t cols) {
 
     float block_amax = 0.0f;
+    float block_amax_gate = 0.0f;
     const size_t stride = cols * 2;
 
     // Find the absolute maximum value in the block
@@ -39,25 +41,37 @@ void scale_block(const IType* grad,
         for (size_t j = j_min; j < j_max; ++j) {
             float silu_elt = static_cast<float>(input[i * stride + j]);
             float gate_elt = static_cast<float>(input[i * stride + cols + j]);
-            float gated_amax;
+            float gated_amax_act = 0;
+            float gated_amax_gate = 0;
 
             if constexpr (IS_DGATED) {
                 const float grad_elt = static_cast<float>(grad[i * cols + j]);
                 const float after_dsilu = dsilu(silu_elt) * grad_elt * gate_elt;
                 const float after_dgate = silu(silu_elt) * grad_elt;
-                gated_amax = max(abs(after_dsilu), abs(after_dgate));
+                gated_amax_act = abs(after_dsilu);
+                gated_amax_gate = abs(after_dgate);
             } else {
                 const float after_silu = silu(silu_elt) * gate_elt;
-                gated_amax = abs(after_silu);
+                gated_amax_act = abs(after_silu);
             }
 
-            if (abs(gated_amax) > block_amax) { block_amax = abs(gated_amax); }
+            if (gated_amax_act > block_amax) { block_amax = gated_amax_act; }
+            if (gated_amax_gate > block_amax_gate) { block_amax_gate = gated_amax_gate; }
         }
     }
 
-    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax * Quantized_Limits<OType>::max_reciprocal());
+    const fp8e8m0 biased_exponent = float_to_e8m0(block_amax *
+                                                  Quantized_Limits<OType>::max_reciprocal());
     const float scale_reciprocal = exp2f_rcp(biased_exponent);
     output_scales[scale_idx] = biased_exponent;
+    float scale_reciprocal_gate = 1;
+    if constexpr (IS_DGATED) {
+      const fp8e8m0 biased_exponent = float_to_e8m0(block_amax_gate *
+                                                    Quantized_Limits<OType>::max_reciprocal());
+      scale_reciprocal_gate = exp2f_rcp(biased_exponent);
+      output_scales[scale_idx_gate] = biased_exponent;
+    }
+
 
     // Quantize elements in the block
     for (size_t i = i_min; i < i_max; ++i) {
@@ -70,7 +84,8 @@ void scale_block(const IType* grad,
                 const float after_dsilu = dsilu(silu_elt) * grad_elt * gate_elt;
                 const float after_dgate = silu(silu_elt) * grad_elt;
                 output[i * stride + j] = static_cast<OType>(after_dsilu * scale_reciprocal);
-                output[i * stride + cols + j] = static_cast<OType>(after_dgate * scale_reciprocal);
+                output[i * stride + cols + j] = static_cast<OType>(after_dgate *
+                                                                   scale_reciprocal_gate);
             } else {
                 const float after_silu = silu(silu_elt) * gate_elt;
                 output[i * cols + j] = static_cast<OType>(after_silu * scale_reciprocal);
@@ -79,6 +94,7 @@ void scale_block(const IType* grad,
         }
     }
     thread_amax = std::max(thread_amax, block_amax);
+    thread_amax = std::max(thread_amax, block_amax_gate);
 }
 
 template <bool IS_DGATED, typename IType, typename OType>
@@ -123,8 +139,10 @@ void compute_ref_x1(const IType* grad,
                     const size_t j_max = std::min(j_min + block_size_X, cols);
 
                     const size_t mx_scale_idx = block_idx_Y * scales_stride + block_idx_X;
+                    const size_t mx_scale_idx_gate = block_idx_Y * scales_stride + block_idx_X +
+                                                     cols / block_size_X;
                     scale_block<IS_DGATED, IType, OType>(
-                        grad, input, output, output_scales, mx_scale_idx,
+                        grad, input, output, output_scales, mx_scale_idx, mx_scale_idx_gate,
                         thread_amax, i_min, i_max, j_min, j_max, cols);
                 }
             }
@@ -163,19 +181,6 @@ void compute_ref_x2(const IType* grad,
  *       OR
  * 2) Scaled columns + column-wise scaling factors
  */
-template <typename T>
-void print_tensor(const std::string& name, const T * const data, const size_t rows, const size_t cols) {
-    printf("%s\n", name.c_str());
-    for (int i = 0; i < rows; ++i) {
-        printf(" ROW %d --->", i);
-        for (int j = 0; j < cols; ++j) {
-            const int idx = i * cols + j;
-            printf("%6.1f ", static_cast<float>(data[idx]));
-        }
-        printf("\n");
-    }
-}
-
 template <bool IS_DGATED, typename IType, typename OType>
 void performTest_x1(const size_t rows,
                     const size_t cols,
@@ -191,16 +196,6 @@ void performTest_x1(const size_t rows,
     const bool colwise = (block_size_rows == 32) && (block_size_cols == 1);
     NVTE_CHECK(rowwise || colwise);
 
-    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
-    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
-                                                                  block_size_cols, size_of_e8m0);
-
-    const size_t unpadded_blocks_Y = scale_dims[0];
-    const size_t unpadded_blocks_X = scale_dims[1];
-    const size_t blocks_Y = scale_dims[2];
-    const size_t blocks_X = scale_dims[3];
-    const size_t scales_stride = blocks_X;
-
     // std::cout << "unpadded_blocks_Y: " << unpadded_blocks_Y << std::endl;
     // std::cout << "unpadded_blocks_X: " << unpadded_blocks_X << std::endl;
     // std::cout << "blocks_Y: " << blocks_Y << std::endl;
@@ -211,7 +206,17 @@ void performTest_x1(const size_t rows,
     Tensor input({ rows, cols * 2 }, itype);
 
     const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING, IS_DGATED);
+
+    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, output_cols, block_size_rows,
+                                                                  block_size_cols);
+
+    const size_t unpadded_blocks_Y = scale_dims[0];
+    const size_t unpadded_blocks_X = scale_dims[1];
+    const size_t blocks_Y = scale_dims[2];
+    const size_t blocks_X = scale_dims[3];
+    const size_t scales_stride = blocks_X;
+
+    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
     std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
@@ -277,9 +282,13 @@ void performTest_x2(const size_t rows,
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
 
-    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
-    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32, size_of_e8m0);
-    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1, size_of_e8m0);
+    Tensor grad({ rows, cols }, itype);
+    Tensor input({ rows, cols * 2 }, itype);
+
+    const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
+
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, output_cols, 1, 32);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, output_cols, 32, 1);
 
     const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
     const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
@@ -293,11 +302,7 @@ void performTest_x2(const size_t rows,
     const size_t blocks_X_colwise = scale_dims_colwise[3];
     const size_t scales_stride_colwise = blocks_X_colwise;
 
-    Tensor grad({ rows, cols }, itype);
-    Tensor input({ rows, cols * 2 }, itype);
-
-    const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, true, true, NVTE_MXFP8_1D_SCALING, IS_DGATED);
+    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, true, true, NVTE_MXFP8_1D_SCALING);
 
     std::unique_ptr<OType[]> ref_output_rowwise = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);

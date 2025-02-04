@@ -181,9 +181,8 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
 
-    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
     const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
-                                                                  block_size_cols, size_of_e8m0);
+                                                                  block_size_cols);
 
     const size_t unpadded_blocks_Y = scale_dims[0];
     const size_t unpadded_blocks_X = scale_dims[1];
@@ -314,9 +313,8 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);
 
-    const size_t size_of_e8m0 = TypeInfo<fp8e8m0>::size;
-    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32, size_of_e8m0);
-    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1, size_of_e8m0);
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
 
     const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
     const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];

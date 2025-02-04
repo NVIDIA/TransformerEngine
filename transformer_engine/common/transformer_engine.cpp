@@ -65,8 +65,7 @@ void CheckNoopTensor(const Tensor &t, const std::string &name) {
   }
 }
 
-void CheckScaleTensorShape(const Tensor &t, const std::string &name,
-                           const bool is_gated_mxfp8_op = false) {
+void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
   NVTE_CHECK(t.scaling_mode != NVTE_INVALID_SCALING, "Invalid scaling mode!");
   if (is_tensor_scaling(t.scaling_mode)) {
     // per-tensor scaling
@@ -85,14 +84,13 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
       size_t expected_x, expected_y, alignment;
 
-      const size_t flat_first_dim = t.flat_first_dim();
-      const size_t flat_last_dim = is_gated_mxfp8_op ? (t.flat_last_dim() / 2) : t.flat_last_dim();
-
       if (t.has_data()) {
         alignment = block_alignment[0];
-        expected_x = DIVUP(DIVUP(flat_first_dim, static_cast<size_t>(1)), alignment) * alignment;
+        expected_x = DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(1)), alignment) *
+                     alignment;
         alignment = block_alignment[1];
-        expected_y = DIVUP(DIVUP(flat_last_dim, static_cast<size_t>(32)), alignment) * alignment;
+        expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(32)), alignment) *
+                     alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
                    "\" has invalid scale_inv shape (expected ", expected, ", got ",
@@ -100,9 +98,11 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
       }
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
-        expected_x = DIVUP(DIVUP(flat_first_dim, static_cast<size_t>(32)), alignment) * alignment;
+        expected_x = DIVUP(DIVUP(t.flat_first_dim(), static_cast<size_t>(32)), alignment) *
+                     alignment;
         alignment = block_alignment[0];
-        expected_y = DIVUP(DIVUP(flat_last_dim, static_cast<size_t>(1)), alignment) * alignment;
+        expected_y = DIVUP(DIVUP(t.flat_last_dim(), static_cast<size_t>(1)), alignment) *
+                     alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
         NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
                    "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
@@ -112,7 +112,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
   }
 }
 
-void CheckInputTensor(const Tensor &t, const std::string &name, const bool is_gated_mxfp8_op) {
+void CheckInputTensor(const Tensor &t, const std::string &name) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 input needs to have scale_inv
@@ -144,11 +144,10 @@ void CheckInputTensor(const Tensor &t, const std::string &name, const bool is_ga
   }
   NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Input ", name, " is not allocated!");
 
-  CheckScaleTensorShape(t, name, is_gated_mxfp8_op);
+  CheckScaleTensorShape(t, name);
 }
 
-void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty,
-                       const bool is_gated_mxfp8_op) {
+void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empty) {
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
@@ -190,7 +189,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     NVTE_CHECK(t.has_data() || t.has_columnwise_data(), "Output ", name, " is not allocated!");
   }
 
-  CheckScaleTensorShape(t, name, is_gated_mxfp8_op);
+  CheckScaleTensorShape(t, name);
 }
 
 }  // namespace transformer_engine

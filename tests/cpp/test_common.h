@@ -100,16 +100,14 @@ class Tensor {
   Tensor(const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const bool is_gated_tensor = false);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
 
   Tensor(const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
-         const bool is_gated_tensor = false) :
-    Tensor(NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode, is_gated_tensor) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
+    Tensor(NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 
@@ -256,10 +254,6 @@ class Tensor {
     return columnwise_;
   }
 
-  bool gated_tensor() const {
-    return is_gated_tensor_;
-  }
-
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
@@ -276,7 +270,6 @@ class Tensor {
   std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;
   bool rowwise_;
   bool columnwise_;
-  bool is_gated_tensor_;
 };
 
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
@@ -434,8 +427,7 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
                                   const size_t N);
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
-                                            const size_t block_size_rows, const size_t block_size_cols,
-                                            const size_t size_of_type);
+                                            const size_t block_size_rows, const size_t block_size_cols);
 
 std::pair<double, double> getTolerances(const DType type);
 

@@ -111,8 +111,7 @@ NVTEShape convertShape(const std::vector<size_t>& shape) {
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
-                                                     const NVTEScalingMode scaling_mode,
-                                                     const bool is_gated_tensor = false) {
+                                                     const NVTEScalingMode scaling_mode) {
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     scale_inv_meta ret;
     ret.shape = {1};
@@ -127,9 +126,6 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     }
     size_t first_dim = first_dimension(shape_vec);
     size_t last_dim = last_dimension(shape_vec);
-    if (is_gated_tensor) {
-      last_dim /= 2;
-    }
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
@@ -169,8 +165,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
 Tensor::Tensor(const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode,
-               const bool is_gated_tensor) {
+               const NVTEScalingMode &scaling_mode) {
   rowwise_ = rowwise;
   columnwise_ = columnwise;
   size_t s = typeToSize(type);
@@ -185,7 +180,6 @@ Tensor::Tensor(const NVTEShape &shape, const DType type,
   columnwise_scale_inv_cpu_data_ = nullptr;
   float *amax = nullptr, *scale = nullptr;
   float *rowwise_scale_inv = nullptr, *columnwise_scale_inv = nullptr;
-  is_gated_tensor_ = is_gated_tensor;
   if (columnwise) {
     NVTE_CHECK(shape.ndim >= 2);
   }
@@ -252,8 +246,7 @@ Tensor::Tensor(const NVTEShape &shape, const DType type,
       }
     } else {
       auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape,
-                                                                 tensor_.scaling_mode(),
-                                                                 is_gated_tensor);
+                                                                 tensor_.scaling_mode());
       auto rowwise_scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       auto columnwise_scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
       auto scale_shape = rowwise_scale_meta.shape;
@@ -302,7 +295,7 @@ void Tensor::to_cpu() const {
                  sizeof(float),
                  cudaMemcpyDeviceToHost);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode(), is_gated_tensor_);
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
@@ -338,7 +331,7 @@ void Tensor::from_cpu() const {
       cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
                  cudaMemcpyHostToDevice);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode(), is_gated_tensor_);
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
@@ -372,7 +365,7 @@ void Tensor::set_scale_inv(float scale_inv) {
     if (columnwise_) {
       NVTE_CHECK(columnwise_scale_inv_cpu_data_);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(tensor_.shape(), tensor_.scaling_mode(), is_gated_tensor_);
+    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(tensor_.shape(), tensor_.scaling_mode());
     if (rowwise_) {
       auto num_scales = product(rowwise_scale_meta.shape);
       if (num_scales == 1){
@@ -778,19 +771,15 @@ size_t last_dimension(const std::vector<size_t> &shape) {
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                             const size_t cols,
                                             const size_t block_size_rows,
-                                            const size_t block_size_cols,
-                                            const size_t size_of_type) {
+                                            const size_t block_size_cols) {
     const bool is_rowwise = (block_size_rows == 1) && (block_size_cols == 32);
 
-    const size_t alignment_bytes_Y = is_rowwise
-                                     ? scale_tensor_alignment_Y_rowwise
-                                     : scale_tensor_alignment_Y_colwise;
-    const size_t alignment_bytes_X = is_rowwise
-                                     ? scale_tensor_alignment_X_rowwise
-                                     : scale_tensor_alignment_X_colwise;
-
-    const size_t alignment_Y = alignment_bytes_Y / size_of_type;
-    const size_t alignment_X = alignment_bytes_X / size_of_type;
+    const size_t alignment_Y = is_rowwise
+                               ? scale_tensor_alignment_Y_rowwise
+                               : scale_tensor_alignment_Y_colwise;
+    const size_t alignment_X = is_rowwise
+                               ? scale_tensor_alignment_X_rowwise
+                               : scale_tensor_alignment_X_colwise;
 
     const size_t unpadded_blocks_Y = divide_round_up(rows, block_size_rows);
     const size_t unpadded_blocks_X = divide_round_up(cols, block_size_cols);
