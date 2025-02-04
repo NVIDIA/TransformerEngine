@@ -543,7 +543,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));
         if constexpr (IS_DGATED) {
           thread_Y_mx_block_amax_gate =
-              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dact_reg[stage]));
+              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dgate_reg[stage]));
         }
       }
     }
@@ -994,7 +994,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     NVTE_CHECK(output->flat_last_dim() == output_cols, "Wrong dimension of the output.");
   }
 
-  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 16 == 0;
+  const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 32 == 0;
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
@@ -1011,7 +1011,7 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                 "by 16, got input of shape ", gated_input.data.shape);
+                 "by 32, got input of shape ", gated_input.data.shape);
     }
   } else {
     NVTE_ERROR("Not supported scaling mode");
