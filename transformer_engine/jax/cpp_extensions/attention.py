@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial, reduce
 import operator
 import os
@@ -74,7 +74,7 @@ __all__ = [
         "cp_axis",
     ],
 )
-@dataclass  # (frozen=True)
+@dataclass(frozen=True)
 class _FusedAttnConfig:
     """
     Passes static configuration properties of fused attention.
@@ -2184,17 +2184,17 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
             kv = helper.stack_kv(k, v)
-            config.qkv_layout = NVTE_QKV_Layout.NVTE_THD_T2HD
-
-            batch, q_max_seqlen, head, _ = q.shape
+            if config.qkv_layout != NVTE_QKV_Layout.NVTE_T3HD:
+                subblock_config = replace(config, qkv_layout=NVTE_QKV_Layout.NVTE_THD_T2HD)
+            else:
+                subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
+            batch, q_max_seqlen, head, _ = q.shape
             output = jnp.zeros(q.shape).astype(jnp.float32)
-
-            # TODO(rewang): reset in C++
-            softmax_aux = jnp.full((batch, q_max_seqlen, head, 1), -jnp.inf, dtype=jnp.float32)
+            softmax_aux = jnp.zeros((batch, q_max_seqlen, head, 1), dtype=jnp.float32)
 
             # RNG shape should be the shared shape. This is unused for ring attention as we do not
             # support dropout currently.
@@ -2204,6 +2204,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             def scan_kv_block(idx, carry):
                 kv, kv_segment_ids, kv_segment_pos, output, softmax_aux = carry
 
+                # TODO(rewang): To check whether we need special handle for the last idx
                 # Send KV block to next step so we can overlap compute.
                 kv_next = helper.permute_kv(kv, cp_perm)
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
@@ -2223,17 +2224,16 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     kv_segment_ids,
                     q_segment_pos,
                     kv_segment_pos,
-                    config,
+                    subblock_config,
                 )
 
                 # TODO(rewang): THD softmax_aux is acutally [B, S, H]
-                tmp_h, tmp_s = softmax_aux_per_step.shape[1:3]
+                batch, tmp_h, tmp_s = softmax_aux_per_step.shape[:3]
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, tmp_s, tmp_h, 1))
 
-                def skip_correction(output, softmax_aux, output_per_step, softmax_aux_per_step):
+                def skip_correction(_output, _softmax_aux, output_per_step, softmax_aux_per_step):
                     # No correction done here but we cast outputs to float32 and perform reduction
                     # in full precision.
-                    # pylint: disable=unused-argument
                     return output_per_step.astype(jnp.float32), softmax_aux_per_step
 
                 def correction(output, softmax_aux, output_per_step, softmax_aux_per_step):
@@ -2248,7 +2248,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
 
                 # first step there is no correction we get initial output and stats
                 output, softmax_aux = lax.cond(
-                    (idx == 0),
+                    idx == 0,
                     skip_correction,
                     correction,
                     output,
@@ -2267,11 +2267,10 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     carry = scan_kv_block(i, carry)
             (_, _, _, output, softmax_aux) = carry
 
-            tmp_h, tmp_s = softmax_aux.shape[1:3]
+            batch, tmp_h, tmp_s = softmax_aux.shape[:3]
             softmax_aux = softmax_aux.reshape((batch, tmp_s, tmp_h, 1))
 
-            output = output.astype(q.dtype)
-            return output, softmax_aux, rng_state
+            return output.astype(q.dtype), softmax_aux, rng_state
 
         return mesh, fwd_impl, out_shardings, arg_shardings
 
@@ -2293,17 +2292,9 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         if not is_context_parallel:
             return FusedAttnBwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
-        del result_infos
-        q_spec = get_padded_spec(arg_infos[0])
-        k_spec = get_padded_spec(arg_infos[1])
-        v_spec = get_padded_spec(arg_infos[2])
-        bias_spec = get_padded_spec(arg_infos[3])
-        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
-        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
-        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
-        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
-        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+        arg_shardings = tuple(arg.sharding for arg in arg_infos)
+        # dq, dk, dv, dbias sharding = q, k, v, bias sharding
+        out_shardings = tuple(arg.sharding for arg in arg_infos[:4])
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
         # helper.check_supported()  # TODO(rewang)
@@ -2331,7 +2322,10 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             # Combine KV tensors if separate for better permute scheduling and performance.
             # Eventually XLA should perform this automatically.
             kv = helper.stack_kv(k, v)
-            # config.qkv_layout = NVTE_QKV_Layout.NVTE_THD_T2HD
+            if config.qkv_layout != NVTE_QKV_Layout.NVTE_T3HD:
+                subblock_config = replace(config, qkv_layout=NVTE_QKV_Layout.NVTE_THD_T2HD)
+            else:
+                subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
@@ -2345,14 +2339,10 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
 
                 # Start communication that feeds the next iteration.
                 # We further combine the tensors to improve overlap.
-
                 kv_dkv = jnp.stack([kv, dkv])
                 kv_dkv = helper.permute_kv(kv_dkv, cp_perm)
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
-
-                adjust_config = copy.copy(config)
-                adjust_config.qkv_layout = NVTE_QKV_Layout.NVTE_THD_T2HD
 
                 def compute():
                     dq_per_step, dkv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
@@ -2372,7 +2362,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                         kv_segment_ids,
                         q_segment_pos,
                         kv_segment_pos,
-                        config=adjust_config,
+                        config=subblock_config,
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
@@ -2398,10 +2388,9 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             dkv = helper.permute_kv(dkv, cp_perm)
 
             global_dbias = dbias
-            if config.attn_bias_type not in [NVTE_Bias_Type.NVTE_NO_BIAS]:
+            if config.attn_bias_type is not NVTE_Bias_Type.NVTE_NO_BIAS:
                 global_dbias = all_reduce_sum_along_dp_fsdp(dbias, mesh)
 
-            # config.qkv_layout = NVTE_QKV_Layout.NVTE_THD_THD_THD
             dk, dv = helper.unstack_kv(dkv)
             return dq, dk, dv, global_dbias
 
