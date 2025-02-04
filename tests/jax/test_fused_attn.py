@@ -28,6 +28,8 @@ from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
+    reorder_causal_striped,
+    inverse_reorder_causal_striped,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
@@ -500,7 +502,8 @@ class FusedAttnRunner:
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
             self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            if self.qkv_layout == QKVLayout.T3HD:
+            # TODO(rewang): record only self attention and find the reason of cross attention
+            if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
                 self.segment_ids_kv = self.segment_ids_q
                 self.segment_pos_kv = self.segment_pos_q
                 self.pad_kv = self.pad_q
@@ -536,6 +539,34 @@ class FusedAttnRunner:
             self.window_size,
         )
 
+        if self.cp_size > 1 and self.cp_load_balanced:
+            if self.qkv_layout.is_thd():
+                self.cp_reorder_fn = partial(
+                    reorder_causal_striped,
+                    cp_size=self.cp_size,
+                    seq_dim=1,
+                )
+                self.cp_inverse_reorder_fn = partial(
+                    inverse_reorder_causal_striped,
+                    cp_size=self.cp_size,
+                    seq_dim=1,
+                )
+            else:
+                self.cp_reorder_fn = partial(
+                    reorder_causal_load_balancing,
+                    cp_size=self.cp_size,
+                    tensor_format=self.qkv_layout.get_qkv_format(),
+                )
+                self.cp_inverse_reorder_fn = partial(
+                    inverse_reorder_causal_load_balancing,
+                    cp_size=self.cp_size,
+                    tensor_format=self.qkv_layout.get_qkv_format(),
+                )
+        else:
+            # no-ops for non cp or non load balanced
+            self.cp_reorder_fn = lambda x: x
+            self.cp_inverse_reorder_fn = lambda x: x
+
         # Test different input formats
         if self.qkv_layout.is_thd():
             match self.seq_desc_format:
@@ -548,8 +579,14 @@ class FusedAttnRunner:
                     )
                 case SeqDescFormat.SegmentIDs:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
-                        (self.segment_ids_q, self.segment_ids_kv),
-                        (self.segment_pos_q, self.segment_pos_kv),
+                        (
+                            self.cp_reorder_fn(self.segment_ids_q),
+                            self.cp_reorder_fn(self.segment_ids_kv),
+                        ),
+                        (
+                            self.cp_reorder_fn(self.segment_pos_q),
+                            self.cp_reorder_fn(self.segment_pos_kv),
+                        ),
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -605,7 +642,12 @@ class FusedAttnRunner:
             case _:
 
                 def to_dp_shardings(x):
-                    pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    if x.ndim == 1:
+                        pspec = PartitionSpec(self.mesh_resource.dp_resource)
+                    else:
+                        pspec = PartitionSpec(
+                            self.mesh_resource.dp_resource, self.mesh_resource.cp_resource
+                        )
                     return NamedSharding(self.mesh, pspec)
 
                 self.seq_desc_sharding = jax.tree.map(to_dp_shardings, self.sequence_desciptor)
@@ -636,24 +678,6 @@ class FusedAttnRunner:
         # TODO(mgoldfarb-nvidia): Will need to handle CP cases of replicated or distributed length/offset.
         self.seq_length_offset_pspec = PartitionSpec(self.mesh_resource.dp_resource, None)
         self.seq_length_offset_sharding = NamedSharding(self.mesh, self.seq_length_offset_pspec)
-
-        # Softmax aux sharding
-
-        if self.cp_size > 1 and self.cp_load_balanced:
-            self.cp_reorder_fn = partial(
-                reorder_causal_load_balancing,
-                cp_size=self.cp_size,
-                tensor_format=self.qkv_layout.get_qkv_format(),
-            )
-            self.cp_inverse_reorder_fn = partial(
-                inverse_reorder_causal_load_balancing,
-                cp_size=self.cp_size,
-                tensor_format=self.qkv_layout.get_qkv_format(),
-            )
-        else:
-            # no-ops for non cp or non load balanced
-            self.cp_reorder_fn = lambda x: x
-            self.cp_inverse_reorder_fn = lambda x: x
 
     def test_forward(self):
         """
@@ -733,15 +757,24 @@ class FusedAttnRunner:
 
         self._setup_inputs()
 
-        def grad_func(func, *args, **kwargs):
+        def grad_func(func, *args, cp_reverse_out=False, **kwargs):
             # Gradient is small, use a gradient multiplier to amplify the gradient
             gradient_multiplier = self.max_seqlen_q * self.num_heads_q
             if self.attn_mask_type.is_causal():
                 gradient_multiplier /= 10
             # Keep only valid result for the gradient
-            ret_valid = jnp.where(
-                self.pad_q[..., jnp.newaxis, jnp.newaxis], 0, func(*args, **kwargs)
-            )
+            if not cp_reverse_out:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    func(*args, **kwargs),
+                )
+            else:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    self.cp_inverse_reorder_fn(func(*args, **kwargs)),
+                )
             return (
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
@@ -787,7 +820,7 @@ class FusedAttnRunner:
         jitted_primitive = jit(
             value_and_grad(
                 lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, **kwargs
+                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
                 ),
                 arg_nums,
             ),

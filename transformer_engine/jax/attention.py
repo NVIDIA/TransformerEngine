@@ -288,6 +288,44 @@ def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: Q
     return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
 
 
+def reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
+    origin_shape = tensor.shape
+    if origin_shape[seq_dim] % cp_size != 0:
+        raise ValueError(
+            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
+            f" {origin_shape[seq_dim]=} and {cp_size=}"
+        )
+
+    new_shape = [
+        *origin_shape[:seq_dim],
+        *[origin_shape[seq_dim] // cp_size, cp_size],
+        *origin_shape[seq_dim + 1 :],
+    ]
+
+    chunked_tensor = tensor.reshape(new_shape)
+    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
+    return reordered_chunked_tensor.reshape(origin_shape)
+
+
+def inverse_reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
+    origin_shape = tensor.shape
+    if origin_shape[seq_dim] % cp_size != 0:
+        raise ValueError(
+            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
+            f" {origin_shape[seq_dim]=} and {cp_size=}"
+        )
+
+    new_shape = [
+        *origin_shape[:seq_dim],
+        *[cp_size, origin_shape[seq_dim] // cp_size],
+        *origin_shape[seq_dim + 1 :],
+    ]
+
+    chunked_tensor = tensor.reshape(new_shape)
+    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
+    return reordered_chunked_tensor.reshape(origin_shape)
+
+
 def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
     # bincount map with 0s
     bincount_vmap = jax.vmap(partial(jnp.bincount, length=max_segments_per_seq + 1))
