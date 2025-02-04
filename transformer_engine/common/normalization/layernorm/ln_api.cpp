@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include <transformer_engine/normalization.h>
+#include <transformer_engine/transpose.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -14,7 +15,6 @@
 
 #include "../../common.h"
 #include "../common.h"
-#include <transformer_engine/transpose.h>
 
 namespace transformer_engine {
 
@@ -99,8 +99,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     Tensor transpose_data;
     transpose_data.data = z->columnwise_data;
     transpose_data.scaling_mode = z->scaling_mode;
-    nvte_transpose(reinterpret_cast<NVTETensor>(z),
-                   reinterpret_cast<NVTETensor>(&transpose_data),
+    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
                    stream);
   }
 

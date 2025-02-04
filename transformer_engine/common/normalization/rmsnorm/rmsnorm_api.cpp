@@ -88,8 +88,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     Tensor transpose_data;
     transpose_data.data = z->columnwise_data;
     transpose_data.scaling_mode = z->scaling_mode;
-    nvte_transpose(reinterpret_cast<NVTETensor>(z),
-                   reinterpret_cast<NVTETensor>(&transpose_data),
+    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
                    stream);
   }
 
