@@ -985,17 +985,20 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
                   if constexpr (IS_DACT) {
                     create_2D_tensor_map(tensor_map_act_input, act_input->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(IType));
+                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
+                                         sizeof(IType));
                   }
 
                   if (use_rowwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_rowwise, output->data, rows, cols,
-                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
+                                         MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
+                                         sizeof(OType));
                   }
 
                   if (use_colwise_scaling) {
                     create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows,
-                                         cols, MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0, sizeof(OType));
+                                         cols, MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, cols, 0,
+                                         sizeof(OType));
                   }
 
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,

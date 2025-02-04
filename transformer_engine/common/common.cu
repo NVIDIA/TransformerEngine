@@ -73,17 +73,10 @@ inline bool isPointerAligned(const void *const ptr, const int alignment) {
 }
 
 // Set up parameters to create TMA descriptor.
-void create_2D_tensor_map(
-    CUtensorMap &tensorMap,
-    const SimpleTensor &tensor,
-    const uint64_t globalY,
-    const uint64_t globalX,
-    const uint32_t shmemY,
-    const uint32_t shmemX,
-    const uint32_t stride_elems,
-    const uint32_t offset_elems,
-    const size_t type_size)
-{
+void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
+                          const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
+                          const uint32_t shmemX, const uint32_t stride_elems,
+                          const uint32_t offset_elems, const size_t type_size) {
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   static PFN_cuTensorMapEncodeTiled cuDriverTensorMapEncodeTiled = []() {
     void *driver_ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
@@ -104,8 +97,8 @@ void create_2D_tensor_map(
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
-  void *dataPtr = reinterpret_cast<void *>(
-                      reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
+  void *dataPtr =
+      reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
 
   constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
   NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment),
