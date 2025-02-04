@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 
@@ -915,23 +916,38 @@ def _all_gather_mxfp8(
     out_shape: Optional[list[int]] = None,
 ) -> tuple[MXFP8TensorBase, Optional[torch.distributed.Work]]:
     """All-gather MXFP8 tensor along first dimension."""
-    world_size = get_distributed_world_size(process_group)
 
-    # Output tensor dims
+    # Tensor dims
+    world_size = get_distributed_world_size(process_group)
+    in_shape = list(input_.size())
     if out_shape is None:
-        out_shape = list(input_.size())
-        out_shape[0] *= world_size
+        out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
     # Gather MXFP8 data for row-wise usage
     if quantizer.rowwise_usage and not quantizer.columnwise_usage:
+
+        # Cast input tensor to MXFP8 if needed
         if not isinstance(input_, MXFP8TensorBase):
             input_ = quantizer(input_)
+
+        # Construct MXFP8 output tensor
         dtype = torch.float32
         device = "cuda"
         if isinstance(input_, MXFP8Tensor):
             dtype = input_.dtype
             device = input_.device
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
+
+        # Remove padding from MXFP8 scale-inverses
+        in_scale_inv = input_._rowwise_scale_inv
+        out_scale_inv = out._rowwise_scale_inv
+        flattened_in_shape0 = math.prod(in_shape[:-1])
+        if in_scale_inv.size(0) != flattened_in_shape0:
+            in_scale_inv = in_scale_inv[:flattened_in_shape0]
+            out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+
+        # Launch all-gathers
         with torch.distributed._coalescing_manager(
             group=process_group,
             device=device,
@@ -943,8 +959,8 @@ def _all_gather_mxfp8(
                 group=process_group,
             )
             torch.distributed.all_gather_into_tensor(
-                out._rowwise_scale_inv,
-                input_._rowwise_scale_inv,
+                out_scale_inv,
+                in_scale_inv,
                 group=process_group,
             )
         handle = coalescing_manager if async_op else None
