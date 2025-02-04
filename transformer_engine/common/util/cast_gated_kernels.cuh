@@ -277,8 +277,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const __grid_constant__ CUtensorMap tensor_map_output_rowwise,
                             const __grid_constant__ CUtensorMap tensor_map_output_colwise,
                             e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
-                            const size_t rows, const size_t cols,
-                            const size_t scale_stride_rowwise, const size_t scale_stride_colwise) {
+                            const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
+                            const size_t scale_stride_colwise) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
@@ -510,8 +510,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           if ((tid_X % SCALE_DIM_X == 0) && !out_of_bounds) {
             const int global_scales_offset_Y =
                 iteration_scale_rowwise_offset_Y + stage_offset_Y + thread_offset_Y;
-            const int global_scales_offset_X = scales_rowwise_chunk_offset_X +
-                                               (tid_X + cols) / SCALE_DIM_X;
+            const int global_scales_offset_X =
+                scales_rowwise_chunk_offset_X + (tid_X + cols) / SCALE_DIM_X;
             const int scale_idx =
                 global_scales_offset_Y * scale_stride_rowwise + global_scales_offset_X;
             scales_rowwise[scale_idx] = biased_exponent_X;
@@ -542,8 +542,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         __builtin_assume(thread_Y_mx_block_amax_gate >= 0);
         thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));
         if constexpr (IS_DGATED) {
-          thread_Y_mx_block_amax_gate = fmaxf(thread_Y_mx_block_amax_gate,
-                                              fabsf(after_dact_reg[stage]));
+          thread_Y_mx_block_amax_gate =
+              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dact_reg[stage]));
         }
       }
     }
@@ -561,8 +561,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if (tid_Y == 0) {
 #pragma unroll
           for (int y = 1; y < THREADS_PER_CHUNK_Y; ++y) {
-            thread_Y_mx_block_amax_gate = fmaxf(thread_Y_mx_block_amax_gate,
-                                                stage_amax_sh[y][tid_X]);
+            thread_Y_mx_block_amax_gate =
+                fmaxf(thread_Y_mx_block_amax_gate, stage_amax_sh[y][tid_X]);
           }
           stage_amax_sh[0][tid_X] = thread_Y_mx_block_amax_gate;  // write mx column-block amax
         }
@@ -877,8 +877,8 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                                           SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid_dim, block_dim, shmem_size, stream>>>(
                       tensor_map_grad, tensor_map_gated_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr,
-                      rows, cols, scale_stride_rowwise,
+                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, rows, cols,
+                      scale_stride_rowwise,
                       scale_stride_colwise););  // NOLINT(*)
           );                                    // NOLINT(*)
       );                                        // NOLINT(*)
