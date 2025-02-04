@@ -201,14 +201,6 @@ class _LayerNormMLP(torch.autograd.Function):
         if ub_overlap_ag:
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-        elif with_quantized_norm:
-            ln_out = fc1_input_quantizer.make_empty(
-                inputmat.shape, dtype=inputmat.dtype, device="cuda"
-            )
-        else:
-            ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format
-            )
 
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
@@ -846,9 +838,10 @@ class _LayerNormMLP(torch.autograd.Function):
                         ln_out_total_work.wait()
                         ln_out_total_work = None
 
+                # Make sure GEMM inputs have expected data
+                if isinstance(ln_out_total, QuantizedTensor):
+                    ln_out_total.update_usage(rowwise_usage=True, columnwise_usage=True)
                 if isinstance(dact, QuantizedTensor):
-                    # This is a no-op if platform supports non-TN FP8 GEMM or the transpose
-                    # already exists.
                     dact.update_usage(rowwise_usage=True, columnwise_usage=True)
 
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():

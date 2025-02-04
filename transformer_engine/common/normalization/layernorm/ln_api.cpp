@@ -14,6 +14,7 @@
 
 #include "../../common.h"
 #include "../common.h"
+#include <transformer_engine/transpose.h>
 
 namespace transformer_engine {
 
@@ -92,6 +93,17 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
                 reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
                 workspace->data.dptr, stream);
+
+  // Compute FP8 transpose if required
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+    Tensor transpose_data;
+    transpose_data.data = z->columnwise_data;
+    transpose_data.scaling_mode = z->scaling_mode;
+    nvte_transpose(reinterpret_cast<NVTETensor>(z),
+                   reinterpret_cast<NVTETensor>(&transpose_data),
+                   stream);
+  }
+
   return;
 }
 
