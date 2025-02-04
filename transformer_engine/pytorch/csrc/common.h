@@ -171,9 +171,11 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     case transformer_engine::DType::kBFloat16:
       return at::kBFloat16;
     case transformer_engine::DType::kByte:
-    case transformer_engine::DType::kFloat8E4M3:
-    case transformer_engine::DType::kFloat8E5M2:
       return at::kByte;
+    case transformer_engine::DType::kFloat8E4M3:
+      return at::kFloat8_e4m3fn;
+    case transformer_engine::DType::kFloat8E5M2:
+      return at::kFloat8_e5m2;
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -181,6 +183,10 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
 
 inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
   switch (t) {
+    case at::kFloat8_e4m3fn:
+      return transformer_engine::DType::kFloat8E4M3;
+    case at::kFloat8_e5m2:
+      return transformer_engine::DType::kFloat8E5M2;
     case at::kHalf:
       return transformer_engine::DType::kFloat16;
     case at::kFloat:
@@ -234,7 +240,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
-size_t product(const std::vector<size_t>& shape);
+template <typename T>
+T product(const std::vector<T>& shape);
 
 size_t product(const NVTEShape& shape, size_t begin, size_t end);
 

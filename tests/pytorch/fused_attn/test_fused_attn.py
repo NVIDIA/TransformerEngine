@@ -2077,7 +2077,7 @@ class _custom_mha_fp8(torch.autograd.Function):
 
         qkv_weight_fp8 = qkv_weight_quantizer(qkv_weight)
 
-        qkv, _, _ = ext.general_gemm(
+        qkv, *_ = ext.general_gemm(
             qkv_weight_fp8,
             inp_fp8,
             workspace,
@@ -2207,7 +2207,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             dqkv_c._create_transpose()
 
             # QKV DGRAD
-            qkv_dgrad, _, _ = ext.general_gemm(
+            qkv_dgrad, *_ = ext.general_gemm(
                 qkv_weight_fp8,
                 dqkv_c,
                 workspace,
@@ -2217,7 +2217,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             )
 
             # QKV WGRAD
-            qkv_wgrad, _, _ = ext.general_gemm(
+            qkv_wgrad, *_ = ext.general_gemm(
                 inp_fp8,
                 dqkv,
                 workspace,
