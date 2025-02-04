@@ -58,21 +58,29 @@ void compute_ref_cast_dgated_swiglu(const IType * const grad,
 }
 
 template <typename IType, typename OType>
-void performTest(const size_t rows, const size_t cols) {
+void performTest(const std::vector<size_t>& shape) {
   using namespace test;
 
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor grad({rows, cols}, itype);
-  Tensor input({rows, cols * 2}, itype);
-  Tensor output_c({rows, cols * 2}, otype);
+  std::vector<size_t> input_shape = shape;
+  input_shape[input_shape.size() - 1] *= 2;
+
+  const size_t input_size = product(input_shape);
+
+  const size_t rows = first_dimension(shape);
+  const size_t cols = last_dimension(shape);
+
+  Tensor grad(shape, itype);
+  Tensor input(input_shape, itype);
+  Tensor output_c(input_shape, otype);
 
   fillUniform(&grad);
   fillUniform(&input);
   setRandomScale(&output_c);
 
-  std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(rows * cols * 2);
+  std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(input_size);
 
   nvte_dswiglu(grad.data(), input.data(), output_c.data(), 0);
   cudaDeviceSynchronize();
@@ -100,21 +108,23 @@ void performTest(const size_t rows, const size_t cols) {
   compareResults("output_c", output_c, ref_output_c.get(), true, atol, rtol);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {
+std::vector<std::vector<size_t>> test_cases = {
   {128, 128},
   {256, 256},
   {768, 1024},
-  // {256, 65536},
-  // {2048, 12288},
-  // {65536, 128},
-  // {16384, 6144},
+  {256, 65536},
+  {2048, 12288},
+  {65536, 128},
+  {217, 256},
+  {1296},
+  {5, 4, 3, 160},
 };
 
 }  // namespace
 
 class CastSwiGLUTestSuite
     : public ::testing::TestWithParam<std::tuple<
-          transformer_engine::DType, transformer_engine::DType, std::pair<size_t, size_t>>> {};
+          transformer_engine::DType, transformer_engine::DType, std::vector<size_t>>> {};
 
 TEST_P(CastSwiGLUTestSuite, TestCastSwiGLU) {
   using namespace transformer_engine;
@@ -131,7 +141,7 @@ TEST_P(CastSwiGLUTestSuite, TestCastSwiGLU) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
       input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
-          output_type, OutputType, performTest<InputType, OutputType>(size.first, size.second);););
+          output_type, OutputType, performTest<InputType, OutputType>(size);););
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -142,8 +152,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(test_cases)),
     [](const testing::TestParamInfo<CastSwiGLUTestSuite::ParamType> &info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
-                         test::typeName(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param).first) + "X" +
-                         std::to_string(std::get<2>(info.param).second);
+                         test::typeName(std::get<1>(info.param));
+      const auto& shape = std::get<2>(info.param);
+      for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+      }
       return name;
     });
