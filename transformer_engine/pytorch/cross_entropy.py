@@ -12,6 +12,7 @@ __all__ = [
     "parallel_cross_entropy",
 ]
 
+
 class CrossEntropyFunction(torch.autograd.Function):
     """
     This class implements a custom autograd function for the Cross Entropy loss. The input tensor can be in BF16/FP32, the
@@ -20,7 +21,9 @@ class CrossEntropyFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, _input, target, label_smoothing=0.0, reduce_loss=False, dist_process_group=None):
+    def forward(
+        ctx, _input, target, label_smoothing=0.0, reduce_loss=False, dist_process_group=None
+    ):
         """
         The forward pass of the Cross Entropy loss. If dist_process_group is passed for distributed loss calculation, the input to each
         distributed rank should be (*,V/world_size). Note that each of the ranks should get equal shards along the V dimension.
@@ -64,5 +67,6 @@ class CrossEntropyFunction(torch.autograd.Function):
             None,
             None,
         )
+
 
 parallel_cross_entropy = CrossEntropyFunction.apply

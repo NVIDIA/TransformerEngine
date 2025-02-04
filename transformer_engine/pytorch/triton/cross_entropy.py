@@ -45,7 +45,7 @@ def online_softmax_kernel(
     # locate the start index
     X_ptr += program_id * X_stride
 
-    #Load Y_ptr
+    # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
 
@@ -64,9 +64,9 @@ def online_softmax_kernel(
 
     for i in range(0, n_cols, BLOCK_SIZE):
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
-        X_block = tl.load(
-            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
-        ).to(tl.float32)
+        X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")).to(
+            tl.float32
+        )
         block_max = tl.max(X_block)
         m_new = tl.maximum(m, block_max)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new))
@@ -119,7 +119,7 @@ def cross_entropy_kernel(
     # locate the start index
     X_ptr += program_id * X_stride
 
-    #Load Y_ptr
+    # Load Y_ptr
     Y_ptr += program_id * Y_stride
     y = tl.load(Y_ptr)
 
@@ -138,7 +138,7 @@ def cross_entropy_kernel(
         d_new = tl.load(access_ptr + m_d_X_y_stride)
         X_y_new = tl.load(access_ptr + (2 * m_d_X_y_stride))
 
-        d = d * tl.exp(m - tl.maximum(m,m_new)) + d_new * tl.exp(m_new - tl.maximum(m,m_new))
+        d = d * tl.exp(m - tl.maximum(m, m_new)) + d_new * tl.exp(m_new - tl.maximum(m, m_new))
         m = tl.maximum(m, m_new)
         ori_X_y = tl.maximum(ori_X_y, X_y_new)
 
@@ -156,9 +156,7 @@ def cross_entropy_kernel(
     #      = dx_i - (1 - label_smoothing) / N
     for i in range(0, n_cols, BLOCK_SIZE):
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
-        X_block = tl.load(
-            X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf")
-        )
+        X_block = tl.load(X_ptr + X_offsets, mask=X_offsets < n_cols, other=float("-inf"))
         grad_dtype = X_block.dtype
         X_block = X_block.to(tl.float32)
         if label_smoothing > 0:
@@ -198,7 +196,7 @@ def cross_entropy_kernel(
 
 
 # The optimal maximum block size depends on your hardware, your kernel, and your dtype
-MAX_FUSED_SIZE = 65536 // 2 
+MAX_FUSED_SIZE = 65536 // 2
 
 
 @triton.jit
@@ -238,12 +236,12 @@ def element_mul_kernel(
 
 
 def cross_entropy_forward(
-        _input: torch.Tensor,
-        target: torch.Tensor,
-        label_smoothing: float,
-        reduce_loss: bool,
-        dist_process_group: Union[dist.ProcessGroup, None]
-        ):
+    _input: torch.Tensor,
+    target: torch.Tensor,
+    label_smoothing: float,
+    reduce_loss: bool,
+    dist_process_group: Union[dist.ProcessGroup, None],
+):
 
     B, SQ, V = _input.shape
     n_rows = B * SQ
@@ -278,11 +276,13 @@ def cross_entropy_forward(
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=32,
     )
-    
+
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
-    
+
     if world_size > 1:
-        m_d_X_y_gathered = torch.zeros(n_rows * 3 * world_size, dtype=torch.float32, device=_input.device)
+        m_d_X_y_gathered = torch.zeros(
+            n_rows * 3 * world_size, dtype=torch.float32, device=_input.device
+        )
         dist.all_gather_into_tensor(m_d_X_y_gathered, m_d_X_y, group=dist_process_group)
     else:
         m_d_X_y_gathered = m_d_X_y
@@ -310,10 +310,7 @@ def cross_entropy_forward(
     return loss, _input
 
 
-def cross_entropy_backward(
-        _input: torch.Tensor, 
-        grad_output: torch.Tensor
-        ):
+def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
 
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
     if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
