@@ -938,8 +938,9 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const size_t blocks_X = DIVUP(chunks_X, MXFP8_CHUNKS_PER_BLOCK_X);
 
   const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
-  const size_t scale_stride_colwise = use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
-  
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+
   e8m0_t *const scales_rowwise_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
   e8m0_t *const scales_colwise_ptr =

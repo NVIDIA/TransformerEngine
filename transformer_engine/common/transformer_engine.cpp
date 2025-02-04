@@ -71,13 +71,12 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
   if (is_tensor_scaling(t.scaling_mode)) {
     // per-tensor scaling
     if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.numel() == 1,
-                 "Tensor \"", name, "\" has invalid scale_inv shape (expected (1), got ",
-                 t.scale_inv.shape, ")");
+      NVTE_CHECK(t.scale_inv.numel() == 1, "Tensor \"", name,
+                 "\" has invalid scale_inv shape (expected (1), got ", t.scale_inv.shape, ")");
     }
     if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.numel() == 1,
-                 "Tensor \"", name, "\" has invalid columnwise_scale_inv shape (expected (1), got ",
+      NVTE_CHECK(t.columnwise_scale_inv.numel() == 1, "Tensor \"", name,
+                 "\" has invalid columnwise_scale_inv shape (expected (1), got ",
                  t.columnwise_scale_inv.shape, ")");
     }
   } else {
@@ -87,7 +86,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
       size_t expected_x, expected_y, alignment;
 
       const size_t flat_first_dim = t.flat_first_dim();
-      const size_t flat_last_dim = is_gated_mxfp8_op ? (t.flat_last_dim() / 2): t.flat_last_dim();
+      const size_t flat_last_dim = is_gated_mxfp8_op ? (t.flat_last_dim() / 2) : t.flat_last_dim();
 
       if (t.has_data()) {
         alignment = block_alignment[0];
@@ -95,9 +94,9 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
         alignment = block_alignment[1];
         expected_y = DIVUP(DIVUP(flat_last_dim, static_cast<size_t>(32)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.scale_inv.shape == expected,
-                   "Tensor \"", name, "\" has invalid scale_inv shape (expected ",
-                   expected, ", got ", t.scale_inv.shape, ")");
+        NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected ", expected, ", got ",
+                   t.scale_inv.shape, ")");
       }
       if (t.has_columnwise_data()) {
         alignment = block_alignment[1];
@@ -105,9 +104,9 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name,
         alignment = block_alignment[0];
         expected_y = DIVUP(DIVUP(flat_last_dim, static_cast<size_t>(1)), alignment) * alignment;
         const auto &expected = std::vector<size_t>{expected_x, expected_y};
-        NVTE_CHECK(t.columnwise_scale_inv.shape == expected,
-                   "Tensor \"", name, "\"  has invalid columnwise_scale_inv shape (expected ",
-                   expected, ", got ", t.columnwise_scale_inv.shape, ")");
+        NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
+                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   t.columnwise_scale_inv.shape, ")");
       }
     }
   }

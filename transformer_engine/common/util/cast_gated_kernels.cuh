@@ -701,9 +701,9 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
             create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X,
                                  sizeof(IType));
           }
-          
+
           create_2D_tensor_map(tensor_map_gated_input, gated_input.data, rows, cols * 2,
-                                 SHMEM_DIM_Y, SHMEM_DIM_X, sizeof(IType));
+                               SHMEM_DIM_Y, SHMEM_DIM_X, sizeof(IType));
           create_2D_tensor_map(tensor_map_output, output->data, rows, output_cols, SHMEM_DIM_Y,
                                SHMEM_DIM_X, sizeof(OType));
 
