@@ -130,12 +130,14 @@ void compute_ref_x1(const IType* grad,
                 const size_t block_idx_Y = tile_Y * blocks_per_tile_Y + ii;
                 const size_t block_offset_Y = ii * block_size_Y;
                 const size_t i_min = tile_offset_Y + block_offset_Y;
+                if (i_min >= rows) continue;
                 const size_t i_max = std::min(i_min + block_size_Y, rows);
 
                 for (size_t jj = 0; jj < blocks_per_tile_X; ++jj) {
                     const size_t block_idx_X = tile_X * blocks_per_tile_X + jj;
                     const size_t block_offset_X = jj * block_size_X;
                     const size_t j_min = tile_offset_X + block_offset_X;
+                    if (j_min >= cols) continue;
                     const size_t j_max = std::min(j_min + block_size_X, cols);
 
                     const size_t mx_scale_idx = block_idx_Y * scales_stride + block_idx_X;
@@ -364,8 +366,8 @@ void performTest_x2(const size_t rows,
 }
 
 std::vector<std::pair<size_t, size_t>> matrix_sizes = {
-    {1, 16},
-    {16, 48},
+    {1, 32},
+    {16, 64},
     {65, 96},
     {128, 128},
     {256, 256},
