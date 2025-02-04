@@ -96,11 +96,20 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   at::Tensor rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
 
   TensorWrapper ln_out_tensor;
+  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+  py::object ln_output;
 
-  if (ln_out.is_none()) {
-    std::tie(ln_out_tensor, ln_out) = createOutputTensor(size, out_dtype, quantizer);
+
+  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
+    // Use high precision output from normalization
+    NoneQuantizer q{none};
+    std::tie(ln_out_tensor, ln_output) = q.create_tensor(size, out_dtype);
   } else {
-    ln_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    if (ln_out.is_none()) {
+      std::tie(ln_out_tensor, ln_out) = my_quantizer->create_tensor(size, out_dtype);
+    } else {
+      ln_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    }
   }
   TensorWrapper mu_cu = makeTransformerEngineTensor(mu);
   TensorWrapper rsigma_cu = makeTransformerEngineTensor(rsigma);
@@ -122,6 +131,18 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                      ln_out_tensor.data(), mu_cu.data(), rsigma_cu.data(), workspace.data(),
                      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+
+  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
+    TensorWrapper cast_out_tensor;
+    if (ln_out.is_none()) {
+      std::tie(cast_out_tensor, ln_out) = my_quantizer->create_tensor(size, out_dtype);
+    } else {
+      cast_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    }
+
+    nvte_quantize_noop(ln_out_tensor.data(), cast_out_tensor.data(), nullptr,
+                       at::cuda::getCurrentCUDAStream());
+  }
 
   return {ln_out, py::cast(mu), py::cast(rsigma)};
 }
@@ -185,11 +206,19 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   auto rsigma = at::empty({static_cast<int64_t>(N)}, at::CUDA(at::kFloat));
   std::vector<size_t> size = {N, H};
   TensorWrapper ln_out_tensor;
+  std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+  py::object ln_output;
 
-  if (ln_out.is_none()) {
-    std::tie(ln_out_tensor, ln_out) = createOutputTensor(size, otype, quantizer);
+  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
+    // Use high precision output from normalization
+    NoneQuantizer q{none};
+    std::tie(ln_out_tensor, ln_output) = q.create_tensor(size, otype);
   } else {
-    ln_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    if (ln_out.is_none()) {
+      std::tie(ln_out_tensor, ln_out) = my_quantizer->create_tensor(size, otype);
+    } else {
+      ln_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    }
   }
   auto rsigma_cu = makeTransformerEngineTensor(rsigma);
 
@@ -210,6 +239,18 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                    rsigma_cu.data(), workspace.data(),
                    at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                    zero_centered_gamma, at::cuda::getCurrentCUDAStream());
+
+  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
+    TensorWrapper cast_out_tensor;
+    if (ln_out.is_none()) {
+      std::tie(cast_out_tensor, ln_out) = my_quantizer->create_tensor(size, otype);
+    } else {
+      cast_out_tensor = makeTransformerEngineTensor(ln_out, quantizer);
+    }
+
+    nvte_quantize_noop(ln_out_tensor.data(), cast_out_tensor.data(), nullptr,
+                       at::cuda::getCurrentCUDAStream());
+  }
 
   return {ln_out, py::none(), py::cast(rsigma)};
 }
