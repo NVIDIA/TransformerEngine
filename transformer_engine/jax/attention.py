@@ -149,6 +149,26 @@ class CPStrategy(Enum):
     RING = 2
 
 
+class ReorderStrategy(Enum):
+    """
+    Defines the tokens re-order strategy for context parallel load balancing for causal mask.
+
+    - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    mulitple of 2 * cp_size.
+      Examples: 8 GPUs, GPU0 swaps with GPU7; GPU1 swaps with GPU6; GPU2 swaps with GPU5 ...
+
+    - Striped: This strategy distributes the tokens in a striped (interleaved) manner across
+      the sequence. This is currently used for THD load balance.
+      Example: Consider 4 GPUs with seqlens=16.
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+      - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
+    """
+
+    DualChunkSwap = 0
+    Striped = 1
+
+
 def make_swa_mask(
     segment_pos_q: jnp.ndarray,
     segment_pos_kv: jnp.ndarray,
@@ -276,19 +296,29 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
     """Reorders a tensor for load balancing the compute of causal attention."""
-    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
-    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
+    if strategy == ReorderStrategy.DualChunkSwap:
+        return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
+    elif strategy == ReorderStrategy.Striped:
+        return _reorder_causal_striped(tensor, cp_size, seq_dim)
+    else:
+        raise ValueError(f"Unsupported {strategy=}")
 
 
-def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+def inverse_reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+):
     """Inverse operation of `reorder_causal_load_balancing`."""
-    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
-    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
+    if strategy == ReorderStrategy.DualChunkSwap:
+        return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
+    elif strategy == ReorderStrategy.Striped:
+        return _inverse_reorder_causal_striped(tensor, cp_size, seq_dim)
+    else:
+        raise ValueError(f"Unsupported {strategy=}")
 
 
-def reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
+def _reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
     origin_shape = tensor.shape
     if origin_shape[seq_dim] % cp_size != 0:
         raise ValueError(
@@ -307,7 +337,7 @@ def reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
     return reordered_chunked_tensor.reshape(origin_shape)
 
 
-def inverse_reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
+def _inverse_reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
     origin_shape = tensor.shape
     if origin_shape[seq_dim] % cp_size != 0:
         raise ValueError(

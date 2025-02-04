@@ -28,14 +28,14 @@ from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
     QKVLayout,
-    reorder_causal_striped,
-    inverse_reorder_causal_striped,
+    QKVFormat,
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
+    ReorderStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
 from transformer_engine.transformer_engine_jax import (
@@ -541,27 +541,23 @@ class FusedAttnRunner:
 
         if self.cp_size > 1 and self.cp_load_balanced:
             if self.qkv_layout.is_thd():
-                self.cp_reorder_fn = partial(
-                    reorder_causal_striped,
-                    cp_size=self.cp_size,
-                    seq_dim=1,
-                )
-                self.cp_inverse_reorder_fn = partial(
-                    inverse_reorder_causal_striped,
-                    cp_size=self.cp_size,
-                    seq_dim=1,
-                )
+                reorder_strategy = ReorderStrategy.Striped
             else:
-                self.cp_reorder_fn = partial(
-                    reorder_causal_load_balancing,
-                    cp_size=self.cp_size,
-                    tensor_format=self.qkv_layout.get_qkv_format(),
-                )
-                self.cp_inverse_reorder_fn = partial(
-                    inverse_reorder_causal_load_balancing,
-                    cp_size=self.cp_size,
-                    tensor_format=self.qkv_layout.get_qkv_format(),
-                )
+                reorder_strategy = ReorderStrategy.DualChunkSwap
+
+            seq_dim = 0 if self.qkv_layout.get_qkv_format() == QKVFormat.SBHD else 1
+            self.cp_reorder_fn = partial(
+                reorder_causal_load_balancing,
+                strategy=reorder_strategy,
+                cp_size=self.cp_size,
+                seq_dim=seq_dim,
+            )
+            self.cp_inverse_reorder_fn = partial(
+                inverse_reorder_causal_load_balancing,
+                strategy=reorder_strategy,
+                cp_size=self.cp_size,
+                seq_dim=seq_dim,
+            )
         else:
             # no-ops for non cp or non load balanced
             self.cp_reorder_fn = lambda x: x

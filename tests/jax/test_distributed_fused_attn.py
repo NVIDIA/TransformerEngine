@@ -23,6 +23,7 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     CPStrategy,
+    ReorderStrategy,
 )
 
 
@@ -408,17 +409,26 @@ class TestReorderCausalLoadBalancing:
         ],
     )
     @pytest.mark.parametrize("qkv_format", [QKVFormat.BSHD, QKVFormat.SBHD])
-    def test(self, cp_size, shape, qkv_format):
+    @pytest.mark.parametrize(
+        "reorder_strategy",
+        [
+            pytest.param(ReorderStrategy.DualChunkSwap, id="DualChunkSwap"),
+            pytest.param(ReorderStrategy.Striped, id="Striped"),
+        ],
+    )
+    def test(self, cp_size, shape, qkv_format, reorder_strategy):
         tensor = random.normal(random.PRNGKey(1124), shape, dtype=jnp.bfloat16)
+        seq_dim = 1
         if qkv_format == QKVFormat.SBHD:
             tensor = tensor.swapaxes(0, 1)
+            seq_dim = 0
 
         ref = tensor.copy()
 
-        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2])
-        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2])
+        reorder = jax.jit(reorder_causal_load_balancing, static_argnums=[1, 2, 3])
+        inverse = jax.jit(inverse_reorder_causal_load_balancing, static_argnums=[1, 2, 3])
 
-        reordered = reorder(tensor, cp_size, qkv_format)
-        inversed = inverse(reordered, cp_size, qkv_format)
+        reordered = reorder(tensor, reorder_strategy, cp_size, seq_dim)
+        inversed = inverse(reordered, reorder_strategy, cp_size, seq_dim)
 
         assert jnp.array_equal(inversed, ref)

@@ -1109,7 +1109,7 @@ def reorder_causal_load_balancing(tensor, cp_size: int, seq_dim: int, to_contigu
 
     # Need to ensure we have 2 pairs to swap for balancing between cp ranks
     if tensor.shape[seq_dim] % (cp_size * 2) != 0:
-        raise ValueError(f"{tensor.shape=} is not a multiple of {cp_size*2=}")
+        raise ValueError(f"{tensor.shape[seq_dim]=} is not a multiple of {cp_size*2=}")
 
     # [B, S, H, D] -> [B, 2*cp_size, S/2*cp_size, D]
     # [S, B, H, D] -> [2*cp_size, S/2*cp_size, B, H, D]
