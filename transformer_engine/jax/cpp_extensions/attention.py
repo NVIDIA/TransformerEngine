@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 from functools import partial, reduce
 import operator
 import os
-import copy
 from typing import Optional, Tuple
 import warnings
 
@@ -2227,9 +2226,8 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     subblock_config,
                 )
 
-                # TODO(rewang): THD softmax_aux is acutally [B, S, H]
-                batch, tmp_h, tmp_s = softmax_aux_per_step.shape[:3]
-                softmax_aux_per_step = softmax_aux_per_step.reshape((batch, tmp_s, tmp_h, 1))
+                # TODO(rewang): THD softmax_aux layout is acutally [B, S, H]
+                softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
                 def skip_correction(_output, _softmax_aux, output_per_step, softmax_aux_per_step):
                     # No correction done here but we cast outputs to float32 and perform reduction
@@ -2237,9 +2235,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     return output_per_step.astype(jnp.float32), softmax_aux_per_step
 
                 def correction(output, softmax_aux, output_per_step, softmax_aux_per_step):
-                    # return helper.correct_output_and_softmax_aux(
-                    #     output, softmax_aux, output_per_step, softmax_aux_per_step
-                    # )
                     new_out = output - jax.nn.sigmoid(softmax_aux_per_step - softmax_aux) * (
                         output - output_per_step
                     )
@@ -2267,8 +2262,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     carry = scan_kv_block(i, carry)
             (_, _, _, output, softmax_aux) = carry
 
-            batch, tmp_h, tmp_s = softmax_aux.shape[:3]
-            softmax_aux = softmax_aux.reshape((batch, tmp_s, tmp_h, 1))
+            softmax_aux = softmax_aux.reshape((batch, head, q_max_seqlen, 1))
 
             return output.astype(q.dtype), softmax_aux, rng_state
 
