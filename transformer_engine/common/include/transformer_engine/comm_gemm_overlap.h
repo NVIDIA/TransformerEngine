@@ -9,6 +9,12 @@
 
 #include <cuda.h>
 #include <cuda_fp8.h>
+
+#ifdef NVTE_WITH_CUBLASMP
+#include <cal.h>
+#include <cublasmp.h>
+#endif
+
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
