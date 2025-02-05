@@ -23,6 +23,7 @@ from ...fp8 import FP8GlobalStateManager
 from ...module.base import _2X_ACC_FPROP, _2X_ACC_DGRAD, _2X_ACC_WGRAD
 from ...tensor import Quantizer, QuantizedTensor
 from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...tensor._internal.float8_tensor_base import Float8TensorBase
 from ..op import BasicOperation, OperationContext
 from .._common import (
@@ -477,6 +478,11 @@ class BasicLinear(BasicOperation):
                 raise ValueError("Output tensor is quantized, but quantizer was not provided")
         else:
             output_quantizer = None
+        if isinstance(output_quantizer, MXFP8Quantizer):
+            raise RuntimeError(
+                "Attempting to generate MXFP8 output tensor, "
+                "but GEMM with MXFP8 output is not supported"
+            )
         if output_quantizer is not None:
             output_quantizer.set_usage(rowwise=True, columnwise=False)
 
@@ -741,6 +747,11 @@ class BasicLinear(BasicOperation):
                     )
             else:
                 grad_input_quantizer = None
+            if isinstance(grad_input_quantizer, MXFP8Quantizer):
+                raise RuntimeError(
+                    "Attempting to generate MXFP8 grad input tensor, "
+                    "but GEMM with MXFP8 output is not supported"
+                )
 
             # Check if accumulating into grad input tensor
             if accumulate_into_grad_input:
