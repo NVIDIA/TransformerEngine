@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+#include <array>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -384,7 +385,7 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
 inline float identity(const float x) { return x; }
@@ -425,6 +426,8 @@ void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
                                   const size_t N);
 
+std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
+                                            const size_t block_size_rows, const size_t block_size_cols);
 
 std::pair<double, double> getTolerances(const DType type);
 

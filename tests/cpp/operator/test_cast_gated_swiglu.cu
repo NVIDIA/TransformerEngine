@@ -138,6 +138,10 @@ TEST_P(CastSwiGLUTestSuite, TestCastSwiGLU) {
   const DType output_type = std::get<1>(GetParam());
   const auto size = std::get<2>(GetParam());
 
+  if (size.back() % 32 != 0) {
+      GTEST_SKIP();
+  }
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(
       input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(

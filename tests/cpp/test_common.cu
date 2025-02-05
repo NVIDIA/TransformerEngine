@@ -768,4 +768,25 @@ size_t last_dimension(const std::vector<size_t> &shape) {
   return shape[shape.size() - 1];
 }
 
+std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
+                                            const size_t cols,
+                                            const size_t block_size_rows,
+                                            const size_t block_size_cols) {
+    const bool is_rowwise = (block_size_rows == 1) && (block_size_cols == 32);
+
+    const size_t alignment_Y = is_rowwise
+                               ? scale_tensor_alignment_Y_rowwise
+                               : scale_tensor_alignment_Y_colwise;
+    const size_t alignment_X = is_rowwise
+                               ? scale_tensor_alignment_X_rowwise
+                               : scale_tensor_alignment_X_colwise;
+
+    const size_t unpadded_blocks_Y = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X = divide_round_up(cols, block_size_cols);
+
+    const size_t blocks_Y = round_up_to_nearest_multiple(unpadded_blocks_Y, alignment_Y);
+    const size_t blocks_X = round_up_to_nearest_multiple(unpadded_blocks_X, alignment_X);
+    return {unpadded_blocks_Y, unpadded_blocks_X, blocks_Y, blocks_X};
+}
+
 }  // namespace test
