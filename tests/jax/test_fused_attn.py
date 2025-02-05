@@ -349,9 +349,9 @@ class FusedAttnRunner:
         self.backend = FusedAttnHelper(
             self.dtype,
             self.dtype,
-            self.qkv_layout.value,
-            self.attn_bias_type.value,
-            self.attn_mask_type.value,
+            self.qkv_layout,
+            self.attn_bias_type,
+            self.attn_mask_type,
             self.dropout_prob,
             self.num_heads_q,
             self.num_heads_kv,
