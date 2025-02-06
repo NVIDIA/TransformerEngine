@@ -1060,7 +1060,7 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
 }
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
-void CastVectorizedUnaryGradKernelLauncher(const Tensor *grad, const Tensor &input, Tensor *output,
+void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input.data.shape);
@@ -1072,8 +1072,8 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor *grad, const Tensor &inp
               is_delayed_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
             VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
-                reinterpret_cast<const IType *>(grad->data.dptr),
-                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<const IType *>(grad.data.dptr),
+                reinterpret_cast<const IType *>(input->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 reinterpret_cast<fp32 *>(output->amax.dptr),
@@ -1124,7 +1124,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                                                       stream);
         } else {
           // Unaligned
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(act_input, input, output, stream);
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
         }
       } else {
         cast_fp8_2D<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,
