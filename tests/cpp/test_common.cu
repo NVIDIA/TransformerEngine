@@ -739,13 +739,13 @@ template void fillCase<fp8e4m3>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
 
-void setRandomScale(Tensor *t, const std::string& tensor_name) {
+void setRandomScale(Tensor *t) {
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   const float scale = dis(t->gen());
   t->set_scale(scale);
 }
 
-void setRandomScaleInv(Tensor *t, const std::string& tensor_name) {
+void setRandomScaleInv(Tensor *t) {
   std::uniform_real_distribution<> dis(-2.0, 1.0);
   const float scale_inv = dis(t->gen());
   t->set_scale_inv(scale_inv);
