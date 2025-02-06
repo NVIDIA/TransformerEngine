@@ -39,7 +39,7 @@ enum ActivationType {
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void scale_block(const ProcessingMethod processing_method,
                  const InputType* input,
-                 const InputType* act_input,
+                 const InputType* grad,
                  OutputType* output_c,
                  float* dbias,
                  fp8e8m0* output_scales,
@@ -62,7 +62,7 @@ void scale_block(const ProcessingMethod processing_method,
             }
             if (processing_method == ProcessingMethod::CAST_DACT ||
                 processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(act_input[idx]);
+                elt *= static_cast<float>(grad[idx]);
             }
             dbias[j] += elt;
             if (isinf(elt) || isnan(elt)) {
@@ -87,7 +87,7 @@ void scale_block(const ProcessingMethod processing_method,
             }
             if (processing_method == ProcessingMethod::CAST_DACT ||
                 processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(act_input[idx]);
+                elt *= static_cast<float>(grad[idx]);
             }
             output_c[idx] = static_cast<OutputType>(elt * scale_reciprocal);
         }
@@ -97,7 +97,7 @@ void scale_block(const ProcessingMethod processing_method,
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void compute_ref_x1(const ProcessingMethod processing_method,
                     const InputType* input,
-                    const InputType* act_input,
+                    const InputType* grad,
                     OutputType* output_c,
                     fp8e8m0* output_scales,
                     InputType* output_dbias,
@@ -120,7 +120,7 @@ void compute_ref_x1(const ProcessingMethod processing_method,
             const size_t j_max = std::min((jj + 1) * block_size_X, cols);
             const size_t scale_idx = ii * scales_stride + jj;
             scale_block<InputType, OutputType, OP>(
-                processing_method, input, act_input, output_c, output_dbias_fp32.data(),
+                processing_method, input, grad, output_c, output_dbias_fp32.data(),
                 output_scales, scale_idx, i_min, i_max, j_min, j_max, cols);
         }
     }
@@ -132,7 +132,7 @@ void compute_ref_x1(const ProcessingMethod processing_method,
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void compute_ref_x2(const ProcessingMethod processing_method,
                     const InputType* input,
-                    const InputType* act_input,
+                    const InputType* grad,
                     OutputType* output_rowwise,
                     OutputType* output_colwise,
                     fp8e8m0* scales_rowwise,
@@ -145,10 +145,10 @@ void compute_ref_x2(const ProcessingMethod processing_method,
                     const size_t scales_stride_rowwise,
                     const size_t scales_stride_colwise) {
     compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, act_input, output_rowwise, scales_rowwise, output_dbias,
+        processing_method, input, grad, output_rowwise, scales_rowwise, output_dbias,
         rows, cols, 1, block_size_X, scales_stride_rowwise);
     compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, act_input, output_colwise, scales_colwise, output_dbias,
+        processing_method, input, grad, output_colwise, scales_colwise, output_dbias,
         rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
@@ -191,7 +191,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t scales_stride = blocks_X;
 
     Tensor input("input", shape, itype);
-    Tensor act_input("act_input", shape, itype);
+    Tensor grad("grad", shape, itype);
     Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias("output_dbias", { cols }, itype);
 
@@ -200,7 +200,7 @@ void performTest_x1(const ProcessingMethod processing_method,
     std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
 
     fillCase<EncodingType>(&input, fill_case);
-    fillUniform(&act_input);
+    fillUniform(&grad);
 
     Tensor workspace;
     switch (processing_method) {
@@ -209,14 +209,14 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output_c.data(),
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output_c.data(),
                                 output_dbias.data(),
                                 workspace.data(),
@@ -224,16 +224,16 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output_c.data(),
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output_c.data(),
                                       output_dbias.data(),
                                       workspace.data(),
@@ -241,7 +241,7 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output_c.data(), 0);
+            nvte_dgelu(grad.data(), input.data(), output_c.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
@@ -256,7 +256,7 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     compute_ref_x1<InputType, OutputType, OP>(processing_method,
                                               input.rowwise_cpu_dptr<InputType>(),
-                                              act_input.rowwise_cpu_dptr<InputType>(),
+                                              grad.rowwise_cpu_dptr<InputType>(),
                                               ref_output_c.get(),
                                               ref_output_scales.get(),
                                               ref_output_dbias.get(),
@@ -329,7 +329,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t scales_stride_colwise = blocks_X_colwise;
 
     Tensor input("input", shape, itype);
-    Tensor act_input("act_input", shape, itype);
+    Tensor grad("grad", shape, itype);
     Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
     Tensor output_dbias("output_dbias", { cols }, itype);
 
@@ -340,7 +340,7 @@ void performTest_x2(const ProcessingMethod processing_method,
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
 
     fillCase<EncodingType>(&input, fill_case);
-    fillUniform(&act_input);
+    fillUniform(&grad);
 
     Tensor workspace;
     switch (processing_method) {
@@ -349,14 +349,14 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output.data(),
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output.data(),
                                 output_dbias.data(),
                                 workspace.data(),
@@ -364,16 +364,16 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output.data(),
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
             workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output.data(),
                                       output_dbias.data(),
                                       workspace.data(),
@@ -381,7 +381,7 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output.data(), 0);
+            nvte_dgelu(grad.data(), input.data(), output.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
@@ -396,7 +396,7 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     compute_ref_x2<InputType, OutputType, OP>(processing_method,
                                               input.rowwise_cpu_dptr<InputType>(),
-                                              act_input.rowwise_cpu_dptr<InputType>(),
+                                              grad.rowwise_cpu_dptr<InputType>(),
                                               ref_output_c_rowwise.get(),
                                               ref_output_c_colwise.get(),
                                               ref_scales_rowwise.get(),
