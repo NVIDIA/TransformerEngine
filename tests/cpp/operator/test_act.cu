@@ -49,7 +49,8 @@ void compute_ref_dact_cast(const IT *input_h,
                            const IT *grad_h,
                            OT *output_h,
                            const size_t N,
-                           const size_t H) {
+                           const size_t H,
+                           float scale = 1.f) {
   using CT = float;
   #pragma omp parallel for schedule(static) proc_bind(spread)
   for (size_t i = 0; i < N; i++) {
@@ -57,7 +58,7 @@ void compute_ref_dact_cast(const IT *input_h,
       CT elt = static_cast<CT>(input_h[i * H + j]);
       elt = dact(elt);
       CT grad = static_cast<CT>(grad_h[i * H + j]);
-      output_h[i * H + j] = static_cast<OT>(grad * elt);
+      output_h[i * H + j] = static_cast<OT>(grad * elt * scale);
     }
   }
 }
@@ -192,7 +193,6 @@ std::vector<size_t> getDBiasWorkspaceShape(size_t batch_size, size_t hidden_size
 
   auto work_shape = std::vector<size_t>(dummy_workspace.shape().data, dummy_workspace.shape().data + dummy_workspace.shape().ndim);
   return work_shape;
-  // return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
 }
 
 template <float (*ref_dact)(const float),
@@ -206,10 +206,6 @@ void performTestDActZeroGradInput(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  // const NVTETensor input, const NVTETensor activation_input,
-  //  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
-  //  cudaStream_t stream
-
   Tensor input({ N, H }, itype);
   Tensor igrad({ N, H }, otype);
   Tensor ograd({ N, H }, itype);
@@ -218,26 +214,24 @@ void performTestDActZeroGradInput(const size_t N, const size_t H) {
   Tensor workspace(workspace_shape, DType::kFloat32);
 
   fillUniform(&input);
-  // fillUniform(&ograd);
-  igrad.set_scale(1.f);
   fillCase<IType>(&ograd, zeros);
+  setRandomScale(&igrad);
+  float iGradScale = igrad.scale();
 
   std::unique_ptr<OType[]> ref_igrad = std::make_unique<OType[]>(N*H);
 
   nvte_dact(ograd.data(), input.data(), igrad.data(), dbias.data(), workspace.data(), 0);
 
   compute_ref_dact_cast<ref_dact>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
-                                  ref_igrad.get(), N, H);
+                                  ref_igrad.get(), N, H, iGradScale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   {
-    auto [atol, rtol] = getTolerances(otype);
-    compareResults("igrad_act", igrad, ref_igrad.get(), atol, rtol);
-
-    // TODO compare amax, scale_inv
+    auto [atol, rtol] = getTolerances(DType::kFloat32);
+    compareResults("scale_inv", *igrad.rowwise_cpu_scale_inv_ptr<fp32>(), 1.f / iGradScale, atol, rtol);
   }
 }
 
@@ -252,10 +246,6 @@ void performTestDAct(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  // const NVTETensor input, const NVTETensor activation_input,
-  //  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
-  //  cudaStream_t stream
-
   Tensor input({ N, H }, itype);
   Tensor igrad({ N, H }, otype);
   Tensor ograd({ N, H }, itype);
@@ -265,14 +255,15 @@ void performTestDAct(const size_t N, const size_t H) {
 
   fillUniform(&input);
   fillUniform(&ograd);
-  igrad.set_scale(1.f);
+  setRandomScale(&igrad);
+  float iGradScale = igrad.scale();
 
   std::unique_ptr<OType[]> ref_igrad = std::make_unique<OType[]>(N*H);
 
   nvte_dact(ograd.data(), input.data(), igrad.data(), dbias.data(), workspace.data(), 0);
 
   compute_ref_dact_cast<ref_dact>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
-                                  ref_igrad.get(), N, H);
+                                  ref_igrad.get(), N, H, iGradScale);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
@@ -281,8 +272,10 @@ void performTestDAct(const size_t N, const size_t H) {
   {
     auto [atol, rtol] = getTolerances(otype);
     compareResults("igrad_act", igrad, ref_igrad.get(), atol, rtol);
-
-    // TODO compare amax, scale_inv
+  }
+  {
+    auto [atol, rtol] = getTolerances(DType::kFloat32);
+    compareResults("scale_inv", *igrad.rowwise_cpu_scale_inv_ptr<fp32>(), 1.f / iGradScale, atol, rtol);
   }
 }
 
