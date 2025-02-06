@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include <transformer_engine/activation.h>
+#include <transformer_engine/cast.h>
 #include "../test_common.h"
 
 using namespace transformer_engine;
@@ -157,6 +158,131 @@ void performTest(const size_t N, const size_t H) {
   {
     auto [atol, rtol] = getTolerances(otype);
     compareResults("igrad_act", igrad, ref_igrad.get(), atol, rtol);
+  }
+}
+
+std::vector<size_t> getDBiasWorkspaceShape(size_t batch_size, size_t hidden_size, DType in_dtype, DType out_dtype) {
+  auto input_shape = std::vector<size_t>{batch_size, hidden_size};
+  auto dact_input_shape = std::vector<size_t>{batch_size, hidden_size};
+  auto output_shape = std::vector<size_t>{batch_size, hidden_size};
+  auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
+  auto dbias_shape = std::vector<size_t>{hidden_size};
+
+  // Evil hack to specify TE impl
+  // Note: nvte_quantize_dbias_dgelu chooses its internal impl based
+  // on what pointers are allocated, e.g. whether to output with
+  // column-wise data. However, we don't have access to any allocated
+  // buffers in this function. We pass a dummy pointer as a
+  // workaround.
+  int temp = 0;
+
+  auto input_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), input_shape, in_dtype);
+  auto dact_input_tensor =
+      TensorWrapper(reinterpret_cast<void *>(&temp), dact_input_shape, in_dtype);
+  auto output_tensor = TensorWrapper();
+  output_tensor.set_rowwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_shape);
+  output_tensor.set_columnwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_trans_shape);
+  auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
+
+  TensorWrapper dummy_workspace;
+
+  // For now, all dbias_dact(-s) have the same workspace size
+  nvte_quantize_dbias_dgelu(input_tensor.data(), dact_input_tensor.data(), output_tensor.data(),
+                            dbias_tensor.data(), dummy_workspace.data(), nullptr);
+
+  auto work_shape = std::vector<size_t>(dummy_workspace.shape().data, dummy_workspace.shape().data + dummy_workspace.shape().ndim);
+  return work_shape;
+  // return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
+}
+
+template <float (*ref_dact)(const float),
+          void (*nvte_dact)(const NVTETensor, const NVTETensor,
+                               NVTETensor, NVTETensor, NVTETensor,
+                               cudaStream_t),
+         typename IType, typename OType>
+void performTestDActZeroGradInput(const size_t N, const size_t H) {
+  using namespace test;
+
+  DType itype = TypeInfo<IType>::dtype;
+  DType otype = TypeInfo<OType>::dtype;
+
+  // const NVTETensor input, const NVTETensor activation_input,
+  //  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+  //  cudaStream_t stream
+
+  Tensor input({ N, H }, itype);
+  Tensor igrad({ N, H }, otype);
+  Tensor ograd({ N, H }, itype);
+  Tensor dbias({ H }, itype);
+  auto workspace_shape = getDBiasWorkspaceShape(N, H, itype, otype);
+  Tensor workspace(workspace_shape, DType::kFloat32);
+
+  fillUniform(&input);
+  // fillUniform(&ograd);
+  igrad.set_scale(1.f);
+  fillCase<IType>(&ograd, zeros);
+
+  std::unique_ptr<OType[]> ref_igrad = std::make_unique<OType[]>(N*H);
+
+  nvte_dact(ograd.data(), input.data(), igrad.data(), dbias.data(), workspace.data(), 0);
+
+  compute_ref_dact_cast<ref_dact>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
+                                  ref_igrad.get(), N, H);
+
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  {
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("igrad_act", igrad, ref_igrad.get(), atol, rtol);
+
+    // TODO compare amax, scale_inv
+  }
+}
+
+template <float (*ref_dact)(const float),
+          void (*nvte_dact)(const NVTETensor, const NVTETensor,
+                               NVTETensor, NVTETensor, NVTETensor,
+                               cudaStream_t),
+         typename IType, typename OType>
+void performTestDAct(const size_t N, const size_t H) {
+  using namespace test;
+
+  DType itype = TypeInfo<IType>::dtype;
+  DType otype = TypeInfo<OType>::dtype;
+
+  // const NVTETensor input, const NVTETensor activation_input,
+  //  NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+  //  cudaStream_t stream
+
+  Tensor input({ N, H }, itype);
+  Tensor igrad({ N, H }, otype);
+  Tensor ograd({ N, H }, itype);
+  Tensor dbias({ H }, itype);
+  auto workspace_shape = getDBiasWorkspaceShape(N, H, itype, otype);
+  Tensor workspace(workspace_shape, DType::kFloat32);
+
+  fillUniform(&input);
+  fillUniform(&ograd);
+  igrad.set_scale(1.f);
+
+  std::unique_ptr<OType[]> ref_igrad = std::make_unique<OType[]>(N*H);
+
+  nvte_dact(ograd.data(), input.data(), igrad.data(), dbias.data(), workspace.data(), 0);
+
+  compute_ref_dact_cast<ref_dact>(input.rowwise_cpu_dptr<IType>(), ograd.rowwise_cpu_dptr<IType>(),
+                                  ref_igrad.get(), N, H);
+
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  {
+    auto [atol, rtol] = getTolerances(otype);
+    compareResults("igrad_act", igrad, ref_igrad.get(), atol, rtol);
+
+    // TODO compare amax, scale_inv
   }
 }
 
@@ -384,6 +510,45 @@ TEST_P(ActTestSuite, TestSReGLU) {
                          OutputType>(size.first, size.second);););
 }
 
+class DActZeroGradTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
+                                                                transformer_engine::DType,
+                                                                std::pair<size_t, size_t>>> {};
+
+TEST_P(DActZeroGradTestSuite, TestDGELUDBias) {
+    using namespace transformer_engine;
+    using namespace test;
+
+    const DType input_type = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+    const auto size = std::get<2>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+        performTestDActZeroGradInput<dgelu, nvte_quantize_dbias_dgelu, InputType, OutputType>(size.first, size.second);
+      );
+    );
+}
+
+class DActTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
+                                                                transformer_engine::DType,
+                                                                std::pair<size_t, size_t>>> {};
+
+TEST_P(DActTestSuite, TestDGELUDBias) {
+    using namespace transformer_engine;
+    using namespace test;
+
+    const DType input_type = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+    const auto size = std::get<2>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+        performTestDAct<dgelu, nvte_quantize_dbias_dgelu, InputType, OutputType>(size.first, size.second);
+      );
+    );
+}
+
+
 namespace {
 
 std::vector<std::pair<size_t, size_t>> act_test_cases = {{2048, 12288},
@@ -404,6 +569,36 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(test::all_fp_types),
         ::testing::ValuesIn(act_test_cases)),
     [](const testing::TestParamInfo<ActTestSuite::ParamType>& info) {
+      std::string name = test::typeName(std::get<0>(info.param)) + "X" +
+                         test::typeName(std::get<1>(info.param)) + "X" +
+                         std::to_string(std::get<2>(info.param).first) + "X" +
+                         std::to_string(std::get<2>(info.param).second);
+      return name;
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    DActZeroGradTestSuite,
+    ::testing::Combine(
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
+        ::testing::Values(std::make_pair<size_t, size_t>(128, 128))),
+    [](const testing::TestParamInfo<DActZeroGradTestSuite::ParamType>& info) {
+      std::string name = test::typeName(std::get<0>(info.param)) + "X" +
+                         test::typeName(std::get<1>(info.param)) + "X" +
+                         std::to_string(std::get<2>(info.param).first) + "X" +
+                         std::to_string(std::get<2>(info.param).second);
+      return name;
+    });
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    DActTestSuite,
+    ::testing::Combine(
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E5M2, DType::kFloat8E4M3),
+        ::testing::Values(std::make_pair<size_t, size_t>(128, 128))),
+    [](const testing::TestParamInfo<DActTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
                          test::typeName(std::get<1>(info.param)) + "X" +
                          std::to_string(std::get<2>(info.param).first) + "X" +

@@ -731,6 +731,11 @@ void fillCase(Tensor *t, const InputsFillCase fill_case) {
 template void fillCase<fp8e4m3>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<bf16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<fp16>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int64_t>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<int32_t>(Tensor *t, const InputsFillCase fill_case);
+template void fillCase<uint8_t>(Tensor *t, const InputsFillCase fill_case);
 
 void setRandomScale(Tensor *t) {
   static std::mt19937 gen(12345);

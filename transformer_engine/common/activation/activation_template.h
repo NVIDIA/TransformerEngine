@@ -46,7 +46,7 @@ void dact_fn(const NVTETensor grad, const NVTETensor input, NVTETensor output,
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, nullptr, output, dbias,
+  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(grad, input, nullptr, output, dbias,
                                                         workspace, stream);
 }
 

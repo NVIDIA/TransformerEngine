@@ -563,10 +563,10 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       const bool row_out_of_bounds = row >= rows;
       const bool out_of_bounds = col_out_of_bounds || row_out_of_bounds;
 
-      float elt = static_cast<float>(in_sh[buff][shmem_offset_y][shmem_offset_x]);
+      float elt = static_cast<float>(act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
       if constexpr (IS_DACT) {
         elt = OP(elt, {});
-        elt *= static_cast<float>(act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
+        elt *= static_cast<float>(in_sh[buff][shmem_offset_y][shmem_offset_x]);
       }
       if constexpr (IS_DBIAS) {
         if constexpr (IS_DACT) {
@@ -1122,7 +1122,8 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                                                       stream);
         } else {
           // Unaligned
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(act_input, input, output, stream);
+          NVTE_CHECK(act_input != nullptr, "Activation input must be provided for DAct.");
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(&input, *act_input, output, stream);
         }
       } else {
         cast_fp8_2D<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,

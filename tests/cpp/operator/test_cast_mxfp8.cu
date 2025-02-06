@@ -241,7 +241,7 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output_c.data(), 0);
+            nvte_dgelu(input.data(), act_input.data(), output_c.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
@@ -381,7 +381,7 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output.data(), 0);
+            nvte_dgelu(input.data(), act_input.data(), output.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
