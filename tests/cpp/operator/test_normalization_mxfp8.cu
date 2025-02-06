@@ -179,12 +179,12 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   DType wtype = TypeInfo<WeightType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input({ N, H }, itype);
-  Tensor z({ N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
-  Tensor gamma({ H }, wtype);
-  Tensor beta({ H }, wtype);
-  Tensor mu({ N }, DType::kFloat32);
-  Tensor rsigma({ N }, DType::kFloat32);
+  Tensor input("input", { N, H }, itype);
+  Tensor z("z", { N, H }, otype, true, is_training, NVTE_MXFP8_1D_SCALING);
+  Tensor gamma("gamma", { H }, wtype);
+  Tensor beta("beta", { H }, wtype);
+  Tensor mu("mu", { N }, DType::kFloat32);
+  Tensor rsigma("rsigma", { N }, DType::kFloat32);
   Tensor workspace;
 
 
@@ -199,7 +199,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        z.data(), mu.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma,
                        0);
-    workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma,
@@ -210,14 +210,14 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      prop.multiProcessorCount, zero_centered_gamma,
                      0);
 
-    workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+    workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
                      z.data(), rsigma.data(), workspace.data(),
                      prop.multiProcessorCount, zero_centered_gamma,
                      0);
   }
 
-  Tensor dequantized_output({ N, H }, DType::kFloat32, true, true);
+  Tensor dequantized_output("dequantized_output", { N, H }, DType::kFloat32, true, true);
 
   dequantize_2x<OutputType, fp8e8m0>(z, dequantized_output, is_training);
 

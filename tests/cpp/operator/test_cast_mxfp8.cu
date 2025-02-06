@@ -190,10 +190,10 @@ void performTest_x1(const ProcessingMethod processing_method,
     const size_t blocks_X = scale_dims[3];
     const size_t scales_stride = blocks_X;
 
-    Tensor input(shape, itype);
-    Tensor act_input(shape, itype);
-    Tensor output_c(shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias({ cols }, itype);
+    Tensor input("input", shape, itype);
+    Tensor act_input("act_input", shape, itype);
+    Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor output_dbias("output_dbias", { cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
@@ -214,7 +214,7 @@ void performTest_x1(const ProcessingMethod processing_method,
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
             nvte_quantize_dbias(input.data(),
                                 output_c.data(),
@@ -230,7 +230,7 @@ void performTest_x1(const ProcessingMethod processing_method,
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
             nvte_quantize_dbias_dgelu(input.data(),
                                       act_input.data(),
@@ -328,10 +328,10 @@ void performTest_x2(const ProcessingMethod processing_method,
     const size_t blocks_X_colwise = scale_dims_colwise[3];
     const size_t scales_stride_colwise = blocks_X_colwise;
 
-    Tensor input(shape, itype);
-    Tensor act_input(shape, itype);
-    Tensor output(shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias({ cols }, itype);
+    Tensor input("input", shape, itype);
+    Tensor act_input("act_input", shape, itype);
+    Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
+    Tensor output_dbias("output_dbias", { cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
@@ -354,7 +354,7 @@ void performTest_x2(const ProcessingMethod processing_method,
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
             nvte_quantize_dbias(input.data(),
                                 output.data(),
@@ -370,7 +370,7 @@ void performTest_x2(const ProcessingMethod processing_method,
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
             nvte_quantize_dbias_dgelu(input.data(),
                                       act_input.data(),

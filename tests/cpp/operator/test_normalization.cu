@@ -191,16 +191,16 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     return;
   }
 
-  Tensor input({ N, H }, itype);
-  Tensor z({ N, H }, otype);
-  Tensor gamma({ H }, wtype);
-  Tensor beta({ H }, wtype);
-  Tensor mu({ N }, DType::kFloat32);
-  Tensor rsigma({ N }, DType::kFloat32);
-  Tensor dz({ N, H }, wtype);
-  Tensor dx({ N, H }, itype);
-  Tensor dgamma({ H }, wtype);
-  Tensor dbeta({ H }, wtype);
+  Tensor input("input", { N, H }, itype);
+  Tensor z("z", { N, H }, otype);
+  Tensor gamma("gamma", { H }, wtype);
+  Tensor beta("beta", { H }, wtype);
+  Tensor mu("mu", { N }, DType::kFloat32);
+  Tensor rsigma("rsigma", { N }, DType::kFloat32);
+  Tensor dz("dz", { N, H }, wtype);
+  Tensor dx("dx", { N, H }, itype);
+  Tensor dgamma("dgamma", { H }, wtype);
+  Tensor dbeta("dbeta", { H }, wtype);
   Tensor workspace_fwd, workspace_bwd;
 
   fillUniform(&input);
@@ -230,7 +230,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
-    workspace_fwd = Tensor(workspace_fwd.rowwise_shape(), workspace_fwd.dtype());
+    workspace_fwd = Tensor("workspace", workspace_fwd.rowwise_shape(), workspace_fwd.dtype());
     nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
                        z.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
@@ -240,7 +240,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                        dx.data(), dgamma.data(), dbeta.data(),
                        workspace_bwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, 0);
-    workspace_bwd = Tensor(workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
+    workspace_bwd = Tensor("workspace", workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
     nvte_layernorm_bwd(dz.data(), input.data(),
                        mu.data(), rsigma.data(), gamma.data(),
                        dx.data(), dgamma.data(), dbeta.data(),
@@ -250,7 +250,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
                      z.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
-    workspace_fwd = Tensor(workspace_fwd.rowwise_shape(), workspace_fwd.dtype());
+    workspace_fwd = Tensor("workspace", workspace_fwd.rowwise_shape(), workspace_fwd.dtype());
     nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
                      z.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
@@ -259,7 +259,7 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
                      dx.data(), dgamma.data(),
                      workspace_bwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, 0);
-    workspace_bwd = Tensor(workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
+    workspace_bwd = Tensor("workspace", workspace_bwd.rowwise_shape(), workspace_bwd.dtype());
     nvte_rmsnorm_bwd(dz.data(), input.data(), rsigma.data(), gamma.data(),
                      dx.data(), dgamma.data(),
                      workspace_bwd.data(),

@@ -66,11 +66,11 @@ void performTest(const std::vector<size_t>& shape) {
   const size_t N = first_dimension(shape);
   const size_t H = last_dimension(shape);
 
-  Tensor input(shape, itype);
+  Tensor input("input", shape, itype);
 
-  Tensor output_c(shape, otype);
+  Tensor output_c("output_c", shape, otype);
   // dbias has the same data type with "output grad"
-  Tensor dbias({H}, itype);
+  Tensor dbias("dbias", {H}, itype);
 
   fillUniform(&input);
   setRandomScale(&output_c);
@@ -94,7 +94,7 @@ void performTest(const std::vector<size_t>& shape) {
                       workspace.data(),
                       0);
 
-  workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
   nvte_quantize_dbias(input.data(),
                       output_c.data(),

@@ -72,9 +72,9 @@ void performTest(const std::vector<size_t>& shape) {
   const size_t rows = first_dimension(shape);
   const size_t cols = last_dimension(shape);
 
-  Tensor grad(shape, itype);
-  Tensor input(input_shape, itype);
-  Tensor output_c(input_shape, otype);
+  Tensor grad("grad", shape, itype);
+  Tensor input("input", input_shape, itype);
+  Tensor output_c("output_c", input_shape, otype);
 
   fillUniform(&grad);
   fillUniform(&input);

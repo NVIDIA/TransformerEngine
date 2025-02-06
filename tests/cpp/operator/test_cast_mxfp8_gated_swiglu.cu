@@ -204,8 +204,8 @@ void performTest_x1(const size_t rows,
     // std::cout << "blocks_X: " << blocks_X << std::endl;
     // std::cout << "scales_stride: " << scales_stride << std::endl;
 
-    Tensor grad({ rows, cols }, itype);
-    Tensor input({ rows, cols * 2 }, itype);
+    Tensor grad("grad", { rows, cols }, itype);
+    Tensor input("input", { rows, cols * 2 }, itype);
 
     const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
@@ -218,7 +218,8 @@ void performTest_x1(const size_t rows,
     const size_t blocks_X = scale_dims[3];
     const size_t scales_stride = blocks_X;
 
-    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor output("output", std::vector<size_t>{ rows, output_cols }, otype,
+                  rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
     std::unique_ptr<OType[]> ref_output = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
@@ -288,8 +289,8 @@ void performTest_x2(const size_t rows,
     DType itype = TypeInfo<IType>::dtype;
     DType otype = TypeInfo<OType>::dtype;
 
-    Tensor grad({ rows, cols }, itype);
-    Tensor input({ rows, cols * 2 }, itype);
+    Tensor grad("grad", { rows, cols }, itype);
+    Tensor input("input", { rows, cols * 2 }, itype);
 
     const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
@@ -308,7 +309,8 @@ void performTest_x2(const size_t rows,
     const size_t blocks_X_colwise = scale_dims_colwise[3];
     const size_t scales_stride_colwise = blocks_X_colwise;
 
-    Tensor output(std::vector<size_t>{ rows, output_cols }, otype, true, true, NVTE_MXFP8_1D_SCALING);
+    Tensor output("output", std::vector<size_t>{ rows, output_cols }, otype,
+                  true, true, NVTE_MXFP8_1D_SCALING);
 
     std::unique_ptr<OType[]> ref_output_rowwise = std::make_unique<OType[]>(rows * output_cols);
     std::unique_ptr<OType[]> ref_output_colwise = std::make_unique<OType[]>(rows * output_cols);
