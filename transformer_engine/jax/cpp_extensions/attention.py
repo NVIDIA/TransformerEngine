@@ -2172,6 +2172,9 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             q_segment_pos,
             kv_segment_pos,
         ):
+            if q_segment_ids.size == 0 or kv_segment_ids.size == 0:
+                raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
+
             _not_used = jnp.zeros(0, dtype=v.dtype)
 
             # Combine KV tensors if separate for better permute scheduling and performance.
@@ -2305,6 +2308,10 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             q_segment_pos,
             kv_segment_pos,
         ):
+
+            if q_segment_ids.size == 0 or kv_segment_ids.size == 0:
+                raise ValueError("THD + ring attn only supports passing seqment_ids/pos")
+
             _not_used = jnp.zeros(0, dtype=output.dtype)
 
             # Combine KV tensors if separate for better permute scheduling and performance.
