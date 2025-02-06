@@ -248,11 +248,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
 
             float elt = static_cast<float>(in.data.elt[j]);
-            if constexpr (IS_ACT || IS_DACT) {
+            if constexpr (IS_ACT) {
               elt = OP(elt, {});
             }
             if constexpr (IS_DACT) {
-              elt *= static_cast<float>(act_in.data.elt[j]);
+              float act_in_elt = static_cast<float>(act_in.data.elt[j]);
+              elt *= OP(act_in_elt, {});
             }
             if constexpr (IS_DBIAS && COMPUTE_DBIAS_IN_ROWWISE_SECTION) {
               if (!out_of_bounds) {
@@ -306,11 +307,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
 
           float elt = static_cast<float>(in_sh[buff][i][tid_colwise_X]);
-          if constexpr (IS_ACT || IS_DACT) {
+          if constexpr (IS_ACT) {
             elt = OP(elt, {});
           }
           if constexpr (IS_DACT) {
-            elt *= static_cast<float>(act_in_sh[buff][i][tid_colwise_X]);
+            float act_in_elt = static_cast<float>(act_in_sh[buff][i][tid_colwise_X]);
+            elt *= OP(act_in_elt, {});
           }
           if constexpr (IS_DBIAS) {
             if (!out_of_bounds) {
@@ -565,8 +567,8 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
 
       float elt = static_cast<float>(in_sh[buff][shmem_offset_y][shmem_offset_x]);
       if constexpr (IS_DACT) {
-        elt = OP(elt, {});
-        elt *= static_cast<float>(act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
+        float act_in_elt = static_cast<float>(act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
+        elt *= OP(act_in_elt, {});
       }
       if constexpr (IS_DBIAS) {
         if constexpr (IS_DACT) {
@@ -1153,7 +1155,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
   if (!IS_DACT) {
     CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
   } else {
-    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(act_input, input, output, stream);
+    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
   }
 }
 
@@ -1194,12 +1196,21 @@ namespace detail {
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-void quantize_helper(const NVTETensor input, const NVTETensor activation_input,
+void quantize_helper(const NVTETensor input, const NVTETensor grad,
                      const NVTETensor noop, NVTETensor output, NVTETensor dbias,
                      NVTETensor workspace, cudaStream_t stream) {
-  const auto &input_tensor = *(reinterpret_cast<const Tensor *>(input));
+  const Tensor *input_tensor;
+  const Tensor *activation_input_tensor;
+  if constexpr (IS_DBIAS || IS_DACT) {
+    // backward - input is incoming gradient
+    input_tensor = reinterpret_cast<const Tensor *>(grad);
+    activation_input_tensor = reinterpret_cast<const Tensor *>(input);
+  } else {
+    // forward = input is activation input
+    input_tensor = reinterpret_cast<const Tensor *>(input);
+    activation_input_tensor = nullptr;
+  }
   auto output_tensor = reinterpret_cast<Tensor *>(output);
-  const auto activation_tensor = reinterpret_cast<const Tensor *>(activation_input);
   auto dbias_tensor = reinterpret_cast<Tensor *>(dbias);
   auto workspace_tensor = reinterpret_cast<Tensor *>(workspace);
   const auto noop_tensor = noop != nullptr ? *(reinterpret_cast<const Tensor *>(noop)) : Tensor();
@@ -1210,22 +1221,22 @@ void quantize_helper(const NVTETensor input, const NVTETensor activation_input,
         NVTE_CHECK(output_tensor->has_data(),
                    "Quantizing in only the columnwise direction not supported yet!");
         if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
-          cast_transpose(input_tensor, noop_tensor, output_tensor, stream);
+          cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
         } else {
           cast_transpose_fused<IS_DBIAS, IS_DACT, IS_ACT, float, ParamOP, OP>(
-              input_tensor, activation_tensor, output_tensor, dbias_tensor, workspace_tensor,
+              *input_tensor, activation_input_tensor, output_tensor, dbias_tensor, workspace_tensor,
               stream);
         }
       } else if (output_tensor->has_data()) {
         fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-            input_tensor, activation_tensor, &noop_tensor, output_tensor, dbias_tensor,
+            *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
             workspace_tensor, stream);
       }
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
-          input_tensor, activation_tensor, &noop_tensor, output_tensor, dbias_tensor,
+          *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
       break;
     }

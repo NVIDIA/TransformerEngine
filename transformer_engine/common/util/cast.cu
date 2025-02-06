@@ -33,10 +33,10 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   constexpr bool IS_ACT = false;
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor activation_input = nullptr;
+  constexpr const NVTETensor grad = nullptr;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      input, grad, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -49,10 +49,10 @@ void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor no
   constexpr bool IS_ACT = false;
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor activation_input = nullptr;
+  constexpr const NVTETensor grad = nullptr;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-      input, activation_input, noop, output, dbias, workspace, stream);
+      input, grad, noop, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
@@ -66,7 +66,7 @@ void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor d
   constexpr const NVTETensor activation_input = nullptr;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, nullptr>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activation_input,
@@ -80,7 +80,7 @@ void nvte_quantize_dbias_dgelu(const NVTETensor input, const NVTETensor activati
   constexpr bool IS_ACT = false;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dgelu<fp32, fp32>>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activation_input,
@@ -94,7 +94,7 @@ void nvte_quantize_dbias_dsilu(const NVTETensor input, const NVTETensor activati
   constexpr bool IS_ACT = false;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dsilu<fp32, fp32>>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor activation_input,
@@ -108,7 +108,7 @@ void nvte_quantize_dbias_drelu(const NVTETensor input, const NVTETensor activati
   constexpr bool IS_ACT = false;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, drelu<fp32, fp32>>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor activation_input,
@@ -122,7 +122,7 @@ void nvte_quantize_dbias_dqgelu(const NVTETensor input, const NVTETensor activat
   constexpr bool IS_ACT = false;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dqgelu<fp32, fp32>>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activation_input,
@@ -136,7 +136,7 @@ void nvte_quantize_dbias_dsrelu(const NVTETensor input, const NVTETensor activat
   constexpr bool IS_ACT = false;
 
   detail::quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, dsrelu<fp32, fp32>>(
-      input, activation_input, nullptr, output, dbias, workspace, stream);
+      activation_input, input, nullptr, output, dbias, workspace, stream);
 }
 
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
