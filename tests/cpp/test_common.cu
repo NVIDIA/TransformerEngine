@@ -679,7 +679,7 @@ void fillUniform(Tensor *t) {
 }
 
 template<typename InputEncoding, InputsFillCase Case>
-void fillCase_special(Tensor *t, const std::string& tensor_name) {
+void fillCase_special(Tensor *t) {
   const size_t size = product(t->rowwise_shape());
   const size_t rows = t->rowwise_shape().data[0];
   const size_t cols = t->rowwise_shape().data[1];
