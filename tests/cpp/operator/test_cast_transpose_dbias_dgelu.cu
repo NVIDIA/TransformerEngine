@@ -76,7 +76,7 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input("input"{N, H}, itype);
+  Tensor input("input", {N, H}, itype);
   Tensor gelu_input("gelu_input", {N, H}, itype);
 
   Tensor output("output", {N, H}, otype, true, true);
