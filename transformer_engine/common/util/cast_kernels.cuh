@@ -1063,9 +1063,9 @@ template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
-  const size_t N = product(input.data.shape);
+  const size_t N = product(input->data.shape);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType,
+      input->data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
           if (!is_fp8_dtype(output->data.dtype) ||
