@@ -1593,7 +1593,11 @@ class _FusedAttnCPWithP2PHelper:
         """Checks if the context parallel implementation is supported by the given arguments."""
         header = "Context parallel fused ring attention"
 
-        allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+        if self.config.qkv_layout.is_thd():
+            allowed_layouts = [QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
+        else:
+            allowed_layouts = [QKVLayout.BSHD_BS2HD, QKVLayout.BSHD_BSHD_BSHD]
+
         if self.config.qkv_layout not in allowed_layouts:
             raise ValueError(
                 f"{header} only supports layouts:"
@@ -1603,14 +1607,17 @@ class _FusedAttnCPWithP2PHelper:
         if self.config.attn_bias_type != AttnBiasType.NO_BIAS:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
-        allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
+        if self.config.qkv_layout.is_thd():
+            allowed_masks = [AttnMaskType.PADDING_CAUSAL_MASK]
+        else:
+            allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
         if self.config.attn_mask_type not in allowed_masks:
             raise ValueError(
                 f"{header} only supports masking types: "
                 f" {','.join(map(str, allowed_masks))} got: {self.config.attn_mask_type}"
             )
 
-        if self.config.max_segments_per_seq != 1:
+        if not self.config.qkv_layout.is_thd() and self.config.max_segments_per_seq != 1:
             raise ValueError(
                 f"{header} only supports max_segments_per_seq == 1 got:"
                 f" {self.config.max_segments_per_seq}"
@@ -2138,7 +2145,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
             return FusedAttnFwdPrimitive.partition(config, mesh, arg_infos, result_infos)
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
-        # helper.check_supported()  # TODO(rewang)
+        helper.check_supported()
 
         out_sharding = result_infos[0].sharding
         softmax_aux_sharding = result_infos[1].sharding
@@ -2278,7 +2285,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
         out_shardings = tuple(arg.sharding for arg in arg_infos[:4])
 
         helper = _FusedAttnCPWithP2PHelper(mesh, config)
-        # helper.check_supported()  # TODO(rewang)
+        helper.check_supported()
 
         def bwd_impl(
             q,
