@@ -136,6 +136,9 @@ class QKVLayout(Enum):
         return self in [QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
 
     def to_qkvpacked(self):
+        """
+        Return the corresponding qkvpacked format, useful when adjusting q, k, v layout
+        """
         qkv_format = self.get_qkv_format()
         if qkv_format == QKVFormat.BSHD:
             return QKVLayout.BS3HD
@@ -144,6 +147,9 @@ class QKVLayout(Enum):
         raise ValueError(f"Unsupported {qkv_format=}")
 
     def to_kvpacked(self):
+        """
+        Return the corresponding kvpacked format, useful when adjusting q, k, v layout
+        """
         qkv_format = self.get_qkv_format()
         if qkv_format == QKVFormat.BSHD:
             return QKVLayout.BSHD_BS2HD
@@ -152,6 +158,9 @@ class QKVLayout(Enum):
         raise ValueError(f"Unsupported {qkv_format=}")
 
     def to_separate(self):
+        """
+        Return the corresponding separate format, useful when adjusting q, k, v layout
+        """
         qkv_format = self.get_qkv_format()
         if qkv_format == QKVFormat.BSHD:
             return QKVLayout.BSHD_BSHD_BSHD
@@ -324,10 +333,9 @@ def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: in
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
-    elif strategy == ReorderStrategy.Striped:
+    if strategy == ReorderStrategy.Striped:
         return _reorder_causal_striped(tensor, cp_size, seq_dim)
-    else:
-        raise ValueError(f"Unsupported {strategy=}")
+    raise ValueError(f"Unsupported {strategy=}")
 
 
 def inverse_reorder_causal_load_balancing(
@@ -336,10 +344,9 @@ def inverse_reorder_causal_load_balancing(
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
         return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
-    elif strategy == ReorderStrategy.Striped:
+    if strategy == ReorderStrategy.Striped:
         return _inverse_reorder_causal_striped(tensor, cp_size, seq_dim)
-    else:
-        raise ValueError(f"Unsupported {strategy=}")
+    raise ValueError(f"Unsupported {strategy=}")
 
 
 def _reorder_causal_striped(tensor, cp_size: int, seq_dim: int):

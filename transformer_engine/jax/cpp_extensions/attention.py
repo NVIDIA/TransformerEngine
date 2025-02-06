@@ -1205,7 +1205,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         if self.config.qkv_layout.is_kvpacked():
             return ag(k), v
-        elif self.config.qkv_layout.is_separate():
+        if self.config.qkv_layout.is_separate():
             return ag(k), ag(v)
 
         return k, v  # fall through
@@ -1229,7 +1229,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         if self.config.qkv_layout.is_kvpacked():
             return rs(dk), dv
-        elif self.config.qkv_layout.is_separate():
+        if self.config.qkv_layout.is_separate():
             return rs(dk), rs(dv)
 
         return dk, dv  # fall through
@@ -1269,7 +1269,7 @@ class _FusedAttnCPWithAllGatherHelper:
 
         if self.config.qkv_layout.is_kvpacked():
             return sliced(k), v
-        elif self.config.qkv_layout.is_separate():
+        if self.config.qkv_layout.is_separate():
             return sliced(k), sliced(v)
 
         return k, v  # fall through
@@ -1283,7 +1283,7 @@ class _FusedAttnCPWithAllGatherHelper:
         if self.config.qkv_layout.is_kvpacked():
             npad = [[0, 0], [0, pad_seq_len], [0, 0], [0, 0], [0, 0]]
             return pad(dk, npad), dv
-        elif self.config.qkv_layout.is_separate():
+        if self.config.qkv_layout.is_separate():
             npad = [[0, 0], [0, pad_seq_len], [0, 0], [0, 0]]
             return pad(dk, npad), pad(dv, npad)
 
