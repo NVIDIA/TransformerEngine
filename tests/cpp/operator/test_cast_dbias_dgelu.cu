@@ -25,7 +25,7 @@ namespace {
 
 template <typename IT, typename OT, typename CT>
 void compute_ref_cast_dbias_dgelu(const IT *input,
-                                  const IT *gelu_input,
+                                  const IT *grad,
                                   const CT scale,
                                   OT *output_c,
                                   CT *amax_h,
@@ -39,9 +39,9 @@ void compute_ref_cast_dbias_dgelu(const IT *input,
   for (size_t i = 0; i < N; i++) {
     for (size_t j = 0; j < H; j++) {
       CT in_elt = static_cast<CT>(input[i * H + j]);
-      const CT gelu_in = static_cast<CT>(gelu_input[i * H + j]);
+      const CT in_grad = static_cast<CT>(grad[i * H + j]);
 
-      const CT elt = in_elt * static_cast<float>(dgelu(static_cast<float>(gelu_in)));
+      const CT elt = in_grad * static_cast<float>(dgelu(static_cast<float>(in_elt)));
       const CT elt_abs = std::abs(elt);
 
       // update amax
@@ -64,22 +64,25 @@ void compute_ref_cast_dbias_dgelu(const IT *input,
 }
 
 template <typename IType, typename OType>
-void performTest(const size_t N, const size_t H) {
+void performTest(const std::vector<size_t>& shape) {
   using namespace test;
   using CType = fp32;
 
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({N, H}, itype);
-  Tensor gelu_input({N, H}, itype);
+  const size_t N = first_dimension(shape);
+  const size_t H = last_dimension(shape);
 
-  Tensor output_c({N, H}, otype);
+  Tensor input("input", shape, itype);
+  Tensor grad("grad", shape, itype);
+
+  Tensor output_c("output_c", shape, otype);
   // dbias has the same data type with "output grad"
-  Tensor dbias({H}, itype);
+  Tensor dbias("dbias", {H}, itype);
 
   fillUniform(&input);
-  fillUniform(&gelu_input);
+  fillUniform(&grad);
   setRandomScale(&output_c);
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
@@ -87,7 +90,7 @@ void performTest(const size_t N, const size_t H) {
 
   CType ref_amax;
   compute_ref_cast_dbias_dgelu(input.rowwise_cpu_dptr<IType>(),
-                               gelu_input.rowwise_cpu_dptr<IType>(),
+                               grad.rowwise_cpu_dptr<IType>(),
                                output_c.scale(),
                                ref_output_c.get(),
                                &ref_amax,
@@ -96,18 +99,18 @@ void performTest(const size_t N, const size_t H) {
 
   Tensor workspace;
 
-  nvte_quantize_dbias_dgelu(input.data(),
-                            gelu_input.data(),
+  nvte_quantize_dbias_dgelu(grad.data(),
+                            input.data(),
                             output_c.data(),
                             dbias.data(),
                             workspace.data(),
                             0);
 
-  workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
 
-  nvte_quantize_dbias_dgelu(input.data(),
-                            gelu_input.data(),
+  nvte_quantize_dbias_dgelu(grad.data(),
+                            input.data(),
                             output_c.data(),
                             dbias.data(),
                             workspace.data(),
@@ -132,7 +135,7 @@ void performTest(const size_t N, const size_t H) {
   compareResults("output_dbias", dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
 }
 
-std::vector<std::pair<size_t, size_t>> test_cases = {
+std::vector<std::vector<size_t>> test_cases = {
   {128, 128},
   {256, 256},
   {768, 1024},
@@ -140,12 +143,12 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
   {2048, 12288},
   {65536, 128},
   {65536, 160},
-  {16384, 6144},
   {16384, 1616},
   {1, 128},
   {1, 1296},
   {1, 16},
   {5, 160},
+  {5, 4, 3, 160},
   {217, 256},
 };
 
@@ -154,7 +157,7 @@ std::vector<std::pair<size_t, size_t>> test_cases = {
 
 class CastDBiasDGeluTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
                                                                            transformer_engine::DType,
-                                                                           std::pair<size_t, size_t>>> {};
+                                                                           std::vector<size_t>>> {};
 
 TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
     using namespace transformer_engine;
@@ -170,7 +173,7 @@ TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-        performTest<InputType, OutputType>(size.first, size.second);
+        performTest<InputType, OutputType>(size);
       );
     );
 }
@@ -184,8 +187,10 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(test_cases)),
     [](const testing::TestParamInfo<CastDBiasDGeluTestSuite::ParamType>& info) {
       std::string name = test::typeName(std::get<0>(info.param)) + "X" +
-                         test::typeName(std::get<1>(info.param)) + "X" +
-                         std::to_string(std::get<2>(info.param).first) + "X" +
-                         std::to_string(std::get<2>(info.param).second);
+                         test::typeName(std::get<1>(info.param));
+      const auto& shape = std::get<2>(info.param);
+      for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+      }
       return name;
     });

@@ -75,7 +75,8 @@ inline bool isPointerAligned(const void *const ptr, const int alignment) {
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                          const uint32_t shmemX, const size_t type_size) {
+                          const uint32_t shmemX, const uint32_t stride_elems,
+                          const uint32_t offset_elems, const size_t type_size) {
   // Get a function pointer to the cuTensorMapEncodeTiled driver API
   static PFN_cuTensorMapEncodeTiled cuDriverTensorMapEncodeTiled = []() {
     void *driver_ptr = cuda_driver::get_symbol("cuTensorMapEncodeTiled");
@@ -86,7 +87,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint64_t size[rank] = {globalX, globalY};
 
   // The stride is the number of bytes to traverse from the first element of one row to the next
-  uint64_t stride[rank - 1] = {globalX * type_size};
+  uint64_t stride[rank - 1] = {stride_elems * type_size};
 
   // The boxSize is the size of the shared memory buffer that is used as the
   // source/destination of a TMA transfer
@@ -96,8 +97,16 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   uint32_t elemStride[rank] = {1, 1};
 
   const CUtensorMapDataType tensorDataType = get_CUtensorMapDataType(tensor.dtype);
-  void *dataPtr = reinterpret_cast<void *>(tensor.dptr);
-  NVTE_CHECK(isPointerAligned(dataPtr, 16), "Tensor data must be 16B aligned");
+  void *dataPtr =
+      reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
+
+  constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
+  NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment),
+             "Tensor data pointer must be 16B aligned");
+
+  const int TMA_needed_size = TMA_gmem_alignment / type_size;
+  NVTE_CHECK(globalX % TMA_needed_size == 0, "Shape not supported. For ", type_size,
+             "-byte data type, expected multiple of ", TMA_needed_size, ", got ", globalX);
 
   // Create the tensor descriptor.
   NVTE_CHECK_CUDA_DRIVER(cuDriverTensorMapEncodeTiled(

@@ -75,11 +75,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("otype"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
-  m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply",
+  m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
         py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),
         py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
-        py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"));
+        py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
+        py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
+        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
   m.def("rowwise_swizzle", &rowwise_swizzle, "Swizzle rowwise scale inverses.",
         py::call_guard<py::gil_scoped_release>());
   m.def("columnwise_swizzle", &columnwise_swizzle, "Swizzle columnwise scale inverses.",
@@ -116,7 +118,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dsrelu", transformer_engine::pytorch::dsrelu, "Backward of Squared ReLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
-
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dbias_dsilu", transformer_engine::pytorch::dbias_dsilu, "DSiLU + DBias + Quantize",
@@ -168,6 +169,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
   m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
         py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
+
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd", &fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
@@ -288,31 +290,25 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
            py::arg("intra_node_group") = py::none(), py::arg("inter_node_group") = py::none());
 
-  py::class_<CommOverlap>(m, "CommOverlap")
+  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
+             transformer_engine::CommOverlapCore>(m, "CommOverlap")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
-                    int, int, int, int, bool, bool>(),
+                    int, int, int, int, bool, bool, bool>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("num_splits") = 3, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
            py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
-           py::arg("atomic_gemm") = false)
-      .def("bulk_overlap", &CommOverlap::bulk_overlap, py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs", &CommOverlap::split_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs", &CommOverlap::atomic_gemm_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &CommOverlap::copy_input_to_ubuf,
-           py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &CommOverlap::get_ubuf_output,
-           py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &CommOverlap::set_ubuf_scale_inv,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlap::is_atomic_gemm, py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlap::is_p2p_overlap, py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlap::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>());
+           py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
+      .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
+           py::arg("quantizer"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer, py::arg("quantizer"),
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
+      .def("set_buffer_params", &CommOverlap::set_buffer_params);
 
-  py::class_<CommOverlapP2P>(m, "CommOverlapP2P")
+  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
+             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
+      m, "CommOverlapP2P")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
                     transformer_engine::CommOverlapType, int, int, int, int, int, bool, bool, bool,
                     bool>(),
@@ -322,23 +318,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_ag_p2p", &CommOverlapP2P::atomic_gemm_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs_p2p", &CommOverlapP2P::atomic_gemm_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &CommOverlapP2P::copy_input_to_ubuf,
-           py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &CommOverlapP2P::get_ubuf_output,
-           py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &CommOverlapP2P::set_ubuf_scale_inv,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlapP2P::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlapP2P::is_atomic_gemm,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlapP2P::is_p2p_overlap,
-           py::call_guard<py::gil_scoped_release>());
+      .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
+           py::arg("quantizer"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
+      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
 }

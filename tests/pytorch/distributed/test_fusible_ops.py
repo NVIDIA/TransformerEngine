@@ -136,7 +136,7 @@ def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     if name == "mxfp8":
-        return transformer_engine.common.recipe.BlockScaling(
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
@@ -315,8 +315,8 @@ def _test_reduce_scatter(
 
 def _test_basic_linear(
     *,
-    local_weight_shape: tuple[int, int] = (128, 128),
-    local_batch_size: int = 128,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    local_batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -459,8 +459,8 @@ def _test_basic_linear(
 def _test_linear(
     *,
     bias: bool = True,
-    local_weight_shape: tuple[int, int] = (128, 128),
-    local_batch_size: int = 128,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    local_batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     quantization: Optional[str] = None,
@@ -639,8 +639,8 @@ def _test_fp8_scale_update(
     amax_history_len: int = 31,
     amax_compute_algo: str = "max",
     margin: float = 2,
-    local_weight_shape: tuple[int, int] = (16, 16),
-    batch_size: int = 16,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     tensor_parallel_mode: str = "column",

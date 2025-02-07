@@ -138,7 +138,13 @@ class Float8Quantizer(Quantizer):
         internal: bool = False,
     ):
         """Create Float8Tensor from raw uint8 data"""
-        assert data.dtype == torch.uint8
+        assert data.dtype in [
+            torch.uint8,
+            torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
+            torch.float8_e5m2,
+            torch.float8_e5m2fnuz,
+        ]
         if internal:
             return Float8TensorBase(
                 data=data,
@@ -515,6 +521,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
         # Quantize to FP8
         assert self._quantizer is not None, "Can't quantize without a quantizer"
+        self._quantizer.internal = False
         self.data = self._quantizer.quantize(tensor)
         if self.requires_grad != tensor.requires_grad:
             self.requires_grad_(requires_grad=tensor.requires_grad)

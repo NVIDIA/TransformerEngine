@@ -279,13 +279,29 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
   const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
 
-  NVTE_CHECK(cols % 32 == 0, "Tensor column dimension must be a multiple of 32.");
+  const size_t unpadded_scales_Y_rowwise = rows;
+  const size_t unpadded_scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  const size_t unpadded_scales_Y_colwise = DIVUP(rows, scale_dim_Y_colwise);
+  const size_t unpadded_scales_X_colwise = cols;
+
+  const size_t scales_Y_rowwise =
+      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
+      scale_tensor_alignment_Y_rowwise;
+  const size_t scales_X_rowwise =
+      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
+      scale_tensor_alignment_X_rowwise;
+  const size_t scales_Y_colwise =
+      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
+      scale_tensor_alignment_Y_colwise;
+  const size_t scales_X_colwise =
+      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
+      scale_tensor_alignment_X_colwise;
 
   const e8m0_t *const scales_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
                           : reinterpret_cast<e8m0_t *>(input.columnwise_scale_inv.dptr);
 
-  const size_t scales_stride = use_rowwise_scaling ? DIVUP(cols, scale_dim_X_rowwise) : cols;
+  const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
 
   const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
 
@@ -305,9 +321,9 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
                   alignas(64) CUtensorMap tensor_map_output{};
 
                   create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, sizeof(IType));
+                                       SHMEM_DIM_X, cols, 0, sizeof(IType));
                   create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, sizeof(OType));
+                                       SHMEM_DIM_X, cols, 0, sizeof(OType));
 
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,

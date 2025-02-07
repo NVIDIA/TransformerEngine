@@ -420,6 +420,12 @@ struct is_fp8<fp8e4m3> : std::true_type {};
 template <>
 struct is_fp8<fp8e5m2> : std::true_type {};
 
+// [128,4] rowwise and [4,128] colwise alignment requirements for the tensor with scaling factors
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
@@ -464,7 +470,8 @@ inline bool isPointerAligned(const void *const ptr, const int alignment);
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
-                          const uint32_t shmemX, const size_t type_size);
+                          const uint32_t shmemX, const uint32_t stride_elems,
+                          const uint32_t offset_elems, const size_t type_size);
 
 bool is_supported_by_CC_100();
 

@@ -12,6 +12,7 @@
 #include <random>
 #include <cassert>
 #include <cmath>
+#include <string>
 
 #include <gtest/gtest.h>
 #include <omp.h>
@@ -20,6 +21,12 @@
 #include "util/logging.h"
 
 namespace test {
+
+size_t create_seed_from_tensor_name(const std::string& tensor_name) {
+  auto full_name = std::string(testing::UnitTest::GetInstance()->current_test_info()->name()) +
+                   "/" + tensor_name;
+  return std::hash<std::string>{}(full_name);
+}
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
                                    DType::kFloat16,
@@ -120,29 +127,34 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     return {ret, ret};
   }
   if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    NVTE_CHECK(shape.ndim == 2,
-               "Invalid shape of the tensor. Expected 2 dimensions for fine granularity scaling.");
+    std::vector<size_t> shape_vec;
+    for (size_t i = 0; i < shape.ndim; ++i) {
+      shape_vec.push_back(shape.data[i]);
+    }
+    size_t first_dim = first_dimension(shape_vec);
+    size_t last_dim = last_dimension(shape_vec);
+
     scale_inv_meta ret_rowwise, ret_colwise;
 
     auto block_alignment = std::vector<size_t>{128ul,4ul};
     {
       auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(shape.data[0],
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
                                      static_cast<size_t>(1)),
                                alignment) * alignment;
       alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(shape.data[1],
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
                                      static_cast<size_t>(32)),
                                alignment) * alignment;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(shape.data[0],
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
                                      static_cast<size_t>(32)),
                                alignment) * alignment;
       alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(shape.data[1],
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
                                      static_cast<size_t>(1)),
                                alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
@@ -158,9 +170,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
   NVTE_ERROR("Invalid scaling mode!");
 }
 
-Tensor::Tensor(const NVTEShape &shape, const DType type,
+Tensor::Tensor(const std::string& name,
+               const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
                const NVTEScalingMode &scaling_mode) {
+  name_ = name;
+  const size_t seed = create_seed_from_tensor_name(name);
+  gen_.seed(seed);
   rowwise_ = rowwise;
   columnwise_ = columnwise;
   size_t s = typeToSize(type);
@@ -366,11 +382,10 @@ void Tensor::set_scale_inv(float scale_inv) {
       if (num_scales == 1){
         rowwise_cpu_scale_inv_ptr<float>()[0] = scale_inv;
       } else{
-        static std::mt19937 gen(12345);
         std::uniform_int_distribution<uint8_t> dis(0, 127);
         auto* scale_inv_ptr = rowwise_cpu_scale_inv_ptr<uint8_t>();
         for (size_t i = 0; i < num_scales; i++){
-          scale_inv_ptr[i] = dis(gen);
+          scale_inv_ptr[i] = dis(gen_);
         }
       }
     }
@@ -379,11 +394,10 @@ void Tensor::set_scale_inv(float scale_inv) {
       if (num_scales == 1){
         columnwise_cpu_scale_inv_ptr<float>()[0] = scale_inv;
       } else{
-        static std::mt19937 gen(12345);
         std::uniform_int_distribution<uint8_t> dis(0, 127);
         auto* scale_inv_ptr = columnwise_cpu_scale_inv_ptr<uint8_t>();
         for (size_t i = 0; i < num_scales; i++){
-          scale_inv_ptr[i] = dis(gen);
+          scale_inv_ptr[i] = dis(gen_);
         }
       }
     }
@@ -586,8 +600,22 @@ void compareResults(const std::string &name, const uint8_t *test, const uint8_t 
 }
 
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                    size_t N) {
-  for (int i = 0; i < N; i++){
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride)
+{
+  for (int i = 0; i < row_blocks; ++i) {
+    for (int j = 0; j < col_blocks; ++j) {
+      const int idx = i * stride + j;
+      ASSERT_FALSE(test[idx] != ref[idx]) << "Error in " << name << std::endl
+        << "Mismatch: " << static_cast<int>(test[idx]) << " vs "
+        << static_cast<int>(ref[idx]) << " at index " << idx;
+    }
+  }
+}
+
+void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
+                                  const size_t N)
+{
+  for (int i = 0; i < N; i++) {
     ASSERT_FALSE(test[i] != ref[i]) << "Error in " << name << std::endl
       << "Mismatch: " << static_cast<int>(test[i]) << " vs "
       << static_cast<int>(ref[i]) << " at index " << i;
@@ -613,18 +641,18 @@ std::pair<double, double> getTolerances(const DType type) {
 }
 
 template <typename T>
-void generate_data_uniformly(T* data, const size_t size) {
-  const int seed = 12345;
+void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
   #pragma omp parallel proc_bind(spread)
   {
-    std::mt19937 gen(seed);
-    gen.discard(omp_get_thread_num() * 599);
+    std::mt19937 gen_local = *gen;
+    gen_local.discard(omp_get_thread_num() * 599);
     std::uniform_real_distribution<> dis(-2.0, 1.0);
     #pragma omp for schedule(static)
     for (size_t i = 0; i < size; ++i) {
-      data[i] = static_cast<T>(dis(gen));
+      data[i] = static_cast<T>(dis(gen_local));
     }
   }
+  gen->discard(size);
 }
 
 void fillUniform(Tensor *t) {
@@ -633,7 +661,7 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
         T *data = t->rowwise_cpu_dptr<T>();
-        generate_data_uniformly(data, size);
+        generate_data_uniformly(data, size, &(t->gen()));
       }
     );
   } else {
@@ -641,13 +669,12 @@ void fillUniform(Tensor *t) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(t->dtype(), T,
       {
         T *data = t->columnwise_cpu_dptr<T>();
-        generate_data_uniformly(data, size);
+        generate_data_uniformly(data, size, &(t->gen()));
       }
     );
   }
-  static std::mt19937 gen(12345);
   std::uniform_real_distribution<> dis(-2.0, 1.0);
-  t->set_scale_inv(dis(gen));
+  t->set_scale_inv(dis(t->gen()));
   t->from_cpu();
 }
 
@@ -671,7 +698,6 @@ void fillCase_special(Tensor *t) {
       minAbs = Quantized_Limits<InputEncoding>::ranges[Case];
       maxAbs = Quantized_Limits<InputEncoding>::ranges[Case + 1];
     }
-    static std::mt19937 gen(12345);
     std::uniform_real_distribution<> dis(minAbs, maxAbs);
     std::uniform_real_distribution<> dis_sign(-1.0, 1.0);
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(t->dtype(), InputType, {
@@ -679,8 +705,8 @@ void fillCase_special(Tensor *t) {
       for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
           const size_t idx = i * cols + j;
-          const bool is_negative = (dis_sign(gen) < 0.0);
-          double val = dis(gen);
+          const bool is_negative = (dis_sign(t->gen()) < 0.0);
+          double val = dis(t->gen());
           if (is_negative) {
             val = -val;
           }
@@ -714,16 +740,14 @@ template void fillCase<fp8e5m2>(Tensor *t, const InputsFillCase fill_case);
 template void fillCase<fp32>(Tensor *t, const InputsFillCase fill_case);
 
 void setRandomScale(Tensor *t) {
-  static std::mt19937 gen(12345);
   std::uniform_real_distribution<> dis(-2.0, 1.0);
-  const float scale = dis(gen);
+  const float scale = dis(t->gen());
   t->set_scale(scale);
 }
 
 void setRandomScaleInv(Tensor *t) {
-  static std::mt19937 gen(12345);
   std::uniform_real_distribution<> dis(-2.0, 1.0);
-  const float scale_inv = dis(gen);
+  const float scale_inv = dis(t->gen());
   t->set_scale_inv(scale_inv);
 }
 
@@ -736,6 +760,38 @@ int32_t getDeviceComputeCapability()
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp, 0);
     return 10 * deviceProp.major + deviceProp.minor;
+}
+
+size_t first_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 1;
+  if (shape.size() == 1) return 1;
+  return product(shape, 0, shape.size() - 1);
+}
+
+size_t last_dimension(const std::vector<size_t> &shape) {
+  if (shape.size() == 0) return 1;
+  return shape[shape.size() - 1];
+}
+
+std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
+                                            const size_t cols,
+                                            const size_t block_size_rows,
+                                            const size_t block_size_cols) {
+    const bool is_rowwise = (block_size_rows == 1) && (block_size_cols == 32);
+
+    const size_t alignment_Y = is_rowwise
+                               ? scale_tensor_alignment_Y_rowwise
+                               : scale_tensor_alignment_Y_colwise;
+    const size_t alignment_X = is_rowwise
+                               ? scale_tensor_alignment_X_rowwise
+                               : scale_tensor_alignment_X_colwise;
+
+    const size_t unpadded_blocks_Y = divide_round_up(rows, block_size_rows);
+    const size_t unpadded_blocks_X = divide_round_up(cols, block_size_cols);
+
+    const size_t blocks_Y = round_up_to_nearest_multiple(unpadded_blocks_Y, alignment_Y);
+    const size_t blocks_X = round_up_to_nearest_multiple(unpadded_blocks_X, alignment_X);
+    return {unpadded_blocks_Y, unpadded_blocks_X, blocks_Y, blocks_X};
 }
 
 }  // namespace test

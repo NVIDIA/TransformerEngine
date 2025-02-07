@@ -116,10 +116,10 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({ N, H }, itype);
-  Tensor output({ N, H }, otype);
-  Tensor igrad({ N, H }, itype);
-  Tensor ograd({ N, H }, itype);
+  Tensor input("input", { N, H }, itype);
+  Tensor output("output", { N, H }, otype);
+  Tensor igrad("igrad", { N, H }, itype);
+  Tensor ograd("ograd", { N, H }, itype);
 
   fillUniform(&input);
   fillUniform(&ograd);
@@ -171,10 +171,10 @@ void performTestGLU(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({N, H * 2}, itype);
-  Tensor output({N, H}, otype);
-  Tensor igrad({ N, H * 2 }, itype);
-  Tensor ograd({ N, H }, itype);
+  Tensor input("input", {N, H * 2}, itype);
+  Tensor output("output", {N, H}, otype);
+  Tensor igrad("igrad", { N, H * 2 }, itype);
+  Tensor ograd("ograd", { N, H }, itype);
 
   fillUniform(&input);
   fillUniform(&ograd);
@@ -194,8 +194,12 @@ void performTestGLU(const size_t N, const size_t H) {
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   if (otype == DType::kFloat8E4M3 || otype == DType::kFloat8E5M2) {
-    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+    auto [atol, rtol] = getTolerances(DType::kFloat32);
+    compareResults("amax", output.amax(), ref_amax, atol, rtol);
+    if (output.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+      const float ref_scale = 1.f / output.scale();
+      compareResults("scale_inv", *output.rowwise_cpu_scale_inv_ptr<float>(), ref_scale, atol, rtol);
+    }
   }
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_gelu", output, ref_output.get(), atol, rtol);

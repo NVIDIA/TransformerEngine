@@ -16,7 +16,7 @@ from torch import nn
 import torch.distributed as dist
 
 from transformer_engine.common.recipe import (
-    BlockScaling,
+    MXFP8BlockScaling,
     DelayedScaling,
     Format,
     Recipe,
@@ -44,7 +44,7 @@ def quantization_recipe() -> Recipe:
             fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
         )
     if QUANTIZATION == "mxfp8":
-        return BlockScaling()
+        return MXFP8BlockScaling()
     return te.fp8.get_default_fp8_recipe()
 
 
@@ -79,6 +79,14 @@ def main(argv=None, namespace=None):
     parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args(argv, namespace)
 
+    # Quantization scheme
+    QUANTIZATION = args.quantization
+    if QUANTIZATION in ("fp8", "mxfp8"):
+        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+        SEQ_LEN = 32
+        BATCH_SIZE = 32
+        HIDDEN_SIZE = 128
+
     test_dict = [
         test_linear,
         test_layernorm,
@@ -86,14 +94,6 @@ def main(argv=None, namespace=None):
         test_layernorm_mlp,
         test_transformer_layer,
     ]
-
-    # Quantization scheme
-    QUANTIZATION = args.quantization
-    if QUANTIZATION == "mxfp8":
-        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
-        SEQ_LEN = 64
-        BATCH_SIZE = 64
-        HIDDEN_SIZE = 256
 
     for test in test_dict:
         test()
@@ -575,7 +575,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     """
     # Set parameter data type
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = {None: 32, "fp8": 64, "mxfp8": 256}[QUANTIZATION]
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
     model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
@@ -665,7 +665,7 @@ def test_layernorm_mlp():
 @run_distributed_test()
 def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = {None: 32, "fp8": 64, "mxfp8": 256}[QUANTIZATION]
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     model_single_node = te.TransformerLayer(
         HIDDEN_SIZE, FFN_HIDDEN_SIZE, NR_HEADS, attention_dropout=0, hidden_dropout=0, **kwargs

@@ -83,8 +83,8 @@ void performTestSwizzle1D(const int num_tiles_M, const int num_tiles_K, bool row
   const auto scale_shape = std::vector<size_t>{data_shape[0] / SF_MODE_X, data_shape[1] /SF_MODE_Y};
 
   std::vector<int> scaling_mode = {SF_MODE_X, SF_MODE_Y, 0};
-  Tensor input(data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
-  Tensor output(data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+  Tensor input("input", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
+  Tensor output("output", data_shape, dtype, rowwise, columnwise, NVTE_MXFP8_1D_SCALING);
 
   fillUniform(&input);
 

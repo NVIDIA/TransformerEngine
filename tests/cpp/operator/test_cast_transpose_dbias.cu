@@ -65,11 +65,11 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({N, H}, itype);
+  Tensor input("input", {N, H}, itype);
 
-  Tensor output({N, H}, otype, true, true);
+  Tensor output("output", {N, H}, otype, true, true);
   // dbias has the same data type with "output grad"
-  Tensor dbias({H}, itype);
+  Tensor dbias("dbias", {H}, itype);
 
   fillUniform(&input);
   setRandomScale(&output);
@@ -95,7 +95,7 @@ void performTest(const size_t N, const size_t H) {
                       workspace.data(),
                       0);
 
-  workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
 
   nvte_quantize_dbias(input.data(),

@@ -64,8 +64,8 @@ def maybe_skip_quantization(
             if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
                 pytest.skip("FP8 GEMMs require dims that are divisible by 16")
         elif quantization == "mxfp8":
-            if math.prod(dims[:-1]) % 128 != 0 or dims[-1] % 128 != 0:
-                pytest.skip("FP8 GEMMs require dims that are divisible by 128")
+            if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
+                pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
 
     # Check if device is supported
     if device is not None and torch.device(device).type != "cuda":
@@ -148,7 +148,7 @@ def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     if name == "mxfp8":
-        return transformer_engine.common.recipe.BlockScaling(
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
             fp8_format=transformer_engine.common.recipe.Format.E4M3,
         )
     raise ValueError(f"Unsupported quantization scheme ({name})")
@@ -368,6 +368,7 @@ class TestFuser:
     def test_dtype_cast(
         self,
         *,
+        size: int = 32,
         init_dtype: torch.dtype,
         final_dtype: torch.dtype,
         device: torch.device = "cuda",
@@ -378,11 +379,6 @@ class TestFuser:
         # Skip invalid configurations
         maybe_skip_quantization(quantization, device=device)
         with_quantization = quantization is not None
-
-        # Data dimensions
-        size = 16
-        if quantization == "mxfp8":
-            size = 128
 
         # Random data
         dtype = torch.float32
@@ -437,6 +433,7 @@ class TestFuser:
     def test_pyt_autocast(
         self,
         *,
+        size: int = 32,
         model_dtype: torch.dtype,
         autocast_dtype: torch.dtype,
         device: torch.device = "cuda",
@@ -449,11 +446,6 @@ class TestFuser:
         # Skip invalid configurations
         quantized_compute = quantization is not None
         maybe_skip_quantization(quantization)
-
-        # Data dimensions
-        size = 16
-        if quantization == "mxfp8":
-            size = 128
 
         # Construct operation
         recipe = make_recipe(quantization)
@@ -692,7 +684,7 @@ class TestBasicOps:
     def test_quantize(
         self,
         *,
-        in_shape: Iterable[int] = (128, 128),
+        in_shape: Iterable[int] = (32, 32),
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = "cuda",
         quantization: str,
@@ -774,6 +766,10 @@ class TestBasicOps:
             pytest.skip("FP8 output is only supported with FP8 GEMMs")
         if quantization == "fp8" and quantized_grad_input and not quantized_compute:
             pytest.skip("FP8 grad input is only supported with FP8 GEMMs")
+        if quantization == "mxfp8" and quantized_output:
+            pytest.skip("MXFP8 output is not supported with MXFP8 GEMMs")
+        if quantization == "mxfp8" and quantized_grad_input:
+            pytest.skip("MXFP8 grad input is not supported with MXFP8 GEMMs")
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -859,8 +855,8 @@ class TestBasicOps:
             )
         torch.testing.assert_close(dw_test, w_ref.grad, **tols)
 
-    @pytest.mark.parametrize("weight_shape", ((128, 128), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 4, 8, -1)))
+    @pytest.mark.parametrize("weight_shape", ((64, 32), (3, 5)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (5, 1, -1), (4, 2, 4, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
     @pytest.mark.parametrize("accumulate_into_main_grad", (False, True))
@@ -921,8 +917,8 @@ class TestBasicOps:
         self,
         *,
         bias: bool,
-        weight_shape: tuple[int, int] = (128, 128),
-        in_shape: Iterable[int] = (128, -1),
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Iterable[int] = (32, -1),
         dtype: torch.dtype = torch.float32,
         device: torch.device = "cuda",
         quantization: Optional[str],
@@ -1012,8 +1008,8 @@ class TestBasicOps:
             db_test = op.bias.grad.to(dtype=torch.float64, device="cpu")
             torch.testing.assert_close(db_test, b_ref.grad, **tols)
 
-    @pytest.mark.parametrize("weight_shape", ((7, 2), (128,)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (6, 64, -1)))
+    @pytest.mark.parametrize("weight_shape", ((7, 2), (32,)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
@@ -1182,8 +1178,8 @@ class TestBasicOps:
         torch.testing.assert_close(dw_test, w_ref.grad, **dtype_tols(dtype))
         torch.testing.assert_close(db_test, b_ref.grad, **dtype_tols(dtype))
 
-    @pytest.mark.parametrize("weight_shape", ((19,), (128,)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (6, 64, -1)))
+    @pytest.mark.parametrize("weight_shape", ((19,), (64,)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (6, 16, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("zero_centered_gamma", (False, True))
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
@@ -1395,7 +1391,7 @@ class TestBasicOps:
         torch.testing.assert_close(dx_test, x_ref.grad, **tols)
 
     @pytest.mark.parametrize("activation", ("relu", "gelu", "geglu", "reglu", "swiglu"))
-    @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (128, 1, 128)))
+    @pytest.mark.parametrize("out_shape", ((37,), (2, 13), (32, 1, 32)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
     def test_activation(
@@ -1491,7 +1487,7 @@ class TestBasicOps:
     def test_swiglu(
         self,
         *,
-        out_shape: Iterable[int] = (128, 128),
+        out_shape: Iterable[int] = (32, 32),
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
@@ -1560,8 +1556,8 @@ class TestFusedOps:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
 
-    @pytest.mark.parametrize("weight_shape", ((128, 128), (3, 5)))
-    @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (128, -1)))
+    @pytest.mark.parametrize("weight_shape", ((32, 64), (3, 5)))
+    @pytest.mark.parametrize("in_shape", ((-1,), (1, 7, -1), (8, 2, 10, -1)))
     @pytest.mark.parametrize("dtype", _dtypes)
     @pytest.mark.parametrize("quantization", (None, "fp8", "mxfp8"))
     @pytest.mark.parametrize("quantized_weight", (False, True))
@@ -1678,8 +1674,8 @@ class TestFusedOps:
         self,
         *,
         bias: bool,
-        weight_shape: tuple[int, int] = (128, 128),
-        in_shape: Iterable[int] = (128, -1),
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Iterable[int] = (32, -1),
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],
@@ -1791,8 +1787,8 @@ class TestFusedOps:
     def test_backward_linear_add(
         self,
         *,
-        weight_shape: tuple[int, int] = (128, 128),
-        in_shape: Iterable[int] = (128, -1),
+        weight_shape: tuple[int, int] = (32, 32),
+        in_shape: Iterable[int] = (32, -1),
         dtype: torch.dtype,
         device: torch.device = "cuda",
         quantization: Optional[str],

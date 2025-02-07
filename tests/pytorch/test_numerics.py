@@ -46,7 +46,7 @@ from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 
-# Only run FP8 tests on H100.
+# Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
@@ -98,7 +98,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 mask_types = ["causal", "no_mask"]
 
 fp8_recipes = [
-    recipe.BlockScaling(),
+    recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
 ]
 
@@ -556,7 +556,7 @@ def _test_e2e_selective_recompute(
 def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.block() and not mxfp8_available:
+    if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]
@@ -668,7 +668,7 @@ def test_gpt_full_activation_recompute(
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.block() and not mxfp8_available:
+    if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]
@@ -1418,7 +1418,7 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, f
         if fp8:
             if recipe.delayed():
                 split_size = 16
-            if recipe.block():
+            if recipe.mxfp8():
                 split_size = 128
         m = config.seq_len // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
@@ -1463,9 +1463,9 @@ def test_grouped_linear_accuracy(
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.block() and not mxfp8_available:
+    if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.block():  # TODO(ksivamani): debug mismatches
+    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
 
     config = model_configs[model]
@@ -1648,9 +1648,9 @@ def test_padding_grouped_linear_accuracy(
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.block() and not mxfp8_available:
+    if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.block():  # TODO(ksivamani): debug mismatches
+    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
 
     config = model_configs[model]
@@ -1860,7 +1860,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
 def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.block() and not mxfp8_available:
+    if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]

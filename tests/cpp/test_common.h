@@ -6,9 +6,10 @@
 
 #pragma once
 
-#include <iostream>
 #include <memory>
 #include <vector>
+#include <array>
+#include <random>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -96,17 +97,19 @@ struct TypeInfo{
 
 class Tensor {
  public:
-  Tensor(const NVTEShape &shape, const DType type,
+  Tensor(const std::string& name,
+         const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
 
-  Tensor(const std::vector<size_t> &shape,
+  Tensor(const std::string& name,
+         const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
+    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 
@@ -259,6 +262,8 @@ class Tensor {
   void set_scale_inv(float scale_inv);
   void shareFP8Meta(const Tensor &other);
 
+  std::mt19937& gen() { return gen_; }
+
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
@@ -269,10 +274,26 @@ class Tensor {
   std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;
   bool rowwise_;
   bool columnwise_;
+  std::string name_;
+  std::mt19937 gen_;
 };
 
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
+
+// [128,4] rowwise and [4,128] colwise alignment requirement
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+
+inline size_t divide_round_up(const size_t N, const size_t M) {
+    return (N - 1 + M) / M;
+}
+
+inline size_t round_up_to_nearest_multiple(const size_t N, const size_t M) {
+    return divide_round_up(N, M) * M;
+}
 
 template <typename T>
 struct Numeric_Traits {
@@ -370,7 +391,7 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  return exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
+  return (biased_exp == 0) ? 1 : exp2f(FP32_EXPONENT_BIAS - static_cast<float>(biased_exp));
 }
 
 inline float identity(const float x) { return x; }
@@ -393,6 +414,10 @@ inline float dsrelu(const float x)   { return fmaxf(0, 2 * x); }
 
 size_t typeToSize(DType type);
 size_t product(const NVTEShape &shape);
+size_t product(const std::vector<size_t> &shape);
+
+size_t first_dimension(const std::vector<size_t> &shape);
+size_t last_dimension(const std::vector<size_t> &shape);
 
 bool areShapesEqual(const NVTEShape &s1, const NVTEShape &s2);
 
@@ -403,7 +428,12 @@ void compareResults(const std::string &name, const float test, const float ref,
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
 void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                    size_t N);
+                                  const size_t row_blocks, const size_t col_blocks, const size_t stride);
+void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
+                                  const size_t N);
+
+std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
+                                            const size_t block_size_rows, const size_t block_size_cols);
 
 std::pair<double, double> getTolerances(const DType type);
 

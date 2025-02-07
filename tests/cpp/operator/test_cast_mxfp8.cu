@@ -4,13 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cstring>
-#include <iomanip>
-#include <iostream>
-#include <memory>
-#include <random>
-#include <limits>
-
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
@@ -46,7 +39,7 @@ enum ActivationType {
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void scale_block(const ProcessingMethod processing_method,
                  const InputType* input,
-                 const InputType* act_input,
+                 const InputType* grad,
                  OutputType* output_c,
                  float* dbias,
                  fp8e8m0* output_scales,
@@ -63,13 +56,17 @@ void scale_block(const ProcessingMethod processing_method,
         for (size_t j = j_min; j < j_max; ++j) {
             const size_t idx = i * cols + j;
             float elt = static_cast<float>(input[idx]);
+            if (processing_method == ProcessingMethod::CAST_DBIAS) {
+              // grad is the input
+              elt = static_cast<float>(grad[idx]);
+            }
             if (processing_method != ProcessingMethod::CAST_ONLY
                 && processing_method != ProcessingMethod::CAST_DBIAS) {
                 elt = OP(elt);
             }
             if (processing_method == ProcessingMethod::CAST_DACT ||
                 processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(act_input[idx]);
+                elt *= static_cast<float>(grad[idx]);
             }
             dbias[j] += elt;
             if (isinf(elt) || isnan(elt)) {
@@ -88,13 +85,17 @@ void scale_block(const ProcessingMethod processing_method,
         for (size_t j = j_min; j < j_max; ++j) {
             const size_t idx = i * cols + j;
             float elt = static_cast<float>(input[idx]);
+            if (processing_method == ProcessingMethod::CAST_DBIAS) {
+              // grad is the input
+              elt = static_cast<float>(grad[idx]);
+            }
             if (processing_method != ProcessingMethod::CAST_ONLY
                 && processing_method != ProcessingMethod::CAST_DBIAS) {
                 elt = OP(elt);
             }
             if (processing_method == ProcessingMethod::CAST_DACT ||
                 processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
-                elt *= static_cast<float>(act_input[idx]);
+                elt *= static_cast<float>(grad[idx]);
             }
             output_c[idx] = static_cast<OutputType>(elt * scale_reciprocal);
         }
@@ -104,14 +105,16 @@ void scale_block(const ProcessingMethod processing_method,
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void compute_ref_x1(const ProcessingMethod processing_method,
                     const InputType* input,
-                    const InputType* act_input,
+                    const InputType* grad,
                     OutputType* output_c,
                     fp8e8m0* output_scales,
                     InputType* output_dbias,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride)
+{
     std::vector<float> output_dbias_fp32(cols, 0);
 
     const size_t blocks_Y = (rows + block_size_Y - 1) / block_size_Y;
@@ -123,9 +126,9 @@ void compute_ref_x1(const ProcessingMethod processing_method,
         for (size_t jj = 0; jj < blocks_X; ++jj) {
             const size_t j_min = jj * block_size_X;
             const size_t j_max = std::min((jj + 1) * block_size_X, cols);
-            const size_t scale_idx = ii * blocks_X + jj;
+            const size_t scale_idx = ii * scales_stride + jj;
             scale_block<InputType, OutputType, OP>(
-                processing_method, input, act_input, output_c, output_dbias_fp32.data(),
+                processing_method, input, grad, output_c, output_dbias_fp32.data(),
                 output_scales, scale_idx, i_min, i_max, j_min, j_max, cols);
         }
     }
@@ -137,7 +140,7 @@ void compute_ref_x1(const ProcessingMethod processing_method,
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void compute_ref_x2(const ProcessingMethod processing_method,
                     const InputType* input,
-                    const InputType* act_input,
+                    const InputType* grad,
                     OutputType* output_rowwise,
                     OutputType* output_colwise,
                     fp8e8m0* scales_rowwise,
@@ -146,13 +149,15 @@ void compute_ref_x2(const ProcessingMethod processing_method,
                     const size_t rows,
                     const size_t cols,
                     const size_t block_size_Y,
-                    const size_t block_size_X) {
+                    const size_t block_size_X,
+                    const size_t scales_stride_rowwise,
+                    const size_t scales_stride_colwise) {
     compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, act_input, output_rowwise, scales_rowwise, output_dbias,
-        rows, cols, 1, block_size_X);
+        processing_method, input, grad, output_rowwise, scales_rowwise, output_dbias,
+        rows, cols, 1, block_size_X, scales_stride_rowwise);
     compute_ref_x1<InputType, OutputType, OP>(
-        processing_method, input, act_input, output_colwise, scales_colwise, output_dbias,
-        rows, cols, block_size_Y, 1);
+        processing_method, input, grad, output_colwise, scales_colwise, output_dbias,
+        rows, cols, block_size_Y, 1, scales_stride_colwise);
 }
 
 /**
@@ -165,8 +170,7 @@ void compute_ref_x2(const ProcessingMethod processing_method,
 
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void performTest_x1(const ProcessingMethod processing_method,
-                    const size_t rows,
-                    const size_t cols,
+                    const std::vector<size_t>& shape,
                     const bool rowwise,
                     const bool colwise,
                     InputsFillCase fill_case) {
@@ -175,23 +179,36 @@ void performTest_x1(const ProcessingMethod processing_method,
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    if (shape.size() < 2 && colwise) {
+      GTEST_SKIP();
+    }
+
     const size_t block_size_rows = rowwise ? 1 : 32;
     const size_t block_size_cols = colwise ? 1 : 32;
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num = blocks_Y * blocks_X;
 
-    Tensor input({ rows, cols }, itype);
-    Tensor act_input({ rows, cols }, itype);
-    Tensor output_c({ rows, cols }, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias({ cols }, itype);
+    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, block_size_rows,
+                                                                  block_size_cols);
+
+    const size_t unpadded_blocks_Y = scale_dims[0];
+    const size_t unpadded_blocks_X = scale_dims[1];
+    const size_t blocks_Y = scale_dims[2];
+    const size_t blocks_X = scale_dims[3];
+    const size_t scales_stride = blocks_X;
+
+    Tensor input("input", shape, itype);
+    Tensor grad("grad", shape, itype);
+    Tensor output_c("output_c", shape, otype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor output_dbias("output_dbias", { cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
     std::unique_ptr<fp8e8m0[]> ref_output_scales = std::make_unique<fp8e8m0[]>(blocks_Y * blocks_X);
 
     fillCase<EncodingType>(&input, fill_case);
-    fillUniform(&act_input);
+    fillUniform(&grad);
 
     Tensor workspace;
     switch (processing_method) {
@@ -200,14 +217,14 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output_c.data(),
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output_c.data(),
                                 output_dbias.data(),
                                 workspace.data(),
@@ -215,16 +232,16 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output_c.data(),
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output_c.data(),
                                       output_dbias.data(),
                                       workspace.data(),
@@ -232,7 +249,7 @@ void performTest_x1(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output_c.data(), 0);
+            nvte_dgelu(grad.data(), input.data(), output_c.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
@@ -247,29 +264,33 @@ void performTest_x1(const ProcessingMethod processing_method,
 
     compute_ref_x1<InputType, OutputType, OP>(processing_method,
                                               input.rowwise_cpu_dptr<InputType>(),
-                                              act_input.rowwise_cpu_dptr<InputType>(),
+                                              grad.rowwise_cpu_dptr<InputType>(),
                                               ref_output_c.get(),
                                               ref_output_scales.get(),
                                               ref_output_dbias.get(),
                                               rows,
                                               cols,
                                               block_size_rows,
-                                              block_size_cols);
+                                              block_size_cols,
+                                              scales_stride);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c", output_c, ref_output_c.get(), rowwise, atol, rtol);
-    if (rowwise) {
-      compare_e8m0_scaling_factors("scales", output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
-    }
-    if (colwise) {
-      compare_e8m0_scaling_factors("scales", output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>(), ref_output_scales.get(), blocks_num);
-    }
+
+    const uint8_t * const gpu_scales_ptr = rowwise
+                                           ? output_c.rowwise_cpu_scale_inv_ptr<fp8e8m0>()
+                                           : output_c.columnwise_cpu_scale_inv_ptr<fp8e8m0>();
+
+    compare_e8m0_scaling_factors("scales", gpu_scales_ptr, ref_output_scales.get(),
+                                 unpadded_blocks_Y, unpadded_blocks_X, scales_stride);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-        rtol_dbias *= 4;
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
+            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+        } else {
+            rtol_dbias *= 4;
         }
         compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
     }
@@ -284,8 +305,7 @@ void performTest_x1(const ProcessingMethod processing_method,
  */
 template <typename InputType, typename OutputType, float (*OP)(const float)>
 void performTest_x2(const ProcessingMethod processing_method,
-                    const size_t rows,
-                    const size_t cols,
+                    const std::vector<size_t>& shape,
                     const size_t block_size_rows,
                     const size_t block_size_cols,
                     InputsFillCase fill_case) {
@@ -294,24 +314,41 @@ void performTest_x2(const ProcessingMethod processing_method,
     DType itype = TypeInfo<InputType>::dtype;
     DType otype = TypeInfo<OutputType>::dtype;
 
-    const size_t blocks_Y = (rows + block_size_rows - 1) / block_size_rows;
-    const size_t blocks_X = (cols + block_size_cols - 1) / block_size_cols;
-    const size_t blocks_num_rowwise = rows * blocks_X;
-    const size_t blocks_num_colwise = blocks_Y * cols;
+    if (shape.size() < 2) {
+      GTEST_SKIP();
+    }
 
-    Tensor input({ rows, cols }, itype);
-    Tensor act_input({ rows, cols }, itype);
-    Tensor output({ rows, cols }, otype, true, true, NVTE_MXFP8_1D_SCALING);
-    Tensor output_dbias({ cols }, itype);
+    const size_t rows = first_dimension(shape);
+    const size_t cols = last_dimension(shape);
+
+    const std::array<size_t,4> scale_dims_rowwise = get_scale_tensor_dims(rows, cols, 1, 32);
+    const std::array<size_t,4> scale_dims_colwise = get_scale_tensor_dims(rows, cols, 32, 1);
+
+    const size_t unpadded_blocks_Y_rowwise = scale_dims_rowwise[0];
+    const size_t unpadded_blocks_X_rowwise = scale_dims_rowwise[1];
+    const size_t blocks_Y_rowwise = scale_dims_rowwise[2];
+    const size_t blocks_X_rowwise = scale_dims_rowwise[3];
+    const size_t scales_stride_rowwise = blocks_X_rowwise;
+
+    const size_t unpadded_blocks_Y_colwise = scale_dims_colwise[0];
+    const size_t unpadded_blocks_X_colwise = scale_dims_colwise[1];
+    const size_t blocks_Y_colwise = scale_dims_colwise[2];
+    const size_t blocks_X_colwise = scale_dims_colwise[3];
+    const size_t scales_stride_colwise = blocks_X_colwise;
+
+    Tensor input("input", shape, itype);
+    Tensor grad("grad", shape, itype);
+    Tensor output("output", shape, otype, true, true, NVTE_MXFP8_1D_SCALING);
+    Tensor output_dbias("output_dbias", { cols }, itype);
 
     std::unique_ptr<OutputType[]> ref_output_c_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_c_colwise = std::make_unique<OutputType[]>(rows * cols);
-    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(rows * blocks_X);
-    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y * cols);
+    std::unique_ptr<fp8e8m0[]> ref_scales_rowwise = std::make_unique<fp8e8m0[]>(blocks_Y_rowwise * blocks_X_rowwise);
+    std::unique_ptr<fp8e8m0[]> ref_scales_colwise = std::make_unique<fp8e8m0[]>(blocks_Y_colwise * blocks_X_colwise);
     std::unique_ptr<InputType[]> ref_output_dbias = std::make_unique<InputType[]>(cols);
 
     fillCase<EncodingType>(&input, fill_case);
-    fillUniform(&act_input);
+    fillUniform(&grad);
 
     Tensor workspace;
     switch (processing_method) {
@@ -320,14 +357,14 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS: {
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output.data(),
                                 output_dbias.data(),
                                 workspace.data(),
                                 0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias(input.data(),
+            nvte_quantize_dbias(grad.data(),
                                 output.data(),
                                 output_dbias.data(),
                                 workspace.data(),
@@ -335,16 +372,16 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DBIAS_DACT: {
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output.data(),
                                       output_dbias.data(),
                                       workspace.data(),
                                       0);
-            workspace = Tensor(workspace.rowwise_shape(), workspace.dtype());
+            workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
-            nvte_quantize_dbias_dgelu(input.data(),
-                                      act_input.data(),
+            nvte_quantize_dbias_dgelu(grad.data(),
+                                      input.data(),
                                       output.data(),
                                       output_dbias.data(),
                                       workspace.data(),
@@ -352,7 +389,7 @@ void performTest_x2(const ProcessingMethod processing_method,
             break;
         }
         case ProcessingMethod::CAST_DACT: {
-            nvte_dgelu(act_input.data(), input.data(), output.data(), 0);
+            nvte_dgelu(grad.data(), input.data(), output.data(), 0);
             break;
         }
         case ProcessingMethod::CAST_ACT: {
@@ -367,7 +404,7 @@ void performTest_x2(const ProcessingMethod processing_method,
 
     compute_ref_x2<InputType, OutputType, OP>(processing_method,
                                               input.rowwise_cpu_dptr<InputType>(),
-                                              act_input.rowwise_cpu_dptr<InputType>(),
+                                              grad.rowwise_cpu_dptr<InputType>(),
                                               ref_output_c_rowwise.get(),
                                               ref_output_c_colwise.get(),
                                               ref_scales_rowwise.get(),
@@ -376,34 +413,47 @@ void performTest_x2(const ProcessingMethod processing_method,
                                               rows,
                                               cols,
                                               block_size_rows,
-                                              block_size_cols);
+                                              block_size_cols,
+                                              scales_stride_rowwise,
+                                              scales_stride_colwise);
 
     auto [atol, rtol] = getTolerances(otype);
     compareResults("output_c_rowwise", output, ref_output_c_rowwise.get(), true, atol, rtol);
     compareResults("output_c_colwise", output, ref_output_c_colwise.get(), false, atol, rtol);
     compare_e8m0_scaling_factors("scales_rowwise", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_rowwise.get(), blocks_num_rowwise);
+                                 ref_scales_rowwise.get(), unpadded_blocks_Y_rowwise,
+                                 unpadded_blocks_X_rowwise, scales_stride_rowwise);
     compare_e8m0_scaling_factors("scales_colwise", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
-                                 ref_scales_colwise.get(), blocks_num_colwise);
+                                 ref_scales_colwise.get(), unpadded_blocks_Y_colwise,
+                                 unpadded_blocks_X_colwise, scales_stride_colwise);
 
     if (processing_method == ProcessingMethod::CAST_DBIAS || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
         auto [atol_dbias, rtol_dbias] = getTolerances(itype);
-        rtol_dbias *= 4;
         if (itype == DType::kFloat32) {
             atol_dbias = 1e-4;
+            rtol_dbias *= sqrt(static_cast<double>(rows)) ;
+        } else {
+            rtol_dbias *= 4;
         }
         compareResults("output_dbias", output_dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
     }
 }
 
-std::vector<std::pair<size_t, size_t>> matrix_sizes = {
+std::vector<std::vector<size_t>> matrix_sizes = {
+    {1, 16},
+    {16, 48},
+    {65, 96},
     {128, 128},
     {256, 256},
-    {768, 1024},
-    // {256, 65536},
-    // {2048, 12288},
-    // {65536, 128},
-    // {16384, 6144},
+    {993, 512},
+    {256, 65536},
+    {2048, 6144},
+    {16384, 128},
+    {32768, 160},
+    {4096, 1632},
+    {1024},
+    {8, 32, 1024},
+    {16, 8, 4, 512},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
@@ -443,7 +493,7 @@ std::vector<ActivationType> Activation_types = {
 class FusedCastMXFP8TestSuite : public ::testing::TestWithParam
     <std::tuple<ProcessingMethod,
                 ActivationType,
-                std::pair<size_t, size_t>,
+                std::vector<size_t>,
                 std::pair<size_t, size_t>,
                 transformer_engine::DType,
                 transformer_engine::DType,
@@ -507,11 +557,11 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
                 TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
                     if (block_size.first == 1 || block_size.second == 1) {
                         performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             rowwise, colwise, fill_case);
                     } else {
                         performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             block_size.first, block_size.second, fill_case);
                     }
                 );
@@ -523,11 +573,11 @@ TEST_P(FusedCastMXFP8TestSuite, TestFusedCastMXFP8) {
                 TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(output_type, OutputType,
                     if (block_size.first == 1 || block_size.second == 1) {
                         performTest_x1<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             rowwise, colwise, fill_case);
                     } else {
                         performTest_x2<InputType, OutputType, OP>(
-                            processing_method, matrix_size.first, matrix_size.second,
+                            processing_method, matrix_size,
                             block_size.first, block_size.second, fill_case);
                     }
                 );
@@ -572,13 +622,15 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(input_scenarios)),
     [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param)) + "X" +
-                           to_string(std::get<1>(info.param)) + "X" +
-                           std::to_string(std::get<2>(info.param).first) + "X" +
-                           std::to_string(std::get<2>(info.param).second) + "X" +
-                           std::to_string(std::get<3>(info.param).first) + "X" +
-                           std::to_string(std::get<3>(info.param).second) + "X" +
-                           test::typeName(std::get<4>(info.param)) + "X" +
-                           test::typeName(std::get<5>(info.param)) + "X" +
-                           test::caseName(std::get<6>(info.param));
+                           to_string(std::get<1>(info.param));
+      const auto& shape = std::get<2>(info.param);
+      for ( const auto& s: shape) {
+        name += "X" + std::to_string(s);
+      }
+      name += "X" + std::to_string(std::get<3>(info.param).first) +
+              "X" + std::to_string(std::get<3>(info.param).second) +
+              "X" + test::typeName(std::get<4>(info.param)) +
+              "X" + test::typeName(std::get<5>(info.param)) +
+              "X" + test::caseName(std::get<6>(info.param));
         return name;
     });

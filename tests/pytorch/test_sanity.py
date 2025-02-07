@@ -38,8 +38,9 @@ from transformer_engine.pytorch.module.base import get_workspace
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from test_numerics import reset_rng_states, dtype_tols
 
-# Only run FP8 tests on H100.
+# Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 
 def create_meta(scale_factor: float, size: int = 1):
@@ -97,6 +98,7 @@ model_configs = {
 
 fp8_recipes = [
     None,  # Handles non-FP8 case
+    recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3),
     recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID),
     recipe.DelayedScaling(
@@ -269,11 +271,14 @@ def _test_sanity_e2e_gradient_accumulation_fusion(block, dtype, config, fp8_reci
     loss.backward()
     torch.cuda.synchronize()
 
+    failed_grads = []
     for name, p in block.named_parameters():
         if "layer_norm_weight" in name:
             continue
         elif "weight" in name and p.requires_grad:
-            assert torch.count_nonzero(p.main_grad) > 0, "Gradient not accumulated."
+            if not torch.count_nonzero(p.main_grad) > 0:
+                failed_grads.append(name)
+    assert len(failed_grads) == 0, f"Gradient not accumulated for {failed_grads}."
 
 
 def _test_sanity_e2e(block, dtype, config, fp8_recipe, skip_wgrad, cpu_offload):
@@ -443,6 +448,8 @@ def test_sanity_layernorm_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -472,6 +479,8 @@ def test_sanity_linear(dtype, fp8_recipe, model, skip_wgrad, skip_dgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -502,6 +511,8 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -537,6 +548,8 @@ def test_sanity_layernorm_mlp(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -585,6 +598,8 @@ def test_sanity_gpt(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -650,6 +665,8 @@ def test_sanity_bert(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, 
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -707,6 +724,8 @@ def test_sanity_T5(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamma, no
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -762,6 +781,8 @@ def test_sanity_amp_and_nvfuser(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -795,6 +816,8 @@ def test_sanity_drop_path(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -831,6 +854,8 @@ def test_sanity_fused_qkv_params(dtype, fp8_recipe, model, skip_wgrad):
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -870,6 +895,8 @@ def test_sanity_gradient_accumulation_fusion(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -910,6 +937,8 @@ def test_gpt_cuda_graph(dtype, fp8_recipe, model, skip_wgrad, zero_centered_gamm
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
@@ -960,7 +989,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
     inp = torch.reshape(scratchpad[offset:-offset], (N, N))
     weight = torch.reshape(scratchpad[offset * 2 :], (N, N))
 
-    _, _, _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
+    _ = general_gemm(A=weight, B=inp, workspace=get_workspace())
     torch.cuda.synchronize()
 
 

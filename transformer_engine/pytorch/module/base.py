@@ -22,7 +22,7 @@ from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta
 from ..fp8 import (
-    BlockScalingRecipeState,
+    MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -305,31 +305,33 @@ def initialize_ub(
             "is_reduce_scatter": is_reduce_scatter,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": False,
-            "num_splits": 4 if method == "pipeline" else tp_size,
+            "set_sm_margin": not method == "ring_exchange",
+            "num_splits": tp_size if method == "ring_exchange" else 4,
             "aggregate": False,
             "atomic_gemm": False,
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
             "comm_priority": _MAX_STREAM_PRIORITY,
             "gemm_priority": _MIN_STREAM_PRIORITY,
+            "pipeline_rs_overlap_first_gemm": False,
         }
         return default_cfg
 
     def add_ub(
         name: str,
         method: str,
-        is_reduce_scatter: int,
+        is_reduce_scatter: bool,
         num_sm: int = 16,
         cga_size: int = 2,
-        set_sm_margin: int = 0,
+        set_sm_margin: bool = False,
         num_splits: int = 0,
-        aggregate: int = 0,
-        atomic_gemm: int = 0,
+        aggregate: bool = False,
+        atomic_gemm: bool = False,
         use_ce: bool = True,
         fp8_buf: bool = False,
         comm_priority: int = 0,
         gemm_priority: int = 0,
+        pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -397,6 +399,7 @@ def initialize_ub(
                 atomic_gemm=atomic_gemm,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[name] = ub_obj
 
@@ -540,7 +543,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.delayed() and isinstance(recipe_state, DelayedScalingRecipeState):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
-            if recipe.block() and isinstance(recipe_state, BlockScalingRecipeState):
+            if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -872,8 +875,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if not ctx.ub_overlap_ag:
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
                 else:
-                    ctx.ub_obj_gradout.copy_input_to_ubuf(grad_output, True)
-                    grad_output = ctx.ub_obj_gradout.get_ubuf_output(1)
+                    ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, local_chunk=True)
+                    grad_output = ctx.ub_obj_gradout.get_buffer(quantizer)
             return grad_output, None
 
         # FP8 with all-gather: unfused bgrad, fused cast + transpose
@@ -882,15 +885,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if ctx.use_bias:
                 grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             if ctx.ub_overlap_ag:
-                # TODO: Implement
-                raise NotImplementedError(
-                    "Overlapped tensor parallelism with Userbuffers is not yet supported"
+                # Quantize the gradient if needed
+                if not isinstance(
+                    grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)
+                ):
+                    grad_output = quantizer(grad_output)
+
+                # Copy into communication buffer, and replace original gradient with it
+                ctx.ub_obj_gradout.copy_into_buffer(grad_output, quantizer, local_chunk=True)
+                grad_output = ctx.ub_obj_gradout.get_buffer(quantizer)
+            else:
+                grad_output, _ = gather_along_first_dim(
+                    grad_output,
+                    ctx.tp_group,
+                    quantizer=quantizer,
                 )
-            grad_output, _ = gather_along_first_dim(
-                grad_output,
-                ctx.tp_group,
-                quantizer=quantizer,
-            )
             return grad_output, grad_bias
 
         # FP8 without all-gather: fused bgrad + cast + transpose
@@ -946,6 +955,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert (
                     quantizer is not None
                 )  # to use primary fp8 weight one needs to use FP8 autocast with specific recipe.
+                quantizer.internal = False
                 param = quantizer(param)
 
             # Redo parameter wrap in case we broke it above
