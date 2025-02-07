@@ -42,8 +42,6 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
 
-.. autoapifunction:: transformer_engine.pytorch.onnx_export
-
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 
 .. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context

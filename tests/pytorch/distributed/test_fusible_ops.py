@@ -5,27 +5,38 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import functools
 import itertools
 import os
 import pathlib
 import subprocess
 import sys
+from typing import Optional
 
 import pytest
 import torch
 
 import transformer_engine
+import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 import transformer_engine_torch as tex
 
-# Check if FP8 is supported
+
+# Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+quantization_list: list[Optional[str]] = [None]
+if fp8_available:
+    quantization_list.append("fp8")
+if mxfp8_available:
+    quantization_list.append("mxfp8")
 
 
 @functools.cache
@@ -66,22 +77,18 @@ def make_reference_and_test_tensors(
     in Transformer Engine operations.
 
     """
-
-    # Random data
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
-
-    # Make copy of tensor
+    test = ref.to(device=test_device, dtype=test_dtype)
     if test_is_fp8:
-        test = Float8Tensor.to_float8(ref)
-    else:
-        test = ref.to(device=test_device, dtype=test_dtype)
-        if test.data_ptr() == ref.data_ptr():
-            test = test.clone()
-
-    # Make sure reference and test tensors represent exact same values
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=test_device),
+            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        test = quantizer(test)
+    elif test.data_ptr() == ref.data_ptr():
+        test = test.clone()
     ref.copy_(test)
-
-    # Return reference and test tensors
     ref.requires_grad_(requires_grad)
     test.requires_grad_(requires_grad)
     return ref, test
@@ -118,6 +125,21 @@ def dtype_tols(dtype: torch.dtype | tex.DType) -> dict[str, float]:
     if dtype == torch.float64:
         return dict(rtol=1e-7, atol=1e-7)
     raise ValueError(f"Unsupported dtype ({dtype})")
+
+
+def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
+    """Make recipe for quantization scheme"""
+    if name is None:
+        return None
+    if name == "fp8":
+        return transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    if name == "mxfp8":
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    raise ValueError(f"Unsupported quantization scheme ({name})")
 
 
 def _test_all_reduce(
@@ -293,17 +315,16 @@ def _test_reduce_scatter(
 
 def _test_basic_linear(
     *,
-    local_weight_shape: tuple[int, int] = (16, 16),
-    batch_size: int = 16,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    local_batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
-    fp8_compute: bool = False,
-    fp8_input: bool = False,
-    fp8_weight: bool = False,
-    fp8_grad_output: bool = False,
+    quantization: Optional[str] = None,
+    quantized_weight: bool = False,
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = False,
 ) -> None:
+    quantized_compute = quantization is not None
 
     # Distributed process group
     process_group = world_group()
@@ -313,10 +334,13 @@ def _test_basic_linear(
     # Tensor dimensions
     local_out_features, local_in_features = local_weight_shape
     out_features, in_features = local_out_features, local_in_features
+    batch_size = local_batch_size
     if tensor_parallel_mode == "column":
         out_features *= world_size
     elif tensor_parallel_mode == "row":
         in_features *= world_size
+    if sequence_parallel:
+        batch_size *= world_size
     in_shape = [batch_size, in_features]
     out_shape = [batch_size, out_features]
 
@@ -326,21 +350,28 @@ def _test_basic_linear(
         in_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_input),
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(x_test, QuantizedTensor):
+        with torch.no_grad():
+            x_test = x_test.dequantize().requires_grad_()
     w_ref, w_test = make_reference_and_test_tensors(
         (out_features, in_features),
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_weight),
+        test_is_fp8=(quantized_compute or quantized_weight),
     )
+    if isinstance(w_test, QuantizedTensor):
+        w_test = w_test.dequantize()
     dy_ref, dy_test = make_reference_and_test_tensors(
         out_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_grad_output),
+        test_is_fp8=quantized_compute,
         requires_grad=False,
     )
+    if isinstance(dy_test, QuantizedTensor):
+        dy_test = dy_test.dequantize()
 
     # Plain PyTorch implementation
     y_ref = torch.nn.functional.linear(x_ref, w_ref)
@@ -391,7 +422,8 @@ def _test_basic_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    with te.fp8_model_init(enabled=fp8_weight):
+    recipe = make_recipe(quantization)
+    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
         op = te_ops.BasicLinear(
             in_features,
             out_features,
@@ -404,7 +436,7 @@ def _test_basic_linear(
     with torch.no_grad():
         op.weight.copy_(w_test)
         del w_test
-    with te.fp8_autocast(enabled=fp8_compute):
+    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
         y_test = op(x_test)
     y_test.backward(dy_test)
 
@@ -412,10 +444,8 @@ def _test_basic_linear(
     tols = dtype_tols(dtype)
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
-    if fp8_compute:
-        tols = dtype_tols(
-            op.weight._fp8_dtype if is_float8_tensor(op.weight) else tex.DType.kFloat8E4M3
-        )
+    if quantized_compute:
+        tols = dtype_tols(tex.DType.kFloat8E4M3)
 
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -429,17 +459,16 @@ def _test_basic_linear(
 def _test_linear(
     *,
     bias: bool = True,
-    local_weight_shape: tuple[int, int] = (16, 16),
-    batch_size: int = 16,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    local_batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
-    fp8_compute: bool = False,
-    fp8_input: bool = False,
-    fp8_weight: bool = False,
-    fp8_grad_output: bool = False,
+    quantization: Optional[str] = None,
+    quantized_weight: bool = False,
     tensor_parallel_mode: str = "column",
     sequence_parallel: bool = False,
 ) -> None:
+    quantized_compute = quantization is not None
 
     # Distributed process group
     process_group = world_group()
@@ -449,10 +478,13 @@ def _test_linear(
     # Tensor dimensions
     local_out_features, local_in_features = local_weight_shape
     out_features, in_features = local_out_features, local_in_features
+    batch_size = local_batch_size
     if tensor_parallel_mode == "column":
         out_features *= world_size
     elif tensor_parallel_mode == "row":
         in_features *= world_size
+    if sequence_parallel:
+        batch_size *= world_size
     in_shape = [batch_size, in_features]
     out_shape = [batch_size, out_features]
 
@@ -462,14 +494,19 @@ def _test_linear(
         in_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_input),
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(x_test, QuantizedTensor):
+        with torch.no_grad():
+            x_test = x_test.dequantize().requires_grad_()
     w_ref, w_test = make_reference_and_test_tensors(
         (out_features, in_features),
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_weight),
+        test_is_fp8=(quantized_compute or quantized_weight),
     )
+    if isinstance(w_test, QuantizedTensor):
+        w_test = w_test.dequantize()
     b_ref, b_test = None, None
     if bias:
         if tensor_parallel_mode == "row":
@@ -485,9 +522,11 @@ def _test_linear(
         out_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=(fp8_compute or fp8_grad_output),
+        test_is_fp8=quantized_compute,
         requires_grad=False,
     )
+    if isinstance(dy_test, QuantizedTensor):
+        dy_test = dy_test.dequantize()
 
     # Plain PyTorch implementation
     y_ref = torch.nn.functional.linear(x_ref, w_ref)
@@ -552,7 +591,8 @@ def _test_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    with te.fp8_model_init(enabled=fp8_weight):
+    recipe = make_recipe(quantization)
+    with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
         model = te_ops.Sequential(
             te_ops.Linear(
                 in_features,
@@ -571,7 +611,7 @@ def _test_linear(
             model[0].bias.copy_(b_test)
         del w_test
         del b_test
-    with te.fp8_autocast(enabled=fp8_compute):
+    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 
@@ -579,12 +619,8 @@ def _test_linear(
     tols = dtype_tols(dtype)
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
-    if fp8_compute:
-        tols = dtype_tols(
-            model[0].weight._fp8_dtype
-            if is_float8_tensor(model[0].weight)
-            else tex.DType.kFloat8E4M3
-        )
+    if quantized_compute:
+        tols = dtype_tols(tex.DType.kFloat8E4M3)
 
     # Check results
     y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -603,8 +639,8 @@ def _test_fp8_scale_update(
     amax_history_len: int = 31,
     amax_compute_algo: str = "max",
     margin: float = 2,
-    local_weight_shape: tuple[int, int] = (16, 16),
-    batch_size: int = 16,
+    local_weight_shape: tuple[int, int] = (32, 32),
+    batch_size: int = 32,
     dtype: torch.dtype = torch.float32,
     device: torch.device = "cuda",
     tensor_parallel_mode: str = "column",
@@ -715,20 +751,12 @@ def _test_fp8_scale_update(
     y_test.backward(dy_test)
 
     # Check results
-    forward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-    backward_key = FP8GlobalStateManager.get_meta_tensor_key(forward=False)
-    x_fp8_meta = op.get_fp8_meta("input")[forward_key]
-    w_fp8_meta = op.get_fp8_meta("param")[forward_key]
-    dy_fp8_meta = op.get_fp8_meta("grad_output")[backward_key]
-    x_amax_test = x_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
-    w_amax_test = w_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
-    dy_amax_test = dy_fp8_meta.amax_history[-1, 0].to(dtype=torch.float32, device="cpu")
-    x_scale_test = x_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
-    w_scale_test = w_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
-    dy_scale_test = dy_fp8_meta.scale[0].to(dtype=torch.float32, device="cpu")
-    torch.testing.assert_close(x_amax_test, x_amax_ref)
-    torch.testing.assert_close(w_amax_test, w_amax_ref)
-    torch.testing.assert_close(dy_amax_test, dy_amax_ref)
+    x_quantizer = op.get_quantizer("forward", 0)
+    w_quantizer = op.get_quantizer("forward", 1)
+    dy_quantizer = op.get_quantizer("backward", 0)
+    x_scale_test = x_quantizer.scale.to(dtype=torch.float32, device="cpu").reshape([])
+    w_scale_test = w_quantizer.scale.to(dtype=torch.float32, device="cpu").reshape([])
+    dy_scale_test = dy_quantizer.scale.to(dtype=torch.float32, device="cpu").reshape([])
     torch.testing.assert_close(x_scale_test, x_scale_ref)
     torch.testing.assert_close(w_scale_test, w_scale_ref)
     torch.testing.assert_close(dy_scale_test, dy_scale_ref)
@@ -755,38 +783,32 @@ def run_parallel_tests() -> None:
 
     # Basic linear op
     for config in itertools.product(
-        (False, True) if fp8_available else (False,),
+        quantization_list,
         ("column", "row"),
         (False, True),
     ):
         if rank == 0:
             print(f"Running _test_basic_linear with {config=}")
-        fp8, tensor_parallel_mode, sequence_parallel = config
+        quantization, tensor_parallel_mode, sequence_parallel = config
         _test_basic_linear(
-            fp8_compute=fp8,
-            fp8_input=fp8,
-            fp8_weight=fp8,
-            fp8_grad_output=fp8,
+            quantization=quantization,
             tensor_parallel_mode=tensor_parallel_mode,
             sequence_parallel=sequence_parallel,
         )
 
     # Linear op
     for config in itertools.product(
-        (False, True) if fp8_available else (False,),
+        quantization_list,
         ("column", "row"),
     ):
         if rank == 0:
             print(f"Running _test_linear with {config=}")
-        fp8, tensor_parallel_mode = config
+        quantization, tensor_parallel_mode = config
         dtype = torch.bfloat16 if is_bf16_compatible() else torch.float32
         _test_linear(
             bias=True,  # bias=False is tested in _test_basic_linear
             dtype=dtype,
-            fp8_compute=fp8,
-            fp8_input=fp8,
-            fp8_weight=fp8,
-            fp8_grad_output=fp8,
+            quantization=quantization,
             tensor_parallel_mode=tensor_parallel_mode,
         )
 
