@@ -925,7 +925,8 @@ __global__ void __launch_bounds__(MAX_THREADS)
       for (int i = 0; i < RANKS; i++) {
         fp8type *x = reinterpret_cast<fp8type *>(&val[i]);
 #pragma unroll
-        for (int j = 0; j < sizeof(int4) / sizeof(fp8type); j++) s[j] += hscale * (half_dtype)(x[j]);
+        for (int j = 0; j < sizeof(int4) / sizeof(fp8type); j++)
+          s[j] += hscale * (half_dtype)(x[j]);
       }
       (reinterpret_cast<int4 *>(outbuf))[index1_out] = sum[0];
       (reinterpret_cast<int4 *>(outbuf))[index2_out] = sum[1];
@@ -2623,7 +2624,7 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       accum_buf[i] += static_cast<float>(loader.separate()[i]) * (*scale);
-      if (input_id == num_inputs-1) {
+      if (input_id == num_inputs - 1) {
         storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
       }
     }
@@ -2642,8 +2643,9 @@ void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_in
   size_t num_blocks = (num_aligned_elements_per_input + num_threads - 1) / num_threads;
   dim3 block(num_threads);
   dim3 grid(num_blocks);
-  reduce_fp8_in_bf16_out_cuda<fp8type, nvec><<<grid, block, 0, stream>>>(
-    inputs, output, scale, num_inputs, input_size, num_aligned_elements_per_input, tot_input_size);
+  reduce_fp8_in_bf16_out_cuda<fp8type, nvec>
+      <<<grid, block, 0, stream>>>(inputs, output, scale, num_inputs, input_size,
+                                   num_aligned_elements_per_input, tot_input_size);
 }
 
 template void reduce_fp8_in_bf16_out<__nv_fp8_e4m3>(void *inputs, void *output, float *scale,
@@ -2677,7 +2679,7 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       accum_buf[i] += static_cast<float>(loader.separate()[i]);
-      if (input_id == num_inputs-1) {
+      if (input_id == num_inputs - 1) {
         storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
       }
     }
@@ -2695,5 +2697,5 @@ void reduce_bf16(void *inputs, void *output, int num_inputs, int input_size, cud
   dim3 block(num_threads);
   dim3 grid(num_blocks);
   reduce_bf16_cuda<nvec><<<grid, block, 0, stream>>>(
-    inputs, output, num_inputs, input_size, num_aligned_elements_per_input, tot_input_size);
+      inputs, output, num_inputs, input_size, num_aligned_elements_per_input, tot_input_size);
 }
