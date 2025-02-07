@@ -1,0 +1,25 @@
+ARG FROM_IMAGE_DEVEL
+ARG FROM_IMAGE
+ARG FRAMEWORK=pytorch
+
+FROM ${FROM_IMAGE_DEVEL} as devel
+FROM ${FROM_IMAGE}
+
+ARG FRAMEWORK
+WORKDIR /opt/transformerengine/
+SHELL ["bash", "-c"]
+
+# Remove PyTorch tests if not needed
+RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
+    && rm -rf /opt/transformerengine/qa/L?_pytorch_* \
+    || [[ "${FRAMEWORK}" =~ pytorch|all ]]
+
+# Remove JAX tests if not needed
+RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \
+    && rm -rf /opt/transformerengine/qa/L?_jax_* \
+    || [[ "${FRAMEWORK}" =~ jax|all ]]
+
+# Remove PaddlePaddle tests if not needed
+RUN [[ ! "${FRAMEWORK}" =~ paddle|all ]] \
+    && rm -rf /opt/transformerengine/qa/L?_paddle_* \
+    || [[ "${FRAMEWORK}" =~ paddle|all ]]
