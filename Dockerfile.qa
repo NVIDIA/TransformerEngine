@@ -13,7 +13,6 @@ SHELL ["bash", "-c"]
 RUN [[ ! "${FRAMEWORK}" =~ pytorch|all ]] \
     && rm -rf /opt/transformerengine/qa/L?_pytorch_* \
     || [[ "${FRAMEWORK}" =~ pytorch|all ]]
-RUN rm -rf /opt/transformerengine/qa/L1_pytorch_distributed_unittest  # TODO Restore
 
 # Remove JAX tests if not needed
 RUN [[ ! "${FRAMEWORK}" =~ jax|all ]] \

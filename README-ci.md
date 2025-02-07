@@ -63,10 +63,8 @@ may also be set:
 | `GL_MR`         |               | GitLab MR number (overrides `GH_BRANCH`)                  |
 | `PYTORCH_IMAGE` | Nightly build | Base Docker container for PyTorch build                   |
 | `JAX_IMAGE`     | Nightly build | Base Docker container for JAX build                       |
-| `PADDLE_IMAGE`  | Nightly build | Base Docker container for PaddlePaddle build              |
 | `BUILD_PYTORCH` | `1`           | Enable PyTorch build and tests                            |
 | `BUILD_JAX`     | `1`           | Enable JAX build and tests                                |
-| `BUILD_PADDLE`  | `1`           | Enable PaddlePaddle build and tests                       |
 | `RUN_L0_TESTS`  | `1`           | Run L0 tests automatically (otherwise run tests manually) |
 | `RUN_L1_TESTS`  | `0`           | Run L1 tests automatically (otherwise run tests manually) |
 | `RUN_L2_TESTS`  | `0`           | Run L2 tests automatically (otherwise run tests manually) |
