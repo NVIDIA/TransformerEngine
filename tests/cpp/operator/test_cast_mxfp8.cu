@@ -56,6 +56,10 @@ void scale_block(const ProcessingMethod processing_method,
         for (size_t j = j_min; j < j_max; ++j) {
             const size_t idx = i * cols + j;
             float elt = static_cast<float>(input[idx]);
+            if (processing_method == ProcessingMethod::CAST_DBIAS) {
+              // grad is the input
+              elt = static_cast<float>(grad[idx]);
+            }
             if (processing_method != ProcessingMethod::CAST_ONLY
                 && processing_method != ProcessingMethod::CAST_DBIAS) {
                 elt = OP(elt);
@@ -81,6 +85,10 @@ void scale_block(const ProcessingMethod processing_method,
         for (size_t j = j_min; j < j_max; ++j) {
             const size_t idx = i * cols + j;
             float elt = static_cast<float>(input[idx]);
+            if (processing_method == ProcessingMethod::CAST_DBIAS) {
+              // grad is the input
+              elt = static_cast<float>(grad[idx]);
+            }
             if (processing_method != ProcessingMethod::CAST_ONLY
                 && processing_method != ProcessingMethod::CAST_DBIAS) {
                 elt = OP(elt);
