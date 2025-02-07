@@ -44,8 +44,8 @@ void performTest(const std::vector<size_t>& shape) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input(shape, itype);
-  Tensor output_c(shape, otype);
+  Tensor input("input", shape, itype);
+  Tensor output_c("output_c", shape, otype);
 
   std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(full_size);
 

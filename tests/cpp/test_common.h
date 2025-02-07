@@ -6,10 +6,10 @@
 
 #pragma once
 
-#include <iostream>
 #include <memory>
 #include <vector>
 #include <array>
+#include <random>
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -97,17 +97,19 @@ struct TypeInfo{
 
 class Tensor {
  public:
-  Tensor(const NVTEShape &shape, const DType type,
+  Tensor(const std::string& name,
+         const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
 
-  Tensor(const std::vector<size_t> &shape,
+  Tensor(const std::string& name,
+         const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
          const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
+    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
 
   Tensor() {}
 
@@ -260,6 +262,8 @@ class Tensor {
   void set_scale_inv(float scale_inv);
   void shareFP8Meta(const Tensor &other);
 
+  std::mt19937& gen() { return gen_; }
+
  private:
   TensorWrapper tensor_;
   std::unique_ptr<unsigned char[]> cpu_data_rowwise_;
@@ -270,6 +274,8 @@ class Tensor {
   std::unique_ptr<unsigned char[]> columnwise_scale_inv_cpu_data_;
   bool rowwise_;
   bool columnwise_;
+  std::string name_;
+  std::mt19937 gen_;
 };
 
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;

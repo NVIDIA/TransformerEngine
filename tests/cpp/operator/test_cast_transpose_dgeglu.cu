@@ -74,9 +74,9 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor grad({N, H}, itype);
-  Tensor input({N, H * 2}, itype);
-  Tensor output({N, H * 2}, otype, true, true);
+  Tensor grad("grad", {N, H}, itype);
+  Tensor input("input", {N, H * 2}, itype);
+  Tensor output("output", {N, H * 2}, otype, true, true);
 
   fillUniform(&grad);
   fillUniform(&input);

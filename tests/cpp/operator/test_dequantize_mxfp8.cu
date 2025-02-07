@@ -194,10 +194,10 @@ void performTest_x1(const size_t rows,
     const size_t blocks_num = rowwise ? blocks_num_rowwise : blocks_num_colwise;
     const size_t scales_stride = rowwise ? blocks_X_rowwise : blocks_X_colwise;
 
-    Tensor input({ rows, cols }, itype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor input("input", { rows, cols }, itype, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
     // Output data are written to the rowwise ptr regardless of the scaling direction
-    Tensor output({ rows, cols }, otype, true, false);
+    Tensor output("output", { rows, cols }, otype, true, false);
 
     std::unique_ptr<OutputType[]> ref_output = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<fp8e8m0[]> scales = std::make_unique<fp8e8m0[]>(blocks_num);
@@ -247,11 +247,11 @@ void performTest_quantize_then_dequantize(const size_t rows,
 
     // input --> quantized --> output (dequantized)
     // input == output
-    Tensor input({ rows, cols }, in_type);
-    Tensor quantized({ rows, cols }, intermed_type, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
+    Tensor input("input", { rows, cols }, in_type);
+    Tensor quantized("quantized", { rows, cols }, intermed_type, rowwise, colwise, NVTE_MXFP8_1D_SCALING);
 
     // Output data are written to the rowwise ptr regardless of the scaling direction
-    Tensor output({ rows, cols }, out_type, true, false);
+    Tensor output("output", { rows, cols }, out_type, true, false);
 
     // fillCase<EncodingType>(&input, InputsFillCase::minNorm_to_maxNorm);
     fillCase<EncodingType>(&input, InputsFillCase::uniform);
@@ -313,8 +313,8 @@ void performTest_x2(const size_t rows,
     const size_t blocks_num_rowwise = blocks_Y_rowwise * blocks_X_rowwise;
     const size_t blocks_num_colwise = blocks_Y_colwise * blocks_X_colwise;
 
-    Tensor input({ rows, cols }, itype, true, true, NVTE_MXFP8_1D_SCALING);
-    Tensor output({ rows, cols }, otype);
+    Tensor input("input", { rows, cols }, itype, true, true, NVTE_MXFP8_1D_SCALING);
+    Tensor output("output", { rows, cols }, otype);
 
     std::unique_ptr<OutputType[]> ref_output_rowwise = std::make_unique<OutputType[]>(rows * cols);
     std::unique_ptr<OutputType[]> ref_output_colwise = std::make_unique<OutputType[]>(rows * cols);

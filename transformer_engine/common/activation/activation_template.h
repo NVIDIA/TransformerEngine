@@ -30,10 +30,10 @@ void act_fn(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   constexpr bool IS_ACT = true;
   constexpr NVTETensor dbias = nullptr;
   constexpr NVTETensor workspace = nullptr;
-  constexpr const NVTETensor activation_input = nullptr;
+  constexpr const NVTETensor grad = nullptr;
 
-  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, activation_input, nullptr, output,
-                                                        dbias, workspace, stream);
+  quantize_helper<IS_DBIAS, IS_DACT, IS_ACT, Empty, OP>(input, grad, nullptr, output, dbias,
+                                                        workspace, stream);
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>

@@ -116,10 +116,10 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({ N, H }, itype);
-  Tensor output({ N, H }, otype);
-  Tensor igrad({ N, H }, itype);
-  Tensor ograd({ N, H }, itype);
+  Tensor input("input", { N, H }, itype);
+  Tensor output("output", { N, H }, otype);
+  Tensor igrad("igrad", { N, H }, itype);
+  Tensor ograd("ograd", { N, H }, itype);
 
   fillUniform(&input);
   fillUniform(&ograd);
@@ -171,10 +171,10 @@ void performTestGLU(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor input({N, H * 2}, itype);
-  Tensor output({N, H}, otype);
-  Tensor igrad({ N, H * 2 }, itype);
-  Tensor ograd({ N, H }, itype);
+  Tensor input("input", {N, H * 2}, itype);
+  Tensor output("output", {N, H}, otype);
+  Tensor igrad("igrad", { N, H * 2 }, itype);
+  Tensor ograd("ograd", { N, H }, itype);
 
   fillUniform(&input);
   fillUniform(&ograd);
