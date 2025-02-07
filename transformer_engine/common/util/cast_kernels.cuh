@@ -1196,9 +1196,9 @@ namespace detail {
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
-void quantize_helper(const NVTETensor input, const NVTETensor grad,
-                     const NVTETensor noop, NVTETensor output, NVTETensor dbias,
-                     NVTETensor workspace, cudaStream_t stream) {
+void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETensor noop,
+                     NVTETensor output, NVTETensor dbias, NVTETensor workspace,
+                     cudaStream_t stream) {
   const Tensor *input_tensor;
   const Tensor *activation_input_tensor;
   if constexpr (IS_DBIAS || IS_DACT) {
