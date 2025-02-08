@@ -15,7 +15,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 import transformer_engine_torch as tex
 
 
@@ -246,20 +246,28 @@ def _test_permutation_index_map(
         unpermute_bwd_input = torch.rand(
             size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda"
         )
+        _permute_fwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        _permute_bwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        _unpermute_bwd_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        permute_fwd_input = _permute_fwd_input_quantizer(permute_fwd_input)
+        permute_bwd_input = _permute_bwd_input_quantizer(permute_bwd_input)
+        unpermute_bwd_input = _unpermute_bwd_quantizer(unpermute_bwd_input)
 
-        permute_fwd_input = Float8Tensor.to_float8(
-            permute_fwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
-        )
-        permute_bwd_input = Float8Tensor.to_float8(
-            permute_bwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
-        )
-        unpermute_bwd_input = Float8Tensor.to_float8(
-            unpermute_bwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
-        )
-
-        pytorch_permute_fwd_input = permute_fwd_input.from_float8(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.from_float8(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.from_float8(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
@@ -333,10 +341,10 @@ def _test_permutation_index_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.from_float8(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.from_float8(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.from_float8(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.from_float8(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
+        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
