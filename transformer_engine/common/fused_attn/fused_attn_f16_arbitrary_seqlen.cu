@@ -241,7 +241,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                          .set_attn_scale(attn_scale);
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
-        sdpa_options.set_sliding_window_length(window_size_left + 1);
+        sdpa_options.set_diagonal_band_left_bound(window_size_left + 1);
       }
 
       sdpa_options.set_alibi_mask(is_alibi);
@@ -685,7 +685,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       }
 
       if (cudnn_runtime_version >= 90200 && window_size_left != -1) {
-        sdpa_backward_options.set_sliding_window_length(window_size_left + 1);
+        sdpa_backward_options.set_diagonal_band_left_bound(window_size_left + 1);
       }
 
       if (cudnn_runtime_version >= 90000) {

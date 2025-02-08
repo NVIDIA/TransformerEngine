@@ -25,7 +25,7 @@ void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t op
   auto input_tensor = TensorWrapper(input, shape, desc.in_dtype);
   auto output_tensor = TensorWrapper(output, shape, desc.out_dtype, amax_out, scale, scale_inv);
 
-  nvte_fp8_quantize(input_tensor.data(), output_tensor.data(), stream);
+  nvte_quantize(input_tensor.data(), output_tensor.data(), stream);
 }
 
 Error_Type QuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
@@ -48,7 +48,7 @@ Error_Type QuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type a
   auto input_tensor = TensorWrapper(input, shape, in_dtype);
   auto output_tensor = TensorWrapper(output, shape, out_dtype, amax_out, scale, scale_inv);
 
-  nvte_fp8_quantize(input_tensor.data(), output_tensor.data(), stream);
+  nvte_quantize(input_tensor.data(), output_tensor.data(), stream);
   return ffi_with_cuda_error_check();
 }
 
@@ -76,7 +76,7 @@ void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t 
   auto input_tensor = TensorWrapper(input, shape, desc.in_dtype, amax, scale, scale_inv);
   auto output_tensor = TensorWrapper(output, shape, desc.out_dtype);
 
-  nvte_fp8_dequantize(input_tensor.data(), output_tensor.data(), stream);
+  nvte_dequantize(input_tensor.data(), output_tensor.data(), stream);
 }
 
 Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
@@ -96,7 +96,7 @@ Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type
   auto input_tensor = TensorWrapper(input, shape, in_dtype, amax, scale, scale_inv);
   auto output_tensor = TensorWrapper(output, shape, out_dtype);
 
-  nvte_fp8_dequantize(input_tensor.data(), output_tensor.data(), stream);
+  nvte_dequantize(input_tensor.data(), output_tensor.data(), stream);
   return ffi_with_cuda_error_check();
 }
 

@@ -8,9 +8,8 @@ from typing import Union, List
 
 import torch
 
-from ..cpp_extensions import (
-    multi_padding_fused,
-)
+import transformer_engine_torch as tex
+
 from ..jit import no_torch_dynamo
 
 
@@ -36,7 +35,7 @@ class _Fp8Padding(torch.autograd.Function):
         total_row = sum(padded_m_splits)
         out = torch.empty([total_row, in_features], dtype=inp.dtype, device=inp.device)
 
-        multi_padding_fused(inp.view(-1, in_features), m_splits, padded_m_splits, out)
+        tex.fused_multi_row_padding(inp.view(-1, in_features), out, m_splits, padded_m_splits)
 
         if is_grad_enabled:
             ctx.m_splits = m_splits
