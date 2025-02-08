@@ -53,7 +53,8 @@ struct FP8Data {
 template <>
 struct FP8Data<false> {};
 
-template <typename PARAM_T, typename GRAD_T, typename M_T, typename V_T, typename FULL_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename M_T, typename V_T, typename FULL_T,
+          typename index_t>
 struct AdamFunctorMaster {
   static constexpr bool is_fp8_type = is_fp8<PARAM_T>::value;
 
@@ -295,8 +296,8 @@ struct AdamFunctorMasterParamRemainder {
   }
 };
 
-
-template <typename PARAM_T, typename GRAD_T, typename M_T, typename V_T,  typename FULL_T, typename index_t>
+template <typename PARAM_T, typename GRAD_T, typename M_T, typename V_T, typename FULL_T,
+          typename index_t>
 struct AdamFunctor {
   __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<4> &tl,  // NOLINT(*)
@@ -632,10 +633,10 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                       v_in_type, 3, "adam",
                       multi_tensor_apply<4>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
                                             tensor_lists,
-                                            AdamFunctor<scalar_t_0, scalar_t_1, scalar_t_2, scalar_t_3, float, int64_t>(), beta1,
-                                            beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                            (adamMode_t)mode, weight_decay);
-                                          ))));
+                                            AdamFunctor<scalar_t_0, scalar_t_1, scalar_t_2,
+                                                        scalar_t_3, float, int64_t>(),
+                                            beta1, beta2, bias_correction1, bias_correction2,
+                                            epsilon, lr, (adamMode_t)mode, weight_decay);))));
     } else {
       // g, p, m, v, p_master
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
@@ -648,9 +649,10 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                       v_in_type, 3, "adam",
                       multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
                                             tensor_lists,
-                                            AdamFunctorMaster<scalar_t_0, scalar_t_1, scalar_t_2, scalar_t_3, float, int64_t>(),
-                                            beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                            (adamMode_t)mode, weight_decay);))));
+                                            AdamFunctorMaster<scalar_t_0, scalar_t_1, scalar_t_2,
+                                                              scalar_t_3, float, int64_t>(),
+                                            beta1, beta2, bias_correction1, bias_correction2,
+                                            epsilon, lr, (adamMode_t)mode, weight_decay);))));
     }
   } else {
     if (tl_size == 4) {
@@ -664,9 +666,10 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                   DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
                       v_in_type, 3, "adam",
                       multi_tensor_apply<4>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                            AdamFunctor<scalar_t_0, scalar_t_1, scalar_t_2, scalar_t_3, float, int32_t>(), beta1,
-                                            beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                            (adamMode_t)mode, weight_decay);))));
+                                            AdamFunctor<scalar_t_0, scalar_t_1, scalar_t_2,
+                                                        scalar_t_3, float, int32_t>(),
+                                            beta1, beta2, bias_correction1, bias_correction2,
+                                            epsilon, lr, (adamMode_t)mode, weight_decay);))));
     } else {
       DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
           p_in_type, 0, "adam",
@@ -677,9 +680,10 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                   DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
                       v_in_type, 3, "adam",
                       multi_tensor_apply<5>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                            AdamFunctorMaster<scalar_t_0, scalar_t_1, scalar_t_2, scalar_t_3, float, int32_t>(),
-                                            beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
-                                            (adamMode_t)mode, weight_decay);))));
+                                            AdamFunctorMaster<scalar_t_0, scalar_t_1, scalar_t_2,
+                                                              scalar_t_3, float, int32_t>(),
+                                            beta1, beta2, bias_correction1, bias_correction2,
+                                            epsilon, lr, (adamMode_t)mode, weight_decay);))));
     }
   }
   AT_CUDA_CHECK(cudaGetLastError());
@@ -769,10 +773,12 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                 m_in_type, 1, "adam",
                 DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
                     v_in_type, 2, "adam",
-                    multi_tensor_apply<5, true>(
-                        (int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
-                        AdamFunctorMaster<FP8_T, scalar_t_0, scalar_t_1, scalar_t_2, float, int64_t>(), beta1, beta2,
-                        bias_correction1, bias_correction2, epsilon, lr, (adamMode_t)mode, weight_decay);))));
+                    multi_tensor_apply<5, true>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag,
+                                                tensor_lists,
+                                                AdamFunctorMaster<FP8_T, scalar_t_0, scalar_t_1,
+                                                                  scalar_t_2, float, int64_t>(),
+                                                beta1, beta2, bias_correction1, bias_correction2,
+                                                epsilon, lr, (adamMode_t)mode, weight_decay);))));
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         fp8_dtype, FP8_T,
@@ -783,9 +789,10 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                 DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
                     v_in_type, 2, "adam",
                     multi_tensor_apply<5, true>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,
-                                                AdamFunctorMaster<FP8_T, scalar_t_0, scalar_t_1, scalar_t_2, float, int32_t>(),
-                                                beta1, beta2, bias_correction1, bias_correction2, epsilon,
-                                                lr, (adamMode_t)mode, weight_decay);))));
+                                                AdamFunctorMaster<FP8_T, scalar_t_0, scalar_t_1,
+                                                                  scalar_t_2, float, int32_t>(),
+                                                beta1, beta2, bias_correction1, bias_correction2,
+                                                epsilon, lr, (adamMode_t)mode, weight_decay);))));
   }
   AT_CUDA_CHECK(cudaGetLastError());
 }
