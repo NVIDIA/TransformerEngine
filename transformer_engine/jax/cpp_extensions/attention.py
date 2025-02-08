@@ -1654,11 +1654,6 @@ class _FusedAttnCPWithP2PHelper:
     def stack_kv(self, k, v):
         """Stacks k and v tensors if not stacked."""
         _not_used = jnp.zeros(0, dtype=k.dtype)
-        # match self.config.qkv_layout:
-        #     case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
-        #         return k
-        #     case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
-        #         return jnp.stack([k, v], axis=2)
         if self.config.qkv_layout.is_kvpacked():
             return k
         if self.config.qkv_layout.is_separate():
@@ -1668,11 +1663,6 @@ class _FusedAttnCPWithP2PHelper:
     def unstack_kv(self, kv):
         """Un-stacks k and v tensors if not stacked."""
         _not_used = jnp.zeros(0, dtype=kv.dtype)
-        # match self.config.qkv_layout:
-        #     case NVTE_QKV_Layout.NVTE_BSHD_BS2HD | NVTE_QKV_Layout.NVTE_THD_T2HD:
-        #         return kv, _not_used
-        #     case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD | NVTE_QKV_Layout.NVTE_THD_THD_THD:
-        #         return jnp.unstack(kv, axis=2)
         if self.config.qkv_layout.is_kvpacked():
             return kv, _not_used
         if self.config.qkv_layout.is_separate():
@@ -2329,7 +2319,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             dkv = jnp.zeros_like(kv)
             dbias = jnp.zeros_like(bias)
 
-            def scan_kv_block(carry):
+            def scan_kv_block(_idx, carry):
                 kv, kv_segment_ids, kv_segment_pos, dq, dkv, dbias = carry
 
                 # Start communication that feeds the next iteration.
@@ -2375,8 +2365,8 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             if helper.use_scanloop():
                 carry = lax.fori_loop(0, cp_size, scan_kv_block, carry)
             else:
-                for _ in range(cp_size):
-                    carry = scan_kv_block(carry)
+                for idx in range(cp_size):
+                    carry = scan_kv_block(idx, carry)
             (_, _, _, dq, dkv, dbias) = carry
 
             # Final permute to put gradients back to their final resting place.
