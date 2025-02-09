@@ -1377,8 +1377,8 @@ def test_permutation_single_case():
 
     # te_dtype = tex.DType.kFloat32
     # te_dtype = tex.DType.kFloat16
-    te_dtype = tex.DType.kBFloat16
-    # te_dtype = tex.DType.kFloat8E5M2
+    # te_dtype = tex.DType.kBFloat16
+    te_dtype = tex.DType.kFloat8E5M2
     # te_dtype = tex.DType.kFloat8E4M3
 
     num_tokens = 10
@@ -1389,36 +1389,36 @@ def test_permutation_single_case():
     with_probs = True
     Benchmark = True
 
-    # _test_permutation_index_map(
-    #     te_dtype=te_dtype,
-    #     num_tokens=num_tokens,
-    #     num_expert=num_expert,
-    #     hidden_size=hidden_size,
-    #     topK=topK,
-    #     num_out_tokens=num_out_tokens,
-    #     with_probs=with_probs,
-    #     BENCHMARK=Benchmark,
-    # )
+    _test_permutation_index_map(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=Benchmark,
+    )
 
-    # _test_permutation_mask_map(
-    #     te_dtype=te_dtype,
-    #     num_tokens=num_tokens,
-    #     num_expert=num_expert,
-    #     hidden_size=hidden_size,
-    #     topK=topK,
-    #     num_out_tokens=num_out_tokens,
-    #     with_probs=with_probs,
-    #     BENCHMARK=Benchmark,
-    # )
+    _test_permutation_mask_map(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        with_probs=with_probs,
+        BENCHMARK=Benchmark,
+    )
 
-    # _test_moe_chunk_sort(
-    #     te_dtype=te_dtype,
-    #     num_tokens=num_tokens,
-    #     num_expert=num_expert,
-    #     tp_size=4,
-    #     hidden_size=hidden_size,
-    #     BENCHMARK=Benchmark,
-    # )
+    _test_moe_chunk_sort(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        tp_size=4,
+        hidden_size=hidden_size,
+        BENCHMARK=Benchmark,
+    )
 
     _test_permutation_mask_map_alongside_probs(
         te_dtype=te_dtype,
