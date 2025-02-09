@@ -383,8 +383,8 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
             if merging_probs.dtype != torch.float32:
                 warnings.warn(
-                    f"The data type of the input `merging_probs` of Unpermute is {merging_probs.dtype}! "
-                    "The recommended type is torch.float32."
+                    "The data type of the input `merging_probs` of Unpermute is"
+                    f" {merging_probs.dtype}! The recommended type is torch.float32."
                 )
                 merging_probs = merging_probs.to(torch.float32)
 
@@ -457,16 +457,18 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype = None
 
             if ctx.with_probs:
-                act_grad, probs_grad = triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
-                    unpermuted_act_grad,
-                    row_id_map,
-                    fwd_input,
-                    merging_probs,
-                    ctx.num_tokens,
-                    ctx.num_experts,
-                    ctx.num_permuted_tokens,
-                    ctx.hidden_size,
-                    fp8_dtype,
+                act_grad, probs_grad = (
+                    triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
+                        unpermuted_act_grad,
+                        row_id_map,
+                        fwd_input,
+                        merging_probs,
+                        ctx.num_tokens,
+                        ctx.num_experts,
+                        ctx.num_permuted_tokens,
+                        ctx.hidden_size,
+                        fp8_dtype,
+                    )
                 )
             else:
                 act_grad, _ = triton_permutation.permute_with_mask_map(

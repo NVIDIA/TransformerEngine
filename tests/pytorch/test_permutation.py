@@ -667,7 +667,9 @@ def _test_permutation_mask_map(
             lambda: pytorch_permute_mask_map(pytorch_permute_fwd_input, routing_map)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_permute(te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask")
+            lambda: te_permute(
+                te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask"
+            )
         )
         print(f"permute\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
@@ -968,7 +970,7 @@ def _test_permutation_mask_map_alongside_probs(
         idx = random.randint(0, num_expert * tp_size - 1)
         split_sizes[idx] += 1
     split_sizes = torch.tensor(split_sizes, dtype=torch.int32)
-    split_sizes_cuda = split_sizes.to(device='cuda')
+    split_sizes_cuda = split_sizes.to(device="cuda")
 
     _sorted_idxs = torch.arange(num_expert * tp_size, dtype=torch.int32)
     sorted_idxs = _sorted_idxs.reshape(tp_size, num_expert).T.ravel()
@@ -976,13 +978,13 @@ def _test_permutation_mask_map_alongside_probs(
 
     split_sizes_2 = [split_sizes[i] for i in sorted_idxs.tolist()]
     split_sizes_2 = torch.tensor(split_sizes_2, dtype=torch.int32)
-    split_sizes_2_cuda = split_sizes_2.to(device='cuda')
+    split_sizes_2_cuda = split_sizes_2.to(device="cuda")
 
     sorted_idxs_2 = [0] * (num_expert * tp_size)
     for i in range(num_expert * tp_size):
         sorted_idxs_2[sorted_idxs[i]] = i
     sorted_idxs_2 = torch.tensor(sorted_idxs_2, dtype=torch.int32)
-    sorted_idxs_2_cuda = sorted_idxs_2.to(device='cuda')
+    sorted_idxs_2_cuda = sorted_idxs_2.to(device="cuda")
 
     ###################################################################################################################################
     #
@@ -1019,7 +1021,11 @@ def _test_permutation_mask_map_alongside_probs(
     te_probs.requires_grad_(True)
 
     te_permute_output, row_id_map, te_permuted_probs = te_permute(
-        te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask", probs=te_probs
+        te_permute_fwd_input,
+        routing_map,
+        num_out_tokens=num_out_tokens,
+        map_type="mask",
+        probs=te_probs,
     )
 
     te_permute_output, te_permuted_probs = te_sort_chunks_by_index(

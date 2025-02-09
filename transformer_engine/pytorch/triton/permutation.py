@@ -266,13 +266,18 @@ def _unpermute_kernel(
                 if FP8_DTYPE is not None:
                     inp = inp.to(data_type, bitcast=True).to(compute_type)
                 if WITH_MERGING_PROBS:
-                    merging_prob_off = pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
+                    merging_prob_off = (
+                        pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
+                    )
                     merging_prob = tl.load(merging_probs_ptr + merging_prob_off).to(compute_type)
                     inp *= merging_prob
                 accumulator += inp
             if PERMUTE_PROBS:
                 if current_start == 0:
-                    unpermuted_prob_off = pid * stride_unpermuted_probs_token + expert_idx * stride_unpermuted_probs_expert
+                    unpermuted_prob_off = (
+                        pid * stride_unpermuted_probs_token
+                        + expert_idx * stride_unpermuted_probs_expert
+                    )
                     if src_row != -1:
                         permuted_prob_off = src_row * stride_permuted_probs_token
                         prob = tl.load(permuted_probs_ptr + permuted_prob_off)
@@ -309,7 +314,9 @@ def unpermute_with_mask_map(
         fp8_dtype = None
     output = torch.empty((num_tokens, hidden_size), dtype=inp.dtype, device="cuda")
     if permuted_probs is not None:
-        unpermuted_probs = torch.empty((num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda")
+        unpermuted_probs = torch.empty(
+            (num_tokens, num_experts), dtype=permuted_probs.dtype, device="cuda"
+        )
     else:
         unpermuted_probs = None
     grid = (num_tokens,)
@@ -405,7 +412,9 @@ def _unpermute_bwd_with_merging_probs_kernel(
                 inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
                 if FP8_DTYPE is not None:
                     inp = inp.to(data_type, bitcast=True).to(compute_type)
-                merging_prob_off = pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
+                merging_prob_off = (
+                    pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
+                )
                 merging_prob = tl.load(merging_probs_ptr + merging_prob_off).to(compute_type)
                 output = inp * merging_prob
                 if FP8_DTYPE is not None:
@@ -425,10 +434,16 @@ def _unpermute_bwd_with_merging_probs_kernel(
                 prob_grad_accum += fwd_input.to(tl.float32) * inp.to(tl.float32)
                 current_start += BLOCK_SIZE
             probs_grad = tl.sum(prob_grad_accum)
-            probs_grad_off = pid * stride_merging_probs_grad_token + expert_idx * stride_merging_probs_grad_expert
+            probs_grad_off = (
+                pid * stride_merging_probs_grad_token
+                + expert_idx * stride_merging_probs_grad_expert
+            )
             tl.store(merging_probs_grad_ptr + probs_grad_off, probs_grad)
         else:
-            probs_grad_off = pid * stride_merging_probs_grad_token + expert_idx * stride_merging_probs_grad_expert
+            probs_grad_off = (
+                pid * stride_merging_probs_grad_token
+                + expert_idx * stride_merging_probs_grad_expert
+            )
             tl.store(merging_probs_grad_ptr + probs_grad_off, 0.0)
 
 
@@ -453,7 +468,9 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     act_grad = torch.empty(
         (num_out_tokens, hidden_size), dtype=fwd_output_grad.dtype, device="cuda"
     )
-    merging_probs_grad = torch.empty((num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda")
+    merging_probs_grad = torch.empty(
+        (num_tokens, num_experts), dtype=merging_probs.dtype, device="cuda"
+    )
     grid = (num_tokens,)
     _unpermute_bwd_with_merging_probs_kernel[grid](
         fwd_output_grad,
