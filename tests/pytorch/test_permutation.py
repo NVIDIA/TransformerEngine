@@ -15,7 +15,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 import transformer_engine_torch as tex
 
 
@@ -509,19 +509,28 @@ def _test_permutation_mask_map(
             size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda"
         )
 
-        permute_fwd_input = Float8Tensor.to_float8(
-            permute_fwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
+        _permute_fwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
         )
-        permute_bwd_input = Float8Tensor.to_float8(
-            permute_bwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
+        _permute_bwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
         )
-        unpermute_bwd_input = Float8Tensor.to_float8(
-            unpermute_bwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
+        _unpermute_bwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
         )
+        permute_fwd_input = _permute_fwd_input_quantizer(permute_fwd_input)
+        permute_bwd_input = _permute_bwd_input_quantizer(permute_bwd_input)
+        unpermute_bwd_input = _unpermute_bwd_input_quantizer(unpermute_bwd_input)
 
-        pytorch_permute_fwd_input = permute_fwd_input.from_float8(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.from_float8(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.from_float8(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
@@ -570,8 +579,8 @@ def _test_permutation_mask_map(
     te_permute_fwd_input.requires_grad_(True)
     te_permute_bwd_input = permute_bwd_input if fp8 else pytorch_permute_bwd_input.detach()
 
-    te_permute_output, row_id_map = te_permute(
-        te_permute_fwd_input, routing_map, num_out_tokens, map_type="mask"
+    te_permute_output, row_id_map, _ = te_permute(
+        te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask"
     )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
 
@@ -596,10 +605,10 @@ def _test_permutation_mask_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.from_float8(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.from_float8(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.from_float8(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.from_float8(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
+        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
@@ -658,7 +667,7 @@ def _test_permutation_mask_map(
             lambda: pytorch_permute_mask_map(pytorch_permute_fwd_input, routing_map)
         )
         t2 = perf_test_cuda_kernel(
-            lambda: te_permute(te_permute_fwd_input, routing_map, num_out_tokens, map_type="mask")
+            lambda: te_permute(te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask")
         )
         print(f"permute\t\tfwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
 
@@ -752,15 +761,21 @@ def _test_moe_chunk_sort(
         fwd_input = torch.rand(size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda")
         bwd_input = torch.rand(size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda")
 
-        fwd_input = Float8Tensor.to_float8(
-            fwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
+        _fwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
         )
-        bwd_input = Float8Tensor.to_float8(
-            bwd_input, fp8_dtype=te_dtype, scale=torch.full([1], 1.0)
+        _bwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
         )
+        fwd_input = _fwd_input_quantizer.quantize(fwd_input)
+        bwd_input = _bwd_input_quantizer.quantize(bwd_input)
 
-        pytorch_fwd_input = fwd_input.from_float8(torch.float16)
-        pytorch_bwd_input = bwd_input.from_float8(torch.float16)
+        pytorch_fwd_input = fwd_input.dequantize().to(torch.float16)
+        pytorch_bwd_input = bwd_input.dequantize().to(torch.float16)
     else:
         pytorch_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
@@ -795,7 +810,7 @@ def _test_moe_chunk_sort(
     te_fwd_input.requires_grad_(True)
     te_bwd_input = bwd_input if fp8 else pytorch_bwd_input.detach()
 
-    te_output = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
+    te_output, _ = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
     te_output.backward(te_bwd_input, retain_graph=True)
 
     ###################################################################################################################################
@@ -806,8 +821,8 @@ def _test_moe_chunk_sort(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_output_ = te_output.from_float8(torch.float32)
-        te_fwd_input_grad = te_fwd_input.grad.from_float8(torch.float32)
+        te_output_ = te_output.dequantize().to(torch.float32)
+        te_fwd_input_grad = te_fwd_input.grad.dequantize().to(torch.float32)
     else:
         te_output_ = te_output.float()
         te_fwd_input_grad = te_fwd_input.grad.float()
@@ -871,6 +886,201 @@ def _test_moe_chunk_sort(
             )
         )
         print(f"chunk sort\t\tbwd: pytorch: {t1:.3f} ms,  TE: {t2:.3f} ms")
+
+
+def _test_permutation_mask_map_alongside_probs(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+    topK,
+    num_out_tokens,
+    tp_size,
+):
+    if topK > num_expert:
+        pytest.skip("topK should be smaller than the number of experts.")
+
+    if num_out_tokens == None:
+        num_out_tokens = num_tokens * topK
+
+    print(
+        "mask map alongside probs:"
+        f" token:{num_tokens} hidden_size:{hidden_size} expert:{num_expert} topK:{topK} {te_dtype}"
+    )
+
+    fp8 = False
+    # Convert TE dtypes to PyTorch dtypes
+    if te_dtype == tex.DType.kFloat32:
+        dtype = torch.float32
+    elif te_dtype == tex.DType.kFloat16:
+        dtype = torch.float16
+    elif te_dtype == tex.DType.kBFloat16:
+        dtype = torch.bfloat16
+    elif fp8_available and (te_dtype == tex.DType.kFloat8E5M2 or te_dtype == tex.DType.kFloat8E4M3):
+        dtype = torch.uint8
+        fp8 = True
+    else:
+        pytest.skip("Invalid dtype.")
+
+    if fp8:
+        permute_fwd_input = torch.rand(
+            size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda"
+        )
+        unpermute_bwd_input = torch.rand(
+            size=(num_tokens, hidden_size), dtype=torch.float32, device="cuda"
+        )
+
+        _permute_fwd_input_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        _unpermute_bwd_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        permute_fwd_input = _permute_fwd_input_quantizer.quantize(permute_fwd_input)
+        unpermute_bwd_input = _unpermute_bwd_quantizer.quantize(unpermute_bwd_input)
+
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+    else:
+        pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
+        pytorch_unpermute_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
+
+    pytorch_permute_fwd_input.requires_grad_(True)
+
+    restore_shape = pytorch_permute_fwd_input.shape
+
+    _tmp_tensor = torch.zeros((num_tokens * num_expert,))
+    _tmp_tensor[: int(num_out_tokens)] = 1.0
+    _tmp_idx = torch.randperm(num_tokens * num_expert)
+    routing_map = torch.reshape(_tmp_tensor[_tmp_idx], (num_tokens, num_expert)).bool().cuda()
+
+    probs = torch.rand(num_tokens, num_expert).cuda() * routing_map
+    row_sums = probs.sum(dim=1, keepdim=True)
+    probs = probs / row_sums
+    probs.requires_grad_(True)
+
+    split_sizes = [0] * (num_expert * tp_size)
+    for i in range(num_out_tokens):
+        idx = random.randint(0, num_expert * tp_size - 1)
+        split_sizes[idx] += 1
+    split_sizes = torch.tensor(split_sizes, dtype=torch.int32)
+    split_sizes_cuda = split_sizes.to(device='cuda')
+
+    _sorted_idxs = torch.arange(num_expert * tp_size, dtype=torch.int32)
+    sorted_idxs = _sorted_idxs.reshape(tp_size, num_expert).T.ravel()
+    sorted_idxs_cuda = sorted_idxs.to(device="cuda")
+
+    split_sizes_2 = [split_sizes[i] for i in sorted_idxs.tolist()]
+    split_sizes_2 = torch.tensor(split_sizes_2, dtype=torch.int32)
+    split_sizes_2_cuda = split_sizes_2.to(device='cuda')
+
+    sorted_idxs_2 = [0] * (num_expert * tp_size)
+    for i in range(num_expert * tp_size):
+        sorted_idxs_2[sorted_idxs[i]] = i
+    sorted_idxs_2 = torch.tensor(sorted_idxs_2, dtype=torch.int32)
+    sorted_idxs_2_cuda = sorted_idxs_2.to(device='cuda')
+
+    ###################################################################################################################################
+    #
+    # PyTorch Permutation
+    #
+    ###################################################################################################################################
+    pytorch_permute_output, sorted_indices = pytorch_permute_mask_map(
+        pytorch_permute_fwd_input, routing_map
+    )
+
+    pytorch_permute_output = pytorch_sort_chunks_by_index(
+        pytorch_permute_output, split_sizes, sorted_idxs
+    )
+
+    pytorch_permute_output = pytorch_sort_chunks_by_index(
+        pytorch_permute_output, split_sizes_2, sorted_idxs_2
+    )
+
+    pytorch_unpermute_output = pytorch_unpermute_mask_map(
+        pytorch_permute_output, sorted_indices, restore_shape, probs, routing_map
+    )
+    pytorch_unpermute_output.backward(pytorch_unpermute_bwd_input, retain_graph=True)
+
+    ###################################################################################################################################
+    #
+    # TE Permutation
+    #
+    ###################################################################################################################################
+    te_permute_fwd_input = permute_fwd_input if fp8 else pytorch_permute_fwd_input.detach()
+    te_permute_fwd_input.requires_grad_(True)
+
+    te_unpermute_bwd_input = unpermute_bwd_input if fp8 else pytorch_unpermute_bwd_input.detach()
+    te_probs = probs.detach()
+    te_probs.requires_grad_(True)
+
+    te_permute_output, row_id_map, te_permuted_probs = te_permute(
+        te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask", probs=te_probs
+    )
+
+    te_permute_output, te_permuted_probs = te_sort_chunks_by_index(
+        te_permute_output, split_sizes_cuda, sorted_idxs_cuda, te_permuted_probs
+    )
+
+    if fp8:
+        _permute_output_quantizer = Float8Quantizer(
+            scale=torch.full([1], 1.0).cuda().squeeze(),
+            amax=torch.full([1], 1.0).cuda(),
+            fp8_dtype=te_dtype,
+        )
+        te_permute_output = te_permute_output.dequantize().to(torch.float32)
+        te_permute_output = te_permute_output * te_permuted_probs.unsqueeze(-1)
+        te_permute_output = _permute_output_quantizer.quantize(te_permute_output)
+    else:
+        te_permute_output_dtype = te_permute_output.dtype
+        te_permute_output = te_permute_output * te_permuted_probs.unsqueeze(-1)
+        te_permute_output = te_permute_output.to(dtype=te_permute_output_dtype)
+
+    te_permute_output, te_permuted_probs = te_sort_chunks_by_index(
+        te_permute_output, split_sizes_2_cuda, sorted_idxs_2_cuda, te_permuted_probs
+    )
+
+    te_unpermute_output = te_unpermute(
+        te_permute_output,
+        row_id_map,
+        None,
+        restore_shape,
+        map_type="mask",
+    )
+    te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
+
+    ###############################################################################################
+
+    tols = dtype_tols(te_dtype)
+
+    if fp8:
+        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
+        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
+    else:
+        te_permute_output_ = te_permute_output.float()
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
+        te_unpermute_output_ = te_unpermute_output.float()
+
+    torch.testing.assert_close(
+        pytorch_unpermute_output.float(),
+        te_unpermute_output_,
+        msg=f"Mismatch in fused_unpermute fwd",
+        **tols,
+    )
+    torch.testing.assert_close(
+        pytorch_permute_fwd_input.grad.float(),
+        te_permute_fwd_input_grad,
+        msg=f"Mismatch in fused_permute bwd",
+        **tols,
+    )
+    torch.testing.assert_close(
+        probs.grad.float(), te_probs.grad.float(), msg=f"Mismatch in prob grad", **tols
+    )
 
 
 def perf_test_cuda_kernel(cuda_kernel_fn):
@@ -959,6 +1169,33 @@ def test_permutation_mask_map(
     )
 
 
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
+@pytest.mark.parametrize("num_tokens", [4096])
+@pytest.mark.parametrize("num_expert", [8, 16])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("num_out_tokens", [None, 2039])
+@pytest.mark.parametrize("tp_size", [1, 2, 8])
+def test_permutation_mask_map_alongside_probs(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+    topK,
+    num_out_tokens,
+    tp_size,
+):
+    _test_permutation_mask_map_alongside_probs(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        tp_size=tp_size,
+    )
+
+
 # Only run FP8 tests on H100.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
@@ -1020,6 +1257,34 @@ def test_permutation_mask_map_fp8(
         num_out_tokens=num_out_tokens,
         with_probs=with_probs,
         BENCHMARK=BENCHMARK,
+    )
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.parametrize("te_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
+@pytest.mark.parametrize("num_tokens", [2048])
+@pytest.mark.parametrize("num_expert", [8, 16])
+@pytest.mark.parametrize("hidden_size", [4096])
+@pytest.mark.parametrize("topK", [1, 2, 5])
+@pytest.mark.parametrize("num_out_tokens", [None, 2039])
+@pytest.mark.parametrize("tp_size", [1, 2, 8])
+def test_permutation_mask_map_alongside_probs_fp8(
+    te_dtype,
+    num_tokens,
+    num_expert,
+    hidden_size,
+    topK,
+    num_out_tokens,
+    tp_size,
+):
+    _test_permutation_mask_map_alongside_probs(
+        te_dtype=te_dtype,
+        num_tokens=num_tokens,
+        num_expert=num_expert,
+        hidden_size=hidden_size,
+        topK=topK,
+        num_out_tokens=num_out_tokens,
+        tp_size=tp_size,
     )
 
 
@@ -1106,8 +1371,8 @@ def test_permutation_single_case():
 
     # te_dtype = tex.DType.kFloat32
     # te_dtype = tex.DType.kFloat16
-    # te_dtype = tex.DType.kBFloat16
-    te_dtype = tex.DType.kFloat8E5M2
+    te_dtype = tex.DType.kBFloat16
+    # te_dtype = tex.DType.kFloat8E5M2
     # te_dtype = tex.DType.kFloat8E4M3
 
     num_tokens = 10
@@ -1118,35 +1383,45 @@ def test_permutation_single_case():
     with_probs = True
     Benchmark = True
 
-    _test_permutation_index_map(
+    # _test_permutation_index_map(
+    #     te_dtype=te_dtype,
+    #     num_tokens=num_tokens,
+    #     num_expert=num_expert,
+    #     hidden_size=hidden_size,
+    #     topK=topK,
+    #     num_out_tokens=num_out_tokens,
+    #     with_probs=with_probs,
+    #     BENCHMARK=Benchmark,
+    # )
+
+    # _test_permutation_mask_map(
+    #     te_dtype=te_dtype,
+    #     num_tokens=num_tokens,
+    #     num_expert=num_expert,
+    #     hidden_size=hidden_size,
+    #     topK=topK,
+    #     num_out_tokens=num_out_tokens,
+    #     with_probs=with_probs,
+    #     BENCHMARK=Benchmark,
+    # )
+
+    # _test_moe_chunk_sort(
+    #     te_dtype=te_dtype,
+    #     num_tokens=num_tokens,
+    #     num_expert=num_expert,
+    #     tp_size=4,
+    #     hidden_size=hidden_size,
+    #     BENCHMARK=Benchmark,
+    # )
+
+    _test_permutation_mask_map_alongside_probs(
         te_dtype=te_dtype,
         num_tokens=num_tokens,
         num_expert=num_expert,
         hidden_size=hidden_size,
         topK=topK,
         num_out_tokens=num_out_tokens,
-        with_probs=with_probs,
-        BENCHMARK=Benchmark,
-    )
-
-    _test_permutation_mask_map(
-        te_dtype=te_dtype,
-        num_tokens=num_tokens,
-        num_expert=num_expert,
-        hidden_size=hidden_size,
-        topK=topK,
-        num_out_tokens=num_out_tokens,
-        with_probs=with_probs,
-        BENCHMARK=Benchmark,
-    )
-
-    _test_moe_chunk_sort(
-        te_dtype=te_dtype,
-        num_tokens=num_tokens,
-        num_expert=num_expert,
         tp_size=4,
-        hidden_size=hidden_size,
-        BENCHMARK=Benchmark,
     )
 
 
