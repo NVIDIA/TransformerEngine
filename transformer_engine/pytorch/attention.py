@@ -7400,14 +7400,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
-        qkv_format: Optional[str] = None,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
-        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
-        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_kv: Optional[int] = None,
+        attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+        qkv_format: str = None,
+        cu_seqlens_q: torch.Tensor = None,
+        cu_seqlens_kv: torch.Tensor = None,
+        cu_seqlens_q_padded: torch.Tensor = None,
+        cu_seqlens_kv_padded: torch.Tensor = None,
+        max_seqlen_q: int = None,
+        max_seqlen_kv: int = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         checkpoint_core_attention: bool = False,
@@ -7629,9 +7629,22 @@ class DotProductAttention(TransformerEngineBaseModule):
                 value_layer.shape[-1] == self.hidden_size_per_attention_head_v
             ), f"Values have head_dim = {value_layer.shape[-1]}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
+            assert (
+                key_layer.shape[-2] == self.num_gqa_groups_per_partition
+                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
+            ), (
+                "Keys and values must have num_gqa_group ="
+                f" {self.num_gqa_groups_per_partition} heads! Found {key_layer.shape[-2]} in"
+                f" key_layer and {value_layer.shape[-2]} in value_layer."
+            )
 
             if qkv_format is None:
                 qkv_format = self.qkv_format
+            assert qkv_format in [
+                "sbhd",
+                "bshd",
+                "thd",
+            ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
 
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
@@ -7655,19 +7668,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     graph_safe_rng_available()
                 ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
 
-            if qkv_format is None:
-                qkv_format = self.qkv_format
-
-            assert qkv_format in [
-                "sbhd",
-                "bshd",
-                "thd",
-            ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
-
             if qkv_format == "thd":
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
+                assert (
+                    "padding" in attn_mask_type
+                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -7744,19 +7751,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
                 # query tensor is now in inference_params.qkv_format
                 qkv_format = target_qkv_format
-
-            if qkv_format == "thd":
-                assert (
-                    "padding" in attn_mask_type
-                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
-            assert (
-                key_layer.shape[-2] == self.num_gqa_groups_per_partition
-                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
-            ), (
-                "Keys and values must have num_gqa_group ="
-                f" {self.num_gqa_groups_per_partition} heads! Found {key_layer.shape[-2]} in"
-                f" key_layer and {value_layer.shape[-2]} in value_layer."
-            )
 
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
