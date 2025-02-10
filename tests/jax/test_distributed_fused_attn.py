@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 
+import os
+import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -11,7 +13,7 @@ from distributed_test_base import (
     generate_context_parallel_configs,
     generate_collectives_count,
 )
-from transformer_engine.jax import fp8_autocast
+from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 from transformer_engine.jax.attention import (
     is_fused_attn_kernel_available,
     AttnBiasType,
@@ -22,10 +24,7 @@ from transformer_engine.jax.attention import (
     inverse_reorder_causal_load_balancing,
     CPStrategy,
 )
-from transformer_engine.jax.sharding import MeshResource
-import pytest
 
-from test_fused_attn import FusedAttnRunner, BiasShape, SeqDescFormat
 
 DTYPES = [jnp.bfloat16]
 
@@ -355,6 +354,10 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.ALL_GATHER,
         )
 
+    @pytest.mark.parametrize(
+            "use_scan",
+            [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
+            )
     def test_context_parallel_ring_attn(
         self,
         device_count,
@@ -367,8 +370,12 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_scan
     ):
-        return self.impl_test_context_parallel_attn(
+        if use_scan:
+            os.environ['NVTE_FUSED_RING_ATTENTION'] = '1'
+
+        self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -381,6 +388,7 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.RING,
         )
+        os.environ['NVTE_FUSED_RING_ATTENTION'] = '0'
 
 
 class TestReorderCausalLoadBalancing:
