@@ -239,7 +239,7 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
     )
     params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
     params_sharding = jax.tree_util.tree_map(
-        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
+        lambda x: NamedSharding(mesh, PartitionSpec(None)), abs_var_collect[PARAMS_KEY]
     )
     params_sharding = {**params_sharding, **params_axes_sharding}
     return params_sharding
