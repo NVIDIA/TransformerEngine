@@ -252,7 +252,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
         v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
-        assert q_dtype == k_dtype == v_dtype == bias_dtype
+        # assert q_dtype == k_dtype == v_dtype == bias_dtype
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
         batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (

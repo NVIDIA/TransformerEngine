@@ -1437,7 +1437,7 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
             "rel_embedding",
             self.embedding_init,
             (self.num_attention_heads, self.num_buckets),
-            jnp.float32,
+            self.dtype,
             axes=self.embedding_axes,
         )
 
