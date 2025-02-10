@@ -355,9 +355,9 @@ class TestDistributedContextParallelSelfAttn:
         )
 
     @pytest.mark.parametrize(
-            "use_scan",
-            [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
-            )
+        "use_scan",
+        [pytest.param(False, id="NO_SCAN"), pytest.param(True, id="USE_SCAN")],
+    )
     def test_context_parallel_ring_attn(
         self,
         device_count,
@@ -370,10 +370,10 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
-        use_scan
+        use_scan,
     ):
         if use_scan:
-            os.environ['NVTE_FUSED_RING_ATTENTION'] = '1'
+            os.environ["NVTE_FUSED_RING_ATTENTION"] = "1"
 
         self.impl_test_context_parallel_attn(
             device_count,
@@ -388,7 +388,7 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.RING,
         )
-        os.environ['NVTE_FUSED_RING_ATTENTION'] = '0'
+        os.environ["NVTE_FUSED_RING_ATTENTION"] = "0"
 
 
 class TestReorderCausalLoadBalancing:
