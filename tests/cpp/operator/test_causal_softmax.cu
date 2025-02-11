@@ -153,11 +153,11 @@ void performTest(
 
   DType itype = TypeInfo<Type>::dtype;
 
-  Tensor data_in({ batches, heads, rows, cols }, itype);
-  Tensor softmax_out({ batches, heads, rows, cols }, itype);
-  Tensor softmax_in({ batches, heads, rows, cols }, itype);
-  Tensor grads_in({ batches, heads, rows, cols }, itype);
-  Tensor grads_out({ batches, heads, rows, cols }, itype);
+  Tensor data_in("data_in", { batches, heads, rows, cols }, itype);
+  Tensor softmax_out("softmax_out", { batches, heads, rows, cols }, itype);
+  Tensor softmax_in("softmax_in", { batches, heads, rows, cols }, itype);
+  Tensor grads_in("grads_in", { batches, heads, rows, cols }, itype);
+  Tensor grads_out("grads_out", { batches, heads, rows, cols }, itype);
 
   const size_t elements_total = batches * heads * rows * cols;
   std::unique_ptr<Type[]> softmax_out_ref = std::make_unique<Type[]>(elements_total);
@@ -175,9 +175,9 @@ void performTest(
 
 
   // Reference implementations
-  compute_fwd_ref(softmax_out_ref.get(), data_in.cpu_dptr<Type>(),
+  compute_fwd_ref(softmax_out_ref.get(), data_in.rowwise_cpu_dptr<Type>(),
                   compute_buffer.get(), scaling_factor, batches, heads, rows, cols);
-  compute_bwd_ref(grads_out_ref.get(), grads_in.cpu_dptr<Type>(), softmax_in.cpu_dptr<Type>(),
+  compute_bwd_ref(grads_out_ref.get(), grads_in.rowwise_cpu_dptr<Type>(), softmax_in.rowwise_cpu_dptr<Type>(),
                   compute_buffer.get(), scaling_factor, batches, heads, rows, cols);
 
   cudaDeviceSynchronize();
@@ -187,8 +187,8 @@ void performTest(
   if(itype == DType::kBFloat16) {
     atol = 1e-3;
   }
-  compareResults("softmax_fwd", softmax_out, softmax_out_ref.get(), atol, rtol);
-  compareResults("softmax_bwd", grads_out, grads_out_ref.get(), atol, rtol);
+  compareResults("softmax_fwd", softmax_out, softmax_out_ref.get(), true, atol, rtol);
+  compareResults("softmax_bwd", grads_out, grads_out_ref.get(), true, atol, rtol);
 }
 
 // [Batches, Attention Heads, Query Sequence Length, Key Sequence Length, Scaling Factor]

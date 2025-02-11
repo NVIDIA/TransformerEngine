@@ -27,29 +27,31 @@ if torch.cuda.device_count() < 2:
     pytest.skip("Distributed training needs at least 2 GPUs.")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(4, torch.cuda.device_count())
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 
 
-def _run_test(fp8):
+def _run_test(quantization):
     test_path = TEST_ROOT / "run_numerics.py"
     test_cmd = LAUNCH_CMD + [str(test_path)]
 
-    if fp8:
-        test_cmd += ["--fp8"]
+    if quantization is not None:
+        test_cmd += ["--quantization", quantization]
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if result.returncode != 0 or "NUMERICAL CHECK FAILED" in result.stderr.decode():
-        raise AssertionError(result.stderr.decode())
+    result = subprocess.run(test_cmd, env=os.environ, check=False)
+    assert result.returncode == 0
 
 
 all_boolean = [True, False]
 
 
-@pytest.mark.parametrize("fp8", all_boolean)
-def test_distributed(fp8):
-    if fp8 and not fp8_available:
+@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8"])
+def test_distributed(quantization):
+    if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    _run_test(fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _run_test(quantization)

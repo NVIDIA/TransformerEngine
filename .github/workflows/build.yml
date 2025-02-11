@@ -73,23 +73,3 @@ jobs:
           MAX_JOBS: 1
       - name: 'Sanity check'
         run: python tests/jax/test_sanity_import.py
-  paddle:
-    name: 'PaddlePaddle'
-    runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/paddlepaddle:24.10-py3
-      options: --user root
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
-      - name: 'Build'
-        run: |
-          apt-get update
-          apt-get install -y libgoogle-glog-dev
-          pip install . -v
-        env:
-          NVTE_FRAMEWORK: paddle
-      - name: 'Sanity check'
-        run: python tests/paddle/test_sanity_import.py

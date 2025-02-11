@@ -11,8 +11,8 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
 import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
@@ -42,6 +42,20 @@ DimsType = Union[Iterable[int], int]
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
+def to_float8(
+    tensor: torch.Tensor,
+    fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+    scale: float = 1.0,
+) -> Float8Tensor:
+    """Cast tensor to FP8"""
+    quantizer = Float8Quantizer(
+        scale=torch.full([1], scale, dtype=torch.float32, device="cuda"),
+        amax=torch.empty([1], dtype=torch.float32, device="cuda"),
+        fp8_dtype=fp8_dtype,
+    )
+    return quantizer(tensor.cuda())
+
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFloat8Tensor:
 
@@ -62,10 +76,11 @@ class TestFloat8Tensor:
         """Call constructor and perform sanity checks"""
         dims = _to_list(dims)
         tensor = Float8Tensor(
+            shape=dims,
+            dtype=dtype,
             data=torch.zeros(dims, device="cuda", dtype=torch.uint8),
             fp8_dtype=fp8_dtype,
             fp8_scale_inv=torch.full([1], scale_inv),
-            dtype=dtype,
         )
         assert list(tensor.size()) == dims, "Incorrect dims"
         assert tensor.dtype == dtype, "Incorrect nominal dtype"
@@ -84,11 +99,7 @@ class TestFloat8Tensor:
         x_ref = 2 * torch.rand(_to_list(dims), dtype=dtype, device="cpu") - 1
 
         # Cast to FP8 and back
-        x_fp8 = Float8Tensor.to_float8(
-            x_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
         x_fp8 = x_fp8.dequantize().cpu()
 
         # Check results
@@ -115,62 +126,6 @@ class TestFloat8Tensor:
     def test_quantize_dequantize_dims(self, dims: DimsType) -> None:
         self._test_quantize_dequantize(dims=dims)
 
-    def test_fp8_meta(
-        self,
-        dtype: torch.dtype = torch.float32,
-        dims: DimsType = 23,
-    ) -> None:
-        """Construct Float8Tensor using FP8 metadata and perform basic checks"""
-
-        # Get FP8 metadata from linear module
-        fp8_dtype = tex.DType.kFloat8E4M3
-        recipe = transformer_engine.common.recipe.DelayedScaling(
-            fp8_format=transformer_engine.common.recipe.Format.E4M3,
-        )
-        with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
-            module = te.Linear(32, 32)
-            _ = module(torch.zeros([8, 32], device="cuda"))
-        fp8_meta = module.fp8_meta
-        fp8_meta_index = tex.FP8FwdTensors.GEMM1_WEIGHT
-        fp8_meta_key = FP8GlobalStateManager.get_meta_tensor_key(forward=True)
-
-        # Initialize random data
-        dims = _to_list(dims)
-        x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-
-        # Make Float8Tensor
-        x_fp8 = Float8Tensor.to_float8(
-            x_ref,
-            fp8_meta=fp8_meta,
-            fp8_meta_index=fp8_meta_index,
-        )
-        x_ref = x_fp8.dequantize()
-        assert list(x_fp8.size()) == dims, "Incorrect dims"
-        assert x_fp8.dtype == dtype, "Incorrect nominal dtype"
-        assert x_fp8.is_cuda, "Incorrect device"
-        assert x_fp8._fp8_dtype == fp8_dtype, "Incorrect FP8 dtype"
-
-        # Change FP8 metadata scale
-        fp8_meta[fp8_meta_key].scale[fp8_meta_index] = 2
-        fp8_meta[fp8_meta_key].scale_inv.fill_(123)
-
-        # Check results
-        torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
-        with pytest.raises(AssertionError):
-            # Make sure we are not trivially passing the test
-            torch.testing.assert_close(x_fp8, -x_ref, **_tols[fp8_dtype])
-
-        # Check if scaling factor is updated after in-place ops
-        x_fp8 += 0
-        fp8_meta[fp8_meta_key].scale[fp8_meta_index] = 4
-        fp8_meta[fp8_meta_key].scale_inv.fill_(321)
-        assert x_fp8._scale_inv.item() == 0.5, "Incorrect FP8 scale_inv"
-        torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
-        y = x_fp8.detach()
-        y += 0
-        assert x_fp8._scale_inv.item() == 0.25, "Incorrect FP8 scale_inv"
-        torch.testing.assert_close(x_fp8, x_ref, **_tols[fp8_dtype])
-
     def test_basic_ops(
         self,
         dims: DimsType = 23,
@@ -184,16 +139,8 @@ class TestFloat8Tensor:
         dims = _to_list(dims)
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
         y_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-        x_fp8 = Float8Tensor.to_float8(
-            x_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
-        y_fp8 = Float8Tensor.to_float8(
-            y_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
+        y_fp8 = to_float8(y_ref, fp8_dtype=fp8_dtype, scale=scale)
         x_ref = x_fp8.dequantize()
         y_ref = y_fp8.dequantize()
 
@@ -227,16 +174,8 @@ class TestFloat8Tensor:
         dims = _to_list(dims)
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
         y_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-        x_fp8 = Float8Tensor.to_float8(
-            x_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
-        y_fp8 = Float8Tensor.to_float8(
-            y_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
+        y_fp8 = to_float8(y_ref, fp8_dtype=fp8_dtype, scale=scale)
         x_ref = x_fp8.dequantize()
         y_ref = y_fp8.dequantize()
 
@@ -260,56 +199,6 @@ class TestFloat8Tensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8, x_ref, **tols)
 
-    @pytest.mark.parametrize("dims", [[33, 41], [7, 11]])
-    def test_transpose(
-        self,
-        dims: DimsType,
-        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
-        scale: float = 0.5,
-        dtype: torch.dtype = torch.float32,
-    ) -> None:
-        """Test transpose"""
-
-        # Initialize random data
-        dims = _to_list(dims)
-        x = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-        x_fp8 = Float8Tensor.to_float8(
-            x,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
-        x = x_fp8.dequantize()
-
-        # Perform transpose
-        x_fp8_t = x_fp8.transpose_2d()
-        x_t = x.transpose(0, 1)
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8_t)
-
-        # Check results
-        tols = dict(rtol=0, atol=0)
-        torch.testing.assert_close(x_fp8_t, x_t, **tols)
-
-        # Make sure we are not trivially passing the test
-        with pytest.raises(AssertionError):
-            torch.testing.assert_close(x_fp8_t, x, **tols)
-
-        # Caching test
-        assert x_fp8._transpose_invalid, "Transpose cache must be invalid when not caching."
-        x_fp8 += 0.5
-        x = x_fp8.dequantize()
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8.transpose_2d(fill_cache=True))
-        x_t = x.transpose(0, 1)
-        torch.testing.assert_close(x_fp8_t, x_t, **tols)
-        assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."
-
-        # Inplace update test
-        x_fp8 += 0.5
-        assert not x_fp8._transpose_invalid, "Transpose cache reset incorrectly."
-        x = x_fp8.dequantize()
-        x_fp8_t = Float8Tensor.make_like(x_fp8, data=x_fp8._transpose)
-        x_t = x.transpose(0, 1)
-        torch.testing.assert_close(x_fp8_t, x_t, **tols)
-
     def test_serialization(
         self,
         dims: DimsType = [2, 3, 5],
@@ -321,11 +210,7 @@ class TestFloat8Tensor:
         # Initialize random data
         dims = _to_list(dims)
         x_ref = 2 * torch.rand(dims, dtype=dtype, device="cpu") - 1
-        x_fp8 = Float8Tensor.to_float8(
-            x_ref,
-            fp8_dtype=fp8_dtype,
-            scale=torch.full([1], scale),
-        )
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=scale)
         x_ref = x_fp8.dequantize()
 
         # Serialize tensor
@@ -357,7 +242,7 @@ class TestFloat8Tensor:
 
         # Initialize Float8Tensor
         x0 = torch.zeros(4, dtype=torch.float32)
-        x = Float8Tensor.to_float8(x0)
+        x = to_float8(x0)
         assert isinstance(x, Float8Tensor)
         assert x0.size() == x.size() == x._data.size()
         assert x.dtype == torch.float32
@@ -382,7 +267,7 @@ class TestFloat8Tensor:
         assert x.device == y.device
 
         # Set data to Float8Tensor
-        x0 = Float8Tensor.to_float8(torch.zeros((4, 3, 1), dtype=torch.float32))
+        x0 = to_float8(torch.zeros((4, 3, 1), dtype=torch.float32))
         x.data = x0
         assert isinstance(x, Float8Tensor)
         assert x0.size() == x.size() == x._data.size()

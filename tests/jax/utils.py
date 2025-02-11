@@ -1387,17 +1387,25 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 def dtype_tols(
     dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
 ) -> Dict[str, float]:
     """Expected numerical tolerance for a data type.
 
     Args:
       dtype: data type.
       reference_value: reference value (default: 1).
+      rtol: override for relative tolerance estimate
+      atol: override for absolute tolerance estimate
 
     Returns:
       Dictionary with "rtol" and "atol" as keys
 
     """
+
+    # Return immediately if tolerances are fully specified
+    if rtol is not None and atol is not None:
+        return {"rtol": rtol, "atol": atol}
 
     # Convert to JAX dtype if needed
     if isinstance(dtype, TEDType):
@@ -1416,7 +1424,11 @@ def dtype_tols(
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):
-        return dict(rtol=0, atol=0)
+        if rtol is None:
+            rtol = 0.0
+        if atol is None:
+            atol = 0.0
+        return {"rtol": rtol, "atol": atol}
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
@@ -1429,10 +1441,11 @@ def dtype_tols(
         spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
         spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
         ulp = max(spacing_high.item(), spacing_low.item())
-    return dict(
-        rtol=eps_relaxed,
-        atol=max(ulp, eps_relaxed),
-    )
+    if rtol is None:
+        rtol = eps_relaxed
+    if atol is None:
+        atol = max(ulp, eps_relaxed)
+    return {"rtol": rtol, "atol": atol}
 
 
 def sync_params_values(dst, src, transformations, sep="/"):
