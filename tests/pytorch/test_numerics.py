@@ -2138,14 +2138,18 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         single_output = True
     elif layout == "NN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
-        B = list(torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits))  # grad_output
+        B = list(
+            torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
+        )  # grad_output
         out = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # dgrad
         out_ref = [o.clone() for o in out]
         grad = True
         single_output = False
     else:  # layout == "NT"
         A = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
-        B = list(torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits))  # grad_output
+        B = list(
+            torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
+        )  # grad_output
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
         out_ref = [o.clone() for o in out]
         grad = True
