@@ -5,10 +5,10 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
-from jax.interpreters import mlir
-import jax.extend as jex
-
 from transformer_engine import transformer_engine_jax
+import jax
+from jax.interpreters import mlir
+
 
 from .misc import is_ffi_enabled
 
@@ -30,11 +30,11 @@ class CustomCallAPIVersion(IntEnum):
 for _name, _value in transformer_engine_jax.registrations().items():
     if _name.endswith("_ffi"):
         if is_ffi_enabled():
-            jex.ffi.register_ffi_target(
+            jax.ffi.register_ffi_target(
                 _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.FFI.value
             )
     else:
-        jex.ffi.register_ffi_target(
+        jax.ffi.register_ffi_target(
             _name, _value, platform="CUDA", api_version=CustomCallAPIVersion.OPAQUE.value
         )
 

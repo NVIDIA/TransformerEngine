@@ -15,7 +15,7 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from jax import ffi
 
 from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
