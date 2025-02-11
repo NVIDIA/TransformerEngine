@@ -2751,10 +2751,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
 
-        return out_ret, softmax_lse
+        return out_ret
 
     @staticmethod
-    def backward(ctx, dout, *args):
+    def backward(ctx, dout):
         # pylint: disable=missing-function-docstring
         cp_size_a2a = ctx.cp_size_a2a
         rank_a2a = ctx.rank_a2a
@@ -4707,7 +4707,7 @@ def attn_forward_func_with_cp(
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
         args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream, quantizers]
-        out, lse = AttnFuncWithCPAndKVP2P.apply(*args)
+        out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)
         args.pop(8)
@@ -4719,7 +4719,7 @@ def attn_forward_func_with_cp(
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
-    return out, lse
+    return out
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -6112,12 +6112,10 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.use_FAv2_bwd = use_FAv2_bwd
         ctx.deterministic = deterministic
 
-        softmax_lse = aux_ctx_tensors[0].squeeze(-1)
-
-        return out_ret, softmax_lse
+        return out_ret
 
     @staticmethod
-    def backward(ctx, d_out, *args):
+    def backward(ctx, d_out):
         # pylint: disable=missing-function-docstring
         if ctx.is_output_fp8:
             assert isinstance(
@@ -6544,7 +6542,7 @@ class FusedAttention(torch.nn.Module):
                 x.contiguous() for x in (query_layer, key_layer, value_layer)
             ]
             with self.attention_dropout_ctx():
-                output, lse = attn_forward_func_with_cp(
+                output = attn_forward_func_with_cp(
                     self.training,
                     query_layer,
                     key_layer,
@@ -6574,7 +6572,7 @@ class FusedAttention(torch.nn.Module):
                 )
         else:
             with self.attention_dropout_ctx():
-                output, lse = FusedAttnFunc.apply(
+                output = FusedAttnFunc.apply(
                     self.training,
                     max_seqlen_q,
                     max_seqlen_kv,
@@ -6604,7 +6602,7 @@ class FusedAttention(torch.nn.Module):
                 )
 
         # ...hd -> ...(hd)
-        return output.view(*output.shape[:-2], -1), lse
+        return output.view(*output.shape[:-2], -1)
 
 
 class DotProductAttention(TransformerEngineBaseModule):
