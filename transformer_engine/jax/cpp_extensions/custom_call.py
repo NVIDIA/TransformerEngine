@@ -5,10 +5,9 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
-from transformer_engine import transformer_engine_jax
 import jax
 from jax.interpreters import mlir
-
+from transformer_engine import transformer_engine_jax
 
 from .misc import is_ffi_enabled
 
