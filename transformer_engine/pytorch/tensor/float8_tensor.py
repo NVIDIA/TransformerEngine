@@ -339,6 +339,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         Remove transpose cache and mark it as invalid.
         """
         self._transpose_invalid = True
+        del self._transpose # explicitly deletes the data for safety
         self._transpose = None
 
     def clear(self):
