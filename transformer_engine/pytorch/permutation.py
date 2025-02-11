@@ -536,7 +536,9 @@ def moe_permute(
         assert probs is None, "probs permutation is not supported when map_type is 'index'"
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, probs)
+        output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
+            inp, routing_map, num_out_tokens, probs
+        )
         if probs is None:
             return output, row_id_map
         else:
