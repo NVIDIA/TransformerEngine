@@ -25,7 +25,9 @@ def type_safe_dot_general(
     """
 
     if fp8_meta_pkg is None:
-        return jax.lax.dot_general(x, kernel, (contracting_dims, ((), ())))
+        assert x.dtype == kernel.dtype, f"lhs dtype = {x.dtype}, rhs dtype = {kernel.dtype}"
+        output = jax.lax.dot_general(x, kernel, (contracting_dims, ((), ())))
+        return output.astype(x.dtype)
 
     amax_list = fp8_meta_pkg.amax_list
     scale_list = fp8_meta_pkg.scale_list

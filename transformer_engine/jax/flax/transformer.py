@@ -976,7 +976,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )
 
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal")
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -1198,6 +1200,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 inputs_kv = ln_out
 
             key = kv_projection(kernel_init=self.kernel_init, name="key")(inputs_kv)
+            key = key.astype(self.dtype)
             value = kv_projection(kernel_init=self.kernel_init, name="value")(inputs_kv)
             query = checkpoint_name(query, "query_proj")
             key = checkpoint_name(key, "key_proj")
@@ -1673,10 +1676,12 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
 
     def __post_init__(self):
         if self.mha_kernel_init is None:
-            self.mha_kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal")
+            self.mha_kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.mlp_kernel_init is None:
             self.mlp_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal"
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1726,6 +1731,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
+
+        inputs = inputs.astype(self.dtype)
+
         assert (
             self.layer_type in TransformerLayerType
         ), f"layer_type should be one of TransformerLayerType, but got {self.layer_type}."
