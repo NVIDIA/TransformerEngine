@@ -550,6 +550,10 @@ def _test_permutation_mask_map(
         probs = torch.rand(num_tokens, num_expert).cuda() * routing_map
         row_sums = probs.sum(dim=1, keepdim=True)
         probs = probs / row_sums
+        if fp8:
+            probs = probs.to(torch.float16)
+        else:
+            probs = probs.to(dtype)
         probs.requires_grad_(True)
 
     ###################################################################################################################################
@@ -963,6 +967,10 @@ def _test_permutation_mask_map_alongside_probs(
     probs = torch.rand(num_tokens, num_expert).cuda() * routing_map
     row_sums = probs.sum(dim=1, keepdim=True)
     probs = probs / row_sums
+    if fp8:
+        probs = probs.to(torch.float16)
+    else:
+        probs = probs.to(dtype)
     probs.requires_grad_(True)
 
     split_sizes = [0] * (num_expert * tp_size)

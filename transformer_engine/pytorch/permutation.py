@@ -381,12 +381,6 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
         with_probs = merging_probs is not None
         if with_probs:
             assert merging_probs.is_cuda, "TransformerEngine needs CUDA."
-            if merging_probs.dtype != torch.float32:
-                warnings.warn(
-                    "The data type of the input `merging_probs` of Unpermute is"
-                    f" {merging_probs.dtype}! The recommended type is torch.float32."
-                )
-                merging_probs = merging_probs.to(torch.float32)
 
         # Device check
         assert inp.is_cuda, "TransformerEngine needs CUDA."

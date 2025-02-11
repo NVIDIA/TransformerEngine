@@ -433,7 +433,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
                     fwd_input = fwd_input.to(data_type, bitcast=True)
                 prob_grad_accum += fwd_input.to(tl.float32) * inp.to(tl.float32)
                 current_start += BLOCK_SIZE
-            probs_grad = tl.sum(prob_grad_accum)
+            probs_grad = tl.sum(prob_grad_accum).to(merging_probs_grad_ptr.dtype.element_ty)
             probs_grad_off = (
                 pid * stride_merging_probs_grad_token
                 + expert_idx * stride_merging_probs_grad_expert
