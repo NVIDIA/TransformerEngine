@@ -1892,8 +1892,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = False
-        if fp8:
-            is_output_fp8 = fp8_meta["recipe"].fp8_mha
 
         (
             QKV_quantizer,
@@ -1914,6 +1912,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     v, q.__class__
                 ), "q, k, and v must have the same type."
                 is_input_fp8 = isinstance(q, Float8Tensor)
+                is_output_fp8 = fp8_meta["recipe"].fp8_mha
                 if not is_input_fp8:
                     q_f16, k_f16, v_f16 = q, k, v
                     if cp_size_a2a == 1 or int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
@@ -1922,9 +1921,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         k, v = [QKV_quantizer(x) for x in [k_f16, v_f16]]
                 q, k, v = q._data, k._data, v._data
                 if rank == 0:
-                    print(f"rank_{rank} fwd Q ", q.shape, q)
-                    print(f"rank_{rank} fwd K ", k.shape, k)
-                    print(f"rank_{rank} fwd V ", v.shape, v)
+                    print(f"rank_{rank} is_input_fp8_{is_input_fp8}")
+                    print(f"rank_{rank} fwd Q ", q.shape, q.dtype)
+                    print(f"rank_{rank} fwd K ", k.shape, k.dtype)
+                    print(f"rank_{rank} fwd V ", v.shape, v.dtype)
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["s_quantizer"] = S_quantizer
                 fp8_meta_kwargs["o_quantizer"] = O_CP_quantizer  # partial result quantizer
@@ -2837,8 +2837,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["FP8"]
 
-                dq_fp8 = torch.empty((cp_size, *q.shape), dtype=q.dtype, device=q.device)
-                dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=kv.dtype, device=kv.device)
+                dqkv_fp8_torch_dtype = get_fp8_torch_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
+                dq_fp8 = torch.empty((cp_size, *q.shape), dtype=dqkv_fp8_torch_dtype, device=q.device)
+                dkv_fp8 = torch.empty((cp_size, *kv.shape), dtype=dqkv_fp8_torch_dtype, device=kv.device)
                 dkv_fp8_ = torch.empty_like(dkv_fp8)
                 if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
@@ -2852,7 +2853,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 fp8_meta_kwargs["dp_quantizer"] = ctx.dP_quantizer
                 fp8_meta_kwargs["dqkv_quantizer"] = ctx.dQKV_CP_quantizer
                 if rank == 0:
-                    print(rank, ctx.qkv_dtype, dout_dtype, fused_attn_dqkv_dtype, cu_seqlens_q_padded, cu_seqlens_kv_padded)
+                    print(rank, ctx.qkv_dtype, dout_dtype, dout.dtype, fused_attn_dqkv_dtype, cu_seqlens_q_padded, cu_seqlens_kv_padded)
                     print(ctx.S_quantizer.scale, ctx.S_quantizer.dtype, ctx.S_quantizer.amax)
                     print(ctx.dP_quantizer.scale, ctx.dP_quantizer.dtype, ctx.dP_quantizer.amax)
                     print(ctx.dQKV_CP_quantizer.scale, ctx.dQKV_CP_quantizer.dtype, ctx.dQKV_CP_quantizer.amax)
@@ -2999,11 +3000,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_part = out_
                         dout_part = dout_
 
-                        if rank == 0:
-                            print(f"rank_{rank} bwd step_{i} Q ", q_part.shape, q_part)
-                            print(f"rank_{rank} bwd step_{i} K ", k_part.shape, k_part)
-                            print(f"rank_{rank} bwd step_{i} V ", v_part.shape, v_part)
-
                         if ctx.fp8:
                             if rank == 0:
                                 print(f"rank_{rank} bwd step_{i} QKV ", ctx.QKV_quantizer.scale, ctx.QKV_quantizer.dtype, ctx.QKV_quantizer.amax)
@@ -3049,6 +3045,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if ctx.fp8:
+                            if rank == 0:
+                                print(f"rank_{rank} bwd step_{i} ", isinstance(dq_, Float8TensorBase), isinstance(dq_, Float8Tensor), dq_._fp8_dtype, dq_._data.dtype)
                             dq_ = dq_._data
                             dk_ = dk_._data
                             dv_ = dv_._data
@@ -3121,11 +3119,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_part = out_
                         dout_part = dout_
 
-                        if rank == 0:
-                            print(f"rank_{rank} bwd step_{i} Q ", q_part.shape, q_part)
-                            print(f"rank_{rank} bwd step_{i} K ", k_part.shape, k_part)
-                            print(f"rank_{rank} bwd step_{i} V ", v_part.shape, v_part)
-
                         if ctx.fp8:
                             if rank == 0:
                                 print(f"rank_{rank} bwd step_{i} QKV ", ctx.QKV_quantizer.scale, ctx.QKV_quantizer.dtype, ctx.QKV_quantizer.amax)
@@ -3173,6 +3166,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if ctx.fp8:
+                            if rank == 0:
+                                print(f"rank_{rank} bwd step_{i} ", isinstance(dq_, Float8TensorBase), isinstance(dq_, Float8Tensor), dq_._fp8_dtype, dq_._data.dtype)
                             dq_ = dq_._data
                             dk_ = dk_._data
                             dv_ = dv_._data
@@ -3247,11 +3242,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_part = out_
                         dout_part = dout_
 
-                        if rank == 0:
-                            print(f"rank_{rank} bwd step_{i} Q ", q_part.shape, q_part)
-                            print(f"rank_{rank} bwd step_{i} K ", k_part.shape, k_part)
-                            print(f"rank_{rank} bwd step_{i} V ", v_part.shape, v_part)
-
                         if ctx.fp8:
                             if rank == 0:
                                 print(f"rank_{rank} bwd step_{i} QKV ", ctx.QKV_quantizer.scale, ctx.QKV_quantizer.dtype, ctx.QKV_quantizer.amax)
@@ -3299,6 +3289,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             **fp8_meta_kwargs,
                         )
                         if ctx.fp8:
+                            if rank == 0:
+                                print(f"rank_{rank} bwd step_{i} ", isinstance(dq_, Float8TensorBase), isinstance(dq_, Float8Tensor), dq_._fp8_dtype, dq_._data.dtype)
                             dq_ = dq_._data
                             dk_ = dk_._data
                             dv_ = dv_._data
