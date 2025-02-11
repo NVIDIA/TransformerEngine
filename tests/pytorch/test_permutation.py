@@ -583,7 +583,7 @@ def _test_permutation_mask_map(
     te_permute_fwd_input.requires_grad_(True)
     te_permute_bwd_input = permute_bwd_input if fp8 else pytorch_permute_bwd_input.detach()
 
-    te_permute_output, row_id_map, _ = te_permute(
+    te_permute_output, row_id_map = te_permute(
         te_permute_fwd_input, routing_map, num_out_tokens=num_out_tokens, map_type="mask"
     )
     te_permute_output.backward(te_permute_bwd_input, retain_graph=True)
@@ -816,7 +816,7 @@ def _test_moe_chunk_sort(
     te_fwd_input.requires_grad_(True)
     te_bwd_input = bwd_input if fp8 else pytorch_bwd_input.detach()
 
-    te_output, _ = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
+    te_output = te_sort_chunks_by_index(te_fwd_input, split_sizes_cuda, sorted_idxs_cuda)
     te_output.backward(te_bwd_input, retain_graph=True)
 
     ###################################################################################################################################

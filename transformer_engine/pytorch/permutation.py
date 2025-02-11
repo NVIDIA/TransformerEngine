@@ -528,13 +528,19 @@ def moe_permute(
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
         If map_type is 'index', this function returns `(permuted_act, row_id_map)`.
-        If map_type is 'mask', this function returns `(permuted_act, row_id_map, permuted_probs)`.
+        If map_type is 'mask', and probs is provided,
+        this function returns `(permuted_act, row_id_map, permuted_probs)`,
+        otherwise it returns `(permuted_act, row_id_map)`.
     """
     if map_type == "index":
         assert probs is None, "probs permutation is not supported when map_type is 'index'"
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        return _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, probs)
+        output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, probs)
+        if probs is None:
+            return output, row_id_map
+        else:
+            return output, row_id_map, permuted_probs
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
@@ -691,4 +697,8 @@ def moe_sort_chunks_by_index(
         of shape [num_tokens]. If provided, it will be permuted with the tokens according to
         the split_sizes and sorted_indices.
     """
-    return _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
+    output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
+    if probs is None:
+        return output
+    else:
+        return output, permuted_probs
