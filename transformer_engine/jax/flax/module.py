@@ -452,10 +452,8 @@ class DenseGeneral(TransformerEngineBase):
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-
-        kernel = jnp.reshape(kernel, kernel_shape)
         kernel = kernel.astype(self.dtype)
 
         if self.use_bias:
@@ -714,10 +712,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         kernel_shape = tuple(y.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_param_shape, self.dtype, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-
-        kernel = jnp.reshape(kernel, kernel_shape)
         kernel = kernel.astype(self.dtype)
 
         contract_ind = tuple(range(0, len(axis)))
