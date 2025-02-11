@@ -541,8 +541,7 @@ def moe_permute(
         )
         if probs is None:
             return output, row_id_map
-        else:
-            return output, row_id_map, permuted_probs
+        return output, row_id_map, permuted_probs
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
@@ -702,5 +701,4 @@ def moe_sort_chunks_by_index(
     output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
     if probs is None:
         return output
-    else:
-        return output, permuted_probs
+    return output, permuted_probs
