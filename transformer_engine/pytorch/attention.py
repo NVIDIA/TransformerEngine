@@ -2703,7 +2703,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if fp8 and int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
             q_save, kv_save, out_save = q, kv, out_fp8._data
         elif fp8 and is_input_fp8:
-            q_save, kv_save, out_save = q, k, out_f16
+            q_save, kv_save, out_save = q, kv, out_f16
         else:
             q_f16 = q_f16.view(q.shape)
             q_save, kv_save, out_save = q_f16, kv, out_f16
