@@ -32,7 +32,7 @@ def apply_rotary_pos_emb_thd(
     cu_seqlens: torch.Tensor,
     freqs: torch.Tensor,
     start_positions: torch.Tensor,
-    cp_size: int = 1, 
+    cp_size: int = 1,
     cp_rank: int = 0,
 ) -> torch.Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
@@ -76,7 +76,6 @@ def apply_rotary_pos_emb_thd(
                     for i, x in enumerate(torch.split(t, seqlens))
                 ]
             ).squeeze(1)
-        
 
 
 def apply_rotary_pos_emb_with_start_positions(
@@ -84,7 +83,7 @@ def apply_rotary_pos_emb_with_start_positions(
     freqs: torch.Tensor,
     tensor_format: str = "sbhd",
     start_positions: Union[torch.Tensor, None] = None,
-    fused: bool = False
+    fused: bool = False,
 ) -> torch.Tensor:
     """
     Apply rotary positional embedding tensor to the input tensor.
@@ -323,6 +322,7 @@ def test_fused_rope_thd(
         torch.testing.assert_close(output_fused, output_unfused)
         torch.testing.assert_close(grad_fused, grad_unfused)
 
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096])
 @pytest.mark.parametrize("hidden_size", [128, 256])
@@ -375,7 +375,11 @@ def test_fused_rope_staggered_inputs(
     # The fused kernel computes in float32 internally, so we force the unfused func to use float32
     # for more accurate comparison
     output_unfused = apply_rotary_pos_emb_with_start_positions(
-        t.float(), rope_emb, tensor_format=tensor_format, start_positions=start_positions, fused=False
+        t.float(),
+        rope_emb,
+        tensor_format=tensor_format,
+        start_positions=start_positions,
+        fused=False,
     ).to(dtype)
     loss_unfused = loss_func(output_unfused)
     loss_unfused.backward()
@@ -391,19 +395,22 @@ def test_fused_rope_staggered_inputs(
     grad_fused = t.grad.detach().clone()
     t.grad = None
 
-    
     torch.testing.assert_close(output_fused, output_unfused)
     torch.testing.assert_close(grad_fused, grad_unfused)
     assert output_fused.is_contiguous()
 
     #
-    # 2. Create RoPE with staggered embeddings in `sb1d` format and apply to 
+    # 2. Create RoPE with staggered embeddings in `sb1d` format and apply to
     #    all the sequences in a batch. `start_positions` should be None in this
     #    case.
     #
-    start = torch.zeros((batch_size,), dtype=int, device=device) if start_positions is None else start_positions
-    staggered_rope_emb = torch.cat([rope_emb[idx : idx + running_seq_len] for idx in start], dim = 1)
-   
+    start = (
+        torch.zeros((batch_size,), dtype=int, device=device)
+        if start_positions is None
+        else start_positions
+    )
+    staggered_rope_emb = torch.cat([rope_emb[idx : idx + running_seq_len] for idx in start], dim=1)
+
     output_staggered = apply_rotary_pos_emb(
         t, staggered_rope_emb, tensor_format=tensor_format, fused=True, start_positions=None
     )

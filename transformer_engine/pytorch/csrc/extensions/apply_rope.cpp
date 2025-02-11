@@ -14,8 +14,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(input.size(0) <= freqs.size(0),
               "expected freqs tensor has a longer sequence length than input");
-  TORCH_CHECK(freqs.size(2) == 1,
-              "expected third dim of the freqs tensor equal 1");
+  TORCH_CHECK(freqs.size(2) == 1, "expected third dim of the freqs tensor equal 1");
   TORCH_CHECK(input.size(3) >= freqs.size(3),
               "expected the last dim of the input tensor equals or is "
               "greater than the freqs tensor");
@@ -35,7 +34,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   const int stride_s = input.stride(0);
   const int stride_b = input.stride(1);
   const int stride_h = input.stride(2);
-  const int stride_d = input.stride(3);  
+  const int stride_d = input.stride(3);
   // freqs' shape could be:
   //   (s 1 1 d) - only `freqs.stride(0)` matters.
   //   (s b 1 d) - both `freqs.stride(1)` and `freqs.stride(0)` matter.
@@ -63,10 +62,9 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
   auto output_cu = makeTransformerEngineTensor(output);
 
   nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), start_positions_cu.data(),
-                          output_cu.data(), s, b, h, d, d2,
-                          stride_s, stride_b, stride_h, stride_d, freqs_stride_s, freqs_stride_b,
-                          o_stride_s, o_stride_b, o_stride_h, o_stride_d, 
-                          at::cuda::getCurrentCUDAStream());
+                          output_cu.data(), s, b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
+                          freqs_stride_s, freqs_stride_b, o_stride_s, o_stride_b, o_stride_h,
+                          o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
@@ -79,8 +77,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(output_grads.size(0) <= freqs.size(0),
               "expected freqs tensor has a longer sequence length than output_grads");
-  TORCH_CHECK(freqs.size(2) == 1,
-              "expected the third dim of the freqs tensor equal 1");
+  TORCH_CHECK(freqs.size(2) == 1, "expected the third dim of the freqs tensor equal 1");
   TORCH_CHECK(output_grads.size(3) >= freqs.size(3),
               "expected the last dim of the output_grads tensor equals or is "
               "greater than the freqs tensor");
@@ -100,7 +97,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   const int stride_s = output_grads.stride(0);
   const int stride_b = output_grads.stride(1);
   const int stride_h = output_grads.stride(2);
-  const int stride_d = output_grads.stride(3);  
+  const int stride_d = output_grads.stride(3);
   // freqs' shape could be:
   //   (s 1 1 d) - only `freqs.stride(0)` matters.
   //   (s b 1 d) - both `freqs.stride(1)` and `freqs.stride(0)` matter.
@@ -126,16 +123,15 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   nvte_fused_rope_backward(output_grads_cu.data(), freqs_cu.data(), start_positions_cu.data(),
-                           input_grads_cu.data(), s, b, h,
-                           d, d2, stride_s, stride_b, stride_h, stride_d, freqs_stride_s, freqs_stride_b,
-                           o_stride_s, o_stride_b, o_stride_h, o_stride_d, 
-                           at::cuda::getCurrentCUDAStream());
+                           input_grads_cu.data(), s, b, h, d, d2, stride_s, stride_b, stride_h,
+                           stride_d, freqs_stride_s, freqs_stride_b, o_stride_s, o_stride_b,
+                           o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs, const at::Tensor &start_positions, 
+                                  const at::Tensor &freqs, const at::Tensor &start_positions,
                                   const int cp_size, const int cp_rank) {
   using namespace transformer_engine;
 
@@ -182,9 +178,9 @@ at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_
   auto start_positions_cu = makeTransformerEngineTensor(start_positions);
 
   nvte_fused_rope_thd_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                              start_positions_cu.data(), output_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
-                              stride_h, stride_d, o_stride_t, o_stride_h, o_stride_d,
-                              at::cuda::getCurrentCUDAStream());
+                              start_positions_cu.data(), output_cu.data(), cp_size, cp_rank, max_s,
+                              b, h, d, d2, stride_t, stride_h, stride_d, o_stride_t, o_stride_h,
+                              o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
@@ -234,9 +230,9 @@ at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Ten
   auto start_positions_cu = makeTransformerEngineTensor(start_positions);
 
   nvte_fused_rope_thd_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                               start_positions_cu.data(), input_grads_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2,
-                               stride_t, stride_h, stride_d, o_stride_t, o_stride_h, o_stride_d,
-                               at::cuda::getCurrentCUDAStream());
+                               start_positions_cu.data(), input_grads_cu.data(), cp_size, cp_rank,
+                               max_s, b, h, d, d2, stride_t, stride_h, stride_d, o_stride_t,
+                               o_stride_h, o_stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }

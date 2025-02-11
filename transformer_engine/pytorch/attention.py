@@ -4832,7 +4832,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         cp_rank: int = 0,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        
+
         if start_positions is None:
             # Each sequence will start from positional encoding corresponding to 0.
             # Otherwise sequence i will start from positional encoding
@@ -4848,7 +4848,9 @@ class FusedRoPEFunc(torch.autograd.Function):
                 t.transpose(0, 1), freqs, start_positions, True
             ).transpose(0, 1)
         elif tensor_format == "thd":
-            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, start_positions, cp_size, cp_rank)
+            output = tex.fused_rope_thd_forward(
+                t, cu_seqlens, freqs, start_positions, cp_size, cp_rank
+            )
         else:
             raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
         ctx.save_for_backward(freqs, cu_seqlens, start_positions)
@@ -4859,9 +4861,7 @@ class FusedRoPEFunc(torch.autograd.Function):
         return output
 
     @staticmethod
-    def backward(
-        ctx, grad_output: torch.Tensor
-    ) -> Tuple[Union[torch.Tensor, None], ...]:
+    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         freqs, cu_seqlens, start_positions = ctx.saved_tensors
         if ctx.tensor_format == "sbhd":
             grad_input = tex.fused_rope_backward(grad_output, freqs, start_positions, False)
@@ -4927,14 +4927,17 @@ def apply_rotary_pos_emb(
         position start_positions[i]. If start_positions=None, then this token has position i.
         Should be `cu_seqlens_padded` when cp_size > 1.
     """
-    assert not (start_positions is not None and not fused), \
-        """start_positions != None and fused=False is not supported"""
+    assert not (
+        start_positions is not None and not fused
+    ), """start_positions != None and fused=False is not supported"""
 
     if fused:
         assert (
             tensor_format != "thd" or cu_seqlens is not None
         ), "cu_seqlens must not be None when tensor_format is 'thd'."
-        return FusedRoPEFunc.apply(t, freqs, tensor_format, start_positions, cu_seqlens, cp_size, cp_rank)
+        return FusedRoPEFunc.apply(
+            t, freqs, tensor_format, start_positions, cu_seqlens, cp_size, cp_rank
+        )
 
     assert tensor_format in ("sbhd", "bshd"), (
         "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
