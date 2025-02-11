@@ -312,15 +312,12 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     def to_float8(
         cls,
         tensor: torch.Tensor,
-        fp8_dtype=tex.DType.kFloat8E4M3,
-        scale: Optional[torch.Tensor] = None,
-        amax: Optional[torch.Tensor] = None,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        scale: float = 1.0,
     ):
         """Quantizes `tensor`"""
-        if scale is None:
-            scale = torch.ones(1, device="cuda")
-        if amax is None:
-            amax = torch.empty(1, device="cuda")
+        scale = torch.empty(1, device="cuda").fill_(scale)
+        amax = torch.empty(1, device="cuda")
         return Float8Quantizer(scale, amax, fp8_dtype)(tensor.cuda())
 
     def contiguous(
