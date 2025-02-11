@@ -1263,7 +1263,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                         f"expected query shape {expected_shape} instead got {query.shape}."
                     )
 
-                cur_index = cache_index.value
+                cur_index = cache_index.value.astype(jnp.int32)
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
                 one_hot_indices = jnp.reshape(one_hot_indices, one_hot_indices_shape)
                 key = cached_key.value + key * one_hot_indices
