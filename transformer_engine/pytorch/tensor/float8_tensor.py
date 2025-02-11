@@ -308,6 +308,21 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return _ReshapeFunc.apply(self, shape)
 
+    @classmethod
+    def to_float8(
+        cls,
+        tensor: torch.Tensor,
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        scale: Optional[torch.Tensor] = None,
+        amax: Optional[torch.Tensor] = None,
+    ):
+        """Quantizes `tensor`"""
+        if scale is None:
+            scale = torch.ones(1, device="cuda")
+        if amax is None:
+            amax = torch.empty(1, device="cuda")
+        return Float8Quantizer(scale, amax, fp8_dtype)(tensor.cuda())
+
     def contiguous(
         self,
         memory_format: torch.memory_format = torch.contiguous_format,
