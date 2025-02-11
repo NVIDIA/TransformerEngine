@@ -576,7 +576,12 @@ class _Linear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    wgrad = None
+                    wgrad = torch.empty(
+                        weight.main_grad.shape,
+                        dtype=weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
