@@ -528,9 +528,9 @@ def moe_permute(
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
         If map_type is 'index', this function returns `(permuted_act, row_id_map)`.
-        If map_type is 'mask', and probs is provided,
-        this function returns `(permuted_act, row_id_map, permuted_probs)`,
-        otherwise it returns `(permuted_act, row_id_map)`.
+        If map_type is 'mask', and probs is not provided,
+        this function returns `(permuted_act, row_id_map)`,
+        otherwise it returns `(permuted_act, row_id_map, permuted_probs)`.
     """
     if map_type == "index":
         assert probs is None, "probs permutation is not supported when map_type is 'index'"
