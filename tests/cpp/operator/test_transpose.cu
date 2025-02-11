@@ -37,8 +37,8 @@ void performTest(const size_t N, const size_t H) {
 
   DType dtype = TypeInfo<Type>::dtype;
 
-  Tensor input({ N, H }, dtype);
-  Tensor output({ H, N }, dtype);
+  Tensor input("input", { N, H }, dtype);
+  Tensor output("output", { H, N }, dtype);
 
   std::unique_ptr<Type[]> ref_output = std::make_unique<Type[]>(N * H);
 
@@ -46,13 +46,13 @@ void performTest(const size_t N, const size_t H) {
 
   nvte_transpose(input.data(), output.data(), 0);
 
-  compute_ref<Type>(input.cpu_dptr<Type>(), ref_output.get(), N, H);
+  compute_ref<Type>(input.rowwise_cpu_dptr<Type>(), ref_output.get(), N, H);
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   auto [atol, rtol] = getTolerances(dtype);
-  compareResults("output", output, ref_output.get(), atol, rtol);
+  compareResults("output", output, ref_output.get(), true, atol, rtol);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},

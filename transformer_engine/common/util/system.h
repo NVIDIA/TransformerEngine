@@ -9,8 +9,6 @@
 
 #include <string>
 
-#include "../common.h"
-
 namespace transformer_engine {
 
 /*! \brief Get environment variable and convert to type

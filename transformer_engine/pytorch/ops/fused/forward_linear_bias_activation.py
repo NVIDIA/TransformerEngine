@@ -83,22 +83,22 @@ class ForwardLinearBiasActivation(FusedOperation):
             raise NotImplementedError("Activations are not yet supported")
 
         # FP8 metadata
-        with_fp8_compute = FP8GlobalStateManager.is_fp8_enabled()
-        input_fp8_meta = None
-        weight_fp8_meta = None
-        output_fp8_meta = None
-        grad_output_fp8_meta = None
-        grad_input_fp8_meta = None
-        if with_fp8_compute:
-            input_fp8_meta = linear_op.get_fp8_meta("input")
-            weight_fp8_meta = linear_op.get_fp8_meta("param")
+        with_quantized_compute = FP8GlobalStateManager.is_fp8_enabled()
+        input_quantizer = None
+        weight_quantizer = None
+        output_quantizer = None
+        grad_output_quantizer = None
+        grad_input_quantizer = None
+        if with_quantized_compute:
+            input_quantizer = linear_op.get_quantizer("forward", 0)
+            weight_quantizer = linear_op.get_quantizer("forward", 1)
             next_op = basic_op_next_ops[-1]
-            if next_op is not None and next_op.num_fp8_scales("input") > 0:
-                output_fp8_meta = next_op.get_fp8_meta("input")
-            grad_output_fp8_meta = linear_op.get_fp8_meta("grad_output")
+            if next_op is not None and next_op.num_quantizers("forward") > 0:
+                output_quantizer = next_op.get_quantizer("forward", 0)
+            grad_output_quantizer = linear_op.get_quantizer("backward", 0)
             prev_op = basic_op_prev_ops[0]
-            if prev_op is not None and prev_op.num_fp8_scales("grad_output") > 0:
-                grad_input_fp8_meta = prev_op.get_fp8_meta("grad_output")
+            if prev_op is not None and prev_op.num_quantizers("backward") > 0:
+                grad_input_quantizer = prev_op.get_quantizer("backward", 0)
 
         # Get autocast dtype if needed
         dtype = None
@@ -110,25 +110,24 @@ class ForwardLinearBiasActivation(FusedOperation):
             input=input_,
             weight=linear_op.weight,
             bias=bias,
-            device=linear_op.device,
             dtype=dtype,
             tensor_parallel_mode=linear_op.tensor_parallel_mode,
             tensor_parallel_group=linear_op.tensor_parallel_group,
             sequence_parallel=linear_op.sequence_parallel,
-            with_fp8_compute=with_fp8_compute,
-            input_fp8_meta=input_fp8_meta,
-            weight_fp8_meta=weight_fp8_meta,
-            output_fp8_meta=output_fp8_meta,
+            with_quantized_compute=with_quantized_compute,
+            input_quantizer=input_quantizer,
+            weight_quantizer=weight_quantizer,
+            output_quantizer=output_quantizer,
         )
 
         # Save state for backward pass
         linear_op_ctx.save_for_backward(x_local)
-        linear_op_ctx.with_fp8_compute = with_fp8_compute
-        linear_op_ctx.weight_fp8_meta = weight_fp8_meta
-        linear_op_ctx.grad_output_fp8_meta = grad_output_fp8_meta
-        linear_op_ctx.grad_input_fp8_meta = grad_input_fp8_meta
+        linear_op_ctx.with_quantized_compute = with_quantized_compute
+        linear_op_ctx.input_quantizer = input_quantizer
+        linear_op_ctx.weight_quantizer = weight_quantizer
+        linear_op_ctx.grad_output_quantizer = grad_output_quantizer
+        linear_op_ctx.grad_input_quantizer = grad_input_quantizer
         linear_op_ctx.dtype = dtype
-        linear_op_ctx.input_dims = input_.size()
         linear_op_ctx.input_requires_grad = input_.requires_grad
         linear_op_ctx.weight_requires_grad = linear_op.weight.requires_grad
         linear_op_ctx.has_prev_op = basic_op_prev_ops[0] is not None

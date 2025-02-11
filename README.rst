@@ -174,7 +174,7 @@ To install the latest stable version of Transformer Engine,
 
     pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch,paddle).
+This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
 
 Alternatively, the package can be directly installed from `Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
 
@@ -182,7 +182,7 @@ Alternatively, the package can be directly installed from `Transformer Engine's 
 
     pip install transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch,paddle]). Transformer Engine ships wheels for the core library as well as the PaddlePaddle extensions. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
 
 From source
 ^^^^^^^^^^^
@@ -264,10 +264,10 @@ Transformer Engine has been integrated with popular LLM frameworks such as:
 * `NVIDIA NeMo Framework <https://github.com/NVIDIA/NeMo-Megatron-Launcher>`_
 * `Amazon SageMaker Model Parallel Library <https://docs.aws.amazon.com/sagemaker/latest/dg/model-parallel-core-features-v2-tensor-parallelism.html>`_
 * `Levanter <https://github.com/stanford-crfm/levanter>`_
+* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_
 * `Hugging Face Nanotron <https://github.com/huggingface/nanotron>`_ - Coming soon!
 * `Colossal-AI <https://github.com/hpcaitech/ColossalAI>`_ - Coming soon!
 * `PeriFlow <https://github.com/friendliai/periflow-python-sdk>`_ - Coming soon!
-* `GPT-NeoX <https://github.com/EleutherAI/gpt-neox>`_ - Coming soon!
 
 
 Contributing
