@@ -2131,21 +2131,26 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
 
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
-        B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
-        out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+        B = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
+        out = [torch.randn(m, n, dtype=dtype, device="cuda")]  # output
+        out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = False
+        single_output = True
     elif layout == "NN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
-        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
-        out = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # dgrad
+        B = list(torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits))  # grad_output
+        out = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # dgrad
+        out_ref = [o.clone() for o in out]
         grad = True
+        single_output = False
     else:  # layout == "NT"
-        A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
-        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        A = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
+        B = list(torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits))  # grad_output
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        out_ref = [o.clone() for o in out]
         grad = True
+        single_output = False
 
-    out_ref = [o.clone() for o in out]
     for i in range(z):
         general_gemm(
             A[i],
@@ -2157,17 +2162,20 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
             layout=layout,
             out=out_ref[i],
         )
+    if single_output:
+        out_ref = [torch.cat(out_ref)]
 
     general_grouped_gemm(
         A,
-        list(B),
-        list(out),
+        B,
+        out,
         dtype,
         get_multi_stream_cublas_workspace(),
-        m_splits=[k] * n,  # TODO, not sure
+        m_splits=m_splits,
         grad=grad,
         accumulate=accumulate,
         layout=layout,
+        single_output=single_output,
     )
 
     # should be bit-wise match
@@ -2190,7 +2198,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
         pytest.skip(reason_for_no_fp8)
 
     z, m, k, n = shape
-    m_splits = m // z
+    m_splits = [m // z] * z
 
     dtype = torch.bfloat16
     A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
@@ -2242,7 +2250,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
         out,
         dtype,
         get_multi_stream_cublas_workspace(),
-        m_splits=[k] * m_splits,
+        m_splits=m_splits,
         accumulate=accumulate,
     )
 
