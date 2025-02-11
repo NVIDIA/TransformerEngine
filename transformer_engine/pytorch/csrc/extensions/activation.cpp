@@ -6,6 +6,7 @@
 
 #include "extensions.h"
 #include "pybind.h"
+#include "common.h"
 
 namespace transformer_engine::pytorch {
 
@@ -23,6 +24,20 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
 
   auto [te_output, out] =
       my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
+
+  // for current scaling, we need to compute amax first and then quantize
+  // because cache cannot fit in the entire tensor to compute amax and quantize
+  // the quantizer should not need amax reduction, no process group needed here
+  auto scaling_mode = my_quantizer->get_scaling_mode();
+  if (is_current_tensor_scaling(scaling_mode)) {
+    // my_quantizer here has to be a Float8CurrentScalingQuantizer
+    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+    nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    if (my_quantizer_cs->with_amax_reduction) {
+      NVTE_ERROR("per-tensor current scaling amax reduction is not supported in activation functions.");
+    }
+    nvte_compute_scale_from_amax(te_output.data(), at::cuda::getCurrentCUDAStream());
+  }
 
   act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
 

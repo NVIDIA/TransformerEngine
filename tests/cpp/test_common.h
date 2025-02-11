@@ -95,6 +95,10 @@ struct TypeInfo{
     constexpr static size_t size = sizeof(T);
 };
 
+inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING;
+}
+
 class Tensor {
  public:
   Tensor(const std::string& name,
@@ -209,7 +213,7 @@ class Tensor {
 
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
+      NVTE_CHECK(is_tensor_scaling(tensor_.scaling_mode()), "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
@@ -219,7 +223,7 @@ class Tensor {
 
   template <typename T>
   T *rowwise_cpu_scale_inv_ptr(){
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
+    if (is_tensor_scaling(tensor_.scaling_mode())){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
@@ -230,7 +234,7 @@ class Tensor {
 
   template <typename T>
   T *columnwise_cpu_scale_inv_ptr(){
-    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
+    if (is_tensor_scaling(tensor_.scaling_mode())){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");

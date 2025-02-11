@@ -13,7 +13,13 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe, DelayedScaling, Format, MXFP8BlockScaling
+from transformer_engine.common.recipe import (
+    Recipe,
+    DelayedScaling,
+    Format,
+    MXFP8BlockScaling,
+    Float8CurrentScaling,
+)
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -198,6 +204,8 @@ class FP8GlobalStateManager:
         fp8_meta: Dict[str, Any],
     ) -> None:
         """
+        Delayed scaling only.
+
         The amax reduction process happens completely outside the FP8 modules.
         To participate in the reduction, the only role played by a module is
         to call this function in order to append it's FP8 tensor into a global
@@ -211,7 +219,8 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other reipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Every module must call this function exactly once since
@@ -326,7 +335,8 @@ class FP8GlobalStateManager:
         cls,
         forward: bool = True,
     ) -> None:
-        """Concatenate, reduce, and split amaxes in the global buffer."""
+        """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
+        # global_amax_buffer should only be non-empty for fp8 delayed scaling
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
@@ -426,6 +436,8 @@ class FP8GlobalStateManager:
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
         if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
+            # delayed scaling only function, for other recipes (current scaling with any granularity),
+            # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -434,7 +446,8 @@ class FP8GlobalStateManager:
         to ensure both forward steps are numerically same.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other reipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -459,8 +472,8 @@ class FP8GlobalStateManager:
         """Switch to the copied scaling factors and amaxes from phase
         1 forward for indentical numerical outputs.
         """
-
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other reipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -478,8 +491,8 @@ class FP8GlobalStateManager:
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other reipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -743,6 +756,8 @@ class RecipeState(abc.ABC):
             cls = DelayedScalingRecipeState
         elif recipe.mxfp8():
             cls = MXFP8BlockScalingRecipeState
+        elif recipe.float8_current_scaling():
+            cls = Float8CurrentScalingRecipeState
         else:
             raise ValueError("{recipe.__class__.__name__} is not supported")
         return cls(
@@ -809,6 +824,45 @@ class DelayedScalingRecipeState(RecipeState):
 
         return [
             Float8Quantizer(self.scale[i], self.amax_history[0][i].reshape((1,)), self.dtype)
+            for i in range(self.num_quantizers)
+        ]
+
+
+class Float8CurrentScalingRecipeState(RecipeState):
+    """Configuration for Per-tensor current scaling quantization.
+
+    Per-tensor current quantization does not require state.
+
+    """
+
+    recipe: Float8CurrentScaling
+    mode: str
+    dtype: tex.DType
+    device: torch.device
+
+    def __init__(
+        self,
+        recipe: Float8CurrentScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
+
+        # Allocate buffers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+    def make_quantizers(self) -> list:
+        from .tensor.float8_tensor import Float8CurrentScalingQuantizer
+
+        return [
+            Float8CurrentScalingQuantizer(self.dtype, device=self.device)
             for i in range(self.num_quantizers)
         ]
 

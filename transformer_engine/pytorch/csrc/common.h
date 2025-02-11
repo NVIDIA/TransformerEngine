@@ -50,6 +50,9 @@
 
 namespace transformer_engine::pytorch {
 
+// in python we have: dist_group_type = torch.distributed.ProcessGroup
+using dist_group_type = c10d::ProcessGroup;
+
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
 class FP8TensorMeta {
@@ -136,6 +139,29 @@ class Float8Quantizer : public Quantizer {
       std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
+class Float8CurrentScalingQuantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  int amax_reduction_size;
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+
+  explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_CURRENT_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
 class MXFP8Quantizer : public Quantizer {
  public:
   DType dtype;
@@ -175,6 +201,29 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     case transformer_engine::DType::kFloat8E4M3:
       return at::kFloat8_e4m3fn;
     case transformer_engine::DType::kFloat8E5M2:
+      return at::kFloat8_e5m2;
+    default:
+      NVTE_ERROR("Invalid type");
+  }
+}
+
+inline at::ScalarType GetATenDTypeFromNVTEDtype(NVTEDType t) {
+  switch (t) {
+    case kNVTEByte:
+      return torch::kByte;
+    case kNVTEInt32:
+      return torch::kInt32;
+    case kNVTEInt64:
+      return torch::kInt64;
+    case kNVTEFloat32:
+      return at::kFloat;
+    case kNVTEFloat16:
+      return at::kHalf;
+    case kNVTEBFloat16:
+      return at::kBFloat16;
+    case kNVTEFloat8E4M3:
+      return at::kFloat8_e4m3fn;
+    case kNVTEFloat8E5M2:
       return at::kFloat8_e5m2;
     default:
       NVTE_ERROR("Invalid type");
@@ -240,6 +289,8 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
+at::Tensor makeATenTensor(NVTEBasicTensor tensor);
+
 template <typename T>
 T product(const std::vector<T>& shape);
 
@@ -260,6 +311,8 @@ at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
+
+at::IntArrayRef convertShapeToATenArrayRef(const NVTEShape& shape);
 
 int roundup(const int value, const int multiple);
 

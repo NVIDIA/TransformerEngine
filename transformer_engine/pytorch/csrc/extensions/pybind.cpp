@@ -24,6 +24,7 @@ namespace transformer_engine::pytorch {
 PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *Float8TensorBasePythonClass = nullptr;
 PyTypeObject *Float8QuantizerClass = nullptr;
+PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
 PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
@@ -33,6 +34,8 @@ void init_float8_extension() {
   auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
   Float8QuantizerClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Quantizer"));
+  Float8CurrentScalingQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8CurrentScalingQuantizer"));
   Float8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
   auto fp8_base_module =

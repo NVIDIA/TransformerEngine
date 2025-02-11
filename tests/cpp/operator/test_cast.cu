@@ -21,7 +21,7 @@ using namespace transformer_engine;
 
 namespace {
 
-template <typename InputType, typename OutputType>
+template <typename InputType, typename OutputType, bool UPDATE_AMAX>
 void compute_ref(const InputType *data, OutputType *output_c,
                  const size_t size,
                  float *amax, float scale) {
@@ -32,9 +32,61 @@ void compute_ref(const InputType *data, OutputType *output_c,
       current_max = fmaxf(current_max, fabsf(current));
       output_c[i] = OutputType(scale * current);
   }
-  *amax = current_max;
+  if constexpr (UPDATE_AMAX){
+    *amax = current_max;
+  }
 }
 
+
+// IEEE_DIV only
+template <typename InputType, typename OutputType>
+void compute_amax_scale_ref(const InputType *data,
+                 const size_t size,
+                 float *amax_ptr, float *scale_ptr, float* scale_inv_ptr,
+                 float max_fp8, float epsilon) {
+  using compute_t = float;
+  compute_t current_max = -1e100;
+  for (size_t i = 0; i < size; ++i) {
+    compute_t current = static_cast<compute_t>(data[i]);
+    current_max = fmaxf(current_max, fabsf(current));
+  }
+  *amax_ptr = current_max;
+
+  // compute scale from amax
+  float clamp_amax = current_max;
+  if (current_max <= epsilon){
+      clamp_amax = epsilon;
+  }
+
+  float scale = 1.f;
+  float scale_inv = 1.f;
+
+  if (isinf(clamp_amax) || clamp_amax == 0.f) {
+      *scale_ptr = scale;
+      *scale_inv_ptr = scale_inv;
+      return;
+  }
+
+  // use ieee_div in CPU
+  scale = max_fp8 / clamp_amax;
+
+  // The amax is too small that the scale becoming infinite in FP32. In other word,
+  // the scale is not representable in FP32.
+  if (isinf(scale)) {
+    scale = 1.f;
+  }
+
+  if (isnan(scale)) {
+    scale = 1.f;
+  }
+
+  scale_inv = 1.0f / scale;
+
+  *scale_ptr = scale;
+  *scale_inv_ptr = scale_inv;
+}
+
+// delayed tensor scaling test
 template <typename InputType, typename OutputType>
 void performTest(const std::vector<size_t>& shape) {
   using namespace test;
@@ -55,7 +107,8 @@ void performTest(const std::vector<size_t>& shape) {
   nvte_quantize(input.data(), output_c.data(), 0);
 
   float ref_amax;
-  compute_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
+
+  compute_ref<InputType, OutputType, true>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
                                      full_size, &ref_amax, output_c.scale());
 
   cudaDeviceSynchronize();
@@ -69,6 +122,73 @@ void performTest(const std::vector<size_t>& shape) {
   }
   auto [atol, rtol] = getTolerances(otype);
   compareResults("output_c", output_c, ref_output_c.get(), true, atol, rtol);
+}
+
+// current tensor scaling test
+template <typename InputType, typename OutputType>
+void performTestCurrentScaling(const std::vector<size_t>& shape) {
+  using namespace test;
+
+  const size_t full_size = product(shape);
+
+  DType itype = TypeInfo<InputType>::dtype;
+  DType otype = TypeInfo<OutputType>::dtype;
+
+  bool is_out_fp8 = isFp8Type(otype);
+
+  // find out max fp8 value
+  float max_fp8;
+  if (is_out_fp8){
+    switch (otype) {
+      case DType::kFloat8E5M2: {
+          max_fp8 = Quantized_Limits<fp8e5m2>::max();
+      } break;
+      case DType::kFloat8E4M3: {
+          max_fp8 = Quantized_Limits<fp8e4m3>::max();
+      } break;
+      default:
+        NVTE_ERROR("Invalid type.");
+    }
+  }
+
+  Tensor input("input", shape, itype);
+  Tensor output_c("output_c", shape, otype, true, false, NVTE_CURRENT_TENSOR_SCALING);
+
+  std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(full_size);
+
+  fillUniform(&input);
+
+  // compute amax
+  if (is_out_fp8){
+    nvte_compute_amax(input.data(), output_c.data(), 0);
+    nvte_compute_scale_from_amax(output_c.data(), 0);
+  }
+  // assume no amax reduction needed for now
+  nvte_quantize(input.data(), output_c.data(), 0);
+
+  float ref_amax;
+  float ref_scale;
+  float ref_scale_inv;
+  if (is_out_fp8){
+    compute_amax_scale_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(),
+                                     full_size, &ref_amax, &ref_scale, &ref_scale_inv, max_fp8, 0.0f);
+  }
+
+  compute_ref<InputType, OutputType, false>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
+                                    full_size, nullptr, is_out_fp8 ? output_c.scale() : 1.0f );
+
+  cudaDeviceSynchronize();
+
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+  if (isFp8Type(otype)) {
+    auto [atol_fp32, rtol_fp32] = getTolerances(DType::kFloat32);
+    compareResults("amax", output_c.amax(), ref_amax, 0.0f, rtol_fp32);
+    compareResults("scale", output_c.scale(), ref_scale, 0.0f, rtol_fp32);
+    compareResults("scale_inv", output_c.rowwise_scale_inv(), ref_scale_inv, 0.0f, rtol_fp32);
+  }
+  auto [atol, rtol] = getTolerances(otype);
+  compareResults("output_c", output_c, ref_output_c.get(), true, 0.0f, rtol);
 }
 
 std::vector<std::vector<size_t>> test_cases = {
@@ -105,7 +225,10 @@ TEST_P(CastTestSuite, TestCast) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+      // delayed tensor scaling
       performTest<InputType, OutputType>(size);
+      // current tensor scaling
+      performTestCurrentScaling<InputType, OutputType>(size);
     );
   );
 }

@@ -150,7 +150,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
-    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+    if (is_tensor_scaling(t.scaling_mode)) {
       NVTE_CHECK(t.amax.dptr != nullptr, "FP8 output ", name, " must have amax tensor");
       NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Invalid amax dtype (expected ",
                  to_string(DType::kFloat32), ", got ", to_string(t.amax.dtype), ")");
@@ -217,7 +217,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   NVTEShape ret;
 
   // FP8 tensor keeps shape in rowwise data
-  if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+  if (transformer_engine::is_tensor_scaling(t.scaling_mode)) {
     ret.data = t.data.shape.data();
     ret.ndim = t.data.shape.size();
     return ret;
@@ -412,3 +412,34 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   }
   cudaStreamSynchronize(stream);
 }
+
+int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_force_pow_2_scales_qopt()) {
+    t.force_pow_2_scales = zero_if_false != 0;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_amax_epsilon_qopt()) {
+    t.amax_epsilon = amax_epsilon;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_get_qopt_force_pow_2_scales(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.force_pow_2_scales ? 1 : 0;
+}
+
+float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.amax_epsilon;
+}
+

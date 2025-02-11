@@ -21,6 +21,7 @@ namespace transformer_engine::pytorch {
 extern PyTypeObject *Float8TensorPythonClass;
 extern PyTypeObject *Float8TensorBasePythonClass;
 extern PyTypeObject *Float8QuantizerClass;
+extern PyTypeObject *Float8CurrentScalingQuantizerClass;
 extern PyTypeObject *MXFP8TensorPythonClass;
 extern PyTypeObject *MXFP8TensorBasePythonClass;
 extern PyTypeObject *MXFP8QuantizerClass;
@@ -34,6 +35,10 @@ void init_mxfp8_extension();
 namespace detail {
 
 inline bool IsFloat8QParams(PyObject *obj) { return Py_TYPE(obj) == Float8QuantizerClass; }
+
+inline bool IsFloat8CurrentScalingQParams(PyObject *obj) {
+  return Py_TYPE(obj) == Float8CurrentScalingQuantizerClass;
+}
 
 inline bool IsFloat8Tensor(PyObject *obj) {
   return Py_TYPE(obj) == Float8TensorPythonClass || Py_TYPE(obj) == Float8TensorBasePythonClass;
@@ -63,6 +68,8 @@ inline bool IsFloatingPointType(at::ScalarType type) {
 constexpr std::array custom_types_converters = {
     std::make_tuple(IsFloat8Tensor, IsFloat8QParams, NVTETensorFromFloat8Tensor,
                     CreateQuantizer<Float8Quantizer>),
+    std::make_tuple(IsFloat8Tensor, IsFloat8CurrentScalingQParams, NVTETensorFromFloat8Tensor,
+                    CreateQuantizer<Float8CurrentScalingQuantizer>),
     std::make_tuple(IsMXFP8Tensor, IsMXFP8QParams, NVTETensorFromMXFP8Tensor,
                     CreateQuantizer<MXFP8Quantizer>)};
 
