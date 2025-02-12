@@ -101,6 +101,10 @@ struct Tensor {
 
   NVTEScalingMode scaling_mode;
 
+  float amax_epsilon;
+  bool force_pow_2_scales;
+  int block_scaling_dim;
+
   Tensor()
       : data(),
         columnwise_data(),
@@ -108,7 +112,10 @@ struct Tensor {
         scale(nullptr, {1}, DType::kFloat32),
         scale_inv(nullptr, {1}, DType::kFloat32),
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
-        scaling_mode(NVTE_DELAYED_TENSOR_SCALING) {}
+        scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
+        amax_epsilon(0.0),
+        force_pow_2_scales(false),
+        block_scaling_dim(scaling_mode == NVTE_BLOCK_SCALING ? 2 : 0) {}
 
   int numel() const {
     size_t acc = 1;
@@ -123,6 +130,33 @@ struct Tensor {
   // Check for size (not just pointer) for 0-dim or no token cases.
   bool has_columnwise_data() const noexcept {
     return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
+  }
+
+  bool supports_force_pow_2_scales_qopt() const noexcept {
+    switch (scaling_mode) {
+      case NVTE_BLOCK_SCALING:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool supports_amax_epsilon_qopt() const noexcept {
+    switch (scaling_mode) {
+      case NVTE_BLOCK_SCALING:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  bool supports_block_scaling_dim(int block_scaling_dim) const noexcept {
+    switch (scaling_mode) {
+      case NVTE_BLOCK_SCALING:
+        return block_scaling_dim == 1 || block_scaling_dim == 2;
+      default:
+        return false;
+    }
   }
 
   DType dtype() const {

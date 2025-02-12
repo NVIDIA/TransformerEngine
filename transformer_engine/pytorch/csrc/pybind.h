@@ -25,6 +25,9 @@ extern PyTypeObject *Float8CurrentScalingQuantizerClass;
 extern PyTypeObject *MXFP8TensorPythonClass;
 extern PyTypeObject *MXFP8TensorBasePythonClass;
 extern PyTypeObject *MXFP8QuantizerClass;
+extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
+extern PyTypeObject *Float8BlockwiseQTensorBasePythonClass;
+extern PyTypeObject *Float8BlockwiseQuantizerClass;
 
 void init_extension();
 
@@ -50,6 +53,15 @@ inline bool IsMXFP8Tensor(PyObject *obj) {
   return Py_TYPE(obj) == MXFP8TensorPythonClass || Py_TYPE(obj) == MXFP8TensorBasePythonClass;
 }
 
+inline bool IsFloat8BlockwiseQParams(PyObject *obj) {
+  return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
+}
+
+inline bool IsFloat8BlockwiseQTensor(PyObject *obj) {
+  return Py_TYPE(obj) == Float8BlockwiseQTensorPythonClass ||
+         Py_TYPE(obj) == Float8BlockwiseQTensorBasePythonClass;
+}
+
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer);
 
 template <typename T>
@@ -61,6 +73,9 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizati
 
 std::unique_ptr<Quantizer> CreateMXFP8Params(const py::handle params);
 
+TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
+                                                   Quantizer *quantization_params);
+
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;
 }
@@ -70,8 +85,10 @@ constexpr std::array custom_types_converters = {
                     CreateQuantizer<Float8Quantizer>),
     std::make_tuple(IsFloat8Tensor, IsFloat8CurrentScalingQuantizers, NVTETensorFromFloat8Tensor,
                     CreateQuantizer<Float8CurrentScalingQuantizer>),
-    std::make_tuple(IsMXFP8Tensor, IsMXFP8Quantizers, NVTETensorFromMXFP8Tensor,
-                    CreateQuantizer<MXFP8Quantizer>)};
+    std::make_tuple(IsMXFP8Tensor, IsMXFP8QParams, NVTETensorFromMXFP8Tensor,
+                    CreateQuantizer<MXFP8Quantizer>),
+    std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQParams,
+                    NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>)};
 
 }  // namespace detail
 

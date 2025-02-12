@@ -84,6 +84,38 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
   return ret;
 }
 
+TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
+  const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
+  auto ret = TensorWrapper(NVTE_BLOCK_SCALING);
+
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+
+  if (rowwise_usage) {
+    const at::Tensor &data_rowwise = tensor.attr("_rowwise_data").cast<at::Tensor>();
+    const at::Tensor &scale_inv_rowwise = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
+    void *scale_inv_rowwise_dptr = scale_inv_rowwise.data_ptr();
+    const auto &shape = getTensorShape(data_rowwise);
+    ret.set_rowwise_data(data_rowwise.data_ptr(), dtype, shape);
+
+    const auto scale_inv_rowwise_shape = getTensorShape(scale_inv_rowwise);
+    ret.set_rowwise_scale_inv(scale_inv_rowwise_dptr, DType::kFloat32, scale_inv_rowwise_shape);
+  }
+
+  if (columnwise_usage) {
+    const at::Tensor &data_colwise = tensor.attr("_columnwise_data").cast<at::Tensor>();
+    const at::Tensor &scale_inv_colwise = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
+    void *scale_inv_colwise_dptr = scale_inv_colwise.data_ptr();
+    const auto &shape = getTensorShape(data_colwise);
+    ret.set_columnwise_data(data_colwise.data_ptr(), dtype, shape);
+
+    const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
+    ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
+  }
+  quantizer->set_quantization_params(&ret);
+  return ret;
+}
+
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch
