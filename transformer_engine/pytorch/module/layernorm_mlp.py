@@ -251,7 +251,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer, False)
             else:
                 ln_out_total = ln_out
-        print(f"with_quantized_all_gather = {with_quantized_all_gather}")
         # If residual connection is after LN, we need `ln_out`
         # tensor in higher precision, this comes at the cost
         # of an extra fp8 cast.
