@@ -2141,10 +2141,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
         B = list(
             torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
         )  # grad_output
-        out = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # dgrad
-        out_ref = [o.clone() for o in out]
+        out = [torch.randn(m, k, dtype=dtype, device="cuda")] # dgrad
+        out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = True
-        single_output = False
+        single_output = True
     else:  # layout == "NT"
         A = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
         B = list(
