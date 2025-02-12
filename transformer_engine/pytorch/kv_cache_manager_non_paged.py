@@ -178,9 +178,9 @@ class NonPagedKVCacheManager(KVCacheManager):
         k_cache, v_cache = self.cache[layer_number]
         step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-        h=16
-        d=64
-        b=4
+        #h=self.num_heads #16
+        #d=self.head_dim_k #64
+        #b=self.max_batch_size #4
         max_ctx_len=k.shape[1] #64
         max_seq_len=k_cache.shape[1] #64 #128
         max_ctx_tokens=k.shape[0]
@@ -189,7 +189,12 @@ class NonPagedKVCacheManager(KVCacheManager):
         #print('step_lens ', step_lens)
         #print('seq_lens ', seq_lens)
         #print('self.batch_indices ', self.batch_indices)
-        tex.copy_to_kv_cache_non_paged(k, v, k_cache, v_cache, self.batch_indices, step_lens, seq_lens, QKVFormat[qkv_format], h, d, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+        print('lensss ', max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+        tex.copy_to_kv_cache_non_paged(
+            k, v, k_cache, v_cache,
+            self.batch_indices, step_lens, seq_lens,
+            QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, self.max_batch_size,
+            max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
         return k_cache, v_cache, None
 
 #        #prev_batch_size = len(self.sequences)

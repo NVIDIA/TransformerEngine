@@ -207,10 +207,10 @@ class Simulation:
 
 @pytest.mark.parametrize("dtype", [torch.float16])#param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
-@pytest.mark.parametrize("qkv_format", ['thd'])#qkv_formats)
+@pytest.mark.parametrize("qkv_format", ["thd"])#qkv_formats)
 @pytest.mark.parametrize("is_paged", [False])#, True])
 @pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("is_cuda_graph", [False])#, True])
+@pytest.mark.parametrize("is_cuda_graph", [True])#False])#, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
     logger = logging.getLogger("test_paged_attn")
@@ -353,6 +353,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             )
             for _ in range(3)
         ]
+        print(aa[0].shape, aa[0][8,0,:4])
         #aa.extend([model_config.sequence_length, model_config.sequence_length])
         return aa
 
@@ -507,6 +508,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         cu_seqlens_q[1 : sim.t_batch_size + 1] = torch.cumsum(sim.step_lens, dim=0)
         cu_seqlens_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_kv[1 : sim.t_batch_size + 1] = torch.cumsum(sim.t_total_lens, dim=0)
+        print('qkv_format' ,qkv_format, cu_seqlens_q, cu_seqlens_kv)
+        print("q[1, 8:10, :2, :2]", q[1, 8:10, :2, :2])
+        print("inc_q[18:20, :2, :2]", incremental_q[18:20, :2, :2])
 
         step_dict = OrderedDict(
             zip(sim.t_seq_ids.tolist(), sim.step_lens.tolist())

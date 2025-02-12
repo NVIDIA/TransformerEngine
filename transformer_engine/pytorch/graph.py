@@ -252,6 +252,10 @@ def _make_graphed_callables(
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
+                print(len(args), [x.shape for x in args])
+                print(len(args), [x.dtype for x in args])
+                print(args[0][8,0,:4])
+                print(kwargs)
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()

@@ -41,7 +41,7 @@ void copy_to_kv_cache_non_paged(
         torch::Tensor step_lens,
         torch::Tensor seq_lens,
         NVTE_QKV_Format qkv_format,
-        int h, int d,
+        int h_kv, int d_k, int d_v,
         int b, int max_ctx_len, int max_seq_len,
         int max_ctx_tokens, int max_tokens);
 

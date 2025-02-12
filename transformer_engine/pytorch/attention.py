@@ -29,6 +29,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
     QKVLayout,
+    QKVFormat,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
@@ -1156,8 +1157,9 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             self.head_dim_q = head_dim_q
             self.max_ctx_len = max_ctx_len
 
+        self.input_qkv_format = "bshd"
         # NonPagedKVCacheManager and PagedKVCacheManager only support 'bshd' cache
-        self.inference_qkv_format = "bshd"
+        self.cache_qkv_format = "bshd"
 
         # layer numbers that we have kv cache for
         #self.layer_numbers = []
@@ -1226,6 +1228,8 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
                 dtype=self.dtype,
                 device=torch.cuda.current_device(),
             )
+            self.q_dummy = torch.Tensor().to(dtype=self.dtype, device="cuda")
+            self.batch_indices = torch.Tensor().to(dtype=torch.int32, device="cuda")
         self.cu_seqlens_q = torch.zeros(
             self.max_batch_size + 1,
             dtype=torch.int32,
@@ -1459,18 +1463,46 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         #actual_batch_size = len(self.step_dict)
         #seqlens_q = list(self.step_dict.values())
         #cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size + 1)]
+        print('qkv_foramt', qkv_format)
+        #print('qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
+        #print('qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
         seqlens_q = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
         batch_size = len(seqlens_q)
         if qkv_format == "bshd":
             q = q.contiguous()
         if qkv_format == "sbhd":
             q = q.transpose(0, 1).contiguous()
+        max_seqlen_q = q.shape[1]
         if qkv_format == "thd":
+            #print('---qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
+            #print('---qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
             q_buffer = self.q_buffer[layer_number]
-            #for i in range(actual_batch_size):
-            for i in range(batch_size):
-                q_buffer[i, : seqlens_q[i], :, :] = q[self.cu_seqlens_q[i] : self.cu_seqlens_q[i + 1], :, :]
-            q = q_buffer
+            ##for i in range(actual_batch_size):
+            #for i in range(batch_size):
+            #    q_buffer[i, : seqlens_q[i], :, :] = q[self.cu_seqlens_q[i] : self.cu_seqlens_q[i + 1], :, :]
+            #q = q_buffer
+            max_seqlen_q = self.max_ctx_len
+            #max_seqlen_kv = self.max_seqlen_kv
+            step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
+            seq_lens = self.cu_seqlens_kv[1:] - self.cu_seqlens_kv[:-1]
+            max_ctx_len=q.shape[1] #64
+            max_seq_len=q_buffer.shape[1] #64 #128
+            max_ctx_tokens=q.shape[0]
+            max_tokens=q_buffer.shape[0]*q_buffer.shape[1]
+            #print('---++qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
+            #print('---++qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
+            #print(q_buffer.shape)
+            #print(step_lens, seq_lens, QKVFormat[qkv_format])
+            #print(self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
+            #    max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+            # TODO: batch_indices
+            tex.copy_to_kv_cache_non_paged(
+                q, self.q_dummy, q_buffer, self.q_dummy,
+                self.batch_indices, step_lens, seq_lens,
+                QKVFormat[qkv_format], self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
+                max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+            #q = q_buffer
+            #print('qqqqqqqq', q_buffer.shape, q_buffer.dtype, q_buffer[:2, 8:10, 0, :4])
 
         #self.page_table = page_table
         #self.seq_ids = list(self.cache_manager.sequences.keys())
@@ -1506,7 +1538,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
 
         # k_cache and v_cache are in InferenceParams.qkv_format format
 #        return k_cache, v_cache, page_table
-        return q, k_cache, v_cache, page_table, self.cu_seqlens_q, self.cu_seqlens_kv
+        return q_buffer, k_cache, v_cache, page_table, self.cu_seqlens_q, self.cu_seqlens_kv, max_seqlen_q, self.max_seqlen_kv
 
 
 @torch.no_grad()
@@ -7806,13 +7838,21 @@ class DotProductAttention(TransformerEngineBaseModule):
                 assert all(
                     len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
                 ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
+                if qkv_format == "sbhd":
+                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
+                    batch_size = query_layer.shape[1]
+                else:
+                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
+                    batch_size = query_layer.shape[0]
 
             page_table = None
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
 
                 # remember original format for output purposes
-                orig_qkv_format = qkv_format
+                inference_params.input_qkv_format = qkv_format
 
                 # convert causal to causal_bottom_right in inference when KV-caching is in use
                 # so users can run with the same attn_mask_type for training and inference
@@ -7844,15 +7884,17 @@ class DotProductAttention(TransformerEngineBaseModule):
 
                 # update KV cache and return the full key/value tensors
                 # full key/value tensors are in inference_params.qkv_format format
-                query_layer, key_layer, value_layer, page_table, cu_seqlens_q, cu_seqlens_kv = inference_params.update_cache(
+                print('query_layer',query_layer.shape, query_layer.dtype)
+                #print('query_layer', query_layer[8,0,:4])
+                query_layer, key_layer, value_layer, page_table, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv = inference_params.update_cache(
                     self.layer_number,
                     query_layer,
                     key_layer,
                     value_layer,
                     qkv_format,
                 )
-                print('cu_seqlens_q',cu_seqlens_q)
-                print('cu_seqlens_kv',cu_seqlens_kv)
+                #print('cu_seqlens_q',cu_seqlens_q)
+                #print('cu_seqlens_kv',cu_seqlens_kv)
 
                 # update cu_seqlens tensors
                 #if inference_params.is_cuda_graph:
@@ -7863,7 +7905,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
                 # query tensor is now in inference_params.qkv_format
                 #qkv_format = target_qkv_format
-                qkv_format = inference_params.inference_qkv_format
+                qkv_format = inference_params.cache_qkv_format
 
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
@@ -7874,14 +7916,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             context_parallel = cp_size > 1
 
             if qkv_format in ["sbhd", "bshd"]:
-                if qkv_format == "sbhd":
-                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
-                    batch_size = query_layer.shape[1]
-                else:
-                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
-                    batch_size = query_layer.shape[0]
                 max_seqlen_q *= cp_size
                 max_seqlen_kv *= cp_size
                 if cu_seqlens_q is None or cu_seqlens_kv is None:
@@ -8149,8 +8183,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     quantizers=self.quantizers,
                 )
                 print('ooooooooooo ',output.shape)
-                print(output[1,9,:4])
-                print(output[1,10,:4])
+                #print(output[1,9,:4])
+                #print(output[1,10,:4])
 
             from .cpu_offload import CPUOffloadEnabled
 
@@ -8198,12 +8232,12 @@ class DotProductAttention(TransformerEngineBaseModule):
                 batch_size = len(inference_params.step_dict)
                 step_lens = list(inference_params.step_dict.values())
                 max_seqlen_q = max(list(inference_params.step_dict.values()))
-                print('xxxxxxxxx ', batch_size, step_lens, max_seqlen_q, inference_params.step_dict, orig_qkv_format)
-                if orig_qkv_format == "bshd":
+                print('xxxxxxxxx ', batch_size, step_lens, max_seqlen_q, inference_params.step_dict, inference_params.input_qkv_format)
+                if inference_params.input_qkv_format == "bshd":
                     output = output[:batch_size, :max_seqlen_q].contiguous()
-                if orig_qkv_format == "sbhd":
+                if inference_params.input_qkv_format == "sbhd":
                     output = output[:batch_size, :max_seqlen_q].transpose(0, 1).contiguous()
-                if orig_qkv_format == "thd":
+                if inference_params.input_qkv_format == "thd":
                     packed_output = torch.Tensor().to(dtype=output.dtype, device=output.device)
                     for i in range(batch_size):
                         packed_output = torch.cat([packed_output, output[i, : step_lens[i]]], dim=0)
