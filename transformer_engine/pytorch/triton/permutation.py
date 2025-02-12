@@ -241,16 +241,15 @@ def _unpermute_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     if FP8_DTYPE == "e5m2":
-        compute_type = tl.float16
         data_type = tl.float8e5
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
-        compute_type = tl.float16
         data_type = tl.float8e4nv
         pytorch_tensor_dtype = tl.uint8
     else:
-        compute_type = input_ptr.dtype.element_ty
+        data_type = input_ptr.dtype.element_ty
         assert FP8_DTYPE is None
+    compute_type = tl.float32
 
     pid = tl.program_id(0)
     current_start = 0
@@ -264,7 +263,8 @@ def _unpermute_kernel(
                 input_off = src_row * stride_input_token + current_offset * stride_input_hidden
                 inp = tl.load(input_ptr + input_off, mask=mask)
                 if FP8_DTYPE is not None:
-                    inp = inp.to(data_type, bitcast=True).to(compute_type)
+                    inp = inp.to(data_type, bitcast=True)
+                inp = inp.to(compute_type)
                 if WITH_MERGING_PROBS:
                     merging_prob_off = (
                         pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
@@ -290,6 +290,8 @@ def _unpermute_kernel(
                 # The outside fp8_scale_inv is also scaled in the meantime.
                 accumulator /= num_experts
             accumulator = accumulator.to(data_type).to(pytorch_tensor_dtype, bitcast=True)
+        else:
+            accumulator = accumulator.to(data_type)
         output_off = pid * stride_output_token + current_offset * stride_output_hidden
         tl.store(output_ptr + output_off, accumulator, mask=mask)
         current_start += BLOCK_SIZE
@@ -385,22 +387,21 @@ def _unpermute_bwd_with_merging_probs_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     if FP8_DTYPE == "e5m2":
-        compute_type = tl.float16
         data_type = tl.float8e5
         pytorch_tensor_dtype = tl.uint8
     elif FP8_DTYPE == "e4m3":
-        compute_type = tl.float16
         data_type = tl.float8e4nv
         pytorch_tensor_dtype = tl.uint8
     else:
-        compute_type = fwd_output_grad_ptr.dtype.element_ty
+        data_type = fwd_output_grad_ptr.dtype.element_ty
         assert FP8_DTYPE is None
+    compute_type = tl.float32
 
     pid = tl.program_id(0)
     for expert_idx in range(num_experts):
         dst_row = tl.load(row_id_map_ptr + expert_idx * num_tokens + pid)
         if dst_row != -1:
-            prob_grad_accum = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+            prob_grad_accum = tl.zeros((BLOCK_SIZE,), dtype=compute_type)
             current_start = 0
             while current_start < hidden_size:
                 current_offset = current_start + tl.arange(0, BLOCK_SIZE)
@@ -411,14 +412,16 @@ def _unpermute_bwd_with_merging_probs_kernel(
                 )
                 inp = tl.load(fwd_output_grad_ptr + input_off, mask=mask)
                 if FP8_DTYPE is not None:
-                    inp = inp.to(data_type, bitcast=True).to(compute_type)
+                    inp = inp.to(data_type, bitcast=True)
+                inp = inp.to(compute_type)
                 merging_prob_off = (
                     pid * stride_merging_probs_token + expert_idx * stride_merging_probs_expert
                 )
                 merging_prob = tl.load(merging_probs_ptr + merging_prob_off).to(compute_type)
                 output = inp * merging_prob
+                output = output.to(data_type)
                 if FP8_DTYPE is not None:
-                    output = output.to(data_type).to(pytorch_tensor_dtype, bitcast=True)
+                    output = output.to(pytorch_tensor_dtype, bitcast=True)
                 output_off = (
                     dst_row * stride_fwd_input_grad_token
                     + current_offset * stride_fwd_input_grad_hidden
@@ -431,7 +434,7 @@ def _unpermute_bwd_with_merging_probs_kernel(
                 fwd_input = tl.load(fwd_input_ptr + fwd_input_off, mask=mask)
                 if FP8_DTYPE is not None:
                     fwd_input = fwd_input.to(data_type, bitcast=True)
-                prob_grad_accum += fwd_input.to(tl.float32) * inp.to(tl.float32)
+                prob_grad_accum += fwd_input.to(compute_type) * inp
                 current_start += BLOCK_SIZE
             probs_grad = tl.sum(prob_grad_accum).to(merging_probs_grad_ptr.dtype.element_ty)
             probs_grad_off = (
