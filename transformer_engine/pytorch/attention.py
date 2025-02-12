@@ -23,7 +23,11 @@ import torch.nn.functional as F
 
 import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine.pytorch.utils import get_cudnn_version
+from transformer_engine.pytorch.utils import (
+    get_cudnn_version,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
@@ -1834,6 +1838,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         quantizers,
     ):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -2756,12 +2761,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
 
         return out_ret
 
     @staticmethod
     def backward(ctx, dout):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVP2P.backward")
         cp_size_a2a = ctx.cp_size_a2a
         rank_a2a = ctx.rank_a2a
 
@@ -3602,6 +3609,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dq = ctx.dQKV_quantizer.create_tensor_from_data(dq, ctx.qkv_dtype)
             dk = ctx.dQKV_quantizer.create_tensor_from_data(dk, ctx.qkv_dtype)
             dv = ctx.dQKV_quantizer.create_tensor_from_data(dv, ctx.qkv_dtype)
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.backward")
 
         return (
             None,
@@ -3688,6 +3696,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         cp_stream,
     ):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -3904,11 +3913,13 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         return out
 
     @staticmethod
     def backward(ctx, dout):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)
         rank = get_distributed_rank(ctx.cp_group)
 
@@ -4092,6 +4103,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         dq = dq.view(*dq.shape[:seq_dim], -1, *dq.shape[(seq_dim + 2) :])
         dk = dk.movedim(0, seq_dim).contiguous()
         dv = dv.movedim(0, seq_dim).contiguous()
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.backward")
 
         return (
             None,
@@ -4151,6 +4163,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         quantizers,
     ):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
 
@@ -4403,11 +4416,13 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         return out_ret
 
     @staticmethod
     def backward(ctx, dout):
         # pylint: disable=missing-function-docstring
+        nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
         cp_size = get_distributed_world_size(ctx.cp_group)
 
         (
@@ -4592,6 +4607,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dv = ctx.dQKV_quantizer.create_tensor_from_data(dv, fake_dtype=dout_dtype)
             if not ctx.is_input_fp8:
                 dq, dk, dv = [x.dequantize() for x in [dq, dk, dv]]
+        nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.backward")
 
         return (
             None,
