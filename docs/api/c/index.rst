@@ -12,12 +12,16 @@ directly from C/C++, without Python.
 .. toctree::
    :caption: Headers
 
+   transformer_engine.h <transformer_engine>
    activation.h <activation>
    cast.h <cast>
-   gemm.h <gemm>
    fused_attn.h <fused_attn>
-   layer_norm.h <layer_norm>
-   rmsnorm.h <rmsnorm>
+   fused_rope.h <fused_rope>
+   gemm.h <gemm>
+   normalization.h <normalization>
+   padding.h <padding>
+   permutation.h <permutation>
+   recipe.h <recipe>
    softmax.h <softmax>
-   transformer_engine.h <transformer_engine>
+   swizzle.h <swizzle>
    transpose.h <transpose>
