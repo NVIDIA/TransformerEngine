@@ -265,9 +265,9 @@ def _test_permutation_index_map(
         permute_bwd_input = _permute_bwd_input_quantizer(permute_bwd_input)
         unpermute_bwd_input = _unpermute_bwd_quantizer(unpermute_bwd_input)
 
-        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize(dtype=torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize(dtype=torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
@@ -341,10 +341,10 @@ def _test_permutation_index_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize(dtype=torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad
+        te_unpermute_output_ = te_unpermute_output.dequantize(dtype=torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
@@ -513,17 +513,15 @@ def _test_permutation_mask_map(
         permute_bwd_input = Float8Tensor.to_float8(permute_bwd_input, fp8_dtype=te_dtype)
         unpermute_bwd_input = Float8Tensor.to_float8(unpermute_bwd_input, fp8_dtype=te_dtype)
 
-        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize(dtype=torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize(dtype=torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_unpermute_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
 
     pytorch_permute_fwd_input.requires_grad_(True)
-    pytorch_permute_bwd_input.requires_grad_(True)
-    pytorch_unpermute_bwd_input.requires_grad_(True)
 
     restore_shape = pytorch_permute_fwd_input.shape
 
@@ -593,10 +591,10 @@ def _test_permutation_mask_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize(dtype=torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad
+        te_unpermute_output_ = te_unpermute_output.dequantize(dtype=torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
@@ -752,8 +750,8 @@ def _test_moe_chunk_sort(
         fwd_input = Float8Tensor.to_float8(fwd_input, fp8_dtype=te_dtype)
         bwd_input = Float8Tensor.to_float8(bwd_input, fp8_dtype=te_dtype)
 
-        pytorch_fwd_input = fwd_input.dequantize().to(torch.float16)
-        pytorch_bwd_input = bwd_input.dequantize().to(torch.float16)
+        pytorch_fwd_input = fwd_input.dequantize(dtype=torch.float16)
+        pytorch_bwd_input = bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
@@ -799,8 +797,8 @@ def _test_moe_chunk_sort(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_output_ = te_output.dequantize().to(torch.float32)
-        te_fwd_input_grad = te_fwd_input.grad.dequantize().to(torch.float32)
+        te_output_ = te_output.dequantize(dtype=torch.float32)
+        te_fwd_input_grad = te_fwd_input.grad
     else:
         te_output_ = te_output.float()
         te_fwd_input_grad = te_fwd_input.grad.float()

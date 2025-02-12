@@ -26,8 +26,11 @@ class _FromFloat8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        if dtype not in (torch.float32, torch.bfloat16, torch.float16):
-            dtype = torch.float32
+        assert dtype in (
+            torch.float32,
+            torch.bfloat16,
+            torch.float16,
+        ), f"Incorrect dtype {dtype} for dequantization."
 
         dtype = torch_to_transformer_engine_dtype[dtype]
 
