@@ -13,7 +13,9 @@
 
 namespace transformer_engine::pytorch {
 
-py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::object& output,
+py::object quantize(const at::Tensor& tensor,
+                    py::handle quantizer,
+                    const py::object& output,
                     std::optional<at::Tensor> noop) {
   init_extension();
   auto my_quantizer = convert_quantizer(quantizer);
