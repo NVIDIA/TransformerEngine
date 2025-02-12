@@ -27,7 +27,6 @@ def setup_pytorch_extension(
     extensions_dir = csrc_source_files / "extensions"
     sources = [
         csrc_source_files / "common.cpp",
-        csrc_source_files / "ts_fp8_op.cpp",
     ] + all_files_in_dir(extensions_dir)
 
     # Header files

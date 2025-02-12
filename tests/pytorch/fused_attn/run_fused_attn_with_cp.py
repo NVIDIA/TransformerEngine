@@ -11,7 +11,7 @@ from transformer_engine.pytorch.attention import get_cu_seqlens_on_cp_rank
 import transformer_engine_torch as tex
 from test_fused_attn_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch.fp8 import fp8_autocast
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.common.recipe import DelayedScaling
 
 dtypes = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
@@ -176,6 +176,11 @@ def run_dpa_with_cp(
     k = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
     v = torch.randn(kv_input_shape, dtype=dtypes[dtype]).cuda()
     dout = torch.randn(attn_output_shape, dtype=dtypes[dtype]).cuda()
+    dout_quantizer = Float8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E5M2,
+        scale=torch.tensor([1], dtype=torch.float32).cuda(),
+        amax=torch.tensor([0], dtype=torch.float32).cuda(),
+    )
 
     # create flash attention bias
     if config.attn_bias_type not in ["no_bias", "alibi"]:
@@ -206,7 +211,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
         if fp8_mha:
-            dout_fp8 = Float8Tensor.to_float8(dout, fp8_dtype=tex.DType.kFloat8E5M2)
+            dout_fp8 = dout_quantizer(dout)
             out.backward(dout_fp8)
         else:
             out.backward(dout)
@@ -276,7 +281,7 @@ def run_dpa_with_cp(
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
         )
         if fp8_mha:
-            dout_fp8_ = Float8Tensor.to_float8(dout_, fp8_dtype=tex.DType.kFloat8E5M2)
+            dout_fp8_ = dout_quantizer(dout_)
             out_.backward(dout_fp8_)
         else:
             out_.backward(dout_)
