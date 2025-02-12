@@ -3,10 +3,9 @@
 # See LICENSE for license information.
 
 import math
-from typing import Callable, Optional
+from typing import Optional
 import torch
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import DelayedScaling, dist_group_type
 
 
 def speedometer(
@@ -204,16 +203,15 @@ def share_parameters_with_transformerlayer_te_model(te_model, basic_model):
 
 
 def cast_to_representable(inp, scale=1.0, fp8_format="e4m3"):
-    import transformer_engine.pytorch.cpp_extensions as texcpp
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     import transformer_engine_torch as tex
-    from transformer_engine.pytorch.constants import TE_DType
 
     fp8_type = tex.DType.kFloat8E4M3 if fp8_format == "e4m3" else tex.DType.kFloat8E5M2
-    input_type = TE_DType[inp.dtype]
-    meta = tex.FP8TensorMeta()
-    meta.scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
-    meta.scale_inv = torch.ones(1, dtype=torch.float32, device="cuda") / scale
-    meta.amax_history = torch.zeros(1, 1, dtype=torch.float32, device="cuda")
-    ret = texcpp.cast_to_fp8(inp, meta, tex.FP8FwdTensors.GEMM1_INPUT, fp8_type)
-    ret = texcpp.cast_from_fp8(ret, meta, tex.FP8FwdTensors.GEMM1_INPUT, fp8_type, input_type)
+    scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
+    amax_history = torch.zeros(1, 1, dtype=torch.float32, device="cuda")
+    quantizer = Float8Quantizer(scale=scale,
+                                amax=amax_history,
+                                fp8_dtype=fp8_type)
+    ret = quantizer(inp)
+    ret = ret.dequantize()
     return ret
