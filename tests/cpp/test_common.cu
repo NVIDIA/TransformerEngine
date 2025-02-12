@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <memory>
 #include <random>
+#include <iostream>
 #include <cassert>
 #include <cmath>
 #include <string>
@@ -116,7 +117,8 @@ NVTEShape convertShape(const std::vector<size_t>& shape) {
 }
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
-                                                     const NVTEScalingMode scaling_mode) {
+                                                     const NVTEScalingMode scaling_mode,
+                                                     const int block_scaling_dim) {
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     scale_inv_meta ret;
     ret.shape = {1};
@@ -134,27 +136,19 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    auto block_alignment = std::vector<size_t>{128ul,4ul};
+    auto block_alignment = std::vector<size_t>{128ul, 4ul};
     {
       auto alignment = block_alignment[0];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
-                                     static_cast<size_t>(1)),
-                               alignment) * alignment;
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
       alignment = block_alignment[1];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
-                                     static_cast<size_t>(32)),
-                               alignment) * alignment;
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(32)), alignment) * alignment;
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto alignment = block_alignment[1];
-      auto scale_dim_0 = DIVUP(DIVUP(first_dim,
-                                     static_cast<size_t>(32)),
-                               alignment) * alignment;
+      auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(32)), alignment) * alignment;
       alignment = block_alignment[0];
-      auto scale_dim_1 = DIVUP(DIVUP(last_dim,
-                                     static_cast<size_t>(1)),
-                               alignment) * alignment;
+      auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(1)), alignment) * alignment;
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat8E8M0;
@@ -164,6 +158,61 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     return {ret_rowwise, ret_colwise};
   }
+  if (scaling_mode == NVTE_BLOCK_SCALING) {
+    if (block_scaling_dim == 2) {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      size_t first_dim = first_dimension(shape_vec);
+      size_t last_dim = last_dimension(shape_vec);
+
+      scale_inv_meta ret_rowwise, ret_colwise;
+
+      {
+        auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
+        auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(128)), 4) * 4;
+        ret_rowwise.shape = {scale_dim_0, scale_dim_1};
+      }
+      {
+        auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
+        auto scale_dim_1 = DIVUP(DIVUP(first_dim, static_cast<size_t>(128)), 4) * 4;
+        ret_colwise.shape = {scale_dim_0, scale_dim_1};
+      }
+      ret_rowwise.type = DType::kFloat32;
+      ret_colwise.type = DType::kFloat32;
+      ret_rowwise.type_size = sizeof(float);
+      ret_colwise.type_size = sizeof(float);
+
+      return {ret_rowwise, ret_colwise};
+    } else if (block_scaling_dim == 1) {
+      std::vector<size_t> shape_vec;
+      for (size_t i = 0; i < shape.ndim; ++i) {
+        shape_vec.push_back(shape.data[i]);
+      }
+      size_t first_dim = first_dimension(shape_vec);
+      size_t last_dim = last_dimension(shape_vec);
+      scale_inv_meta ret_rowwise, ret_colwise;
+
+      {
+        auto scale_dim_1 = first_dim;
+        auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
+        ret_rowwise.shape = {scale_dim_0, scale_dim_1};
+      }
+      {
+        auto scale_dim_1 = last_dim;
+        auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
+        ret_colwise.shape = {scale_dim_0, scale_dim_1};
+      }
+      ret_rowwise.type = DType::kFloat32;
+      ret_colwise.type = DType::kFloat32;
+      ret_rowwise.type_size = sizeof(float);
+      ret_colwise.type_size = sizeof(float);
+      return {ret_rowwise, ret_colwise};
+    } else {
+      NVTE_ERROR("Unsupported block scaling dim!");
+    }
+  }
 
   NVTE_ERROR("Invalid scaling mode!");
 }
@@ -171,7 +220,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
-               const NVTEScalingMode &scaling_mode) {
+               const NVTEScalingMode &scaling_mode,
+               const QuantizationOptions* q_opts) {
   name_ = name;
   const size_t seed = create_seed_from_tensor_name(name);
   gen_.seed(seed);
@@ -197,8 +247,12 @@ Tensor::Tensor(const std::string& name,
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
   NVTEShape columnwise_shape{nullptr, 0};
 
+  size_t block_scaling_dim = 0;
+  if (q_opts != nullptr) {
+    block_scaling_dim = q_opts->block_scaling_dim;
+  }
   std::vector<size_t> columnwise_shape_vec;
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING) {
     // Transpose when tensor scaling
     columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
     for (size_t i = 0; i < shape.ndim - 1; ++i) {
@@ -259,26 +313,33 @@ Tensor::Tensor(const std::string& name,
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), sizeof(float), 0);
       }
     } else {
-      auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(normalized_shape,
-                                                                 tensor_.scaling_mode());
+      auto [rowwise_scale_meta, colwise_scale_meta] =
+          get_scales(normalized_shape, tensor_.scaling_mode(), block_scaling_dim);
       auto rowwise_scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       auto columnwise_scale_size = product(colwise_scale_meta.shape) * colwise_scale_meta.type_size;
       auto scale_shape = rowwise_scale_meta.shape;
       auto columnwise_scale_shape = colwise_scale_meta.shape;
       if (rowwise) {
-        cudaMalloc((void**)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
+        cudaMalloc((void **)&rowwise_scale_inv, rowwise_scale_size);  // NOLINT(*)
         cudaMemset(rowwise_scale_inv, 0, rowwise_scale_size);
         rowwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(rowwise_scale_size);
         std::fill_n(rowwise_scale_inv_cpu_data_.get(), rowwise_scale_size, 0);
-        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, DType::kFloat8E8M0, scale_shape);
+        auto scale_dtype = rowwise_scale_meta.type;
+        tensor_.set_rowwise_scale_inv(rowwise_scale_inv, scale_dtype, scale_shape);
       }
       if (columnwise) {
         cudaMalloc((void**)&columnwise_scale_inv, columnwise_scale_size);  // NOLINT(*)
         cudaMemset(columnwise_scale_inv, 0, columnwise_scale_size);
         columnwise_scale_inv_cpu_data_ = std::make_unique<unsigned char[]>(columnwise_scale_size);
         std::fill_n(columnwise_scale_inv_cpu_data_.get(), columnwise_scale_size, 0);
-        tensor_.set_columnwise_scale_inv(columnwise_scale_inv, DType::kFloat8E8M0, columnwise_scale_shape);
+        auto scale_dtype = colwise_scale_meta.type;
+        tensor_.set_columnwise_scale_inv(columnwise_scale_inv, scale_dtype, columnwise_scale_shape);
       }
+    }
+    if (q_opts != nullptr) {
+      tensor_.set_qopt_force_pow_2_scales(q_opts->force_pow_2_scales);
+      tensor_.set_qopt_amax_epsilon(q_opts->amax_epsilon);
+      tensor_.set_qopt_block_scaling_dim(q_opts->block_scaling_dim);
     }
   }
 }
@@ -311,7 +372,8 @@ void Tensor::to_cpu() const {
                  sizeof(float),
                  cudaMemcpyDeviceToHost);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
+    auto [rowwise_scale_meta, colwise_scale_meta] =
+        get_scales(s, tensor_.scaling_mode(), tensor_.get_qopt_block_scaling_dim());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       cudaMemcpy(rowwise_scale_inv_cpu_data_.get(),
@@ -349,7 +411,8 @@ void Tensor::from_cpu() const {
       cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
                  cudaMemcpyHostToDevice);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(s, tensor_.scaling_mode());
+    auto [rowwise_scale_meta, colwise_scale_meta] =
+        get_scales(s, tensor_.scaling_mode(), tensor_.get_qopt_block_scaling_dim());
     if (rowwise_) {
       auto scale_size = product(rowwise_scale_meta.shape) * rowwise_scale_meta.type_size;
       cudaMemcpy(tensor_.get_rowwise_scale_inv().data_ptr,
@@ -368,7 +431,7 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-  if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }
@@ -383,27 +446,29 @@ void Tensor::set_scale_inv(float scale_inv) {
     if (columnwise_) {
       NVTE_CHECK(columnwise_scale_inv_cpu_data_);
     }
-    auto [rowwise_scale_meta, colwise_scale_meta] = get_scales(tensor_.shape(), tensor_.scaling_mode());
+
+    auto [rowwise_scale_meta, colwise_scale_meta] =
+        get_scales(tensor_.shape(), tensor_.scaling_mode(), tensor_.get_qopt_block_scaling_dim());
     if (rowwise_) {
       auto num_scales = product(rowwise_scale_meta.shape);
-      if (num_scales == 1){
+      if (num_scales == 1) {
         rowwise_cpu_scale_inv_ptr<float>()[0] = scale_inv;
-      } else{
+      } else {
         std::uniform_int_distribution<uint8_t> dis(0, 127);
-        auto* scale_inv_ptr = rowwise_cpu_scale_inv_ptr<uint8_t>();
-        for (size_t i = 0; i < num_scales; i++){
+        auto *scale_inv_ptr = rowwise_cpu_scale_inv_ptr<uint8_t>();
+        for (size_t i = 0; i < num_scales; i++) {
           scale_inv_ptr[i] = dis(gen_);
         }
       }
     }
     if (columnwise_) {
       auto num_scales = product(colwise_scale_meta.shape);
-      if (num_scales == 1){
+      if (num_scales == 1) {
         columnwise_cpu_scale_inv_ptr<float>()[0] = scale_inv;
-      } else{
+      } else {
         std::uniform_int_distribution<uint8_t> dis(0, 127);
-        auto* scale_inv_ptr = columnwise_cpu_scale_inv_ptr<uint8_t>();
-        for (size_t i = 0; i < num_scales; i++){
+        auto *scale_inv_ptr = columnwise_cpu_scale_inv_ptr<uint8_t>();
+        for (size_t i = 0; i < num_scales; i++) {
           scale_inv_ptr[i] = dis(gen_);
         }
       }
@@ -413,23 +478,20 @@ void Tensor::set_scale_inv(float scale_inv) {
 }
 
 void Tensor::shareFP8Meta(const Tensor &other) {
-  if(isFp8Type(dtype()) && isFp8Type(other.dtype())) {
+  if (isFp8Type(dtype()) && isFp8Type(other.dtype())) {
     auto new_tensor = TensorWrapper(other.tensor_.scaling_mode());
     auto my_rowwise_data = tensor_.get_rowwise_data();
-    new_tensor.set_rowwise_data(my_rowwise_data.data_ptr,
-                                static_cast<DType>(my_rowwise_data.dtype),
+    new_tensor.set_rowwise_data(my_rowwise_data.data_ptr, static_cast<DType>(my_rowwise_data.dtype),
                                 my_rowwise_data.shape);
     auto my_columnwise_data = tensor_.get_columnwise_data();
     new_tensor.set_columnwise_data(my_columnwise_data.data_ptr,
                                    static_cast<DType>(my_columnwise_data.dtype),
                                    my_columnwise_data.shape);
     auto other_amax = other.tensor_.get_amax();
-    new_tensor.set_amax(other_amax.data_ptr,
-                        static_cast<DType>(other_amax.dtype),
+    new_tensor.set_amax(other_amax.data_ptr, static_cast<DType>(other_amax.dtype),
                         other_amax.shape);
     auto other_scale = other.tensor_.get_scale();
-    new_tensor.set_scale(other_scale.data_ptr,
-                         static_cast<DType>(other_scale.dtype),
+    new_tensor.set_scale(other_scale.data_ptr, static_cast<DType>(other_scale.dtype),
                          other_scale.shape);
     auto other_row_scale_inv = other.tensor_.get_rowwise_scale_inv();
     new_tensor.set_rowwise_scale_inv(other_row_scale_inv.data_ptr,
@@ -460,9 +522,7 @@ std::string to_string(const std::vector<T> &v) {
 std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   std::vector<size_t> ret;
   size_t current_i = i;
-  for (size_t current = shape.ndim - 1;
-       current > 0;
-       --current) {
+  for (size_t current = shape.ndim - 1; current > 0; --current) {
     ret.push_back(current_i % shape.data[current]);
     current_i /= shape.data[current];
   }
@@ -700,7 +760,7 @@ void fillCase_special(Tensor *t) {
     });
   } else {
     double minAbs = -2.0;
-    double maxAbs =  1.0;
+    double maxAbs = 1.0;
     if constexpr (Case != InputsFillCase::uniform) {
       minAbs = Quantized_Limits<InputEncoding>::ranges[Case];
       maxAbs = Quantized_Limits<InputEncoding>::ranges[Case + 1];
@@ -759,14 +819,13 @@ void setRandomScaleInv(Tensor *t) {
 }
 
 bool isFp8Type(DType type) {
-    return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
+  return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2 || type == DType::kFloat8E8M0;
 }
 
-int32_t getDeviceComputeCapability()
-{
-    cudaDeviceProp deviceProp;
-    cudaGetDeviceProperties(&deviceProp, 0);
-    return 10 * deviceProp.major + deviceProp.minor;
+int32_t getDeviceComputeCapability() {
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0);
+  return 10 * deviceProp.major + deviceProp.minor;
 }
 
 size_t first_dimension(const std::vector<size_t> &shape) {

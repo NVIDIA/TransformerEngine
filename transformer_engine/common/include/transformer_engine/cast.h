@@ -42,23 +42,25 @@ extern "C" {
  *  of the output tensor should be set to 0.
  */
 
-/*! \brief Casts input tensor to FP8/MXFP8.
+/*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
- *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *         the MXFP8 block quantization of the specified shape of the block will be used.
+ *         If the scaling mode of the output tensor is set to NVTE_BLOCK_SCALING,
+ *         blockwise float8 scaling will be used.
  *
  *  \param[in]     input            Input tensor to be cast.
- *  \param[in,out] output           Output FP8/MXFP8 tensor.
+ *  \param[in,out] output           Output FP8/MXFP8/BlockwiseFP8 tensor.
  *  \param[in]     stream           CUDA stream used for the operation.
  */
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
 /*! \brief Casts input tensor to FP8/MXFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
- *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
- *         the block quantization (MXFP8) of the specified shape of the block will be used.
+ *         The type of quantized tensor in the output depends on the scaling mode of the output
+ *         tensor.
  *
  *  \param[in]      input            Input tensor to be cast.
- *  \param[in,out]  output           Output FP8/MXFP8 tensor.
+ *  \param[in,out]  output           Output quantized tensor.
  *  \param[out]     noop             Noop tensor.
  *  \param[in]      stream           CUDA stream used for the operation.
  */

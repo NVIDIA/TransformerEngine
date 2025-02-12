@@ -349,6 +349,7 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
       NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
     }
   } else {
+    // FIXME(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
     NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
   }
 }

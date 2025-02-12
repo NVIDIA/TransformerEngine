@@ -502,3 +502,48 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
     delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
 }
+
+int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_force_pow_2_scales_qopt()) {
+    t.force_pow_2_scales = zero_if_false != 0;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_amax_epsilon_qopt()) {
+    t.amax_epsilon = amax_epsilon;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_set_qopt_block_scaling_dim(NVTETensor tensor, int block_scaling_dim) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_block_scaling_dim(block_scaling_dim)) {
+    t.block_scaling_dim = block_scaling_dim;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_get_qopt_force_pow_2_scales(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.force_pow_2_scales ? 1 : 0;
+}
+
+float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.amax_epsilon;
+}
+
+int nvte_get_qopt_block_scaling_dim(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.block_scaling_dim;
+}

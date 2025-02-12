@@ -80,6 +80,11 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
+  /*! Tensor is split into NxN quantization tiles or 1xN quantization tiles,
+    which each yield a scale. The block_scaling_dim property of the quantizer
+    selects the granularity.
+   */
+  NVTE_BLOCK_SCALING = 2,
   NVTE_INVALID_SCALING
 };
 
@@ -233,6 +238,63 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
  */
 void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
                            const NVTEBasicTensor *param);
+
+/*! \brief Set a quantization option for whether to force power of 2 scales.
+ *
+ *  \param[in/out] tensor Tensor.
+ *  \param[in] zero_if_false Whether to force power of 2 scales.
+ *
+ *  \return zero if the tensor supports this option and it was set. non-zero if
+ *   call had no effect.
+ */
+int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false);
+
+/*! \brief Set a quantization option for epsilon to set floor of amax.
+ *
+ *  \param[in/out] tensor Tensor.
+ *  \param[in] amax_epsilon Epsilon to use for amax calculation.
+ *
+ *  \return zero if the tensor supports this option and it was set. non-zero if
+ *   call had no effect.
+ */
+int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon);
+
+/*! \brief Set a quantization option to use 1D or 2D quantization blocks
+ *   to scale the tensor.
+ *
+ *  \param[in/out] tensor Tensor.
+ *  \param[in] block_scaling_dim, 1D or 2D.
+ *
+ *  \return zero if the tensor supports this option and it was set. non-zero if
+ *   call had no effect or the number of dims is not supported.
+ */
+int nvte_set_qopt_block_scaling_dim(NVTETensor tensor, int block_scaling_dim);
+
+/*! \brief Get a quantization option for whether to force power of 2 scales.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return zero if the tensor will not force power of 2 scales or if the
+ *   setting is irrelevant. non-zero if the flag is configured.
+ */
+int nvte_get_qopt_force_pow_2_scales(NVTETensor tensor);
+
+/*! \brief Get a quantization option for amax epsilon.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return amax_epsilon value or zero if not applicable.
+ */
+float nvte_get_qopt_amax_epsilon(const NVTETensor tensor);
+
+/*! \brief Get the number of dimensions in the quantization blocks.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return zero if the quantization does not support the block_scaling_dim
+ *   option or the block_scaling_dim configured.
+ */
+int nvte_get_qopt_block_scaling_dim(const NVTETensor tensor);
 
 /*! \brief Get a value of the parameter of the tensor.
  *
@@ -651,6 +713,24 @@ class TensorWrapper {
   }
 
   void zero_(cudaStream_t stream) { nvte_zero_tensor(tensor_, stream); }
+
+  int set_qopt_force_pow_2_scales(bool flag) {
+    return nvte_set_qopt_force_pow_2_scales(tensor_, flag ? 1 : 0);
+  }
+
+  int set_qopt_amax_epsilon(float eps) { return nvte_set_qopt_amax_epsilon(tensor_, eps); }
+
+  int set_qopt_block_scaling_dim(int block_scaling_dim) {
+    return nvte_set_qopt_block_scaling_dim(tensor_, block_scaling_dim);
+  }
+
+  bool get_qopt_force_pow_2_scales() const {
+    return nvte_get_qopt_force_pow_2_scales(tensor_) != 0;
+  }
+
+  float get_qopt_amax_epsilon() const { return nvte_get_qopt_amax_epsilon(tensor_); }
+
+  int get_qopt_block_scaling_dim() const { return nvte_get_qopt_block_scaling_dim(tensor_); }
 
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {&defaultData, 1};

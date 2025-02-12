@@ -95,21 +95,29 @@ struct TypeInfo{
     constexpr static size_t size = sizeof(T);
 };
 
+struct QuantizationOptions {
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+  size_t block_scaling_dim = 2u;
+};
+
 class Tensor {
  public:
   Tensor(const std::string& name,
          const NVTEShape &shape, const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING);
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const QuantizationOptions* q_opts = nullptr);
 
   Tensor(const std::string& name,
          const std::vector<size_t> &shape,
          const DType type,
          const bool rowwise = true,
          const bool columnwise = false,
-         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING) :
-    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode) {}
+         const NVTEScalingMode &mode = NVTE_DELAYED_TENSOR_SCALING,
+         const QuantizationOptions* q_opts = nullptr) :
+    Tensor(name, NVTEShape{shape.data(), shape.size()}, type, rowwise, columnwise, mode, q_opts) {}
 
   Tensor() {}
 
@@ -136,25 +144,19 @@ class Tensor {
     if (scale_inv != nullptr) {
       cudaFree(scale_inv);
     }
-    if (columnwise_data_ptr != nullptr){
+    if (columnwise_data_ptr != nullptr) {
       cudaFree(columnwise_data_ptr);
     }
-    if (columnwise_scale_inv != nullptr){
+    if (columnwise_scale_inv != nullptr) {
       cudaFree(columnwise_scale_inv);
     }
   }
 
-  NVTETensor data() const noexcept {
-    return tensor_.data();
-  }
+  NVTETensor data() const noexcept { return tensor_.data(); }
 
-  NVTEShape rowwise_shape() const noexcept {
-    return tensor_.get_rowwise_data().shape;
-  }
+  NVTEShape rowwise_shape() const noexcept { return tensor_.get_rowwise_data().shape; }
 
-  NVTEShape columnwise_shape() const noexcept {
-    return tensor_.get_columnwise_data().shape;
-  }
+  NVTEShape columnwise_shape() const noexcept { return tensor_.get_columnwise_data().shape; }
 
   NVTEShape rowwise_scale_inv_shape() const {
     NVTE_CHECK(rowwise_, "Tensor does not have rowwise data!");
@@ -221,6 +223,8 @@ class Tensor {
   T *rowwise_cpu_scale_inv_ptr(){
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -231,6 +235,8 @@ class Tensor {
   template <typename T>
   T *columnwise_cpu_scale_inv_ptr(){
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
@@ -459,6 +465,7 @@ extern std::vector<DType> all_fp_types;
 bool isFp8Type(DType type);
 
 int32_t getDeviceComputeCapability();
+constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
 }  // namespace test
