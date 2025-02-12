@@ -55,7 +55,7 @@ class _moe_permute_index_map(torch.autograd.Function):
             ), "Only one factor scaling per tensor (Delayed Scaling) supported by moe_permute."
             dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
-            fake_dtype = inp.dtype
+            ctx.fake_dtype = inp.dtype
             inp = inp._data
         else:
             dtype = TE_DType[inp.dtype]
@@ -88,7 +88,7 @@ class _moe_permute_index_map(torch.autograd.Function):
                 fp8_dtype=dtype,
                 fp8_scale_inv=fp8_scale_inv,
                 shape=permuted_act.shape,
-                dtype=fake_dtype,
+                dtype=ctx.fake_dtype,
                 requires_grad=requires_grad,
             )
 
@@ -118,7 +118,6 @@ class _moe_permute_index_map(torch.autograd.Function):
             ), "Grad of the output must be in Float8Tensor type for FP8 moe_permute."
             dtype = permuted_act_grad._fp8_dtype
             fp8_scale_inv = permuted_act_grad._scale_inv
-            fake_dtype = permuted_act_grad.dtype
             permuted_act_grad = permuted_act_grad._data
         else:
             dtype = TE_DType[permuted_act_grad.dtype]
@@ -134,7 +133,7 @@ class _moe_permute_index_map(torch.autograd.Function):
                     fp8_dtype=dtype,
                     fp8_scale_inv=fp8_scale_inv * ctx.topK,
                     shape=act_grad.shape,
-                    dtype=fake_dtype,
+                    dtype=ctx.fake_dtype,
                 )
 
         return act_grad, None, None, None
@@ -185,7 +184,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
         if fp8:
             dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
-            fake_dtype = inp.dtype
+            ctx.fake_dtype = inp.dtype
             inp = inp._data
         else:
             dtype = TE_DType[inp.dtype]
@@ -204,7 +203,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
                 fp8_dtype=dtype,
                 fp8_scale_inv=fp8_scale_inv,
                 shape=unpermuted_output.shape,
-                dtype=fake_dtype,
+                dtype=ctx.fake_dtype,
                 requires_grad=requires_grad,
             )
 
@@ -231,7 +230,6 @@ class _moe_unpermute_index_map(torch.autograd.Function):
             ), "Grad of the output must be in Float8Tensor type for FP8 moe_unpermute."
             dtype = unpermuted_act_grad._fp8_dtype
             fp8_scale_inv = unpermuted_act_grad._scale_inv
-            fake_dtype = unpermuted_act_grad.dtype
             unpermuted_act_grad = unpermuted_act_grad._data
         else:
             dtype = TE_DType[unpermuted_act_grad.dtype]
@@ -250,7 +248,7 @@ class _moe_unpermute_index_map(torch.autograd.Function):
                     fp8_dtype=dtype,
                     fp8_scale_inv=fp8_scale_inv,
                     shape=act_grad.shape,
-                    dtype=fake_dtype,
+                    dtype=ctx.fake_dtype,
                 )
         if not ctx.needs_input_grad[2]:
             prob_grad = None
@@ -288,7 +286,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
         requires_grad = inp.requires_grad
 
         if fp8:
-            fake_dtype = inp.dtype
+            ctx.fake_dtype = inp.dtype
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
@@ -304,7 +302,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
 
         if fp8:
             output = Float8Tensor(
-                dtype=fake_dtype,
+                dtype=ctx.fake_dtype,
                 shape=output.shape,
                 data=output,
                 fp8_dtype=fp8_dtype,
@@ -352,7 +350,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
                     data=act_grad,
                     fp8_dtype=fp8_dtype,
                     fp8_scale_inv=fp8_scale_inv * ctx.num_experts,
-                    dtype=permuted_act_grad.dtype,
+                    dtype=ctx.fake_dtype,
                     shape=act_grad.shape,
                 )
         return act_grad, None, None
@@ -398,7 +396,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
 
         if fp8:
             fp8_dtype = inp._fp8_dtype
-            fake_dtype = inp.dtype
+            ctx.fake_dtype = inp.dtype
             if not with_probs:
                 fp8_scale_inv = inp._scale_inv * num_experts
             else:
@@ -421,7 +419,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=fp8_scale_inv,
                 requires_grad=requires_grad,
-                dtype=fake_dtype,
+                dtype=ctx.fake_dtype,
                 shape=unpermuted_output.shape,
             )
 
@@ -486,7 +484,7 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
                     fp8_dtype=fp8_dtype,
                     fp8_scale_inv=fp8_scale_inv,
                     shape=act_grad.shape,
-                    dtype=unpermuted_act_grad.dtype,
+                    dtype=ctx.fake_dtype,
                 )
 
         if not ctx.needs_input_grad[2]:
@@ -595,7 +593,7 @@ class _moe_chunk_sort(torch.autograd.Function):
         requires_grad = inp.requires_grad
 
         if fp8:
-            fake_dtype = inp.dtype
+            ctx.fake_dtype = inp.dtype
             fp8_dtype = inp._fp8_dtype
             fp8_scale_inv = inp._scale_inv
             inp = inp._data
@@ -613,7 +611,7 @@ class _moe_chunk_sort(torch.autograd.Function):
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=fp8_scale_inv,
                 requires_grad=requires_grad,
-                dtype=fake_dtype,
+                dtype=ctx.fake_dtype,
                 shape=output.shape,
             )
 
@@ -651,7 +649,7 @@ class _moe_chunk_sort(torch.autograd.Function):
                     fp8_dtype=fp8_dtype,
                     fp8_scale_inv=fp8_scale_inv,
                     shape=act_grad.shape,
-                    dtype=permuted_act_grad.dtype,
+                    dtype=ctx.fake_dtype,
                 )
         return act_grad, None, None
 

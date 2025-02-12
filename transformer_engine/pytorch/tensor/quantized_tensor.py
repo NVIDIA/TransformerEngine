@@ -260,6 +260,12 @@ class QuantizedTensor(torch.Tensor):
     """
 
     def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+        assert dtype in (
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+        ), f"Incorrect dtype {dtype} for quantized tensor."
+
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
