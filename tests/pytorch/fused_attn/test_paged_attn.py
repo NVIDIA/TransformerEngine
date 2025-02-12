@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 from collections import OrderedDict
+from typing import List
 import os
 import logging
 
@@ -10,6 +11,7 @@ import pytest
 import torch
 
 from torch.distributions import Exponential
+from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     InferenceParams,
@@ -36,7 +38,7 @@ if is_bf16_compatible():
 
 model_configs_infer = {
     #    test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "infer_0": ModelConfig(4, 16, 16, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=8),
+    "infer_0": ModelConfig(4, 16, 16, 64, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8),
     #"infer_1": ModelConfig(2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6),
 }
 
@@ -69,9 +71,10 @@ class Simulation:
         self.seq_ids = torch.range(0, total_requests-1, dtype=torch.int32, device="cpu")
 
         # simulate context lengths in Uniform distribution
-        self.context_lens = torch.randint(
-            1, self.max_context_len, [total_requests], dtype=torch.int32, device="cpu"
-        )
+        #self.context_lens = torch.randint(
+        #    1, self.max_context_len, [total_requests], dtype=torch.int32, device="cpu"
+        #)
+        self.context_lens = 10 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -79,16 +82,18 @@ class Simulation:
         gen_lens = torch.where(gen_lens > self.max_gen_len, self.max_gen_len, gen_lens).to(
             dtype=torch.int32, device="cpu"
         )
-        self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(
-            dtype=torch.int32, device="cpu"
-        )
+        #self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(
+        #    dtype=torch.int32, device="cpu"
+        #)
+        self.gen_lens = 5 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate arrival times in Poisson distribution
         if poisson_rate is None:
             self.poisson_rate = torch.randint(1, max_batch_size, [1]).item()
         interval_dist = Exponential(self.poisson_rate)
         arrival_intervals = interval_dist.sample((total_requests,))
-        self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(dtype=torch.int32, device="cpu")
+        #self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(dtype=torch.int32, device="cpu")
+        self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
         self.last_arrival = self.arrival_times.max().item()
 
         # initialize tensors
@@ -315,63 +320,78 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         num_heads_q=config.num_heads,
         head_dim_q=config.head_dim_qk,
     )
-    inference_params.allocate_memory(layer_number)
+    inference_params.allocate_memory(layer_number, qkv_format)
     inference_params.print()
 
-#    def generate_data(
-#        model_config: ModelConfig,
-#        dtype: torch.dtype,
-#        warmup: bool = False,
-#    ) -> List[torch.Tensor]:
-#        """Generate synthetic data for dot product attention."""
-#        gen_func = torch.ones if warmup else torch.randn
-#        aa=[
-#            gen_func(
-#                model_config.batch_size,
-#                model_config.max_seqlen_q,
-#                model_config.num_heads,
-#                model_config.head_dim_qk,
-#                device="cuda",
-#                #requires_grad=True,
-#                dtype=dtype,
-#            )
-#            for _ in range(3)
-#        ]
-#        #aa.extend([model_config.sequence_length, model_config.sequence_length])
-#        return aa
-#
-#    def gen_cu(
-#        model_config: ModelConfig,
-#        dtype: torch.dtype,
-#        ):
-#        cu_dict = {}
-#        cu_dict["cu_seqlens_q"] = torch.linspace( 0,
-#            model_config.batch_size * model_config.max_seqlen_q,
-#            steps=model_config.batch_size+1,
-#            device="cuda",
-#            dtype=torch.int32,
-#        )
-#        cu_dict["cu_seqlens_kv"] = torch.linspace( 0,
-#            model_config.batch_size * model_config.max_seqlen_kv,
-#            steps=model_config.batch_size+1,
-#            device="cuda",
-#            dtype=torch.int32,
-#        )
-#        cu_dict["max_seqlen_q"] = model_config.max_seqlen_q
-#        cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
-#        return cu_dict
-#
+    def generate_data(
+        model_config: ModelConfig,
+        dtype: torch.dtype,
+        warmup: bool = False,
+    ) -> List[torch.Tensor]:
+        """Generate synthetic data for dot product attention."""
+        gen_func = torch.ones if warmup else torch.randn
+        aa=[
+            gen_func(
+                model_config.batch_size,
+                64, #model_config.max_seqlen_q,
+                model_config.num_heads,
+                model_config.head_dim_qk,
+                device="cuda",
+                #requires_grad=True,
+                dtype=dtype,
+            )
+            for _ in range(3)
+        ]
+        #aa.extend([model_config.sequence_length, model_config.sequence_length])
+        return aa
+
+    def gen_cu(
+        model_config: ModelConfig,
+        dtype: torch.dtype,
+        ):
+        cu_dict = {}
+        cu_dict["cu_seqlens_q"] = torch.linspace( 0,
+            model_config.batch_size * 1, #model_config.max_seqlen_q,
+            #model_config.batch_size * model_config.max_seqlen_q,
+            steps=model_config.batch_size+1,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        cu_dict["cu_seqlens_kv"] = torch.linspace( 0,
+            model_config.batch_size * 1, #model_config.max_seqlen_kv,
+            #model_config.batch_size * model_config.max_seqlen_kv,
+            steps=model_config.batch_size+1,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        cu_dict["max_seqlen_q"] = model_config.max_seqlen_q
+        cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
+        cu_dict["inference_params"] = inference_params
+        cu_dict["attn_mask_type"] = attn_mask_type
+        #cu_dict["max_seqlen_q"] = max_seqlen_q_infer
+        #cu_dict["max_seqlen_kv"] = max_seqlen_kv_roundup
+        cu_dict["qkv_format"] = qkv_format
+        return cu_dict
+
+#    t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
+#    step_lens = torch.ones(max_batch_size, dtype=torch.int32, device="cpu")
+#    step_dict = OrderedDict(
+#        zip(t_seq_ids.tolist(), step_lens.tolist())
+#    )
+#    inference_params.prepare(step_dict)
 #    model = make_graphed_callables(
 #        model,
-#        generate_data_for_dot_product_attention(model_config, dtype, warmup=True),
+#        generate_data(config, dtype, warmup=True),
 #        num_warmup_iters=10,
 #        fp8_enabled=False,
 #        #sample_kwargs={"qkv_format":"thd"},
-#        sample_kwargs=gen_cu(model_config, dtype),
+#        sample_kwargs=gen_cu(config, dtype),
 #    )
-
+#    print('AAAAAAAAAAAAfter graphed')
     # similate step by step
     sim.reset()
+    graphed = False
+    model_orig = model
     while True:
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
@@ -460,18 +480,50 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         cu_seqlens_kv = torch.zeros(sim.t_batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_kv[1 : sim.t_batch_size + 1] = torch.cumsum(sim.t_total_lens, dim=0)
 
-        inference_params.step_dict = OrderedDict(
+        step_dict = OrderedDict(
             zip(sim.t_seq_ids.tolist(), sim.step_lens.tolist())
         )
+        inference_params.prepare(step_dict)
 
+        #if sim.step_lens[0] == 1 and not graphed:
+        #    model_graphed = make_graphed_callables(
+        #        model,
+        #        generate_data(config, dtype, warmup=True),
+        #        num_warmup_iters=10,
+        #        fp8_enabled=False,
+        #        #sample_kwargs={"qkv_format":"thd"},
+        #        sample_kwargs=gen_cu(config, dtype),
+        #    )
+        #    graphed = True
+        #    print('AAAAAAAAAAAAfter graphed')
+        if not graphed:
+            model = make_graphed_callables(
+                model,
+                generate_data(config, dtype, warmup=True),
+                num_warmup_iters=10,
+                fp8_enabled=False,
+                #sample_kwargs={"qkv_format":"thd"},
+                sample_kwargs=gen_cu(config, dtype),
+            )
+            graphed = True
+            print('AAAAAAAAAAAAfter graphed')
+        print('incremental shapes', [x.shape for x in [ incremental_q, incremental_k, incremental_v]])
+
+        #if sim.step_lens[0] == 1 and graphed:
+        #    model = model_graphed
+        #else:
+        #    model = model_orig
         line_output = model(
-            query_layer=incremental_q,
-            key_layer=incremental_k,
-            value_layer=incremental_v,
-            inference_params=inference_params,
-            attn_mask_type=attn_mask_type,
+            #query_layer=incremental_q,
+            #key_layer=incremental_k,
+            #value_layer=incremental_v,
+            incremental_q,
+            incremental_k,
+            incremental_v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
+            inference_params=inference_params,
+            attn_mask_type=attn_mask_type,
             max_seqlen_q=max_seqlen_q_infer,
             max_seqlen_kv=max_seqlen_kv_roundup,
             qkv_format=qkv_format,
@@ -491,6 +543,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             }
         for i, seq in enumerate(sim.t_seq_ids):
             if qkv_format == "bshd":
+                print(i,seq, sim.t_total_lens[i], sim.step_lens[i])
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(line_output[i, sim.step_lens[i] - 1, :4])
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     line_output[i, sim.step_lens[i] - 1, :],

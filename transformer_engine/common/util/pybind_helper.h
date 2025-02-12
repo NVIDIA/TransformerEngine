@@ -36,6 +36,10 @@
       .value("NVTE_CAUSAL_BOTTOM_RIGHT_MASK", NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK)       \
       .value("NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK",                                              \
              NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);                               \
+  pybind11::enum_<NVTE_QKV_Format>(m, "NVTE_QKV_Format", pybind11::module_local())                 \
+      .value("NVTE_BSHD", NVTE_QKV_Format::NVTE_BSHD)                                              \
+      .value("NVTE_SBHD", NVTE_QKV_Format::NVTE_SBHD)                                              \
+      .value("NVTE_THD", NVTE_QKV_Format::NVTE_THD);                                               \
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())                 \
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)                                            \
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)                                            \

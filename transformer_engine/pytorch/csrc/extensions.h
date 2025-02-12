@@ -34,6 +34,16 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
 /***************************************************************************************************
  * Attention
  **************************************************************************************************/
+void copy_to_kv_cache_non_paged(
+        torch::Tensor new_k, torch::Tensor new_v,
+        torch::Tensor k_cache, torch::Tensor v_cache,
+        torch::Tensor batch_indices,
+        torch::Tensor step_lens,
+        torch::Tensor seq_lens,
+        NVTE_QKV_Format qkv_format,
+        int h, int d,
+        int b, int max_ctx_len, int max_seq_len,
+        int max_ctx_tokens, int max_tokens);
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
                                                const transformer_engine::DType kv_dtype,

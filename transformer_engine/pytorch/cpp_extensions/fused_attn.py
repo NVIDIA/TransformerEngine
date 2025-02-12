@@ -9,6 +9,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import (
     NVTE_QKV_Layout,
+    NVTE_QKV_Format,
     NVTE_Bias_Type,
     NVTE_Mask_Type,
     NVTE_Fused_Attn_Backend,
@@ -29,6 +30,12 @@ TORCH_DType = {
     tex.DType.kBFloat16: torch.bfloat16,
     tex.DType.kFloat32: torch.float32,
     tex.DType.kInt32: torch.int32,
+}
+
+QKVFormat = {
+    "bshd": NVTE_QKV_Format.NVTE_BSHD,
+    "sbhd": NVTE_QKV_Format.NVTE_SBHD,
+    "thd": NVTE_QKV_Format.NVTE_THD,
 }
 
 QKVLayout = {
