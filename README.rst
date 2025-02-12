@@ -33,7 +33,7 @@ What is Transformer Engine?
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
-using 8-bit floating point (FP8) precision on Hopper, Ada and Blackwell GPUs, to provide better
+using 8-bit floating point (FP8) precision on Hopper, Ada, and Blackwell GPUs, to provide better
 performance with lower memory utilization in both training and inference. TE provides a collection
 of highly optimized building blocks for popular Transformer architectures and an automatic mixed
 precision-like API that can be used seamlessly with your framework-specific code. TE also includes a
@@ -61,7 +61,7 @@ Highlights
 
 * Easy-to-use modules for building Transformer layers with FP8 support
 * Optimizations (e.g. fused kernels) for Transformer models
-* Support for FP8 on NVIDIA Hopper, Ada and Blackwell GPUs
+* Support for FP8 on NVIDIA Hopper, Ada, and Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
