@@ -976,9 +976,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )
 
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.dtype
+            _kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=jnp.float32
             )
+            self.kernel_init = _kernel_init.astype(self.dtype)
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -1677,11 +1678,11 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     def __post_init__(self):
         if self.mha_kernel_init is None:
             self.mha_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.dtype
+                1.0, "fan_in", "normal", dtype=jnp.float32
             )
         if self.mlp_kernel_init is None:
             self.mlp_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+                1.0, "fan_in", "truncated_normal", dtype=jnp.float32
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
