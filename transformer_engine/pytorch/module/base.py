@@ -13,6 +13,7 @@ import struct
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -37,6 +38,10 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..utils import needs_quantized_gemm
+from ...common.recipe import Recipe
+from ...debug.pytorch.debug_state import TEDebugState
+
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -454,6 +459,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
+        self.debug = False
         self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
         self.tp_group = None
         self.tp_size = 1
@@ -464,6 +470,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
+
+        if not TEDebugState.debug_enabled:
+            TEDebugState.initialize()
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
@@ -757,6 +766,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
+        if self.debug and self.fp8_parameters:
+            raise RuntimeError("Primary FP8 parameters is not supported in the debug module. ")
+
         if self.fp8_parameters or fp8_enabled:
             if (
                 self.fp8_initialized
@@ -835,6 +847,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
 
+        if self.debug:
+            import nvdlfw_inspect.api as debug_api
+
+            # if debug_api is ended,
+            # then simply end debug
+            if debug_api.DEBUG_MANAGER is None:
+                self.debug = False
+                TEDebugState.reset()
+
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
         before the GEMM for there to be a guaranteed overlap. From the
@@ -870,7 +891,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8:
+        if not ctx.fp8 and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
@@ -880,6 +901,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return grad_output, None
 
         # FP8 with all-gather: unfused bgrad, fused cast + transpose
+        # Also supports debug quantization, which is handled inside gather_along_first_dim.
         if gather_grad_output:
             grad_bias = None
             if ctx.use_bias:
@@ -900,6 +922,23 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     ctx.tp_group,
                     quantizer=quantizer,
                 )
+            return grad_output, grad_bias
+
+        # Debug without all-gather: unfused cast and bgrad
+        # bgrad only if wgrad is in FP8, otherwise it is fused with wgrad and we return None
+        if ctx.debug:
+            grad_output_ = quantizer(grad_output)
+            if (
+                isinstance(
+                    grad_output_.get_tensor(True),
+                    (QuantizedTensor, Float8TensorBase, MXFP8TensorBase),
+                )
+                and ctx.use_bias
+            ):
+                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+            else:
+                grad_bias = None
+            grad_output = grad_output_
             return grad_output, grad_bias
 
         # FP8 without all-gather: fused bgrad + cast + transpose
@@ -977,6 +1016,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         update_workspace: bool = True,
         skip_update_flag: Optional[torch.Tensor] = None,
         fsdp_group: Optional[dist_group_type] = None,
+        workspace_dtype: Optional[torch.dtype] = None,
     ) -> QuantizedTensor:
         """Get FP8 workspace buffer and maybe update its values
 
@@ -999,6 +1039,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             over `update_workspace` if provided.
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
+        workspace_dtype: torch.dtype, default = None
+            If weight workspace contains high-precision tensor - for example
+            for debug quantization, this will be stored in such precision.
         """
 
         # Try getting workspace from cache
@@ -1023,7 +1066,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 raise ValueError(
                     "tensor and quantizer kwargs must be provided to construct FP8 workspace"
                 )
-            out = quantizer(tensor)
+            out = quantizer.quantize(tensor, dtype=workspace_dtype)
 
             # Update cache
             if cache_name is not None:
@@ -1040,6 +1083,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 out.quantize_(tensor, noop_flag=skip_update_flag)
             else:
                 tex.quantize(tensor, quantizer, out, skip_update_flag)
+
+        if not needs_quantized_gemm(type(out)):  # only holds for debug quantizer
+            assert (
+                out.dtype == workspace_dtype
+            ), "Activation dtype cannot be changed with nvidia-dlframework-inspect."
 
         return out
 
@@ -1063,3 +1111,56 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         super()._load_from_state_dict(
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
+
+    def _validate_debug_name(self, overwrite_debug_name):
+        """
+        Validate name passed to the module.
+        This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
+        If no name is assigned, it creates a default name with layer count as the variable.
+
+        Args
+        overwrite_name: str, default = None
+            This will overwrite the name of the module with the specified name. This is needed for debug layers re-using this Linear
+            module such as LayerNormLinear. The idea is to re-name the Linear module which is a part of another layer with that layers name.
+            Only needed if layer names are assigned after model initialization like in Megatron-LM.
+        """
+        assert self.debug
+        import nvdlfw_inspect.api as debug_api
+
+        if overwrite_debug_name:
+            self.debug_name = overwrite_debug_name
+
+        if self.debug_name is None:
+            debug_api.log_message(
+                "[DEBUG-WARNING] Names are not provided to debug modules. ",
+                "Creating and using generic names. Pass names to debug modules for better"
+                " insight. ",
+                level=logging.WARNING,
+            )
+            self.debug_name = f"Layer_{TEDebugState.get_layer_count()}"
+
+    def _turn_off_unsupported_features_in_debug(self):
+        if (
+            getattr(self, "ub_bulk_wgrad", False)
+            or getattr(self, "ub_bulk_dgrad", False)
+            or getattr(self, "ub_overlap_ag", False)
+            or getattr(self, "ub_overlap_rs_dgrad", False)
+            or getattr(self, "ub_overlap_rs", False)
+        ):
+            import nvdlfw_inspect.api as debug_api
+
+            debug_api.log_message(
+                "> UserBuffers are not supported in debug module. "
+                "Using UB optimization will not affect the debug module. ",
+                level=logging.WARNING,
+            )
+            if hasattr(self, "ub_bulk_wgrad"):
+                self.ub_bulk_wgrad = None
+            if hasattr(self, "ub_bulk_dgrad"):
+                self.ub_bulk_dgrad = None
+            if hasattr(self, "ub_overlap_ag"):
+                self.ub_overlap_ag = None
+            if hasattr(self, "ub_overlap_rs_dgrad"):
+                self.ub_overlap_rs_dgrad = None
+            if hasattr(self, "ub_overlap_rs"):
+                self.ub_overlap_rs = None

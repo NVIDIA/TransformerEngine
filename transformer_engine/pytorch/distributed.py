@@ -18,7 +18,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import safely_set_viewless_tensor_data
+from .utils import safely_set_viewless_tensor_data, needs_quantized_gemm
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor
@@ -26,6 +26,7 @@ from .tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
 from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -1019,6 +1020,30 @@ def gather_along_first_dim(
             quantizer=quantizer,
             out_shape=out_shape,
         )
+
+    # Debug case - call gather_along_first_dim on each tensor
+    if isinstance(input_, DebugQuantizedTensor):
+        out_obj = input_
+        rowwise = input_.get_tensor(False)
+        columnwise = input_.get_tensor(True)
+        final_quantizer = (
+            None if not needs_quantized_gemm(input_, rowwise=True) else quantizer.parent_quantizer
+        )
+        rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
+        out_obj.rowwise_gemm_tensor = rowwise_total
+        if rowwise is not columnwise:
+            final_quantizer_columnwise = (
+                None
+                if not needs_quantized_gemm(input_, rowwise=False)
+                else quantizer.parent_quantizer
+            )
+            columnwise_total, _ = gather_along_first_dim(
+                columnwise, process_group, False, final_quantizer_columnwise
+            )
+            out_obj.columnwise_gemm_tensor = columnwise_total
+        else:
+            out_obj.rowwise_gemm_tensor = out_obj.rowwise_gemm_tensor
+        return out_obj, None
 
     # High-precision communication for quantized tensors
     if quantizer is not None:

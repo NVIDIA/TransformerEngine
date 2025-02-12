@@ -97,6 +97,15 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
+if os.environ.get("DEBUG", False):
+    # The numerics of all the layers should work the same,
+    # when debug=True. I fed them with dummy feature
+    # to prevent switching off debug, what can happend if
+    # no feature is active.
+    import nvdlfw_inspect.api as debug_api
+
+    debug_api.initialize(os.environ["CONFIG_FILE"], feature_dirs=os.environ["FEATURE_DIRS"])
+
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
@@ -558,6 +567,8 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and os.environ.get("DEBUG", False):
+        pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
 
@@ -670,6 +681,8 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8_model_params and os.environ.get("DEBUG", False):
+        pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
 
@@ -1467,6 +1480,8 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_mxfp8)
     if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
+    if fp8_model_params and os.environ.get("DEBUG", False):
+        pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1652,6 +1667,8 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_mxfp8)
     if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
+    if fp8_model_params and os.environ.get("DEBUG", False):
+        pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1765,6 +1782,8 @@ def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 def test_gpt_cuda_graph(dtype, bs, model):
+    if os.environ.get("DEBUG", False):
+        pytest.skip("Cuda Graphs are not supported in debug mode.")
     config = model_configs[model]
 
     sigma = 0.023
@@ -1862,6 +1881,8 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if os.environ.get("DEBUG", False):
+        pytest.skip("FP8 parameters are not supported in debug mode.")
 
     config = model_configs[model]
 

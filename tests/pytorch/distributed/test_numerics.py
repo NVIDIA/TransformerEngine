@@ -31,12 +31,13 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 
 TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = min(4, torch.cuda.device_count())
-LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
+LAUNCH_CMD = ["python", "-m", "torch.distributed.run", f"--nproc_per_node={NUM_PROCS}"]
 
 
 def _run_test(quantization):
     test_path = TEST_ROOT / "run_numerics.py"
     test_cmd = LAUNCH_CMD + [str(test_path)]
+    print(" ".join(test_cmd))
 
     if quantization is not None:
         test_cmd += ["--quantization", quantization]
