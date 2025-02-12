@@ -30,8 +30,7 @@ from ..utils import (
     needs_quantized_gemm,
     non_tn_fp8_gemm_supported,
     nvtx_range_pop,
-    nvtx_range_push,
-    requires_grad,
+    nvtx_range_push
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
