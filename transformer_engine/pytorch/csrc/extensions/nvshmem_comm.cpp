@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -32,7 +32,7 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
   auto backend_is_nccl = (process_group->getBackendType() == c10d::ProcessGroup::BackendType::NCCL);
   NVTE_CHECK(backend_is_nccl, "Currently only support NCCL boostrap for NVSHMEM");
   auto datatensor = torch::from_blob(
-      (void *)&id, {static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t) / sizeof(uint8_t))},
+      reinterpret_cast<void*>(&id), {static_cast<int64_t>(sizeof(nvshmemx_uniqueid_t) / sizeof(uint8_t))},
       at::device(torch::kCPU).dtype(torch::kUInt8));
   auto datatmp = (backend_is_nccl) ? datatensor.cuda() : datatensor;
 
@@ -60,7 +60,7 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 
 void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind) {
 #ifdef NVTE_ENABLE_NVSHMEM
-  uint64_t *sig_addr = (uint64_t *)signal.data_ptr();
+  uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
   cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
 
   transformer_engine::nvshmem_wait_on_stream(sig_addr, wait_kind, cur_stream);
@@ -86,9 +86,9 @@ torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::Scal
 
 void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal) {
 #ifdef NVTE_ENABLE_NVSHMEM
-  void *src_ptr = (void *)src.data_ptr();
-  void *dst_ptr = (void *)dst.data_ptr();
-  uint64_t *sig_addr = (uint64_t *)signal.data_ptr();
+  void *src_ptr = reinterpret_cast<void *>(src.data_ptr());
+  void *dst_ptr = reinterpret_cast<void *>(dst.data_ptr());
+  uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
   auto nelement = src.numel() * src.element_size();
   uint64_t sigval = 1;
   at::cuda::CUDAStream cur_stream = at::cuda::getCurrentCUDAStream();
