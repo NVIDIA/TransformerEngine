@@ -6,6 +6,7 @@ from collections import OrderedDict
 from typing import List
 import os
 import logging
+import math
 
 import pytest
 import torch
@@ -38,7 +39,7 @@ if is_bf16_compatible():
 
 model_configs_infer = {
     #    test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
-    "infer_0": ModelConfig(4, 16, 16, 64, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8),
+    "infer_0": ModelConfig(4, 16, 16, 64, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16),
     #"infer_1": ModelConfig(2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6),
 }
 
@@ -48,31 +49,33 @@ qkv_formats = ["bshd", "sbhd", "thd"]
 def to_pretty_string(x: torch.Tensor):
     return "[" + ",".join(["{:>3s}".format(str(i)) for i in x.tolist()]) + "]"
 
+def round_up(a: int, b: int):
+    return b * math.ceil(a / b)
+
 class Simulation:
     def __init__(
         self,
         total_requests: int = 10,
-        max_seqlen_kv: int = 1024,
-        context_ratio: float = 0.25,
+        max_seq_len: int = 1024,
+        max_ctx_len: int = 128,
         max_batch_size: int = 5,
-        poisson_rate: float = None,
+        poisson_rate: float = 1,
     ):
         self.total_requests = total_requests
-        self.max_seqlen_kv = max_seqlen_kv
-        self.context_ratio = context_ratio
+        self.max_seq_len = max_seq_len
         self.max_batch_size = max_batch_size
         self.poisson_rate = poisson_rate
 
         # calculate maximum context/generation length
-        self.max_context_len = int(max_seqlen_kv * context_ratio)
-        self.max_gen_len = max_seqlen_kv - self.max_context_len
+        self.max_ctx_len = max_ctx_len
+        self.max_gen_len = max_seq_len - self.max_ctx_len
 
         # simulate sequence ids in monotonically increasing fashion
         self.seq_ids = torch.range(0, total_requests-1, dtype=torch.int32, device="cpu")
 
         # simulate context lengths in Uniform distribution
         #self.context_lens = torch.randint(
-        #    1, self.max_context_len, [total_requests], dtype=torch.int32, device="cpu"
+        #    1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         #)
         self.context_lens = 10 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
@@ -127,34 +130,35 @@ class Simulation:
         # step info from step t-1 to t
         self.step_lens = torch.Tensor([]).to(dtype=torch.int32, device="cpu")
 
-    def print(self, logger, label="setup"):
-        if label == "setup":
-            logger.info("Simulation:")
-            logger.info("  {:<33s}: {}".format("total number of requests", self.total_requests))
-            logger.info("  {:<33s}: {}".format("max sequence length per request", self.max_seqlen_kv))
-            logger.info("  {:<33s}: {}".format("max context lengh", self.max_context_len))
-            logger.info("  {:<33s}: {}".format("max generation lengh", self.max_gen_len))
-            logger.info("  {:<33s}: {}".format("max batch size per iteration", self.max_batch_size))
-            logger.info("  {:<33s}: {}".format("Poisson rate", self.poisson_rate))
-            logger.info("  {:<18s}: {}".format("sequence ids", to_pretty_string(self.seq_ids)))
-            logger.info("  {:<18s}: {}".format("arrival times", to_pretty_string(self.arrival_times)))
-            logger.info("  {:<18s}: {}".format("context lenghs", to_pretty_string(self.context_lens)))
-            logger.info("  {:<18s}: {}".format("generation lenghs", to_pretty_string(self.gen_lens)))
-        if label == "step":
-            logger.info(f"Step t = {self.t}:")
-            logger.info("  {:<15s}: {}".format("t_batch_size", self.t_batch_size))
-            logger.info("  {:<15s}: {}".format("t_seq_ids", self.t_seq_ids.tolist()))
-            logger.info("  {:<15s}: {}".format("t_ctx_lens", self.t_ctx_lens.tolist()))
-            logger.info("  {:<15s}: {}".format("t_gen_lens", self.t_gen_lens.tolist()))
-            logger.info("  {:<15s}: {}".format("t_total_lens", self.t_total_lens.tolist()))
-            logger.info("  {:<15s}: {}".format("step_lens", self.step_lens.tolist()))
-        if label == "summary":
-            logger.info("Summary:")
-            logger.info("  {:<18s}: {}".format("total steps taken", self.t))
-            logger.info("  {:<18s}: {}".format("arrival_times",     to_pretty_string(self.arrival_times)))
-            logger.info("  {:<18s}: {}".format("serving_times",     to_pretty_string(self.serving_times)))
-            logger.info("  {:<18s}: {}".format("total_gen_lens",    to_pretty_string(self.gen_lens)))
-            logger.info("  {:<18s}: {}".format("complete_times",    to_pretty_string(self.complete_times)))
+    def print_setup(self, logger):
+        logger.info("Simulation:")
+        logger.info("  {:<31s}: {}".format("total number of requests", self.total_requests))
+        logger.info("  {:<31s}: {}".format("max sequence length per request", self.max_seq_len))
+        logger.info("  {:<31s}: {}".format("max context length", self.max_ctx_len))
+        logger.info("  {:<31s}: {}".format("max generation length", self.max_gen_len))
+        logger.info("  {:<31s}: {}".format("max batch size per iteration", self.max_batch_size))
+        logger.info("  {:<31s}: {}".format("Poisson rate", self.poisson_rate))
+        logger.info("  {:<17s}: {}".format("sequence ids", to_pretty_string(self.seq_ids)))
+        logger.info("  {:<17s}: {}".format("arrival times", to_pretty_string(self.arrival_times)))
+        logger.info("  {:<17s}: {}".format("context lengths", to_pretty_string(self.context_lens)))
+        logger.info("  {:<17s}: {}".format("generation lengths", to_pretty_string(self.gen_lens)))
+
+    def print_step(self, logger):
+        logger.info(f"Step t = {self.t}:")
+        logger.info("  {:<15s}: {}".format("t_batch_size", self.t_batch_size))
+        logger.info("  {:<15s}: {}".format("t_seq_ids", self.t_seq_ids.tolist()))
+        logger.info("  {:<15s}: {}".format("t_ctx_lens", self.t_ctx_lens.tolist()))
+        logger.info("  {:<15s}: {}".format("t_gen_lens", self.t_gen_lens.tolist()))
+        logger.info("  {:<15s}: {}".format("t_total_lens", self.t_total_lens.tolist()))
+        logger.info("  {:<15s}: {}".format("step_lens", self.step_lens.tolist()))
+
+    def print_summary(self, logger):
+        logger.info("Summary:")
+        logger.info("  {:<18s}: {}".format("total steps taken", self.t))
+        logger.info("  {:<18s}: {}".format("arrival_times",     to_pretty_string(self.arrival_times)))
+        logger.info("  {:<18s}: {}".format("serving_times",     to_pretty_string(self.serving_times)))
+        logger.info("  {:<18s}: {}".format("total_gen_lens",    to_pretty_string(self.gen_lens)))
+        logger.info("  {:<18s}: {}".format("complete_times",    to_pretty_string(self.complete_times)))
 
     def add_new_seqs(self, new_seq_ids):
         # get ctx_lens for new seqs
@@ -203,7 +207,7 @@ class Simulation:
 
 @pytest.mark.parametrize("dtype", [torch.float16])#param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
-@pytest.mark.parametrize("qkv_format", ['bshd'])#qkv_formats)
+@pytest.mark.parametrize("qkv_format", ['thd'])#qkv_formats)
 @pytest.mark.parametrize("is_paged", [False])#, True])
 @pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False])#, True])
@@ -212,6 +216,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     logger = logging.getLogger("test_paged_attn")
 
     config = model_configs_infer[model]
+    num_layers = 2
     layer_number = 1
 
     # figure out supported backends
@@ -238,63 +243,41 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     os.environ["NVTE_FUSED_ATTN"] = str(int(backend == "FusedAttention"))
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
 
-    # set up various parameters
-    total_requests = config.total_requests
-    max_batch_size = config.batch_size
-    max_seqlen_kv = config.max_seqlen_kv
-    attn_mask_type = "padding"
-    page_size = 256 if backend == "FlashAttention" else 16
-    max_seqlen_kv_roundup = max_seqlen_kv
-    if is_paged:
-        # round up max_seqlen_kv to nearest page size
-        max_seqlen_kv_roundup = int((max_seqlen_kv + page_size - 1) // page_size * page_size)
-    else:
-        # round up max_seqlen_kv to nearest multiple of 64
-        max_seqlen_kv_roundup = int((max_seqlen_kv + 63) // 64 * 64)
-    cache_size = max_batch_size * max_seqlen_kv_roundup
-    total_num_pages = int(cache_size / page_size)
-
-    # set up simulation
-    sim = Simulation(
-        total_requests=total_requests,
-        max_seqlen_kv=max_seqlen_kv,
-        context_ratio=0.25,
-        max_batch_size=max_batch_size,
-        poisson_rate=2,
-        )
-    sim.print(logger, label="setup")
-
-    # create model and data
+    # create model
+    # TODO: multi layers [num_layers]
     model = (
         DotProductAttention(
             kv_channels=config.head_dim_qk,
             num_attention_heads=config.num_heads,
             num_gqa_groups=config.num_gqa_groups,
             layer_number=layer_number,
-            attention_dropout=0.0,
-            attn_mask_type="causal",
-            qkv_format="bshd",
+            attention_dropout=config.dropout_p,
         )
         .cuda()
         .eval()
     )
+
+    # generate data for all requests
+    assert (
+        config.max_seqlen_q == config.max_seqlen_kv
+        ), "This test only simulates max_seqlen_q = max_seqlen_kv."
     q = 0.1 * torch.randn(
-        (total_requests, max_seqlen_kv, config.num_heads, config.head_dim_qk),
+        (config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk),
         dtype=dtype,
         device="cuda",
     )
     k = 0.1 * torch.randn(
-        (total_requests, max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),
+        (config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),
         dtype=dtype,
         device="cuda",
     )
     v = 0.1 * torch.randn(
-        (total_requests, max_seqlen_kv, config.num_gqa_groups, config.head_dim_v),
+        (config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v),
         dtype=dtype,
         device="cuda",
     )
 
-    # generate all tokens at once
+    # generate reference results
     logger.info("=== Generating all tokens at once ===")
     full_output = model(
         query_layer=q,
@@ -304,11 +287,29 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         attn_mask_type="causal",
     )
 
-    # generate tokens one at a time
+    # simulate real-life inference
     logger.info("=== Generating one token at a time ===")
+    max_batch_size = config.batch_size
+    page_size = None
+    total_num_pages = None
+    if is_paged: 
+        page_size = 256 if backend == "FlashAttention" else 16
+        config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
+        total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
+    else:
+        config.max_seqlen_kv = round_up(config.max_seqlen_kv, 64)
+    sim = Simulation(
+        total_requests=config.total_requests,
+        max_seq_len=config.max_seqlen_kv,
+        max_ctx_len=config.max_ctx_len,
+        max_batch_size=max_batch_size,
+        poisson_rate=2,
+        )
+    sim.print_setup(logger)
+
     inference_params = InferenceParams(
         max_batch_size=max_batch_size,
-        max_seqlen_kv=max_seqlen_kv_roundup,
+        max_seqlen_kv=config.max_seqlen_kv,
         num_heads_kv=config.num_gqa_groups,
         head_dim_k=config.head_dim_qk,
         head_dim_v=config.head_dim_v,
@@ -316,24 +317,34 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         is_paged=is_paged,
         page_size=page_size,
         total_num_pages=total_num_pages,
-        is_cuda_graph=is_cuda_graph,
         num_heads_q=config.num_heads,
         head_dim_q=config.head_dim_qk,
+        max_ctx_len=config.max_ctx_len,
+        qkv_format=qkv_format,
     )
+    # TODO: num_layers
     inference_params.allocate_memory(layer_number, qkv_format)
-    inference_params.print()
+    #inference_params.print()
 
     def generate_data(
         model_config: ModelConfig,
         dtype: torch.dtype,
         warmup: bool = False,
+        qkv_format: str = "bshd",
     ) -> List[torch.Tensor]:
         """Generate synthetic data for dot product attention."""
         gen_func = torch.ones if warmup else torch.randn
+        if qkv_format == "bshd":
+            shape = [ model_config.batch_size, model_config.max_ctx_len]
+        if qkv_format == "sbhd":
+            shape = [ model_config.max_ctx_len, model_config.batch_size]
+        if qkv_format == "thd":
+            shape = [ model_config.batch_size * model_config.max_ctx_len]
         aa=[
             gen_func(
-                model_config.batch_size,
-                64, #model_config.max_seqlen_q,
+                #model_config.max_ctx_len,
+                #model_config.batch_size,
+                *shape,
                 model_config.num_heads,
                 model_config.head_dim_qk,
                 device="cuda",
@@ -351,54 +362,59 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         ):
         cu_dict = {}
         cu_dict["cu_seqlens_q"] = torch.linspace( 0,
-            model_config.batch_size * 1, #model_config.max_seqlen_q,
+            model_config.batch_size * model_config.max_ctx_len,
             #model_config.batch_size * model_config.max_seqlen_q,
             steps=model_config.batch_size+1,
             device="cuda",
             dtype=torch.int32,
         )
         cu_dict["cu_seqlens_kv"] = torch.linspace( 0,
-            model_config.batch_size * 1, #model_config.max_seqlen_kv,
+            model_config.batch_size * model_config.max_ctx_len,
+            #model_config.batch_size * 1, #model_config.max_seqlen_kv,
             #model_config.batch_size * model_config.max_seqlen_kv,
             steps=model_config.batch_size+1,
             device="cuda",
             dtype=torch.int32,
         )
-        cu_dict["max_seqlen_q"] = model_config.max_seqlen_q
-        cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
+        #cu_dict["max_seqlen_q"] = model_config.max_seqlen_q
+        #cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
         cu_dict["inference_params"] = inference_params
-        cu_dict["attn_mask_type"] = attn_mask_type
-        #cu_dict["max_seqlen_q"] = max_seqlen_q_infer
-        #cu_dict["max_seqlen_kv"] = max_seqlen_kv_roundup
+        cu_dict["attn_mask_type"] = "padding" #"causal"
+        # for qkv_format = thd
+        cu_dict["max_seqlen_q"] = model_config.max_ctx_len #max_seqlen_q_infer
+        cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
         cu_dict["qkv_format"] = qkv_format
         return cu_dict
 
-#    t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
-#    step_lens = torch.ones(max_batch_size, dtype=torch.int32, device="cpu")
-#    step_dict = OrderedDict(
-#        zip(t_seq_ids.tolist(), step_lens.tolist())
-#    )
-#    inference_params.prepare(step_dict)
-#    model = make_graphed_callables(
-#        model,
-#        generate_data(config, dtype, warmup=True),
-#        num_warmup_iters=10,
-#        fp8_enabled=False,
-#        #sample_kwargs={"qkv_format":"thd"},
-#        sample_kwargs=gen_cu(config, dtype),
-#    )
-#    print('AAAAAAAAAAAAfter graphed')
+    t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
+    step_lens = config.max_ctx_len * torch.ones(max_batch_size, dtype=torch.int32, device="cpu")
+    step_dict = OrderedDict(
+        zip(t_seq_ids.tolist(), step_lens.tolist())
+    )
+    inference_params.prepare(step_dict)
+    if is_cuda_graph:
+        model = make_graphed_callables(
+            model,
+            generate_data(config, dtype, warmup=True, qkv_format=qkv_format),
+            num_warmup_iters=10,
+            fp8_enabled=False,
+            #sample_kwargs={"qkv_format":"thd"},
+            sample_kwargs=gen_cu(config, dtype),
+        )
+        print('AAAAAAAAAAAAfter graphed')
     # similate step by step
     sim.reset()
+    inference_params.reset()
     graphed = False
     model_orig = model
+    max_tokens = config.batch_size * config.max_ctx_len
     while True:
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
 
         dynamic_fill = True #inference_params.is_paged
         sim.step(dynamic_fill=dynamic_fill)
-        sim.print(logger, label="step")
+        sim.print_step(logger)
 
         if sim.t_batch_size == 0:
             # all sequences are finished
@@ -411,11 +427,14 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                 sim.t += 1
                 continue
 
-        if not is_cuda_graph:
-            max_seqlen_q_infer = int((sim.max_context_len + 63)// 64 * 64)
-        else:
-            max_seqlen_q_infer = max_seqlen_kv_roundup
+        #if not is_cuda_graph:
+        #    max_seqlen_q_infer = int((sim.max_ctx_len + 63)// 64 * 64)
+        #else:
+        #    max_seqlen_q_infer = max_seqlen_kv_roundup
 
+        batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
+        max_seqlen_q = sim.max_ctx_len if is_cuda_graph else max(sim.step_lens).item() #max_seqlen_q_infer,
+        #max_seqlen_q_infer = sim.max_ctx_len
         # create incremental input
         if qkv_format == "thd":
             incremental_q = torch.Tensor().to(dtype=dtype, device="cuda")
@@ -439,26 +458,34 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     ],
                     dim=0,
                 )
+            if is_cuda_graph:
+                incremental_q = torch.cat([incremental_q, torch.zeros([max_tokens - sum(sim.step_lens), config.num_heads, config.head_dim_qk], dtype=dtype, device=incremental_q.device)], dim=0)
+                incremental_k = torch.cat([incremental_k, torch.zeros([max_tokens - sum(sim.step_lens), config.num_gqa_groups, config.head_dim_v], dtype=dtype, device=incremental_k.device)], dim=0)
+                incremental_v = torch.cat([incremental_v, torch.zeros([max_tokens - sum(sim.step_lens), config.num_gqa_groups, config.head_dim_v], dtype=dtype, device=incremental_v.device)], dim=0)
         else:
             incremental_q = torch.zeros(
-                sim.t_batch_size,
-                max_seqlen_q_infer,
+                batch_size,
+                #sim.max_ctx_len, #max_seqlen_q_infer,
+                max_seqlen_q,
                 config.num_heads,
                 config.head_dim_qk,
                 dtype=dtype,
                 device="cuda",
             )
             incremental_k = torch.zeros(
-                sim.t_batch_size,
-                max_seqlen_q_infer,
+                batch_size,
+                #sim.max_ctx_len, #max_seqlen_q_infer,
+                max_seqlen_q,
                 config.num_gqa_groups,
                 config.head_dim_qk,
                 dtype=dtype,
                 device="cuda",
             )
             incremental_v = torch.zeros(
-                sim.t_batch_size,
-                max_seqlen_q_infer,
+                #sim.t_batch_size,
+                batch_size,
+                #sim.max_ctx_len, #max_seqlen_q_infer,
+                max_seqlen_q,
                 config.num_gqa_groups,
                 config.head_dim_v,
                 dtype=dtype,
@@ -475,9 +502,10 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     x.transpose(0, 1) for x in [incremental_q, incremental_k, incremental_v]
                 ]
 
-        cu_seqlens_q = torch.zeros(sim.t_batch_size + 1, dtype=torch.int32, device="cuda")
+        batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
+        cu_seqlens_q = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_q[1 : sim.t_batch_size + 1] = torch.cumsum(sim.step_lens, dim=0)
-        cu_seqlens_kv = torch.zeros(sim.t_batch_size + 1, dtype=torch.int32, device="cuda")
+        cu_seqlens_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_kv[1 : sim.t_batch_size + 1] = torch.cumsum(sim.t_total_lens, dim=0)
 
         step_dict = OrderedDict(
@@ -496,17 +524,17 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         #    )
         #    graphed = True
         #    print('AAAAAAAAAAAAfter graphed')
-        if not graphed:
-            model = make_graphed_callables(
-                model,
-                generate_data(config, dtype, warmup=True),
-                num_warmup_iters=10,
-                fp8_enabled=False,
-                #sample_kwargs={"qkv_format":"thd"},
-                sample_kwargs=gen_cu(config, dtype),
-            )
-            graphed = True
-            print('AAAAAAAAAAAAfter graphed')
+        #if not graphed:
+        #    model = make_graphed_callables(
+        #        model,
+        #        generate_data(config, dtype, warmup=True),
+        #        num_warmup_iters=10,
+        #        fp8_enabled=False,
+        #        #sample_kwargs={"qkv_format":"thd"},
+        #        sample_kwargs=gen_cu(config, dtype),
+        #    )
+        #    graphed = True
+        #    print('AAAAAAAAAAAAfter graphed')
         print('incremental shapes', [x.shape for x in [ incremental_q, incremental_k, incremental_v]])
 
         #if sim.step_lens[0] == 1 and graphed:
@@ -523,11 +551,12 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             inference_params=inference_params,
-            attn_mask_type=attn_mask_type,
-            max_seqlen_q=max_seqlen_q_infer,
-            max_seqlen_kv=max_seqlen_kv_roundup,
+            attn_mask_type="padding",
+            max_seqlen_q=max_seqlen_q, #config.max_ctx_len, #max_seqlen_q_infer,
+            max_seqlen_kv=config.max_seqlen_kv,
             qkv_format=qkv_format,
         )
+        print('llllllllllllllll ', line_output.shape)
 
         if backend != "FlashAttention":
             tols = {
@@ -560,6 +589,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
+                print('thd ', seq, sim.t_total_lens[i], cu_seqlens_q[i + 1])
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(line_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     line_output[cu_seqlens_q[i + 1] - 1, :],
@@ -571,4 +603,4 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
 
     sim.serving_times = sim.arrival_times + sim.request_delays
     sim.complete_times = sim.serving_times + sim.gen_lens
-    sim.print(logger, label="summary")
+    sim.print_summary(logger)

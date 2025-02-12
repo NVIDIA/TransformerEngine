@@ -10,8 +10,36 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
+class KVCacheManager:
+    """
+    KV cache manager. This should be the base class for custom KV cache managers.
+    """
+    def __init__(self, *args, **kwargs):
+        """Initialize the cache manager"""
+        self.cache = {}
+    def allocate_memory(self, layer_number: int):
+        """Allocate memory for the cache"""
+        self.cache[layer_number] = (None, None)
+    def prepare(
+        self,
+        sequences: Dict[List, List],
+        step_dict: Dict[List, List],
+    ):
+        """Prepare for step(). Update sequences with step_dict."""
+        return sequences
+    def step(
+        self,
+        layer_number: int,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_kv: torch.Tensor,
+        qkv_format: str,
+    ):
+        """Update the cache with new_k and new_v tokens"""
+        return *self.cache[layer_number], None
 
-class NonPagedKVCacheManager:
+class NonPagedKVCacheManager(KVCacheManager):
     """
     The non-paged KV cache manager.
     """
@@ -24,7 +52,7 @@ class NonPagedKVCacheManager:
         head_dim_k: int,
         dtype: torch.dtype,
         head_dim_v: Optional[int] = None,
-        is_cuda_graph: bool = False,
+        #is_cuda_graph: bool = False,
     ):
         """Initialize the KV cache"""
         self.max_batch_size = max_batch_size
@@ -33,12 +61,13 @@ class NonPagedKVCacheManager:
         self.head_dim_k = head_dim_k
         self.dtype = dtype
         self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
-        self.is_cuda_graph = is_cuda_graph
+        #self.is_cuda_graph = is_cuda_graph
 
         # sequences contained in the kv cache, {seq_id: seq_len}
-        self.sequences = OrderedDict()
+        #self.sequences = OrderedDict()
         # KV cache tuple (k_cache, v_cache)
         self.cache = {}
+        self.batch_indices = None
 #        self._allocator = StaticBufferAllocator()
 #
 #    def alloc(self, size, dtype, device):
@@ -79,6 +108,7 @@ class NonPagedKVCacheManager:
         sequences: Dict[List, List],
         step_dict: Dict[List, List],
     ):
+        # TODO: remove
         self.sequences = sequences
         #self.step_dict = step_dict
         prev_batch_size = len(self.sequences)
@@ -153,8 +183,8 @@ class NonPagedKVCacheManager:
         b=4
         max_ctx_len=k.shape[1] #64
         max_seq_len=k_cache.shape[1] #64 #128
-        max_ctx_tokens=1
-        max_tokens=1024
+        max_ctx_tokens=k.shape[0]
+        max_tokens=k_cache.shape[0]*k_cache.shape[1]
         print('kv shapes ', [x.shape for x in [k, v, k_cache, v_cache]])
         #print('step_lens ', step_lens)
         #print('seq_lens ', seq_lens)

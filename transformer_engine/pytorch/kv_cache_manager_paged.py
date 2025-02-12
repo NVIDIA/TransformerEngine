@@ -8,6 +8,7 @@ from typing import List, Optional
 import logging
 
 import torch
+from transformer_engine.pytorch.kv_cache_manager_non_paged import KVCacheManager
 
 
 class Page:
@@ -27,7 +28,7 @@ class Page:
         self.allocated = False
 
 
-class PagedKVCacheManager:
+class PagedKVCacheManager(KVCacheManager):
     """
     Paged KV cache manager. It supports a set of utilities including adding and removing
     sequences, and copying new key/value tokens to the cache. Users can overwrite this class

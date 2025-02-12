@@ -97,7 +97,8 @@ class ModelConfig:
         num_layers: int = 1,
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
-        total_requests: int = 1,
+        total_requests: int = None,
+        max_ctx_len: int = None,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -117,6 +118,7 @@ class ModelConfig:
         self.bias_shape = bias_shape
         self.window_size = window_size
         self.total_requests = total_requests
+        self.max_ctx_len = max_ctx_len
 
 
 @contextmanager
