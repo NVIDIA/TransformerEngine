@@ -209,9 +209,7 @@ def cast_to_representable(inp, scale=1.0, fp8_format="e4m3"):
     fp8_type = tex.DType.kFloat8E4M3 if fp8_format == "e4m3" else tex.DType.kFloat8E5M2
     scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
     amax_history = torch.zeros(1, 1, dtype=torch.float32, device="cuda")
-    quantizer = Float8Quantizer(scale=scale,
-                                amax=amax_history,
-                                fp8_dtype=fp8_type)
+    quantizer = Float8Quantizer(scale=scale, amax=amax_history, fp8_dtype=fp8_type)
     ret = quantizer(inp)
     ret = ret.dequantize()
     return ret
