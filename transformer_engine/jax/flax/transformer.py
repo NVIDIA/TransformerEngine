@@ -150,8 +150,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         del self.scale_factor
 
         if self.float32_logits:
-            query = query.astype(self.dtype)
-            key = key.astype(self.dtype)
+            query = query.astype(jnp.float32)
+            key = key.astype(jnp.float32)
         h_q, h_kv = query.shape[-2], key.shape[-2]
         # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
         # Therefore, we have to maintain two code paths.
