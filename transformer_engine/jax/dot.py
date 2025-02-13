@@ -25,7 +25,7 @@ def type_safe_dot_general(
     """
 
     if fp8_meta_pkg is None:
-        kernel = jnp.asarray(kernel, x.dtype)
+        assert x.dtype == kernel.dtype, f"lhs dtype = {x.dtype}, rhs dtype = {kernel.dtype}"
         return jax.lax.dot_general(x, kernel, (contracting_dims, ((), ())))
 
     amax_list = fp8_meta_pkg.amax_list
