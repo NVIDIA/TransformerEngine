@@ -14,6 +14,9 @@ from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
 
+# Attributes of params that are added externally should be preserved.
+# grad_added_to_main_grad is used by DDP in MCore.
+_preserved_attributes = ["grad_added_to_main_grad"]
 
 def prepare_for_saving(
     *tensors,
@@ -28,7 +31,11 @@ def prepare_for_saving(
             tensor_list.append(None)
             tensor_objects_list.append(None)
         elif type(tensor) in (torch.Tensor, torch.nn.Parameter):
-            tensor_list.append(tensor)
+            saved_tensor = tensor.data
+            for attr in _preserved_attributes:
+                if hasattr(tensor, attr):
+                    setattr(saved_tensor, attr, getattr(tensor, attr))
+            tensor_list.append(saved_tensor)
             tensor_objects_list.append(None)
         else:
             t, t_obj = tensor.prepare_for_saving()
