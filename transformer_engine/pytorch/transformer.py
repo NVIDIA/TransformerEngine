@@ -711,9 +711,7 @@ class TransformerLayer(torch.nn.Module):
             max_seqlen_kv=max_seqlen_kv,
             fast_zero_fill=fast_zero_fill,
             overwrite_name=(
-                overwrite_name + ".self_attention"
-                if overwrite_name is not None
-                else None
+                overwrite_name + ".self_attention" if overwrite_name is not None else None
             ),
         )
 
@@ -743,9 +741,7 @@ class TransformerLayer(torch.nn.Module):
                 alibi_slopes=alibi_slopes,
                 fast_zero_fill=fast_zero_fill,
                 overwrite_name=(
-                    overwrite_name + ".inter_attention"
-                    if overwrite_name is not None
-                    else None
+                    overwrite_name + ".inter_attention" if overwrite_name is not None else None
                 ),
             )
             if self.apply_residual_connection_post_layernorm:
@@ -761,9 +757,7 @@ class TransformerLayer(torch.nn.Module):
             hidden_states,
             is_first_microbatch=is_first_microbatch,
             overwrite_name=(
-                overwrite_name + ".layernorm_mlp"
-                if overwrite_name is not None
-                else None
+                overwrite_name + ".layernorm_mlp" if overwrite_name is not None else None
             ),
         )
         if self.apply_residual_connection_post_layernorm:

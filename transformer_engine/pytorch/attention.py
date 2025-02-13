@@ -8271,9 +8271,7 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                     overwrite_name=(
-                        overwrite_name + ".layernorm_qkv"
-                        if overwrite_name is not None
-                        else None
+                        overwrite_name + ".layernorm_qkv" if overwrite_name is not None else None
                     ),
                 )
                 if self.return_layernorm_output:
@@ -8343,9 +8341,7 @@ class MultiheadAttention(torch.nn.Module):
                 is_first_microbatch=is_first_microbatch,
                 fp8_output=fp8_mha and rotary_pos_emb is None,
                 overwrite_name=(
-                    overwrite_name + ".key_value"
-                    if overwrite_name is not None
-                    else None
+                    overwrite_name + ".key_value" if overwrite_name is not None else None
                 ),
             )
 
@@ -8391,9 +8387,7 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                     overwrite_name=(
-                        overwrite_name + ".layernorm_query"
-                        if overwrite_name is not None
-                        else None
+                        overwrite_name + ".layernorm_query" if overwrite_name is not None else None
                     ),
                 )
                 if self.return_layernorm_output:
@@ -8406,9 +8400,7 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                     overwrite_name=(
-                        overwrite_name + ".query_layer"
-                        if overwrite_name is not None
-                        else None
+                        overwrite_name + ".query_layer" if overwrite_name is not None else None
                     ),
                 )
 
