@@ -115,7 +115,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     float32_logits: bool = False
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
@@ -262,7 +262,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
@@ -482,10 +482,10 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the module parameters.
-    init_dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used in the parameter initializers.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     """
 
     head_dim: int
@@ -495,7 +495,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: AttnMaskType = "causal"
     attn_bias_type: AttnBiasType = None
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     dropout_rng_name: str = "dropout"
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
@@ -620,7 +620,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
-                init_dtype=self.init_dtype,
+                weight_dtype=self.weight_dtype,
                 float32_logits=self.float32_logits,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
@@ -632,7 +632,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
-                init_dtype=self.init_dtype,
+                weight_dtype=self.weight_dtype,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
@@ -887,10 +887,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the module parameters.
-    init_dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used in the parameter initializers.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
@@ -936,7 +936,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
@@ -987,7 +987,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.init_dtype
+                1.0, "fan_in", "normal", dtype=self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1115,7 +1115,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     dot_input_axes=inputs_logical_axes_no_sp,
                     name="qkv",
                     dtype=self.dtype,
-                    init_dtype=self.init_dtype,
+                    weight_dtype=self.weight_dtype,
                 )(inputs_q)
                 qkv_proj = checkpoint_name(qkv_proj, "combined_qkv_proj")
                 qkv_layout = QKVLayout.BS3HD
@@ -1139,7 +1139,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     dtype=self.dtype,
-                    init_dtype=self.init_dtype,
+                    weight_dtype=self.weight_dtype,
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
@@ -1164,7 +1164,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     name="kv",
                     dtype=self.dtype,
-                    init_dtype=self.init_dtype,
+                    weight_dtype=self.weight_dtype,
                 )(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, "combined_kv_proj")
                 qkv_layout = QKVLayout.BSHD_BS2HD
@@ -1182,7 +1182,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                 low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
-                init_dtype=self.init_dtype,
+                weight_dtype=self.weight_dtype,
             )
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=self.input_layernorm,
@@ -1203,7 +1203,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                 low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
-                init_dtype=self.init_dtype,
+                weight_dtype=self.weight_dtype,
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
                 dot_input_axes=inputs_logical_axes_no_sp,
@@ -1366,7 +1366,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             low_rank_adaptation_dim=self.low_rank_adaptation_dim,
             low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             dtype=self.dtype,
-            init_dtype=self.init_dtype,
+            weight_dtype=self.weight_dtype,
             name="out",
         )(x)
         out = checkpoint_name(out, "out_proj")
@@ -1394,10 +1394,10 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the module parameters.
-    init_dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used in the parameter initializers.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     """
 
     num_buckets: int
@@ -1406,7 +1406,7 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
     embedding_init: Callable[..., Array] = nn.linear.default_embed_init
     embedding_axes: Tuple[str, ...] = ("heads", "relpos_buckets")
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
 
     @nn.compact
     def __call__(self, q_seqlen, k_seqlen, bidirectional=True):
@@ -1631,10 +1631,10 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used to allocate the module parameters.
-    init_dtype : jax.numpy.dtype, default  = jax.numpy.float32
-        the data type used in the parameter initializers.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     drop_path: float, default = 0.0
         When > 0.0, applies stochastic depth per sample in the main
         path of the residual block.
@@ -1687,7 +1687,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
-    init_dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = False
@@ -1699,11 +1699,11 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     def __post_init__(self):
         if self.mha_kernel_init is None:
             self.mha_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.init_dtype
+                1.0, "fan_in", "normal", dtype=self.weight_dtype
             )
         if self.mlp_kernel_init is None:
             self.mlp_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal", dtype=self.init_dtype
+                1.0, "fan_in", "truncated_normal", dtype=self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1969,7 +1969,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_hidden_dropout_dims=self.intermediate_dropout_dims,
             dtype=self.dtype,
-            init_dtype=self.init_dtype,
+            weight_dtype=self.weight_dtype,
             scale_axes=(W_NO_SHARD_AXES,),
             ln_bias_axes=(W_NO_SHARD_AXES,),
             kernel_init=self.mlp_kernel_init,
