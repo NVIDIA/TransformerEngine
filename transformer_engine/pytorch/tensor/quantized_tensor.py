@@ -18,6 +18,7 @@ import transformer_engine_torch as tex
 # grad_added_to_main_grad is used by DDP in MCore.
 _preserved_attributes = ["grad_added_to_main_grad"]
 
+
 def prepare_for_saving(
     *tensors,
 ) -> Tuple[list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], Optional[Any]]:
