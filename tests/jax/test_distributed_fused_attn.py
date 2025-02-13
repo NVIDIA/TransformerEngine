@@ -373,7 +373,9 @@ class TestDistributedContextParallelSelfAttn:
         use_scan,
     ):
         if use_scan:
-            os.environ["NVTE_FUSED_RING_ATTENTION"] = "1"
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
+        else:
+            os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
 
         self.impl_test_context_parallel_attn(
             device_count,
