@@ -1178,7 +1178,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         device: Union[torch.device, str] = "cuda",
         ub_overlap_ag: bool = False,
-        debug_name: str = None,
+        name: str = None,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -1210,7 +1210,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             and not self.debug
         )
         self.debug = TEDebugState.debug_enabled
-        self.debug_name = debug_name
+        self.name = name
 
         if self.debug:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
@@ -1368,7 +1368,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-        overwrite_debug_name: str = None,
+        overwrite_name: str = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a feedforward network (MLP Block).
@@ -1392,7 +1392,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                produced)
         """
         if self.debug:
-            self._validate_debug_name(overwrite_debug_name)
+            self._validate_name(overwrite_name)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1577,7 +1577,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             labels = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
             return [
                 DebugQuantizer(
-                    f"{self.debug_name}.{prefix}",
+                    f"{self.name}.{prefix}",
                     label,
                     None if label in ("dgrad", "wgrad") else base_quantizers[i + offset],
                     self.tp_group,

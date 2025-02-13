@@ -916,7 +916,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ub_bulk_wgrad: bool = False,
         ub_bulk_dgrad: bool = False,
         ub_name: Optional[str] = None,
-        debug_name: str = None,
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -934,7 +934,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
 
         self.debug = TEDebugState.debug_enabled
-        self.debug_name = debug_name
+        self.name = name
         if self.debug:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
@@ -1194,7 +1194,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
-        overwrite_debug_name: Optional[str] = None,
+        overwrite_name: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
@@ -1218,7 +1218,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
         if self.debug:
-            self._validate_debug_name(overwrite_debug_name)
+            self._validate_name(overwrite_name)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1367,6 +1367,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            DebugQuantizer(self.debug_name, name, q, self.tp_group)
+            DebugQuantizer(self.name, name, q, self.tp_group)
             for name, q in zip(names, original_quantizers)
         )

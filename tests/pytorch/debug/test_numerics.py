@@ -233,7 +233,7 @@ def _cmp(ground_truth, output):
 
 
 def _init_model(weight):
-    model = transformer_engine.pytorch.Linear(IN_SIZE, OUT_SIZE, debug_name="linear")
+    model = transformer_engine.pytorch.Linear(IN_SIZE, OUT_SIZE, name="linear")
     with torch.no_grad():
         model.weight.copy_(weight.contiguous())
     return model

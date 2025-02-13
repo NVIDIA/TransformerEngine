@@ -7841,7 +7841,7 @@ class MultiheadAttention(torch.nn.Module):
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         qkv_format: str = "sbhd",
-        debug_name: str = None,
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -7894,7 +7894,7 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
         self.debug = TEDebugState.debug_enabled
-        self.debug_name = debug_name
+        self.name = name
 
         common_gemm_kwargs = {
             "fuse_wgrad_accumulation": fuse_wgrad_accumulation,
@@ -7936,7 +7936,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
-                    debug_name=debug_name + ".layernorm_qkv" if debug_name is not None else None,
+                    name=name + ".layernorm_qkv" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             else:
@@ -7948,7 +7948,7 @@ class MultiheadAttention(torch.nn.Module):
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
                     parameters_split=parameters_split,
-                    debug_name=debug_name + ".qkv" if debug_name is not None else None,
+                    name=name + ".qkv" if name is not None else None,
                     **common_gemm_kwargs,
                 )
         elif self.attention_type == "cross":
@@ -7970,7 +7970,7 @@ class MultiheadAttention(torch.nn.Module):
                     ub_overlap_ag=ub_overlap_ag,
                     normalization=normalization,
                     ub_name="qkv",
-                    debug_name=debug_name + ".layernorm_query" if debug_name is not None else None,
+                    name=name + ".layernorm_query" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             else:
@@ -7981,7 +7981,7 @@ class MultiheadAttention(torch.nn.Module):
                     bias=bias,
                     return_bias=False,
                     parallel_mode=qkv_parallel_mode,
-                    debug_name=debug_name + ".query_layer" if debug_name is not None else None,
+                    name=name + ".query_layer" if name is not None else None,
                     **common_gemm_kwargs,
                 )
             self.key_value = Linear(
@@ -7992,7 +7992,7 @@ class MultiheadAttention(torch.nn.Module):
                 return_bias=False,
                 parallel_mode=qkv_parallel_mode,
                 parameters_split=("key", "value") if not fuse_qkv_params else None,
-                debug_name=debug_name + ".key_value" if debug_name is not None else None,
+                name=name + ".key_value" if name is not None else None,
                 **common_gemm_kwargs,
             )
 
@@ -8022,7 +8022,7 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_rs=ub_overlap_rs,
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
-            debug_name=debug_name + ".proj" if debug_name is not None else None,
+            name=name + ".proj" if name is not None else None,
             **common_gemm_kwargs,
         )
 
@@ -8127,7 +8127,7 @@ class MultiheadAttention(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
-        overwrite_debug_name: str = None,
+        overwrite_name: str = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
         Forward propagation for MultiheadAttention layer.
@@ -8224,7 +8224,7 @@ class MultiheadAttention(torch.nn.Module):
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         if self.debug:
-            TransformerEngineBaseModule._validate_debug_name(self, overwrite_debug_name)
+            TransformerEngineBaseModule._validate_name(self, overwrite_name)
 
         # =================================================
         # Pre-allocate memory for key-values for inference
@@ -8270,9 +8270,9 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_debug_name=(
-                        overwrite_debug_name + ".layernorm_qkv"
-                        if overwrite_debug_name is not None
+                    overwrite_name=(
+                        overwrite_name + ".layernorm_qkv"
+                        if overwrite_name is not None
                         else None
                     ),
                 )
@@ -8285,8 +8285,8 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_debug_name=(
-                        overwrite_debug_name + ".qkv" if overwrite_debug_name is not None else None
+                    overwrite_name=(
+                        overwrite_name + ".qkv" if overwrite_name is not None else None
                     ),
                 )
 
@@ -8342,9 +8342,9 @@ class MultiheadAttention(torch.nn.Module):
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 fp8_output=fp8_mha and rotary_pos_emb is None,
-                overwrite_debug_name=(
-                    overwrite_debug_name + ".key_value"
-                    if overwrite_debug_name is not None
+                overwrite_name=(
+                    overwrite_name + ".key_value"
+                    if overwrite_name is not None
                     else None
                 ),
             )
@@ -8390,9 +8390,9 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_debug_name=(
-                        overwrite_debug_name + ".layernorm_query"
-                        if overwrite_debug_name is not None
+                    overwrite_name=(
+                        overwrite_name + ".layernorm_query"
+                        if overwrite_name is not None
                         else None
                     ),
                 )
@@ -8405,9 +8405,9 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_debug_name=(
-                        overwrite_debug_name + ".query_layer"
-                        if overwrite_debug_name is not None
+                    overwrite_name=(
+                        overwrite_name + ".query_layer"
+                        if overwrite_name is not None
                         else None
                     ),
                 )

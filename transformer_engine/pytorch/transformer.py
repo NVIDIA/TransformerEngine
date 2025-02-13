@@ -279,7 +279,7 @@ class TransformerLayer(torch.nn.Module):
         normalization: str = "LayerNorm",
         device: Union[torch.device, str] = "cuda",
         attn_input_format: str = "sbhd",
-        debug_name: str = None,
+        name: str = None,
     ) -> None:
         super().__init__()
 
@@ -340,7 +340,7 @@ class TransformerLayer(torch.nn.Module):
         self.attn_input_format = attn_input_format
 
         self.debug = TEDebugState.debug_enabled
-        self.debug_name = debug_name
+        self.name = name
 
         attention_args = (
             hidden_size,
@@ -382,7 +382,7 @@ class TransformerLayer(torch.nn.Module):
             return_bias=not self.parallel_attention_mlp,
             normalization=normalization,
             device=device,
-            debug_name=debug_name + ".self_attention" if debug_name is not None else None,
+            name=name + ".self_attention" if name is not None else None,
         )
 
         if layer_type == "decoder":
@@ -396,7 +396,7 @@ class TransformerLayer(torch.nn.Module):
                 return_bias=True,
                 normalization=normalization,
                 device=device,
-                debug_name=debug_name + ".inter_attention" if debug_name is not None else None,
+                name=name + ".inter_attention" if name is not None else None,
             )
 
         # LayerNorm -> activation(Linear + Bias) -> Linear
@@ -431,7 +431,7 @@ class TransformerLayer(torch.nn.Module):
             activation=activation,
             normalization=normalization,
             device=device,
-            debug_name=debug_name + ".layernorm_mlp" if debug_name is not None else None,
+            name=name + ".layernorm_mlp" if name is not None else None,
         )
 
         self.hidden_dropout = hidden_dropout
@@ -555,7 +555,7 @@ class TransformerLayer(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
-        overwrite_debug_name: str = None,
+        overwrite_name: str = None,
     ) -> torch.Tensor:
         """
         Transformer Layer: attention block and a feedforward network (MLP)
@@ -686,7 +686,7 @@ class TransformerLayer(torch.nn.Module):
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
         if self.debug:
-            TransformerEngineBaseModule._validate_debug_name(self, overwrite_debug_name)
+            TransformerEngineBaseModule._validate_name(self, overwrite_name)
 
         # For AMP
         if torch.is_autocast_enabled():
@@ -710,9 +710,9 @@ class TransformerLayer(torch.nn.Module):
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             fast_zero_fill=fast_zero_fill,
-            overwrite_debug_name=(
-                overwrite_debug_name + ".self_attention"
-                if overwrite_debug_name is not None
+            overwrite_name=(
+                overwrite_name + ".self_attention"
+                if overwrite_name is not None
                 else None
             ),
         )
@@ -742,9 +742,9 @@ class TransformerLayer(torch.nn.Module):
                 core_attention_bias=core_attention_bias,
                 alibi_slopes=alibi_slopes,
                 fast_zero_fill=fast_zero_fill,
-                overwrite_debug_name=(
-                    overwrite_debug_name + ".inter_attention"
-                    if overwrite_debug_name is not None
+                overwrite_name=(
+                    overwrite_name + ".inter_attention"
+                    if overwrite_name is not None
                     else None
                 ),
             )
@@ -760,9 +760,9 @@ class TransformerLayer(torch.nn.Module):
         mlp_outputs = self.layernorm_mlp(
             hidden_states,
             is_first_microbatch=is_first_microbatch,
-            overwrite_debug_name=(
-                overwrite_debug_name + ".layernorm_mlp"
-                if overwrite_debug_name is not None
+            overwrite_name=(
+                overwrite_name + ".layernorm_mlp"
+                if overwrite_name is not None
                 else None
             ),
         )

@@ -73,7 +73,7 @@ def _init_model(weight, parallel_mode=None, tp_group=None, name="linear"):
     model = transformer_engine.pytorch.Linear(
         IN_SIZE,
         OUT_SIZE,
-        debug_name=name,
+        name=name,
         parallel_mode=parallel_mode,
         tp_group=(tp_group or NCCL_WORLD if parallel_mode else None),
     )

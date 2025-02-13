@@ -755,7 +755,7 @@ class Linear(TransformerEngineBaseModule):
         ub_bulk_dgrad: bool = False,
         ub_bulk_wgrad: bool = False,
         ub_name: Optional[str] = None,
-        debug_name: Optional[str] = None,
+        name: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -769,7 +769,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
         self.debug = TEDebugState.debug_enabled
-        self.debug_name = debug_name
+        self.name = name
 
         if self.debug:
             self._turn_off_unsupported_features_in_debug()  # turn of userbuffers
@@ -984,7 +984,7 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
-        overwrite_debug_name: Optional[str] = None,
+        overwrite_name: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1008,7 +1008,7 @@ class Linear(TransformerEngineBaseModule):
                                produced)
         """
         if self.debug:
-            self._validate_debug_name(overwrite_debug_name)
+            self._validate_name(overwrite_name)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1148,6 +1148,6 @@ class Linear(TransformerEngineBaseModule):
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
         return tuple(
-            DebugQuantizer(self.debug_name, name, q, self.tp_group)
+            DebugQuantizer(self.name, name, q, self.tp_group)
             for name, q in zip(names, original_quantizers)
         )

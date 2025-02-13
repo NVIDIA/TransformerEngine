@@ -1112,7 +1112,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _validate_debug_name(self, overwrite_debug_name):
+    def _validate_name(self, overwrite_name):
         """
         Validate name passed to the module.
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
@@ -1127,17 +1127,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         assert self.debug
         import nvdlfw_inspect.api as debug_api
 
-        if overwrite_debug_name:
-            self.debug_name = overwrite_debug_name
+        if overwrite_name:
+            self.name = overwrite_name
 
-        if self.debug_name is None:
+        if self.name is None:
             debug_api.log_message(
                 "[DEBUG-WARNING] Names are not provided to debug modules. ",
                 "Creating and using generic names. Pass names to debug modules for better"
                 " insight. ",
                 level=logging.WARNING,
             )
-            self.debug_name = f"Layer_{TEDebugState.get_layer_count()}"
+            self.name = f"Layer_{TEDebugState.get_layer_count()}"
 
     def _turn_off_unsupported_features_in_debug(self):
         if (
