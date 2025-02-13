@@ -269,9 +269,10 @@ class _GroupedLinear(torch.autograd.Function):
                 general_grouped_gemm(
                     weights,
                     grad_output,
-                    torch.split(dgrad, ctx.m_splits),
+                    [dgrad],
                     ctx.activation_dtype,
                     get_multi_stream_cublas_workspace(),
+                    single_output=True,
                     layout="NN",
                     m_splits=ctx.m_splits,
                     grad=True,
