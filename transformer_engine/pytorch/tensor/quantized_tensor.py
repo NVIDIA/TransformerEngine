@@ -15,8 +15,8 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 # Attributes of params that are added externally should be preserved.
-# grad_added_to_main_grad is used by DDP in MCore.
-_preserved_attributes = ["grad_added_to_main_grad"]
+# grad_added_to_main_grad and main_grad is used by DDP in MCore.
+_preserved_attributes = ["grad_added_to_main_grad", "main_grad"]
 
 
 def prepare_for_saving(
