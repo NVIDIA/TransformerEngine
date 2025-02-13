@@ -59,7 +59,9 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
 def _create_layernorm_parameters(
     layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, dtype, weight_dtype
 ):
-    scale = nn_partitioning.param_with_axes("scale", scale_init, shape, dtype=weight_dtype, axes=scale_axes)
+    scale = nn_partitioning.param_with_axes(
+        "scale", scale_init, shape, dtype=weight_dtype, axes=scale_axes
+    )
     scale = scale.astype(dtype)
 
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
@@ -1110,13 +1112,21 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 bias_1_shape = intermediate_dim
                 bias_1 = nn_partitioning.param_with_axes(
-                    "wi_bias", self.bias_init, bias_1_shape, dtype=self.weight_dtype, axes=self.bias_axes_1
+                    "wi_bias",
+                    self.bias_init,
+                    bias_1_shape,
+                    dtype=self.weight_dtype,
+                    axes=self.bias_axes_1,
                 )
                 bias_1 = bias_1.astype(self.dtype)
 
                 bias_2_shape = (hidden_size,)
                 bias_2 = nn_partitioning.param_with_axes(
-                    "wo_bias", self.bias_init, bias_2_shape, dtype=self.weight_dtype, axes=self.bias_axes_2
+                    "wo_bias",
+                    self.bias_init,
+                    bias_2_shape,
+                    dtype=self.weight_dtype,
+                    axes=self.bias_axes_2,
                 )
                 bias_2 = bias_2.astype(self.dtype)
             else:
