@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -194,15 +194,18 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if self.attn_bias_type == AttnBiasType.PRE_SCALE_BIAS:
                 attn_weights += bias
 
-        def apply_swa_mask(attn_mask_type: AttnMaskType, original_mask: Array) -> Array:
+        def apply_swa_mask(original_mask: Array) -> Array:
             """Apply the sliding window mask to a given mask"""
+            batch = original_mask.shape[0]
             max_seqlen_q = original_mask.shape[-2]
             max_seqlen_kv = original_mask.shape[-1]
-            swa_mask = make_swa_mask(max_seqlen_q, max_seqlen_kv, self.window_size, attn_mask_type)
-            # In swa_mask 0 is masked out, in original_mask 1 is masked out
-            swa_mask = 1 - swa_mask.astype(original_mask.dtype)
-            swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
-            new_mask = jnp.where(original_mask == 0, swa_mask_bcast, original_mask)
+            # TODO(rewang): Support THD format pos
+            pos_q = jnp.broadcast_to(jnp.arange(max_seqlen_q), (batch, max_seqlen_q))
+            pos_kv = jnp.broadcast_to(jnp.arange(max_seqlen_kv), (batch, max_seqlen_kv))
+            # In inv_swa_mask 0 is masked out, in original_mask 1 is masked out
+            inv_swa_mask = make_swa_mask(pos_q, pos_kv, self.window_size, original_mask.dtype)
+            swa_mask = 1 - inv_swa_mask
+            new_mask = jnp.where(original_mask == 0, swa_mask, original_mask)
             return new_mask
 
         def convert_to_softmax_type(attn_mask_type, mask):
@@ -213,7 +216,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             if attn_mask_type == AttnMaskType.CAUSAL_MASK and self.window_size is None:
                 mask = None
             if mask is not None:
-                mask = apply_swa_mask(attn_mask_type, mask)
+                mask = apply_swa_mask(mask)
             # Currently cuDNN backend only supports SWA for causal/padding_causal, follow this
             if attn_mask_type in [AttnMaskType.CAUSAL_MASK, AttnMaskType.PADDING_CAUSAL_MASK]:
                 return SoftmaxType.SCALED_UPPER_TRIANG_MASKED, mask

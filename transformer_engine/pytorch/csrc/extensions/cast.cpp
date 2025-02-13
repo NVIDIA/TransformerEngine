@@ -1,72 +1,129 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "transformer_engine/cast.h"
+
+#include "common.h"
 #include "extensions.h"
+#include "pybind.h"
+#include "transformer_engine/transformer_engine.h"
 
-at::Tensor cast_to_fp8(const at::Tensor& input, const at::Tensor& scale, at::Tensor amax,
-                       at::Tensor scale_inv, transformer_engine::DType otype,
-                       const int scale_offset, const int amax_offset, const int scale_inv_offset) {
-  using namespace transformer_engine;
-  auto input_shape = input.sizes().vec();
-  std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
+namespace transformer_engine::pytorch {
 
-  auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
+py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::object& output,
+                    std::optional<at::Tensor> noop) {
+  init_extension();
+  auto my_quantizer = convert_quantizer(quantizer);
+  auto input_tensor = tensor.contiguous();
 
-  if (input.numel() == 0) return output;
+  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
+  const auto& te_input_shape = te_input.shape();
+  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
+  auto fake_tensor_type = tensor.scalar_type();
+  if (!detail::IsFloatingPointType(fake_tensor_type)) {
+    fake_tensor_type = at::kFloat;
+  }
 
-  // Get pointers for FP8 scale, amax, scale-inverse
-  void* scale_dptr = getDataPtr(scale, scale_offset);
-  void* amax_dptr = getDataPtr(amax, amax_offset);
-  void* scale_inv_dptr = getDataPtr(scale_inv, scale_inv_offset);
+  TensorWrapper te_output;
+  py::object out;
+  if (output.is_none()) {
+    DType fake_te_type = GetTransformerEngineDType(fake_tensor_type);
+    std::tie(te_output, out) = my_quantizer->create_tensor(input_shape, fake_te_type);
+  } else {
+    out = output;
+    te_output = makeTransformerEngineTensor(output, quantizer);
+  }
 
-  auto input_cu = makeTransformerEngineTensor(input);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), shape, otype, amax_dptr,
-                                               scale_dptr, scale_inv_dptr);
+  TensorWrapper te_noop;
+  if (noop.has_value()) {
+    te_noop = makeTransformerEngineTensor(*noop);
+  } else {
+    te_noop = TensorWrapper();
+  }
 
-  nvte_fp8_quantize(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  if (te_output.numel() == 0) return out;
+  nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),
+                     at::cuda::getCurrentCUDAStream());
 
-  return output;
+  return out;
 }
 
-void cast_to_fp8_noalloc(const at::Tensor& input, const at::Tensor& scale, at::Tensor output,
-                         at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype,
-                         const int scale_offset, const int amax_offset,
-                         const int scale_inv_offset) {
-  using namespace transformer_engine;
-  size_t N = static_cast<size_t>(input.size(0));
-  size_t H = static_cast<size_t>(input.size(1));
+py::object dequantize(const py::handle& input, transformer_engine::DType otype) {
+  init_extension();
 
-  // Get pointers for FP8 scale, amax, scale-inverse
-  void* scale_dptr = getDataPtr(scale, scale_offset);
-  void* amax_dptr = getDataPtr(amax, amax_offset);
-  void* scale_inv_dptr = getDataPtr(scale_inv, scale_inv_offset);
+  const auto none = py::none();
 
-  auto input_cu = makeTransformerEngineTensor(input);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {N, H}, otype, amax_dptr,
-                                               scale_dptr, scale_inv_dptr);
+  const auto& input_tensor = makeTransformerEngineTensor(input, none);
 
-  nvte_fp8_quantize(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  NoneQuantizer q(none);
 
-  return;
+  const auto& shape = convertShape(input_tensor.shape());
+
+  auto [out_tensor, out] = q.create_tensor(shape, otype);
+
+  nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+
+  return out;
 }
 
-at::Tensor cast_from_fp8(const at::Tensor& input, const at::Tensor& scale_inv,
-                         transformer_engine::DType itype, transformer_engine::DType otype,
-                         const int scale_inv_offset) {
-  using namespace transformer_engine;
-  auto input_shape = input.sizes().vec();
-  std::vector<size_t> shape{input_shape.begin(), input_shape.end()};
+template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
+                       cudaStream_t)>
+std::vector<py::object> dbias_dact(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                   py::handle quantizer) {
+  init_extension();
+  auto my_quantizer = convert_quantizer(quantizer);
 
-  auto output = at::empty_like(input, at::CUDA(GetATenDType(otype)));
+  auto grad_tensor = makeTransformerEngineTensor(grad_output);
 
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), shape, itype, nullptr, nullptr,
-                                              getDataPtr(scale_inv, scale_inv_offset));
-  auto output_cu = makeTransformerEngineTensor(output);
+  auto grad_bias = allocateTorchTensor(grad_output.size(-1), grad_tensor.dtype());
+  auto act_input_tensor = makeTransformerEngineTensor(act_input);
 
-  nvte_fp8_dequantize(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  const auto& shape = convertShape(grad_tensor.shape());
+  auto [dact_tensor, dact] = my_quantizer->create_tensor(shape, act_input_tensor.dtype());
 
-  return output;
+  auto dbias_tensor = makeTransformerEngineTensor(grad_bias);
+
+  // Query workspace size and allocate workspace
+  transformer_engine::TensorWrapper workspace;
+  func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
+       workspace.data(), at::cuda::getCurrentCUDAStream());
+  auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
+  workspace =
+      makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
+
+  // Launch kernel
+  func(grad_tensor.data(), act_input_tensor.data(), dact_tensor.data(), dbias_tensor.data(),
+       workspace.data(), at::cuda::getCurrentCUDAStream());
+
+  return {py::cast(grad_bias), dact};
 }
+
+std::vector<py::object> dbias_dgelu(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                    py::handle quantizer) {
+  return dbias_dact<nvte_quantize_dbias_dgelu>(grad_output, act_input, quantizer);
+}
+
+std::vector<py::object> dbias_dsilu(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                    py::handle quantizer) {
+  return dbias_dact<nvte_quantize_dbias_dsilu>(grad_output, act_input, quantizer);
+}
+
+std::vector<py::object> dbias_drelu(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                    py::handle quantizer) {
+  return dbias_dact<nvte_quantize_dbias_drelu>(grad_output, act_input, quantizer);
+}
+
+std::vector<py::object> dbias_dqgelu(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                     py::handle quantizer) {
+  return dbias_dact<nvte_quantize_dbias_dqgelu>(grad_output, act_input, quantizer);
+}
+
+std::vector<py::object> dbias_dsrelu(const at::Tensor& grad_output, const at::Tensor& act_input,
+                                     py::handle quantizer) {
+  return dbias_dact<nvte_quantize_dbias_dsrelu>(grad_output, act_input, quantizer);
+}
+
+}  // namespace transformer_engine::pytorch

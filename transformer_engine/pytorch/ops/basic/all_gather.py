@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,12 +9,9 @@ from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
-from .._common import convert_tensor, is_float8_tensor
+from ...distributed import gather_along_first_dim
+from ...tensor import QuantizedTensor
+from ..op import BasicOperation, OperationContext
 
 
 class AllGather(BasicOperation):
@@ -45,47 +42,12 @@ class AllGather(BasicOperation):
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
-
-        # Trivial case
+        out: torch.Tensor
         if self.process_group_size == 1:
-            return input_
-
-        # Tensor dimensions
-        input_dims = input_.size()
-        if not input_dims:
-            raise RuntimeError(
-                "Attempted to all-gather a tensor "
-                f"with shape={list(input_dims)} "
-                f"over {self.process_group_size} processes"
-            )
-        output_dims = list(input_dims)
-        output_dims[0] *= self.process_group_size
-
-        # Perform all-gather
-        x = convert_tensor(input_, memory_format=torch.contiguous_format)
-        y = None
-        if is_float8_tensor(x):
-            y = Float8Tensor.make_like(
-                x,
-                data=torch.empty(
-                    output_dims,
-                    dtype=torch.uint8,
-                    device=x.device,
-                ),
-            )
-            torch.distributed.all_gather_into_tensor(
-                y._data,
-                x._data,
-                group=self.process_group,
-            )
+            out = input_.detach()
         else:
-            y = torch.empty(output_dims, dtype=x.dtype, device=x.device)
-            torch.distributed.all_gather_into_tensor(
-                y,
-                x,
-                group=self.process_group,
-            )
-        return y
+            out, _ = gather_along_first_dim(input_, self.process_group)
+        return out
 
     def op_backward(
         self,
@@ -110,8 +72,8 @@ class AllGather(BasicOperation):
 
         # Check output gradient tensor
         dy = grad_output
-        if is_float8_tensor(dy):
-            dy = dy.from_float8()
+        if isinstance(dy, QuantizedTensor):
+            dy = dy.dequantize()
         dy = dy.contiguous()
 
         # Perform reduce-scatter

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,10 +6,12 @@
 from __future__ import annotations
 import functools
 import math
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
+
+from .tensor.quantized_tensor import QuantizedTensor
 
 
 def requires_grad(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
@@ -27,12 +29,10 @@ def clear_tensor_data(*tensors: Tuple[Optional[torch.Tensor], ...]) -> None:
 
     Must be used carefully.
     """
-    from .float8_tensor import Float8Tensor
-
     for t in tensors:
         if t is not None:
-            if isinstance(t, Float8Tensor):
-                t._data.data = torch.Tensor()
+            if isinstance(t, QuantizedTensor):
+                t.clear()
             else:
                 t.data = torch.Tensor()
             del t
@@ -231,14 +231,15 @@ def check_dim_for_fp8_exec(tensor: torch.Tensor) -> bool:
     return tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0
 
 
-def assert_dim_for_fp8_exec(tensor: torch.Tensor) -> None:
-    """Assert that tensor dimensions are supported for FP8 TN GEMM"""
-    # single tensor check so it's clear which tensor is triggering the assertion
-    assert tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0, (
-        "FP8 execution requires 2D input matrices with "
-        "height divisible by 8 and width divisible by 16, "
-        f"but got tensor with dims={list(tensor.size())}"
-    )
+def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
+    """Assert that tensor or tensors dimensions are supported for FP8 TN GEMM."""
+
+    for tensor in tensors:
+        assert tensor.dim() == 2 and tensor.size(0) % 8 == 0 and tensor.size(1) % 16 == 0, (
+            "FP8 execution requires 2D input matrices with "
+            "height divisible by 8 and width divisible by 16, "
+            f"but got tensor with dims={list(tensor.size())}"
+        )
 
 
 def is_bf16_compatible() -> None:
@@ -246,6 +247,13 @@ def is_bf16_compatible() -> None:
     check on device compute capability to enforce sm_80 or higher.
     """
     return torch.cuda.get_device_capability()[0] >= 8
+
+
+def non_tn_fp8_gemm_supported() -> bool:
+    """Checks whether the device supports
+    non-TN layouts for FP8 GEMMs.
+    """
+    return torch.cuda.get_device_capability() >= (10, 0)
 
 
 @functools.lru_cache(maxsize=None)
@@ -305,3 +313,16 @@ def devices_match(device1: torch.device, device2: torch.device) -> bool:
             index2 = torch.cuda.current_device()
         return index1 == index2
     return device1 == device2
+
+
+@functools.lru_cache
+def get_sm_count() -> int:
+    """Returns the number of streaming multiprocessors in the current device."""
+    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+
+
+def round_up_to_nearest_multiple(value, multiple):
+    """Round up `value` to the next mutiple of `multiple`"""
+    if multiple == 0:
+        raise ValueError("multiple cannot be zero.")
+    return ((value + multiple - 1) // multiple) * multiple

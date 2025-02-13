@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX multi-head attention modules"""
@@ -46,6 +46,42 @@ class AttnMaskType(Enum):
     CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_CAUSAL_BOTTOM_RIGHT_MASK
     PADDING_CAUSAL_BOTTOM_RIGHT_MASK = NVTE_Mask_Type.NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK
 
+    def is_causal(self):
+        """Returns True if the mask is a causal mask"""
+        return self in [
+            AttnMaskType.CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_padding(self):
+        """Returns True if the mask includes padding"""
+        return self in [
+            AttnMaskType.PADDING_MASK,
+            AttnMaskType.PADDING_CAUSAL_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+    def is_bottom_right(self):
+        """Returns True if the causal mask is calculated from the bottom-right section"""
+        return self in [
+            AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
+        ]
+
+
+class QKVFormat(Enum):
+    """
+    SBHD: q,k,v memory layout with [s, b, ..., h, d]
+    BSHD: q,k,v memory layout with [b, s, ..., h, d]
+    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
+    """
+
+    SBHD = NVTE_QKV_Format.NVTE_SBHD
+    BSHD = NVTE_QKV_Format.NVTE_BSHD
+    THD = NVTE_QKV_Format.NVTE_THD
+
 
 class QKVLayout(Enum):
     """
@@ -66,17 +102,35 @@ class QKVLayout(Enum):
     THD_T2HD = NVTE_QKV_Layout.NVTE_THD_T2HD
     THD_THD_THD = NVTE_QKV_Layout.NVTE_THD_THD_THD
 
+    def get_qkv_format(self):
+        """
+        Return the corresponding qkv_format (BSHD, SBHD, THD)
+        """
+        return QKVFormat(nvte_get_qkv_format(self.value))
 
-class QKVFormat(Enum):
-    """
-    SBHD: q,k,v memory layout with [s, b, ..., h, d]
-    BSHD: q,k,v memory layout with [b, s, ..., h, d]
-    THD: q,k,v memory layout is same as BSHD, but allow multiple segments packed in a sequence.
-    """
+    def is_qkvpacked(self):
+        """
+        Return True if the query, key, value is packed
+        """
+        return self in [QKVLayout.BS3HD, QKVLayout.T3HD]
 
-    SBHD = NVTE_QKV_Format.NVTE_SBHD
-    BSHD = NVTE_QKV_Format.NVTE_BSHD
-    THD = NVTE_QKV_Format.NVTE_THD
+    def is_kvpacked(self):
+        """
+        Return True if the key, value is packed
+        """
+        return self in [QKVLayout.BSHD_BS2HD, QKVLayout.THD_T2HD]
+
+    def is_separate(self):
+        """
+        Return True if the query, key, value are three separate tensors
+        """
+        return self in [QKVLayout.BSHD_BSHD_BSHD, QKVLayout.THD_THD_THD]
+
+    def is_thd(self):
+        """
+        Return True if the layout belongs to THD
+        """
+        return self in [QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
 
 
 class CPStrategy(Enum):
@@ -92,71 +146,45 @@ class CPStrategy(Enum):
     RING = 2
 
 
-def get_qkv_format(qkv_layout):
-    """
-    Get qkv_format from qkv_layout
-    """
-    return QKVFormat(nvte_get_qkv_format(qkv_layout.value))
-
-
 def make_swa_mask(
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
+    segment_pos_q: jnp.ndarray,
+    segment_pos_kv: jnp.ndarray,
     window_size: Optional[Tuple[int, int]] = None,
-    attn_mask_type: AttnMaskType = AttnMaskType.NO_MASK,
     dtype: jax.typing.DTypeLike = jnp.float32,
 ):
     """
-    Generate sliding window mask. `True` or `1` means keep the element.
+    Generate a sliding window mask (1 = attend, 0 = masked).
 
-    For `CAUSAL_BOTTOM_RIGHT_MASK` and `PADDING_CAUSAL_BOTTOM_RIGHT_MASK` mask type,
-    the sliding window diagonal is aligned to the bottom right corner, and for other
-    mask types, the top left corner.
+    Args:
+        segment_pos_q (jnp.ndarray):
+            Query positions within each segment. For example, a batch with segment_ids =
+            [[1, 1, 1, 2, 2, 2, 2, 2]] yields segment_pos =
+            [[0, 1, 2, 0, 1, 2, 3, 4]].
+        segment_pos_kv (jnp.ndarray):
+            Key/value positions within each segment.
+        window_size (Optional[Tuple[int, int]], optional):
+            Sliding window size for local attention, where query at position i attends to keys
+            in [i - window_size[0], i + window_size[1]] inclusive. A negative number means an
+            infinite window; None means no sliding window.
+            Defaults to None.
+        dtype (jax.typing.DTypeLike, optional):
+            Mask data type. Defaults to jnp.float32.
 
-    Parameters
-    ----------
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    window_size: Optional[Tuple[int, int]] = None
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Negative number in window size means infinity window.
-        `None` means no sliding window.
-    attn_mask_type: AttnMaskType, default = AttnMaskType.NO_MASK
-    dtype: jax.typing.DTypeLike, default=jnp.float32
-        The mask data type.
-    Returns
-    ----------
-    swa_mask: jax.numpy.tensor
-        Matrix with shape [max_seqlen_q, max_seqlen_kv]. Elements with value 1 are the positions
-        that will get attention, value 0 are the masked out positions.
+    Returns:
+        jnp.ndarray:
+            The mask with shape [b, 1, max_seqlen_q, max_seqlen_kv].
     """
-    swa_mask = jnp.ones((max_seqlen_q, max_seqlen_kv), dtype=dtype)
-    if window_size is None:
-        return swa_mask
-    bottom_right_masks = [
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    ]
-    left_window, right_window = window_size
-    if attn_mask_type in bottom_right_masks:
-        if left_window < 0:
-            left_window = max_seqlen_kv
-        if right_window < 0:
-            right_window = max_seqlen_kv
-        bottom_right_shift = max_seqlen_kv - max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window + bottom_right_shift)
-        swa_mask = jnp.tril(swa_mask, k=right_window + bottom_right_shift)
+    if window_size is not None:
+        left_window, right_window = window_size
     else:
-        if left_window < 0:
-            left_window = max_seqlen_q
-        if right_window < 0:
-            right_window = max_seqlen_q
-        swa_mask = jnp.triu(swa_mask, k=-left_window)
-        swa_mask = jnp.tril(swa_mask, k=right_window)
-    return swa_mask
+        left_window = right_window = jnp.inf
+    left_window = jnp.inf if left_window < 0 else left_window
+    right_window = jnp.inf if right_window < 0 else right_window
+    pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
+    pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
+    inv_swa_mask = (pos_kv >= pos_q - left_window) & (pos_kv <= pos_q + right_window)
+    inv_swa_mask = jnp.expand_dims(inv_swa_mask, axis=-3)
+    return inv_swa_mask.astype(dtype)
 
 
 def canonicalize_attn_mask_type(attn_mask_type: str):
@@ -310,7 +338,7 @@ def fused_attn(
         (jnp.ndarray): The output tensor from the fused attention.
     """
     assert (
-        get_qkv_format(qkv_layout) != QKVFormat.THD
+        not qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn_thd for THD format."
 
     # Check inputs qkv
@@ -327,11 +355,7 @@ def fused_attn(
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
-    if attn_mask_type in [
-        AttnMaskType.NO_MASK,
-        AttnMaskType.CAUSAL_MASK,
-        AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-    ]:
+    if not attn_mask_type.is_padding():
         batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
         q_seq_lens = jnp.full((batch,), q_max_seqlen, dtype=jnp.int32)
         kv_seq_lens = jnp.full((batch,), kv_max_seqlen, dtype=jnp.int32)
@@ -448,7 +472,7 @@ def fused_attn_thd(
                                  QKVLayout.T3HD, 0.125, 0, True, 3)
     """
     assert (
-        get_qkv_format(qkv_layout) == QKVFormat.THD
+        qkv_layout.is_thd()
     ), "Please use transformer_engine.jax.attention.fused_attn for non-THD format."
 
     # Check inputs qkv

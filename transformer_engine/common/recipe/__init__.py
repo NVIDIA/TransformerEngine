@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -39,19 +39,22 @@ class Format(Enum):
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
 
 
-class _OverrideLinearPrecision(NamedTuple):
+class Recipe:
     """
-    Whether or not the execute the `fprop`, `dgrad`, and `wgrad`
-    GEMMs in higher precision when using FP8.
+    Base recipe class.
     """
 
-    fprop: bool = False
-    dgrad: bool = False
-    wgrad: bool = False
+    def mxfp8(self):
+        """Whether the given recipe is MXFP8 block scaling."""
+        return isinstance(self, MXFP8BlockScaling)
+
+    def delayed(self):
+        """Whether the given recipe is delayed scaling."""
+        return isinstance(self, DelayedScaling)
 
 
 @dataclass()
-class DelayedScaling:
+class DelayedScaling(Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.
@@ -92,9 +95,6 @@ class DelayedScaling:
                                                               recipe: DelayedScaling) -> Tensor
 
                                  where `Tensor` is a framework tensor type.
-    override_linear_precision: Tuple(bool, bool, bool), default=(False, False, False)
-                              Whether or not to execute the `fprop`, `dgrad`, and `wgrad`
-                              GEMMs (respectively) in higher precision when using FP8.
     reduce_amax: bool, default = `True`
                 By default, if `torch.distributed` is initialized, the `amax` value for FP8
                 tensors is reduced across the `fp8_group` (specified in the `fp8_autocast`
@@ -137,7 +137,6 @@ class DelayedScaling:
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
-    override_linear_precision: _OverrideLinearPrecision = _OverrideLinearPrecision()
     scaling_factor_compute_algo: Optional[Callable] = None
     reduce_amax: bool = True
     fp8_dpa: bool = False
@@ -145,10 +144,6 @@ class DelayedScaling:
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-        assert self.override_linear_precision in (
-            (False, False, False),
-            (False, False, True),
-        ), "Only wgrad GEMM override is currently supported."
         if self.interval >= 0:
             warnings.warn(
                 "`interval` argument is deprecated and unused. "
@@ -161,7 +156,43 @@ class DelayedScaling:
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
-            f"wgrad_override={self.override_linear_precision.wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class MXFP8BlockScaling(Recipe):
+    """
+    Use the MXFP8 scaling factor strategy.
+
+    In this strategy, tensors are scaled in blockwise fashion. Each group
+    of 32 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E8M0 (8 bits of exponent,
+    0 bits of mantissa), equivalent to scaling by a power of 2.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the MXFP8 tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
+                Controls the FP8 data format used during forward and backward
+                pass.
+    """
+
+    margin: int = 0
+    fp8_format: Format = Format.E4M3
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"

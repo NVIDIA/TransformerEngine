@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -123,18 +123,12 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention is only supported on sm90+!")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
-        pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
         pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if qkv_format == "thd" and "a2a" in cp_comm_type:
         pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
-    if config.window_size != (-1, 0) and config.window_size != (-1, -1) and cp_comm_type != "a2a":
-        pytest.skip(
-            "Sliding window attention only can be supported with the implementation of QKVO A2A!"
-        )
     if dtype == "fp8" and cp_comm_type == "all_gather":
         pytest.skip(
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
@@ -145,6 +139,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention cannot work with bias yet!")
     if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("FP8 attention cannot work with sliding window yet!")
+    if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
+        pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":

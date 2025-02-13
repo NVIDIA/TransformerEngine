@@ -1,12 +1,13 @@
 #!/usr/bin/python3
 
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
-import sys
-import os
 import argparse
+import datetime
+import os
+import sys
 from functools import wraps
 
 import transformer_engine.pytorch as te
@@ -14,7 +15,12 @@ import torch
 from torch import nn
 import torch.distributed as dist
 
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import (
+    MXFP8BlockScaling,
+    DelayedScaling,
+    Format,
+    Recipe,
+)
 from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
@@ -23,15 +29,27 @@ NR_HEADS = 4
 WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
-FP8 = False
+QUANTIZATION = None
 
-# Fp8 recipe setup
-fp8_format = Format.HYBRID
-fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+
+# Disable TF32
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
+
+# Quantization recipe setup
+def quantization_recipe() -> Recipe:
+    if QUANTIZATION == "fp8":
+        return DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
+        )
+    if QUANTIZATION == "mxfp8":
+        return MXFP8BlockScaling()
+    return te.fp8.get_default_fp8_recipe()
 
 
 def main(argv=None, namespace=None):
-    global WORLD_RANK, WORLD_SIZE, NCCL_WORLD, FP8
+    global WORLD_RANK, WORLD_SIZE, NCCL_WORLD, QUANTIZATION
 
     WORLD_RANK = int(os.getenv("RANK", "0"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
@@ -44,6 +62,7 @@ def main(argv=None, namespace=None):
         "backend": "nccl",
         "rank": WORLD_RANK,
         "world_size": WORLD_SIZE,
+        "timeout": datetime.timedelta(seconds=30),
     }
     dist_init_kwargs["init_method"] = "env://"
     dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
@@ -57,8 +76,16 @@ def main(argv=None, namespace=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--layer-type", type=str)
-    parser.add_argument("--fp8", action="store_true", default=False)
+    parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args(argv, namespace)
+
+    # Quantization scheme
+    QUANTIZATION = args.quantization
+    if QUANTIZATION in ("fp8", "mxfp8"):
+        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+        SEQ_LEN = 32
+        BATCH_SIZE = 32
+        HIDDEN_SIZE = 128
 
     test_dict = [
         test_linear,
@@ -67,8 +94,6 @@ def main(argv=None, namespace=None):
         test_layernorm_mlp,
         test_transformer_layer,
     ]
-
-    FP8 = args.fp8
 
     for test in test_dict:
         test()
@@ -124,11 +149,10 @@ def dist_print(msg, src=None, end="\n", error=False):
     stream = sys.stderr if error else sys.stdout
     if WORLD_RANK == (0 if src is None else src):
         stream.write(f"[rank{WORLD_RANK}] {msg}{end}\n")
-    dist.barrier()
 
 
 def _get_tolerances(dtype):
-    if FP8:
+    if QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
 
     if dtype == torch.float16:
@@ -153,8 +177,7 @@ def _check_outputs(output_single_node, output_distributed):
         dist_print(output_info, src=WORLD_RANK, error=output_failed)
     numerics_failed[0] = int(output_failed)
     dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
-    if bool(numerics_failed.item()):
-        sys.exit(1)
+    assert not bool(numerics_failed.item())
 
 
 def _match_param_sizes(dist_param, single_param):
@@ -213,13 +236,12 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
             )
 
         if grad_failed:
-            dist_print(i)
-            dist_print(name)
+            dist_print(i, src=WORLD_RANK)
+            dist_print(name, src=WORLD_RANK)
             dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
         numerics_failed[0] = int(grad_failed)
         dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
-        if bool(numerics_failed.item()):
-            sys.exit(1)
+        assert not bool(numerics_failed.item())
 
 
 def _copy_params(model_distributed, model_single):
@@ -243,9 +265,18 @@ def _apply_models(
     model_single_node, model_distributed, input_single_node, input_distributed, **kwargs
 ):
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
-    with te.fp8_autocast(enabled=FP8, fp8_recipe=fp8_recipe):
+    input_single_node.requires_grad_()
+    input_distributed.requires_grad_()
+    with te.fp8_autocast(
+        enabled=QUANTIZATION is not None,
+        fp8_recipe=quantization_recipe(),
+    ):
         output_single_node = model_single_node(input_single_node, **kwargs)
-    with te.fp8_autocast(enabled=FP8, fp8_recipe=fp8_recipe, fp8_group=NCCL_WORLD):
+    with te.fp8_autocast(
+        enabled=QUANTIZATION is not None,
+        fp8_recipe=quantization_recipe(),
+        fp8_group=NCCL_WORLD,
+    ):
         output_distributed = model_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed
 
@@ -544,9 +575,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     """
     # Set parameter data type
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = (
-        64 if FP8 else 32
-    )  # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
     model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
@@ -636,9 +665,7 @@ def test_layernorm_mlp():
 @run_distributed_test()
 def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = (
-        64 if FP8 else 32
-    )  # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     model_single_node = te.TransformerLayer(
         HIDDEN_SIZE, FFN_HIDDEN_SIZE, NR_HEADS, attention_dropout=0, hidden_dropout=0, **kwargs

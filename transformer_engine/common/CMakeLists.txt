@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,13 +6,17 @@ cmake_minimum_required(VERSION 3.21)
 
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G")
+  set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G")
 endif()
 
 # Hide non-necessary symbols in shared object.
@@ -30,14 +34,14 @@ endif()
 
 # cuDNN frontend API
 set(CUDNN_FRONTEND_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/include")
 if(NOT EXISTS "${CUDNN_FRONTEND_INCLUDE_DIR}")
     message(FATAL_ERROR
-            "Could not find cuDNN frontend API. "
+            "Could not find cuDNN frontend API at ${CUDNN_FRONTEND_INCLUDE_DIR}. "
             "Try running 'git submodule update --init --recursive' "
             "within the Transformer Engine source.")
 endif()
-include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
 
 # Python
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
@@ -61,21 +65,24 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
+     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
-     layer_norm/ln_api.cpp
-     layer_norm/ln_bwd_semi_cuda_kernel.cu
-     layer_norm/ln_fwd_cuda_kernel.cu
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
+     normalization/layernorm/ln_fwd_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_api.cpp
+     normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
+     normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     rmsnorm/rmsnorm_api.cpp
-     rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
-     rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
      util/system.cpp
+     swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu

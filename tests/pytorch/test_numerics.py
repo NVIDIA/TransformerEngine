@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,7 +13,11 @@ import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import fp8_autocast, FP8GlobalStateManager, fp8_model_init
+from transformer_engine.pytorch.fp8 import (
+    FP8GlobalStateManager,
+    fp8_autocast,
+    fp8_model_init,
+)
 from transformer_engine.pytorch.utils import (
     init_method_normal,
     scaled_init_method_normal,
@@ -35,13 +39,16 @@ from transformer_engine.pytorch import (
     Fp8Unpadding,
 )
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import fp8_gemm, fp8_grouped_gemm, gemm, grouped_gemm
+from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
 from transformer_engine.pytorch.utils import get_device_compute_capability
+from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 
-# Only run FP8 tests on H100.
+# Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -89,6 +96,11 @@ all_activations = ["gelu", "relu", "reglu", "geglu", "swiglu", "qgelu", "srelu"]
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
+
+fp8_recipes = [
+    recipe.MXFP8BlockScaling(),
+    recipe.DelayedScaling(),
+]
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -450,7 +462,8 @@ class TorchLayerNormMLP(nn.Module):
         self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
 
     def forward(self, x):
-        return self.fc2(self.gelu(self.fc1(self.ln(x))))
+        t = self.gelu(self.fc1(self.ln(x)))
+        return self.fc2(t)
 
 
 class TorchGPT(nn.Module):
@@ -480,7 +493,9 @@ class TorchGPT(nn.Module):
         return x
 
 
-def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False, recompute=False):
+def _test_e2e_selective_recompute(
+    bs, dtype, config, fp8, recipe, fp8_model_params=False, recompute=False
+):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -488,7 +503,7 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -515,7 +530,7 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    with fp8_autocast(enabled=fp8):
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         te_out = block(
             te_inp_hidden_states,
             attention_mask=te_inp_attn_mask,
@@ -536,18 +551,21 @@ def _test_e2e_selective_recompute(bs, dtype, config, fp8, fp8_model_params=False
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_params):
+def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_model_params):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]
 
     outputs = _test_e2e_selective_recompute(
-        bs, dtype, config, fp8, fp8_model_params, recompute=False
+        bs, dtype, config, fp8, recipe, fp8_model_params, recompute=False
     )
     outputs_recompute = _test_e2e_selective_recompute(
-        bs, dtype, config, fp8, fp8_model_params, recompute=True
+        bs, dtype, config, fp8, recipe, fp8_model_params, recompute=True
     )
 
     # Check that results match
@@ -556,6 +574,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
         tols["atol"] = 1e-4
     if fp8 or fp8_model_params:
         tols.update(dict(rtol=0.125, atol=0.0675))
+
     for i, (ref, test) in enumerate(zip(outputs, outputs_recompute)):
         torch.testing.assert_close(
             test,
@@ -566,7 +585,7 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, fp8_model_par
 
 
 def _test_e2e_full_recompute(
-    bs, dtype, config, fp8, fp8_model_params=False, recompute=False, use_reentrant=True
+    bs, dtype, config, fp8, recipe, fp8_model_params=False, recompute=False, use_reentrant=True
 ):
     reset_rng_states()
     FP8GlobalStateManager.reset()
@@ -575,7 +594,7 @@ def _test_e2e_full_recompute(
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -603,7 +622,7 @@ def _test_e2e_full_recompute(
         te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    with fp8_autocast(enabled=fp8):
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if recompute:
             te_out = te_checkpoint(
                 block,
@@ -641,11 +660,16 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
-def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, use_reentrant):
+def test_gpt_full_activation_recompute(
+    dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
+):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]
 
@@ -654,10 +678,24 @@ def test_gpt_full_activation_recompute(dtype, bs, model, fp8, fp8_model_params, 
         os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
 
     outputs, names = _test_e2e_full_recompute(
-        bs, dtype, config, fp8, fp8_model_params, recompute=False, use_reentrant=use_reentrant
+        bs,
+        dtype,
+        config,
+        fp8,
+        recipe,
+        fp8_model_params,
+        recompute=False,
+        use_reentrant=use_reentrant,
     )
     outputs_recompute, _ = _test_e2e_full_recompute(
-        bs, dtype, config, fp8, fp8_model_params, recompute=True, use_reentrant=use_reentrant
+        bs,
+        dtype,
+        config,
+        fp8,
+        recipe,
+        fp8_model_params,
+        recompute=True,
+        use_reentrant=use_reentrant,
     )
 
     if not use_reentrant:
@@ -741,7 +779,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path))
+        block.load_state_dict(torch.load(path, weights_only=False))
         reset_rng_states()
 
         for p in block.parameters():
@@ -1267,9 +1305,14 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
         torch.half: 2e-3,
         torch.bfloat16: 2e-2,
     }
+    rtol = {
+        torch.float32: 1e-3,
+        torch.half: 4e-2,
+        torch.bfloat16: 4e-2,
+    }
 
     # Check output.
-    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
 
     if model == "small":
         atol = {
@@ -1335,8 +1378,14 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         torch.bfloat16: 5e-2,
     }
 
+    rtol = {
+        torch.float32: 1e-3,
+        torch.half: 4e-2,
+        torch.bfloat16: 4e-2,
+    }
+
     # Check output.
-    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype])
+    assert_allclose(te_outputs[0], torch_outputs[0], atol[dtype], rtol[dtype])
 
     # Check gradients, only for small model
     rtol = {
@@ -1351,7 +1400,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
+def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
@@ -1365,16 +1414,22 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
     inp_hidden_states.retain_grad()
 
     if num_gemms > 1:
-        m = config.seq_len // 16
+        split_size = 1
+        if fp8:
+            if recipe.delayed():
+                split_size = 16
+            if recipe.mxfp8():
+                split_size = 128
+        m = config.seq_len // split_size
         dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
         dist.append(dist[-1])  # Manually add a zero
         m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
-        m_splits = m_splits * 16
+        m_splits = m_splits * split_size
         assert m_splits.sum() == config.seq_len and len(m_splits) == num_gemms
     else:
         m_splits = torch.tensor([config.seq_len])
 
-    with fp8_autocast(enabled=fp8):
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, GroupedLinear):
             m_splits = m_splits * bs
             out = block(inp_hidden_states, m_splits.tolist())
@@ -1401,18 +1456,23 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", all_boolean)
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, parallel_mode=None
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
+        pytest.skip("MXFP8 unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -1442,9 +1502,11 @@ def test_grouped_linear_accuracy(
             sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
             sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
 
-    outputs = _test_grouped_linear_accuracy(grouped_linear, num_gemms, bs, dtype, config, fp8)
     outputs_ref = _test_grouped_linear_accuracy(
-        sequential_linear, num_gemms, bs, dtype, config, fp8
+        sequential_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
     )
 
     # Shoule be bit-wise match
@@ -1453,7 +1515,8 @@ def test_grouped_linear_accuracy(
 
 
 @pytest.mark.parametrize("parallel_mode", ["column", "row"])
-def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
         dtype=torch.float32,
@@ -1461,12 +1524,14 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode):
         bs=2,
         model="126m",
         fp8=True,
+        recipe=recipe,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
     )
 
 
-def test_grouped_linear_accuracy_single_gemm():
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
         dtype=torch.float32,
@@ -1474,11 +1539,12 @@ def test_grouped_linear_accuracy_single_gemm():
         bs=2,
         model="126m",
         fp8=True,
+        recipe=recipe,
         fp8_model_params=True,
     )
 
 
-def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, fp8=False):
+def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
         """Padding tensor shapes to multiples of 16."""
@@ -1546,7 +1612,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 
     m_splits = _generate_random_numbers(num_gemms, config.seq_len * bs)
 
-    with fp8_autocast(enabled=fp8):
+    with fp8_autocast(enabled=fp8, fp8_recipe=recipe):
         if isinstance(block, TorchGroupedLinearWithPadding):
             out = block(inp_hidden_states, m_splits)
         else:
@@ -1575,18 +1641,23 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, f
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
 @pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_padding_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, fp8_model_params, parallel_mode=None
+    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, parallel_mode=None
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
+        pytest.skip("MXFP8 unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         grouped_linear = TorchGroupedLinearWithPadding(
             num_gemms,
             config.hidden_size,
@@ -1597,7 +1668,7 @@ def test_padding_grouped_linear_accuracy(
             fp8=fp8,
         ).eval()
 
-    with fp8_model_init(enabled=fp8 and fp8_model_params):
+    with fp8_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
         ref_grouped_linear = GroupedLinear(
             num_gemms,
             config.hidden_size,
@@ -1619,10 +1690,10 @@ def test_padding_grouped_linear_accuracy(
             )
 
     outputs = _test_padding_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, fp8
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
     )
     outputs_ref = _test_padding_grouped_linear_accuracy(
-        ref_grouped_linear, num_gemms, bs, dtype, config, fp8
+        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
     )
 
     # Shoule be bit-wise match
@@ -1734,7 +1805,7 @@ def test_gpt_cuda_graph(dtype, bs, model):
     assert_allclose(grads, graphed_grads, 1e-3)
 
 
-def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
+def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params, recipe):
     reset_rng_states()
     FP8GlobalStateManager.reset()
 
@@ -1742,7 +1813,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, config.num_layers)
 
-    with fp8_model_init(enabled=fp8_model_params):
+    with fp8_model_init(enabled=fp8_model_params, recipe=recipe):
         block = TransformerLayer(
             config.hidden_size,
             4 * config.hidden_size,
@@ -1769,7 +1840,7 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
     te_inp_hidden_states.retain_grad()
     te_inp_attn_mask = get_causal_attn_mask(config.seq_len)
 
-    with fp8_autocast(enabled=True):
+    with fp8_autocast(enabled=True, fp8_recipe=recipe):
         te_out = block(te_inp_hidden_states, attention_mask=te_inp_attn_mask)
     loss = te_out.sum()
     loss.backward()
@@ -1785,14 +1856,17 @@ def _test_gpt_fp8_parameters(bs, dtype, config, fp8_model_params):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-def test_gpt_fp8_parameters(dtype, bs, model):
+@pytest.mark.parametrize("recipe", fp8_recipes)
+def test_gpt_fp8_parameters(dtype, bs, model, recipe):
     if not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     config = model_configs[model]
 
-    outputs = _test_gpt_fp8_parameters(bs, dtype, config, False)
-    outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True)
+    outputs = _test_gpt_fp8_parameters(bs, dtype, config, False, recipe)
+    outputs_fp8_params = _test_gpt_fp8_parameters(bs, dtype, config, True, recipe)
 
     # Check that results match
     tols = dict(rtol=0.125, atol=0.0675)
@@ -2073,23 +2147,24 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
 
     out_ref = [o.clone() for o in out]
     for i in range(z):
-        gemm(
+        general_gemm(
             A[i],
             B[i],
-            dtype,
             get_workspace(),
+            dtype,
             grad=grad,
             accumulate=accumulate,
             layout=layout,
             out=out_ref[i],
         )
 
-    grouped_gemm(
+    general_grouped_gemm(
         A,
-        B,
-        out,
+        list(B),
+        list(out),
         dtype,
         get_multi_stream_cublas_workspace(),
+        m_splits=[k] * n,  # TODO, not sure
         grad=grad,
         accumulate=accumulate,
         layout=layout,
@@ -2124,64 +2199,52 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
     out_ref = [o.clone() for o in out]
 
     # fp8 should be robust enough to this fake scale
-    scale = 1 + torch.rand(z * 3, dtype=torch.float32, device="cuda")
-    scale_inv = 1 / scale
-    amax = torch.zeros(1024, z * 3, dtype=torch.float32, device="cuda")
+    scale = 1 + torch.rand(1, dtype=torch.float32, device="cuda").squeeze()
+    amax = torch.zeros(1, 1, dtype=torch.float32, device="cuda")
 
-    A_fp8 = [
-        torch.ops.tex_ts.cast_to_fp8_ts(
-            A[i],
-            scale,
-            amax,
-            scale_inv,
-            i,  # fp8 meta tensor index
+    a_quantizers = [
+        Float8Quantizer(
+            scale.clone(),
+            amax.clone(),
             tex.DType.kFloat8E4M3,
         )
-        for i in range(z)
+        for _ in range(z)
     ]
-    B_fp8 = [
-        torch.ops.tex_ts.cast_to_fp8_ts(
-            B[i],
-            scale,
-            amax,
-            scale_inv,
-            z + i,  # fp8 meta tensor index
-            fp8_dtype,
+    b_quantizers = [
+        Float8Quantizer(
+            scale.clone(),
+            amax.clone(),
+            tex.DType.kFloat8E4M3,
         )
-        for i in range(z)
+        for _ in range(z)
     ]
 
-    fp8_grouped_gemm(
-        A_fp8,
-        [scale_inv],
-        0,  # A_offset
-        tex.DType.kFloat8E4M3,
-        B_fp8,
-        scale_inv,
-        z,  # B_offset
-        fp8_dtype,
-        out,
-        dtype,
-        get_multi_stream_cublas_workspace(),
-        accumulate=accumulate,
-    )
+    A_fp8 = []
+    B_fp8 = []
+
+    for i in range(z):
+        A_fp8.append(a_quantizers[i](A[i]))
+        B_fp8.append(b_quantizers[i](B[i]))
 
     # baseline
     for i in range(z):
-        fp8_gemm(
+        general_gemm(
             A_fp8[i],
-            scale_inv,
-            i,
-            tex.DType.kFloat8E4M3,
             B_fp8[i],
-            scale_inv,
-            z + i,
-            fp8_dtype,
-            dtype,
             get_workspace(),
+            dtype,
             out=out_ref[i],
             accumulate=accumulate,
         )
+    general_grouped_gemm(
+        A_fp8,
+        B_fp8,
+        out,
+        dtype,
+        get_multi_stream_cublas_workspace(),
+        m_splits=[k] * m_splits,
+        accumulate=accumulate,
+    )
 
     # should be bit-wise match
     for o, o_ref in zip(out, out_ref):

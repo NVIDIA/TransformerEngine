@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -41,8 +41,6 @@ pyTorch
 .. autoapifunction:: transformer_engine.pytorch.fp8_model_init
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
-
-.. autoapifunction:: transformer_engine.pytorch.onnx_export
 
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 

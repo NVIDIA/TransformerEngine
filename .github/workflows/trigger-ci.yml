@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -40,6 +40,9 @@ jobs:
            || github.actor == 'vasunvidia'
            || github.actor == 'erhoo82'
            || github.actor == 'kocchop'
+           || github.actor == 'youngeunkwon0405'
+           || github.actor == 'KshitijLakhani'
+           || github.actor == 'jberchtold-nvidia'
          )
     steps:
       - name: Check if comment is issued by authorized person

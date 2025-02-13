@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -354,11 +354,6 @@ def fp8_autocast(
     assert (
         fp8_recipe.scaling_factor_compute_algo is None
     ), "DelayedScaling scaling_factor_compute_algo isn't supported by TE/JAX."
-    assert fp8_recipe.override_linear_precision == (
-        False,
-        False,
-        False,
-    ), "DelayedScaling override_linear_precision isn't supported by TE/JAX."
     assert fp8_recipe.reduce_amax, "DelayedScaling reduce_amax should be enabled for TE/JAX."
 
     if mesh_resource is None:

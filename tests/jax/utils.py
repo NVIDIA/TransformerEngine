@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Utility for the TE layer tests"""
@@ -19,7 +19,11 @@ from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
 
-from transformer_engine.jax.attention import AttnMaskType, make_swa_mask
+from transformer_engine.jax.attention import (
+    AttnMaskType,
+    canonicalize_attn_mask_type,
+    make_swa_mask,
+)
 from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
@@ -913,24 +917,16 @@ def apply_swa_mask(
     window_size: Tuple[int, int] = (-1, -1),
 ) -> Array:
     """Apply the sliding window mask to a given mask"""
-    mask_map = {
-        "no_mask": AttnMaskType.NO_MASK,
-        "padding": AttnMaskType.PADDING_MASK,
-        "causal": AttnMaskType.CAUSAL_MASK,
-        "padding_causal": AttnMaskType.PADDING_CAUSAL_MASK,
-        "causal_bottom_right": AttnMaskType.CAUSAL_BOTTOM_RIGHT_MASK,
-        "padding_causal_bottom_right": AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK,
-    }
-    _attn_mask_type = mask_map.get(attn_mask_type, None)
+    _attn_mask_type = canonicalize_attn_mask_type(attn_mask_type)
     assert _attn_mask_type is not None
+    batch = original_mask.shape[0]
     max_seqlen_q = original_mask.shape[-2]
     max_seqlen_kv = original_mask.shape[-1]
-    swa_mask = make_swa_mask(
-        max_seqlen_q, max_seqlen_kv, window_size, _attn_mask_type, dtype=original_mask.dtype
-    )
+    pos_q = jnp.broadcast_to(jnp.arange(max_seqlen_q), (batch, max_seqlen_q))
+    pos_kv = jnp.broadcast_to(jnp.arange(max_seqlen_kv), (batch, max_seqlen_kv))
+    swa_mask = make_swa_mask(pos_q, pos_kv, window_size, original_mask.dtype)
     # In swa_mask and original_mask 0 is masked out
-    swa_mask_bcast = jnp.broadcast_to(swa_mask, original_mask.shape)
-    new_mask = jnp.where(original_mask == 1, swa_mask_bcast, original_mask)
+    new_mask = jnp.where(original_mask == 1, swa_mask, original_mask)
     return new_mask
 
 
@@ -1391,17 +1387,25 @@ def assert_tree_like_allclose(expected, actual, rtol=1e-05, atol=1e-08):
 def dtype_tols(
     dtype: Union[DType, TEDType, np.dtype],
     reference_value: float = 1.0,
+    rtol: Optional[float] = None,
+    atol: Optional[float] = None,
 ) -> Dict[str, float]:
     """Expected numerical tolerance for a data type.
 
     Args:
       dtype: data type.
       reference_value: reference value (default: 1).
+      rtol: override for relative tolerance estimate
+      atol: override for absolute tolerance estimate
 
     Returns:
       Dictionary with "rtol" and "atol" as keys
 
     """
+
+    # Return immediately if tolerances are fully specified
+    if rtol is not None and atol is not None:
+        return {"rtol": rtol, "atol": atol}
 
     # Convert to JAX dtype if needed
     if isinstance(dtype, TEDType):
@@ -1420,7 +1424,11 @@ def dtype_tols(
 
     # Expect bit-wise accuracy for integer dtypes
     if not jnp.issubdtype(dtype, jnp.floating):
-        return dict(rtol=0, atol=0)
+        if rtol is None:
+            rtol = 0.0
+        if atol is None:
+            atol = 0.0
+        return {"rtol": rtol, "atol": atol}
 
     # Estimate floating-point error
     finfo = jnp.finfo(dtype)
@@ -1433,10 +1441,11 @@ def dtype_tols(
         spacing_high = jnp.nextafter(reference_value, finfo.max) - reference_value
         spacing_low = reference_value - jnp.nextafter(reference_value, finfo.min)
         ulp = max(spacing_high.item(), spacing_low.item())
-    return dict(
-        rtol=eps_relaxed,
-        atol=max(ulp, eps_relaxed),
-    )
+    if rtol is None:
+        rtol = eps_relaxed
+    if atol is None:
+        atol = max(ulp, eps_relaxed)
+    return {"rtol": rtol, "atol": atol}
 
 
 def sync_params_values(dst, src, transformations, sep="/"):
