@@ -987,7 +987,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.weight_dtype
+                1.0, "fan_in", "normal", self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1341,6 +1341,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_bias_type=self.attn_bias_type,
             attention_dropout=self.attention_dropout,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_logits,
             qkv_layout=qkv_layout.name,
@@ -1459,7 +1460,7 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
             "rel_embedding",
             self.embedding_init,
             (self.num_attention_heads, self.num_buckets),
-            self.dtype,
+            self.weight_dtype,
             axes=self.embedding_axes,
         )
 
@@ -1793,6 +1794,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                     max_distance=128,
                     num_attention_heads=self.num_attention_heads,
                     dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
                     embedding_init=nn.initializers.variance_scaling(1.0, "fan_avg", "uniform"),
                     name="relpos_bias",
                 )
@@ -1826,6 +1828,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         x, ln_out = MultiHeadAttention(
             num_attention_heads=self.num_attention_heads,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             head_dim=head_dim,
             num_gqa_groups=self.num_gqa_groups,
             transpose_batch_sequence=self.transpose_batch_sequence,
@@ -1904,6 +1907,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             y, ln_out = MultiHeadAttention(
                 num_attention_heads=self.num_attention_heads,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 head_dim=head_dim,
                 num_gqa_groups=self.num_gqa_groups,
                 transpose_batch_sequence=self.transpose_batch_sequence,
@@ -2019,6 +2023,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_axes=(W_NO_SHARD_AXES,),
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 name="output_layernorm",
             )(z)
 
