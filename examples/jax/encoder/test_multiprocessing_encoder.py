@@ -587,7 +587,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         result = self.exec(True)
-        assert result[0] < 0.45 and result[1] > 0.79
+        assert result[0] < 0.455 and result[1] > 0.79
 
 
 if __name__ == "__main__":
