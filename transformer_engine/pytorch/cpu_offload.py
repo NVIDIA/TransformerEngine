@@ -381,7 +381,6 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     if self.tensor_need_offloading_checker(tensor_on_device):
                         state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         self.tensor_tag_to_state[tensor_tag] = state
-                        tensor_on_device.data = torch.Tensor()  # Force to release memory
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
