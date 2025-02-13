@@ -1598,7 +1598,7 @@ class _FusedAttnCPWithP2PHelper:
             return val.lower() in ["1", "true"]
 
         x = use_scan and get_xla_flag(
-            "--xla_experimental_ignore_channel_id", default=False, cast=truthy
+            "--xla_ignore_channel_id", default=False, cast=truthy
         )
         return x
 
