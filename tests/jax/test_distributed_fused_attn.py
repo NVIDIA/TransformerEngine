@@ -388,7 +388,8 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.RING,
         )
-        del os.environ["NVTE_FUSED_RING_ATTENTION"]
+        if use_scan:
+            del os.environ["NVTE_FUSED_RING_ATTENTION"]
 
 
 class TestReorderCausalLoadBalancing:
