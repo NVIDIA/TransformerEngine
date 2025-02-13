@@ -986,10 +986,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )
 
         if self.kernel_init is None:
-            _kernel_init = nn.initializers.variance_scaling(
+            self.kernel_init = nn.initializers.variance_scaling(
                 1.0, "fan_in", "normal", dtype=self.init_dtype
             )
-            self.kernel_init = _kernel_init.astype(self.dtype)
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
