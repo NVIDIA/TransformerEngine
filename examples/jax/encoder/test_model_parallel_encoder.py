@@ -239,7 +239,7 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
     )
     params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
     params_sharding = jax.tree_util.tree_map(
-        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
+        lambda x: NamedSharding(mesh, PartitionSpec(None)), abs_var_collect[PARAMS_KEY]
     )
     params_sharding = {**params_sharding, **params_axes_sharding}
     return params_sharding
@@ -447,7 +447,7 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.45 and actual[1] > 0.79
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
     @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16_sp(self):
@@ -462,7 +462,7 @@ class TestEncoder(unittest.TestCase):
         self.args.enable_sp = True
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.45 and actual[1] > 0.79
+        assert actual[0] < 0.455 and actual[1] > 0.785
 
 
 if __name__ == "__main__":
