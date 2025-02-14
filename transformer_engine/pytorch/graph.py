@@ -254,7 +254,7 @@ def _make_graphed_callables(
                     hooks.append(hook)
                 print(len(args), [x.shape for x in args])
                 print(len(args), [x.dtype for x in args])
-                print(args[0][8,0,:4])
+                #print(args[0][8,0,:4])
                 print(kwargs)
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:

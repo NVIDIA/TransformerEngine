@@ -1219,6 +1219,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         self.cache_manager.allocate_memory(layer_number)
         if qkv_format == 'thd': #self.is_cuda_graph:
             #self.max_seqlen_q = self.max_seqlen_kv
+            self.q_orig = {}
             self.q_buffer = {}
             self.q_buffer[layer_number] = torch.zeros(
                 self.max_batch_size,
@@ -1463,44 +1464,52 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         #actual_batch_size = len(self.step_dict)
         #seqlens_q = list(self.step_dict.values())
         #cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size + 1)]
-        print('qkv_foramt', qkv_format)
+        #print('qkv_foramt', qkv_format)
         #print('qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
         #print('qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
         seqlens_q = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
         batch_size = len(seqlens_q)
+        self.q_orig[layer_number] = q
         if qkv_format == "bshd":
-            q = q.contiguous()
+            q_buffer = q.contiguous()
+            max_seqlen_q = q_buffer.shape[1]
         if qkv_format == "sbhd":
-            q = q.transpose(0, 1).contiguous()
-        max_seqlen_q = q.shape[1]
+            q_buffer = q.transpose(0, 1).contiguous()
+            max_seqlen_q = q_buffer.shape[1]
         if qkv_format == "thd":
             #print('---qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
             #print('---qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
             q_buffer = self.q_buffer[layer_number]
+            #q_buffer_copy = self.q_buffer[layer_number].clone()
             ##for i in range(actual_batch_size):
             #for i in range(batch_size):
             #    q_buffer[i, : seqlens_q[i], :, :] = q[self.cu_seqlens_q[i] : self.cu_seqlens_q[i + 1], :, :]
-            #q = q_buffer
+            ##q = q_buffer
             max_seqlen_q = self.max_ctx_len
+
             #max_seqlen_kv = self.max_seqlen_kv
             step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
-            seq_lens = self.cu_seqlens_kv[1:] - self.cu_seqlens_kv[:-1]
-            max_ctx_len=q.shape[1] #64
-            max_seq_len=q_buffer.shape[1] #64 #128
-            max_ctx_tokens=q.shape[0]
-            max_tokens=q_buffer.shape[0]*q_buffer.shape[1]
+            #seq_lens = self.cu_seqlens_kv[1:] - self.cu_seqlens_kv[:-1]
+            max_ctx_len=q.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+            max_seq_len=self.max_ctx_len #q_buffer.shape[1] #64 #128
+            #max_ctx_tokens=q.shape[0]
+            #max_tokens=q_buffer.shape[0]*q_buffer.shape[1]
             #print('---++qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
             #print('---++qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
             #print(q_buffer.shape)
-            #print(step_lens, seq_lens, QKVFormat[qkv_format])
-            #print(self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
-            #    max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+            #print(self.cu_seqlens_q, self.cu_seqlens_kv, step_lens, seq_lens, QKVFormat[qkv_format])
+            print('q xxxxxxxxxxxx ',self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
+                max_ctx_len, max_seq_len)#, max_ctx_tokens, max_tokens)
             # TODO: batch_indices
             tex.copy_to_kv_cache_non_paged(
                 q, self.q_dummy, q_buffer, self.q_dummy,
-                self.batch_indices, step_lens, seq_lens,
+                self.batch_indices, step_lens, step_lens,
                 QKVFormat[qkv_format], self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
-                max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+                max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
+            #q = q_buffer
+            #q_buffer = q_buffer_copy
+            #torch.save(q_buffer, 'q_buffer.pt')
+            #torch.save(q_buffer_copy, 'q_buffer_copy.pt')
             #q = q_buffer
             #print('qqqqqqqq', q_buffer.shape, q_buffer.dtype, q_buffer[:2, 8:10, 0, :4])
 
@@ -8238,10 +8247,32 @@ class DotProductAttention(TransformerEngineBaseModule):
                 if inference_params.input_qkv_format == "sbhd":
                     output = output[:batch_size, :max_seqlen_q].transpose(0, 1).contiguous()
                 if inference_params.input_qkv_format == "thd":
-                    packed_output = torch.Tensor().to(dtype=output.dtype, device=output.device)
-                    for i in range(batch_size):
-                        packed_output = torch.cat([packed_output, output[i, : step_lens[i]]], dim=0)
-                    output = packed_output.contiguous()
+                    output_buffer = inference_params.q_orig[self.layer_number]
+                    #packed_output = torch.Tensor().to(dtype=output.dtype, device=output.device)
+                    #for i in range(batch_size):
+                    #    packed_output = torch.cat([packed_output, output[i, : step_lens[i]]], dim=0)
+                    #output = packed_output.contiguous()
+
+                    #max_seqlen_kv = self.max_seqlen_kv
+                    step_lens = inference_params.cu_seqlens_q[1:] - inference_params.cu_seqlens_q[:-1]
+                    #seq_lens = self.cu_seqlens_kv[1:] - self.cu_seqlens_kv[:-1]
+                    max_ctx_len=1 #output.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+                    max_seq_len=inference_params.max_ctx_len #q_buffer.shape[1] #64 #128
+                    #max_ctx_tokens=q.shape[0]
+                    #max_tokens=q_buffer.shape[0]*q_buffer.shape[1]
+                    #print('---++qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
+                    #print('---++qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
+                    #print(q_buffer.shape)
+                    #print(self.cu_seqlens_q, self.cu_seqlens_kv, step_lens, seq_lens, QKVFormat[qkv_format])
+                    #print('o xxxxxxxxxxxx ',step_lens, #self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
+                    #    max_ctx_len, max_seq_len, output.shape, output_buffer.shape)#, max_ctx_tokens, max_tokens)
+                    # TODO: batch_indices
+                    tex.copy_to_kv_cache_non_paged(
+                        inference_params.q_dummy, output, inference_params.q_dummy, output_buffer,
+                        inference_params.batch_indices, step_lens, step_lens,
+                        QKVFormat[qkv_format], inference_params.num_heads_q, inference_params.head_dim_q, inference_params.head_dim_q, inference_params.max_batch_size,
+                        max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
+                    output = output_buffer.view(output_buffer.shape[0], -1)
 
             return output
 

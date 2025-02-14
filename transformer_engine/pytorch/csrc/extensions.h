@@ -42,8 +42,7 @@ void copy_to_kv_cache_non_paged(
         torch::Tensor seq_lens,
         NVTE_QKV_Format qkv_format,
         int h_kv, int d_k, int d_v,
-        int b, int max_ctx_len, int max_seq_len,
-        int max_ctx_tokens, int max_tokens);
+        int b, int max_ctx_len, int max_seq_len);
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
                                                const transformer_engine::DType kv_dtype,

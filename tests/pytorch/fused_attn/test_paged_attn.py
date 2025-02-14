@@ -210,7 +210,7 @@ class Simulation:
 @pytest.mark.parametrize("qkv_format", ["thd"])#qkv_formats)
 @pytest.mark.parametrize("is_paged", [False])#, True])
 @pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("is_cuda_graph", [True])#False])#, True])
+@pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
     logger = logging.getLogger("test_paged_attn")
@@ -353,7 +353,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             )
             for _ in range(3)
         ]
-        print(aa[0].shape, aa[0][8,0,:4])
+        #print(aa[0].shape, aa[0][8,0,:4])
         #aa.extend([model_config.sequence_length, model_config.sequence_length])
         return aa
 
@@ -397,7 +397,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         model = make_graphed_callables(
             model,
             generate_data(config, dtype, warmup=True, qkv_format=qkv_format),
-            num_warmup_iters=10,
+            num_warmup_iters=3, #10,
             fp8_enabled=False,
             #sample_kwargs={"qkv_format":"thd"},
             sample_kwargs=gen_cu(config, dtype),
@@ -460,6 +460,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     dim=0,
                 )
             if is_cuda_graph:
+                print('incremental qkv shapes ', [x.shape for x in [incremental_q, incremental_k, incremental_v]])
                 incremental_q = torch.cat([incremental_q, torch.zeros([max_tokens - sum(sim.step_lens), config.num_heads, config.head_dim_qk], dtype=dtype, device=incremental_q.device)], dim=0)
                 incremental_k = torch.cat([incremental_k, torch.zeros([max_tokens - sum(sim.step_lens), config.num_gqa_groups, config.head_dim_v], dtype=dtype, device=incremental_k.device)], dim=0)
                 incremental_v = torch.cat([incremental_v, torch.zeros([max_tokens - sum(sim.step_lens), config.num_gqa_groups, config.head_dim_v], dtype=dtype, device=incremental_v.device)], dim=0)
@@ -509,8 +510,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         cu_seqlens_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_kv[1 : sim.t_batch_size + 1] = torch.cumsum(sim.t_total_lens, dim=0)
         print('qkv_format' ,qkv_format, cu_seqlens_q, cu_seqlens_kv)
-        print("q[1, 8:10, :2, :2]", q[1, 8:10, :2, :2])
-        print("inc_q[18:20, :2, :2]", incremental_q[18:20, :2, :2])
+        #print("q[1, 8:10, :2, :2]", q[1, 8:10, :2, :2])
+        #print("inc_q[18:20, :2, :2]", incremental_q[18:20, :2, :2])
 
         step_dict = OrderedDict(
             zip(sim.t_seq_ids.tolist(), sim.step_lens.tolist())
@@ -593,6 +594,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
+                print('iiii ', i, cu_seqlens_q, sim.t_total_lens)
                 print('thd ', seq, sim.t_total_lens[i], cu_seqlens_q[i + 1])
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(line_output[cu_seqlens_q[i + 1] - 1, :4])

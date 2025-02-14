@@ -22,8 +22,7 @@ __global__ void copy_to_kv_cache_non_paged_kernel(
 		int* seq_lens,
 		NVTE_QKV_Format qkv_format,
 	        int h_kv, int d_k, int d_v,
-                int b, int max_ctx_len, int max_seq_len,
-	        int max_ctx_tokens, int max_tokens) {
+                int b, int max_ctx_len, int max_seq_len) {
   // new_k, new_v: qkv_format; k_cache, v_cache: bshd
   // batch_indices, step_lens, seq_lens: [b + 1]
   if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
@@ -93,8 +92,7 @@ __global__ void copy_to_kv_cache_non_paged_kernel_same_d(
 		int* seq_lens,
 		NVTE_QKV_Format qkv_format,
 	        int h_kv, int d_kv,
-                int b, int max_ctx_len, int max_seq_len,
-	        int max_ctx_tokens, int max_tokens) {
+                int b, int max_ctx_len, int max_seq_len) {
   // new_k, new_v: qkv_format; k_cache, v_cache: bshd
   // batch_indices, step_lens, seq_lens: [b + 1]
   if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
@@ -155,8 +153,7 @@ __global__ void copy_to_kv_cache_non_paged_kernel_q(
 		int* seq_lens,
 		NVTE_QKV_Format qkv_format,
 	        int h_kv, int d_kv,
-                int b, int max_ctx_len, int max_seq_len,
-	        int max_ctx_tokens, int max_tokens) {
+                int b, int max_ctx_len, int max_seq_len) {
   // new_k, new_v: qkv_format; k_cache, v_cache: bshd
   // batch_indices, step_lens, seq_lens: [b + 1]
   if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
@@ -202,6 +199,69 @@ __global__ void copy_to_kv_cache_non_paged_kernel_q(
   }
 }
 template <typename scalar_t>
+__global__ void copy_to_kv_cache_non_paged_kernel_o(
+		scalar_t* output, // output in bshd
+		scalar_t* output_buffer, // output in thd
+		//int* batch_indices,
+		int* step_lens,
+		//int* seq_lens,
+		NVTE_QKV_Format qkv_format,
+	        int h_q, int d_q,
+                int b, int max_seq_len) {
+  // new_k, new_v: qkv_format; k_cache, v_cache: bshd
+  // batch_indices, step_lens, seq_lens: [b + 1]
+  if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int num_elts = step_lens[batch_idx] * h_q * d_q;
+      int output_offset = batch_idx * max_seq_len * h_q * d_q;
+      int output_buffer_offset = 0;
+      for (int t = 0; t < batch_idx; t ++) {
+	output_buffer_offset += step_lens[t];
+      }
+      output_buffer_offset = output_buffer_offset * h_q * d_q;
+      scalar_t* output_token = output + output_offset;
+      scalar_t* output_buffer_token = output_buffer + output_buffer_offset;
+
+      for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
+	if (batch_idx < 2 && i < 3) {
+	printf("h_q %d d_q %d, b %d t %d, output_offset %d output_buffer_offset %d, output_buffer_token + i %p output_token + i %p\n",h_q, d_q,batch_idx, i, output_offset, output_buffer_offset, output_buffer_token + i, output_token + i);
+	}
+        *(output_buffer_token + i) = *(output_token + i);
+      }
+    }
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int output_buffer_offset = 0;
+      for (int t = 0; t < batch_idx; t ++) {
+	output_buffer_offset += step_lens[t];
+      }
+      for (int i = threadIdx.x; i < step_lens[batch_idx]; i += blockDim.x) {
+        for (int j = 0; j < h_q * d_q; j ++) {
+          *(output_buffer + (output_buffer_offset + i) * h_q * d_q + j) = *(output + (i * b + batch_idx) * h_q * d_q +j);
+	}
+      }
+    }
+//  } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+//    // no padding between sequences in new_k and new_v
+//    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+//      int num_elts = step_lens[batch_idx] * h_kv * d_kv;
+//      int new_token_offset = 0;
+//      for (int t = 0; t < batch_idx; t ++) {
+//	new_token_offset += step_lens[t];
+//      }
+//      new_token_offset = new_token_offset * h_kv * d_kv;
+//      int cache_offset = (batch_idx * max_seq_len + seq_lens[batch_idx] - step_lens[batch_idx]) * h_kv * d_kv;
+//
+//      scalar_t* new_k_token = new_k + new_token_offset;
+//      scalar_t* k_cache_token = k_cache + cache_offset;
+//
+//      for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
+//        *(k_cache_token + i) = *(new_k_token + i);
+//      }
+//    }
+  }
+}
+template <typename scalar_t>
 void copy_to_kv_cache_non_paged_launcher(
 	torch::Tensor new_k, torch::Tensor new_v,
 	torch::Tensor k_cache, torch::Tensor v_cache,
@@ -210,9 +270,9 @@ void copy_to_kv_cache_non_paged_launcher(
 	torch::Tensor seq_lens,
 	NVTE_QKV_Format qkv_format,
 	int h_kv, int d_k, int d_v,
-        int b, int max_ctx_len, int max_seq_len,
-	int max_ctx_tokens, int max_tokens) {
+        int b, int max_ctx_len, int max_seq_len) {
   if (new_v.data_ptr() != nullptr && d_k != d_v) {
+	 printf("-------- 1 %p %d %d %d \n", new_v.data_ptr(), h_kv, d_k, d_v);
   copy_to_kv_cache_non_paged_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
@@ -221,9 +281,10 @@ void copy_to_kv_cache_non_paged_launcher(
       batch_indices.data_ptr<int>(),
       step_lens.data_ptr<int>(),
       seq_lens.data_ptr<int>(),
-      qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+      qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len);
   }
-  if (new_v.data_ptr() != nullptr && d_k == d_v) {
+  if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr && d_k == d_v) {
+	 printf("-------- 2 %p %d %d %d \n", new_v.data_ptr(), h_kv, d_k, d_v);
   copy_to_kv_cache_non_paged_kernel_same_d<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
@@ -232,16 +293,27 @@ void copy_to_kv_cache_non_paged_launcher(
       batch_indices.data_ptr<int>(),
       step_lens.data_ptr<int>(),
       seq_lens.data_ptr<int>(),
-      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len);
   }
   if (new_v.data_ptr() == nullptr) {
+	 printf("-------- 3 %p %d %d %d \n", new_v.data_ptr(), h_kv, d_k, d_v);
   copy_to_kv_cache_non_paged_kernel_q<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(k_cache.data_ptr<scalar_t>()),
       batch_indices.data_ptr<int>(),
       step_lens.data_ptr<int>(),
       seq_lens.data_ptr<int>(),
-      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len);
+  }
+  if (new_k.data_ptr() == nullptr) {
+	 printf("-------- 4 %p %d %d %d \n", new_v.data_ptr(), h_kv, d_k, d_v);
+  copy_to_kv_cache_non_paged_kernel_o<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
+      reinterpret_cast<scalar_t*>(v_cache.data_ptr<scalar_t>()),
+      //batch_indices.data_ptr<int>(),
+      step_lens.data_ptr<int>(),
+      //seq_lens.data_ptr<int>(),
+      qkv_format, h_kv, d_k, b, max_seq_len);
   }
 }
 
@@ -253,18 +325,17 @@ void copy_to_kv_cache_non_paged(
 	torch::Tensor seq_lens,
 	NVTE_QKV_Format qkv_format,
 	int h_kv, int d_k, int d_v,
-        int b, int max_ctx_len, int max_seq_len,
-	int max_ctx_tokens, int max_tokens) {
+        int b, int max_ctx_len, int max_seq_len) {
   if (k_cache.scalar_type() == at::ScalarType::Half) {
     using dtype = at::Half;
-    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len);
 
   } else if (k_cache.scalar_type() == at::ScalarType::BFloat16) {
     using dtype = at::BFloat16;
-    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len);
   } else if (k_cache.scalar_type() == at::ScalarType::Float) {
     using dtype = float;
-    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens);
+    copy_to_kv_cache_non_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, batch_indices, step_lens, seq_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len);
   } else {
     NVTE_ERROR("Unsupported dtype.\n");
   }

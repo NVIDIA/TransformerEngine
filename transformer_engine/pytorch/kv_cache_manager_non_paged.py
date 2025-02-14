@@ -181,8 +181,8 @@ class NonPagedKVCacheManager(KVCacheManager):
         #h=self.num_heads #16
         #d=self.head_dim_k #64
         #b=self.max_batch_size #4
-        max_ctx_len=k.shape[1] #64
-        max_seq_len=k_cache.shape[1] #64 #128
+        max_ctx_len=k.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+        max_seq_len=self.max_seqlen #k_cache.shape[1] #64 #128
         max_ctx_tokens=k.shape[0]
         max_tokens=k_cache.shape[0]*k_cache.shape[1]
         print('kv shapes ', [x.shape for x in [k, v, k_cache, v_cache]])
@@ -194,7 +194,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             k, v, k_cache, v_cache,
             self.batch_indices, step_lens, seq_lens,
             QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, self.max_batch_size,
-            max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+            max_ctx_len, max_seq_len)#, max_ctx_tokens, max_tokens)
         return k_cache, v_cache, None
 
 #        #prev_batch_size = len(self.sequences)
