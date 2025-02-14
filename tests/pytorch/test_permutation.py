@@ -198,6 +198,16 @@ def dtype_tols(te_dtype: tex.DType) -> Dict[str, float]:
     raise ValueError(f"Unsuppored dtype ({te_dtype})")
 
 
+def backward_wrapper(
+    act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False
+):
+    # Set forward_input.grad to None to avoid grad accumulation.
+    if accumulate_grad == False:
+        for i in forward_input:
+            i.grad = None
+    return act.backward(backward_input, retain_graph=retain_graph)
+
+
 def _test_permutation_index_map(
     te_dtype,
     num_tokens,
@@ -265,9 +275,9 @@ def _test_permutation_index_map(
         permute_bwd_input = _permute_bwd_input_quantizer(permute_bwd_input)
         unpermute_bwd_input = _unpermute_bwd_quantizer(unpermute_bwd_input)
 
-        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize(dtype=torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize(dtype=torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
@@ -341,10 +351,10 @@ def _test_permutation_index_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize(dtype=torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize(dtype=torch.float32)
+        te_unpermute_output_ = te_unpermute_output.dequantize(dtype=torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize(dtype=torch.float32)
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
@@ -388,15 +398,6 @@ def _test_permutation_index_map(
     # Benchmark
     #
     ###################################################################################################################################
-    def backward_wrapper(
-        act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False
-    ):
-        # Set forward_input.grad to None to avoid grad accumulation.
-        if accumulate_grad == False:
-            for i in forward_input:
-                i.grad = None
-        return act.backward(backward_input, retain_graph=retain_graph)
-
     if BENCHMARK:
         t1 = perf_test_cuda_kernel(
             lambda: pytorch_permute_index_map(pytorch_permute_fwd_input, indices, num_out_tokens)
@@ -528,9 +529,9 @@ def _test_permutation_mask_map(
         permute_bwd_input = _permute_bwd_input_quantizer(permute_bwd_input)
         unpermute_bwd_input = _unpermute_bwd_input_quantizer(unpermute_bwd_input)
 
-        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
-        pytorch_permute_bwd_input = permute_bwd_input.dequantize().to(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize(dtype=torch.float16)
+        pytorch_permute_bwd_input = permute_bwd_input.dequantize(dtype=torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_permute_bwd_input = torch.rand((num_out_tokens, hidden_size), dtype=dtype).cuda()
@@ -609,10 +610,10 @@ def _test_permutation_mask_map(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
-        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize().to(torch.float32)
+        te_permute_output_ = te_permute_output.dequantize(dtype=torch.float32)
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize(dtype=torch.float32)
+        te_unpermute_output_ = te_unpermute_output.dequantize(dtype=torch.float32)
+        te_unpermute_fwd_input_grad = te_unpermute_fwd_input.grad.dequantize(dtype=torch.float32)
     else:
         te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
@@ -657,15 +658,6 @@ def _test_permutation_mask_map(
     # Benchmark
     #
     ###################################################################################################################################
-    def backward_wrapper(
-        act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False
-    ):
-        # Set forward_input.grad to None to avoid grad accumulation.
-        if accumulate_grad == False:
-            for i in forward_input:
-                i.grad = None
-        return act.backward(backward_input, retain_graph=retain_graph)
-
     if BENCHMARK:
         t1 = perf_test_cuda_kernel(
             lambda: pytorch_permute_mask_map(pytorch_permute_fwd_input, routing_map)
@@ -780,8 +772,8 @@ def _test_moe_chunk_sort(
         fwd_input = _fwd_input_quantizer.quantize(fwd_input)
         bwd_input = _bwd_input_quantizer.quantize(bwd_input)
 
-        pytorch_fwd_input = fwd_input.dequantize().to(torch.float16)
-        pytorch_bwd_input = bwd_input.dequantize().to(torch.float16)
+        pytorch_fwd_input = fwd_input.dequantize(dtype=torch.float16)
+        pytorch_bwd_input = bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
@@ -827,8 +819,8 @@ def _test_moe_chunk_sort(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_output_ = te_output.dequantize().to(torch.float32)
-        te_fwd_input_grad = te_fwd_input.grad.dequantize().to(torch.float32)
+        te_output_ = te_output.dequantize(dtype=torch.float32)
+        te_fwd_input_grad = te_fwd_input.grad.dequantize(dtype=torch.float32)
     else:
         te_output_ = te_output.float()
         te_fwd_input_grad = te_fwd_input.grad.float()
@@ -855,15 +847,6 @@ def _test_moe_chunk_sort(
     # Benchmark
     #
     ###################################################################################################################################
-    def backward_wrapper(
-        act, backward_input, forward_input=[], retain_graph=True, accumulate_grad=False
-    ):
-        # Set forward_input.grad to None to avoid grad accumulation.
-        if accumulate_grad == False:
-            for i in forward_input:
-                i.grad = None
-        return act.backward(backward_input, retain_graph=retain_graph)
-
     if BENCHMARK:
         t1 = perf_test_cuda_kernel(
             lambda: pytorch_sort_chunks_by_index(pytorch_fwd_input, split_sizes, sorted_idxs)
@@ -949,8 +932,8 @@ def _test_permutation_mask_map_alongside_probs(
         permute_fwd_input = _permute_fwd_input_quantizer.quantize(permute_fwd_input)
         unpermute_bwd_input = _unpermute_bwd_quantizer.quantize(unpermute_bwd_input)
 
-        pytorch_permute_fwd_input = permute_fwd_input.dequantize().to(torch.float16)
-        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize().to(torch.float16)
+        pytorch_permute_fwd_input = permute_fwd_input.dequantize(dtype=torch.float16)
+        pytorch_unpermute_bwd_input = unpermute_bwd_input.dequantize(dtype=torch.float16)
     else:
         pytorch_permute_fwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
         pytorch_unpermute_bwd_input = torch.rand((num_tokens, hidden_size), dtype=dtype).cuda()
@@ -1046,7 +1029,7 @@ def _test_permutation_mask_map_alongside_probs(
             amax=torch.full([1], 1.0).cuda(),
             fp8_dtype=te_dtype,
         )
-        te_permute_output = te_permute_output.dequantize().to(torch.float32)
+        te_permute_output = te_permute_output.dequantize(dtype=torch.float32)
         te_permute_output = te_permute_output * te_permuted_probs.unsqueeze(-1)
         te_permute_output = _permute_output_quantizer.quantize(te_permute_output)
     else:
@@ -1072,11 +1055,10 @@ def _test_permutation_mask_map_alongside_probs(
     tols = dtype_tols(te_dtype)
 
     if fp8:
-        te_permute_output_ = te_permute_output.dequantize().to(torch.float32)
-        te_permute_fwd_input_grad = te_permute_fwd_input.grad.dequantize().to(torch.float32)
-        te_unpermute_output_ = te_unpermute_output.dequantize().to(torch.float32)
+        # backward of dequantize is in high precision
+        te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
+        te_unpermute_output_ = te_unpermute_output.dequantize(dtype=torch.float32)
     else:
-        te_permute_output_ = te_permute_output.float()
         te_permute_fwd_input_grad = te_permute_fwd_input.grad.float()
         te_unpermute_output_ = te_unpermute_output.float()
 

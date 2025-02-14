@@ -548,7 +548,7 @@ def moe_permute(
 def moe_unpermute(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
-    merging_probs: torch.Tensor = None,
+    probs: torch.Tensor = None,
     restore_shape: torch.Tensor = None,
     map_type: str = "mask",
 ) -> torch.Tensor:
@@ -563,7 +563,7 @@ def moe_unpermute(
     row_id_map: torch.Tensor
         The tensor of a mapping table for sorted indices used to unpermute the tokens,
         which is the second output tensor of `Permute`.
-    merging_probs: torch.Tensor
+    probs: torch.Tensor
         The tensor of probabilities corresponding to the permuted tokens. If provided,
         the unpermuted tokens will be merged with their respective probabilities.
         By default, set to an empty tensor, which means that the tokens are directly merged by accumulation.
@@ -574,9 +574,9 @@ def moe_unpermute(
         Options are: 'mask', 'index'.
     """
     if map_type == "index":
-        return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
+        return _moe_unpermute_index_map.apply(inp, row_id_map, probs)
     if map_type == "mask":
-        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
+        return _moe_unpermute_mask_map.apply(inp, row_id_map, probs, restore_shape)
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
