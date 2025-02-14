@@ -2943,7 +2943,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     dout, fake_dtype=dout_dtype, internal=True
                 )
                 dout = dout.dequantize(dtype=dout_dtype)
-                dout = dout._data
 
         out = out.view(*q.shape)
         dout = dout.view(*q.shape)
