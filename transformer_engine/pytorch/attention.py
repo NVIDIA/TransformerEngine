@@ -4415,7 +4415,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if is_input_fp8:
                 q_save, k_save, v_save = q, k, v
             else:
-                q_save, k_save, v_save, out_save = q_f16, k_f16, v_f16
+                q_save, k_save, v_save = q_f16, k_f16, v_f16
             if is_output_fp8:
                 out_save = out
             else:
