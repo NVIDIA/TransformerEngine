@@ -74,10 +74,10 @@ class Simulation:
         self.seq_ids = torch.range(0, total_requests-1, dtype=torch.int32, device="cpu")
 
         # simulate context lengths in Uniform distribution
-        #self.context_lens = torch.randint(
-        #    1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
-        #)
-        self.context_lens = 10 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        self.context_lens = torch.randint(
+            1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
+        )
+        #self.context_lens = 10 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -85,10 +85,10 @@ class Simulation:
         gen_lens = torch.where(gen_lens > self.max_gen_len, self.max_gen_len, gen_lens).to(
             dtype=torch.int32, device="cpu"
         )
-        #self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(
-        #    dtype=torch.int32, device="cpu"
-        #)
-        self.gen_lens = 5 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(
+            dtype=torch.int32, device="cpu"
+        )
+        #self.gen_lens = 5 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate arrival times in Poisson distribution
         if poisson_rate is None:
@@ -207,7 +207,7 @@ class Simulation:
 
 @pytest.mark.parametrize("dtype", [torch.float16])#param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
-@pytest.mark.parametrize("qkv_format", ["thd"])#qkv_formats)
+@pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False])#, True])
 @pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
@@ -587,6 +587,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     rtol=tols[dtype],
                 )
             if qkv_format == "sbhd":
+                print(i,seq, sim.t_total_lens[i], sim.step_lens[i])
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(line_output[sim.step_lens[i] - 1, i, :4])
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     line_output[sim.step_lens[i] - 1, i, :],
@@ -598,6 +601,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                 print('thd ', seq, sim.t_total_lens[i], cu_seqlens_q[i + 1])
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(line_output[cu_seqlens_q[i + 1] - 1, :4])
+                #print(line_output[cu_seqlens_q[1 + 1] - 1, :4])
+                #print(line_output[cu_seqlens_q[2 + 1] - 1, :4])
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     line_output[cu_seqlens_q[i + 1] - 1, :],

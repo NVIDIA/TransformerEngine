@@ -1258,9 +1258,13 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         actual_batch_size = len(self.step_dict)
         seqlens_q = list(self.step_dict.values())
         cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size + 1)]
+        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (
+            self.max_batch_size - actual_batch_size
+        )
         self.seq_lens = list(self.sequences.values())
 
-        self.cu_seqlens_q[:len(cu_seqlens_q)].copy_(
+        #self.cu_seqlens_q[:len(cu_seqlens_q)].copy_(
+        self.cu_seqlens_q.copy_(
             torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
         )
         cu_seqlens_kv = [0] + [sum(self.seq_lens[:i]) for i in range(1, actual_batch_size + 1)]
@@ -1469,7 +1473,6 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         #print('qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
         seqlens_q = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
         batch_size = len(seqlens_q)
-        self.q_orig[layer_number] = q
         if qkv_format == "bshd":
             q_buffer = q.contiguous()
             max_seqlen_q = q_buffer.shape[1]
@@ -1479,6 +1482,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         if qkv_format == "thd":
             #print('---qqqqqqqq0', q.shape, q.dtype, q[8, 0, :4])
             #print('---qqqqqqqq1', q.shape, q.dtype, q[18:20, 0, :4])
+            self.q_orig[layer_number] = q
             q_buffer = self.q_buffer[layer_number]
             #q_buffer_copy = self.q_buffer[layer_number].clone()
             ##for i in range(actual_batch_size):
@@ -7951,6 +7955,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                         )
             print('max_seqlen_q ', max_seqlen_q)
             print('max_seqlen_kv ', max_seqlen_kv)
+            #print('cu_seqlens_q ', cu_seqlens_q)
+            #print('cu_seqlens_kv ', cu_seqlens_kv)
 
             if (
                 isinstance(query_layer, Float8Tensor)
@@ -8241,7 +8247,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 batch_size = len(inference_params.step_dict)
                 step_lens = list(inference_params.step_dict.values())
                 max_seqlen_q = max(list(inference_params.step_dict.values()))
-                print('xxxxxxxxx ', batch_size, step_lens, max_seqlen_q, inference_params.step_dict, inference_params.input_qkv_format)
+                print('xxxxxxxxx ', batch_size, step_lens, max_seqlen_q, inference_params.step_dict, inference_params.input_qkv_format, output.shape)
+                #ooo = output.view(output.shape[:2], -1)
+                #print('output ', output[0,0,:4]) 
+                #print('output ', output[1,0,:4]) 
                 if inference_params.input_qkv_format == "bshd":
                     output = output[:batch_size, :max_seqlen_q].contiguous()
                 if inference_params.input_qkv_format == "sbhd":
@@ -8254,7 +8263,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     #output = packed_output.contiguous()
 
                     #max_seqlen_kv = self.max_seqlen_kv
-                    step_lens = inference_params.cu_seqlens_q[1:] - inference_params.cu_seqlens_q[:-1]
+                    #step_lens = inference_params.cu_seqlens_q[1:] - inference_params.cu_seqlens_q[:-1]
+                    step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
                     #seq_lens = self.cu_seqlens_kv[1:] - self.cu_seqlens_kv[:-1]
                     max_ctx_len=1 #output.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
                     max_seq_len=inference_params.max_ctx_len #q_buffer.shape[1] #64 #128

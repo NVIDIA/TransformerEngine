@@ -176,12 +176,20 @@ class NonPagedKVCacheManager(KVCacheManager):
             The value cache tensor containing previous and the current tokens
         """
         k_cache, v_cache = self.cache[layer_number]
+        #kk=k_cache.clone()
+        #k_cache1 = kk[self.batch_indices].contiguous()
+        #k_cache = k_cache[self.batch_indices].contiguous()
+        #v_cache = v_cache[self.batch_indices].contiguous()
         step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
         #h=self.num_heads #16
         #d=self.head_dim_k #64
         #b=self.max_batch_size #4
-        max_ctx_len=k.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+        max_ctx_len=1 #k.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+        if qkv_format == "bshd":
+            max_ctx_len=k.shape[1]
+        if qkv_format == "sbhd":
+            max_ctx_len=k.shape[0]
         max_seq_len=self.max_seqlen #k_cache.shape[1] #64 #128
         max_ctx_tokens=k.shape[0]
         max_tokens=k_cache.shape[0]*k_cache.shape[1]
@@ -195,6 +203,11 @@ class NonPagedKVCacheManager(KVCacheManager):
             self.batch_indices, step_lens, seq_lens,
             QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, self.max_batch_size,
             max_ctx_len, max_seq_len)#, max_ctx_tokens, max_tokens)
+        #print(k_cache1[0, :2, 0, :4])
+        #print(k_cache1[1, :2, 0, :4])
+        #print(k_cache[0, :2, 0, :4])
+        #print(k_cache[1, :2, 0, :4])
+        self.cache[layer_number] = k_cache, v_cache
         return k_cache, v_cache, None
 
 #        #prev_batch_size = len(self.sequences)
