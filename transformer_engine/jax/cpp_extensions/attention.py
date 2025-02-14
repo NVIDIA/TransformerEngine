@@ -15,7 +15,7 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from jax import ffi
 
 from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
@@ -252,8 +252,13 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
         v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
         bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
-        assert q_dtype == k_dtype == v_dtype == bias_dtype
-        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+        assert (
+            q_dtype == k_dtype == v_dtype == bias_dtype
+        ), f"q_dtype={q_dtype}, k_dtype={k_dtype}, v_dtype={v_dtype}, bias_dtype={bias_dtype}"
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype, (
+            f"q_seqlen_or_cu_seqlen_aval={q_seqlen_or_cu_seqlen_aval},"
+            f" kv_seqlen_or_cu_seqlen_aval={kv_seqlen_or_cu_seqlen_aval}"
+        )
 
         batch_shape, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, head_dim = (
             FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
@@ -1597,9 +1602,7 @@ class _FusedAttnCPWithP2PHelper:
         def truthy(val):
             return val.lower() in ["1", "true"]
 
-        x = use_scan and get_xla_flag(
-            "--xla_experimental_ignore_channel_id", default=False, cast=truthy
-        )
+        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
         return x
 
     def check_supported(self):
