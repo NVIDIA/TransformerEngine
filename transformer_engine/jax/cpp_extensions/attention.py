@@ -1602,7 +1602,7 @@ class _FusedAttnCPWithP2PHelper:
         def truthy(val):
             return val.lower() in ["1", "true"]
 
-        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=False, cast=truthy)
+        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
         return x
 
     def check_supported(self):
