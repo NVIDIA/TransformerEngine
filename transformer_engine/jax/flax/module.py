@@ -1251,7 +1251,6 @@ class LayerNormMLP(TransformerEngineBase):
                 # Remove act axis
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
             z = z.astype(self.dtype)
-            # import pdb; pdb.set_trace()
 
             z = nn.Dropout(
                 rate=self.intermediate_dropout_rate,
