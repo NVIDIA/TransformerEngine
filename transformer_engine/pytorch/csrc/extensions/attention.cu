@@ -14,6 +14,115 @@ constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
 
 template <typename scalar_t>
+__global__ void copy_to_kv_cache_paged_kernel(
+		scalar_t* new_k, scalar_t* new_v,
+		scalar_t* k_cache, scalar_t* v_cache,
+		int* page_table,
+		int* step_lens,
+		int* seq_lens,
+		NVTE_QKV_Format qkv_format,
+	        int h, int d,
+                int b, int max_ctx_len, int max_seq_len,
+	        int max_ctx_tokens, int max_tokens,
+		int max_pages_per_seq) {
+  int page_size = max_seq_len / max_pages_per_seq;
+  // new_k, new_v: qkv_format; k_cache, v_cache: bshd
+  // batch_indices, step_lens, seq_lens: [b + 1]
+  if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int* page_list = page_table + batch_idx * max_pages_per_seq;
+      int new_token_offset = batch_idx * max_ctx_len;
+      for (int i = threadIdx.x; i < step_lens[batch_idx]; i += blockDim.x) {
+	int page_idx = page_list[(seq_lens[batch_idx] - step_lens[batch_idx] + i)/page_size];
+	int token_idx = (seq_lens[batch_idx] - step_lens[batch_idx] + i)%page_size;
+        for (int j = 0; j < h * d; j ++) {
+          *(k_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_k + (new_token_offset + i) * h * d +j);
+          *(v_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_v + (new_token_offset + i) * h * d +j);
+	}
+      }
+    }
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int* page_list = page_table + batch_idx * max_pages_per_seq;
+      for (int i = threadIdx.x; i < step_lens[batch_idx]; i += blockDim.x) {
+	int page_idx = page_list[(seq_lens[batch_idx] - step_lens[batch_idx] + i)/page_size];
+	int token_idx = (seq_lens[batch_idx] - step_lens[batch_idx] + i)%page_size;
+        for (int j = 0; j < h * d; j ++) {
+          *(k_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_k + (i * b + batch_idx) * h * d +j);
+          *(v_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_v + (i * b + batch_idx) * h * d +j);
+	}
+      }
+    }
+  } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
+    // no padding between sequences in new_k and new_v
+    for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
+      int* page_list = page_table + batch_idx * max_pages_per_seq;
+      int new_token_offset = 0;
+      for (int t = 0; t < batch_idx; t ++) {
+	new_token_offset += step_lens[t];
+      }
+      for (int i = threadIdx.x; i < step_lens[batch_idx]; i += blockDim.x) {
+	int page_idx = page_list[(seq_lens[batch_idx] - step_lens[batch_idx] + i)/page_size];
+	int token_idx = (seq_lens[batch_idx] - step_lens[batch_idx] + i)%page_size;
+        for (int j = 0; j < h * d; j ++) {
+          *(k_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_k + (new_token_offset + i) * h * d +j);
+          *(v_cache + (page_idx * page_size + token_idx) * h * d + j) = *(new_v + (new_token_offset + i) * h * d +j);
+	}
+      }
+    }
+  }
+}
+//template <typename scalar_t>
+//void copy_to_kv_cache_paged_launcher(
+//	torch::Tensor new_k, torch::Tensor new_v,
+//	torch::Tensor k_cache, torch::Tensor v_cache,
+//	torch::Tensor page_table,
+//	torch::Tensor step_lens,
+//	torch::Tensor seq_lens,
+//	NVTE_QKV_Format qkv_format,
+//	int h, int d,
+//        int b, int max_ctx_len, int max_seq_len,
+//	int max_ctx_tokens, int max_tokens,
+//	int max_pages_per_seq) {
+//  copy_to_kv_cache_paged_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+//      reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(k_cache.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(v_cache.data_ptr<scalar_t>()),
+//      page_table.data_ptr<int>(),
+//      step_lens.data_ptr<int>(),
+//      seq_lens.data_ptr<int>(),
+//      qkv_format, h, d, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens, max_pages_per_seq);
+//}
+//
+//void copy_to_kv_cache_paged(
+//	torch::Tensor new_k, torch::Tensor new_v,
+//	torch::Tensor k_cache, torch::Tensor v_cache,
+//	torch::Tensor page_table,
+//	torch::Tensor step_lens,
+//	torch::Tensor seq_lens,
+//	NVTE_QKV_Format qkv_format,
+//	int h, int d,
+//        int b, int max_ctx_len, int max_seq_len,
+//	int max_ctx_tokens, int max_tokens,
+//	int max_pages_per_seq) {
+//  if (k_cache.scalar_type() == at::ScalarType::Half) {
+//    using dtype = at::Half;
+//    copy_to_kv_cache_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, step_lens, seq_lens, qkv_format, h, d, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens, max_pages_per_seq);
+//
+//  } else if (k_cache.scalar_type() == at::ScalarType::BFloat16) {
+//    using dtype = at::BFloat16;
+//    copy_to_kv_cache_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, step_lens, seq_lens, qkv_format, h, d, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens, max_pages_per_seq);
+//  } else if (k_cache.scalar_type() == at::ScalarType::Float) {
+//    using dtype = float;
+//    copy_to_kv_cache_paged_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, step_lens, seq_lens, qkv_format, h, d, b, max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens, max_pages_per_seq);
+//  } else {
+//    NVTE_ERROR("Unsupported dtype.\n");
+//  }
+//}
+
+
+template <typename scalar_t>
 __global__ void copy_to_kv_cache_non_paged_kernel(
 		scalar_t* new_k, scalar_t* new_v,
 		scalar_t* k_cache, scalar_t* v_cache,
@@ -301,6 +410,11 @@ __global__ void copy_to_kv_cache_non_paged_kernel_reindex(
         }
       }
     }
+    if (blockIdx.x == 0) {
+      for (int batch_idx = threadIdx.x; batch_idx < actual_b; batch_idx ++) {
+        batch_indices[batch_idx] = batch_idx;
+      }
+    }
   //}
 }
 template <typename scalar_t>
@@ -341,7 +455,16 @@ void copy_to_kv_cache_non_paged_launcher(
       step_lens.data_ptr<int>(),
       seq_lens.data_ptr<int>(),
       qkv_format, h_kv, d_k, d_v, b, max_ctx_len, max_seq_len);
-  copy_to_kv_cache_non_paged_kernel_same_d<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+//  copy_to_kv_cache_non_paged_kernel_same_d<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+//      reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(k_cache.data_ptr<scalar_t>()),
+//      reinterpret_cast<scalar_t*>(v_cache.data_ptr<scalar_t>()),
+//      batch_indices.data_ptr<int>(),
+//      step_lens.data_ptr<int>(),
+//      seq_lens.data_ptr<int>(),
+//      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len);
+  copy_to_kv_cache_paged_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(new_k.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(new_v.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(k_cache.data_ptr<scalar_t>()),
@@ -349,7 +472,7 @@ void copy_to_kv_cache_non_paged_launcher(
       batch_indices.data_ptr<int>(),
       step_lens.data_ptr<int>(),
       seq_lens.data_ptr<int>(),
-      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len);
+      qkv_format, h_kv, d_k, b, max_ctx_len, max_seq_len, 1, 1, 1);
   }
   if (new_v.data_ptr() == nullptr) {
 	 printf("-------- 3 %p %d %d %d \n", new_v.data_ptr(), h_kv, d_k, d_v);
