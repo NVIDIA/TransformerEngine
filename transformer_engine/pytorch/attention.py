@@ -2912,7 +2912,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dout = dout.dequantize(dtype=dout_dtype)
                     else:
                         ctx.dO_quantizer = dout._quantizer
-                    dout = dout._data
+                        dout = dout._data
             dq = torch.empty_like(q)
             p2p_comm_buffers = [
                 torch.empty((2, *kv.shape), dtype=kv.dtype, device=kv.device),
