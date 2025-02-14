@@ -150,8 +150,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         del self.scale_factor
 
         if self.float32_logits:
-            query = query.astype(jnp.float32)
-            key = key.astype(jnp.float32)
+            query = query.astype(self.dtype)
+            key = key.astype(self.dtype)
         h_q, h_kv = query.shape[-2], key.shape[-2]
         # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
         # Therefore, we have to maintain two code paths.
@@ -1026,7 +1026,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", self.weight_dtype
+                1.0, "fan_in", "normal", dtype=self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1320,7 +1320,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                         f"expected query shape {expected_shape} instead got {query.shape}."
                     )
 
-                cur_index = cache_index.value
+                cur_index = cache_index.value.astype(jnp.int32)
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
                 one_hot_indices = jnp.reshape(one_hot_indices, one_hot_indices_shape)
                 key = cached_key.value + key * one_hot_indices

@@ -15,7 +15,7 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from jax import ffi
 
 from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
 
@@ -1607,9 +1607,7 @@ class _FusedAttnCPWithP2PHelper:
         def truthy(val):
             return val.lower() in ["1", "true"]
 
-        x = use_scan and get_xla_flag(
-            "--xla_experimental_ignore_channel_id", default=False, cast=truthy
-        )
+        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
         return x
 
     def check_supported(self):
