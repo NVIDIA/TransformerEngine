@@ -198,11 +198,11 @@ class NonPagedKVCacheManager(KVCacheManager):
         #print('seq_lens ', seq_lens)
         #print('self.batch_indices ', self.batch_indices)
         print('lensss ', max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
-        tex.copy_to_kv_cache_non_paged(
+        tex.copy_to_kv_cache(
             k, v, k_cache, v_cache,
             self.batch_indices, step_lens, seq_lens,
             QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, self.max_batch_size,
-            max_ctx_len, max_seq_len)#, max_ctx_tokens, max_tokens)
+            max_ctx_len, max_seq_len, 1, True)#, max_ctx_tokens, max_tokens)
         #print(k_cache1[0, :2, 0, :4])
         #print(k_cache1[1, :2, 0, :4])
         #print(k_cache[0, :2, 0, :4])

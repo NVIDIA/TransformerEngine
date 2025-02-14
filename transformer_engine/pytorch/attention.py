@@ -1505,11 +1505,12 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             print('q xxxxxxxxxxxx ',self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
                 max_ctx_len, max_seq_len)#, max_ctx_tokens, max_tokens)
             # TODO: batch_indices
-            tex.copy_to_kv_cache_non_paged(
-                q, self.q_dummy, q_buffer, self.q_dummy,
-                self.batch_indices, step_lens, step_lens,
-                QKVFormat[qkv_format], self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
-                max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
+            tex.reshape_q(q, q_buffer, step_lens, QKVFormat[qkv_format], self.num_heads_q, self.head_dim_q, self.max_batch_size, max_ctx_len, max_seq_len)
+            #tex.copy_to_kv_cache_non_paged(
+            #    q, self.q_dummy, q_buffer, self.q_dummy,
+            #    self.batch_indices, step_lens, step_lens,
+            #    QKVFormat[qkv_format], self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
+            #    max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
             #q = q_buffer
             #q_buffer = q_buffer_copy
             #torch.save(q_buffer, 'q_buffer.pt')
@@ -8277,11 +8278,13 @@ class DotProductAttention(TransformerEngineBaseModule):
                     #print('o xxxxxxxxxxxx ',step_lens, #self.num_heads_q, self.head_dim_q, self.head_dim_q, self.max_batch_size,
                     #    max_ctx_len, max_seq_len, output.shape, output_buffer.shape)#, max_ctx_tokens, max_tokens)
                     # TODO: batch_indices
-                    tex.copy_to_kv_cache_non_paged(
-                        inference_params.q_dummy, output, inference_params.q_dummy, output_buffer,
-                        inference_params.batch_indices, step_lens, step_lens,
-                        QKVFormat[qkv_format], inference_params.num_heads_q, inference_params.head_dim_q, inference_params.head_dim_q, inference_params.max_batch_size,
-                        max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
+                    tex.reshape_o(output, output_buffer, step_lens,
+                        inference_params.num_heads_q, inference_params.head_dim_q, inference_params.max_batch_size, max_seq_len) #, max_ctx_tokens, max_tokens)
+                    #tex.copy_to_kv_cache_non_paged(
+                    #    inference_params.q_dummy, output, inference_params.q_dummy, output_buffer,
+                    #    inference_params.batch_indices, step_lens, step_lens,
+                    #    QKVFormat[qkv_format], inference_params.num_heads_q, inference_params.head_dim_q, inference_params.head_dim_q, inference_params.max_batch_size,
+                    #    max_ctx_len, max_seq_len) #, max_ctx_tokens, max_tokens)
                     output = output_buffer.view(output_buffer.shape[0], -1)
 
             return output

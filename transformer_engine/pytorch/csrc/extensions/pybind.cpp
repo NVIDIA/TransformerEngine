@@ -171,7 +171,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
 
   m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
-  m.def("copy_to_kv_cache_non_paged", &copy_to_kv_cache_non_paged, "Copy KV to non-paged KV cache");
+  m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
+  m.def("reshape_q", &reshape_q, "Reshape Q for THD before attention");
+  m.def("reshape_o", &reshape_o, "Reshape O for THD after attention");
   m.def("fused_attn_fwd", &fused_attn_fwd,
         "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &fused_attn_bwd,
