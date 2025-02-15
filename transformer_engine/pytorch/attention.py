@@ -7872,8 +7872,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 # so users can run with the same attn_mask_type for training and inference
                 if "padding" not in attn_mask_type:
                     attn_mask_type = "padding_" + attn_mask_type
-#                if attn_mask_type in ["causal", "padding_causal"]:
-#                    attn_mask_type = attn_mask_type + "_bottom_right"
+                if attn_mask_type in ["causal", "padding_causal"]:
+                    attn_mask_type = attn_mask_type + "_bottom_right"
 
                 # convert to cross attention type when KV cache is in use
                 self.attention_type = "cross"

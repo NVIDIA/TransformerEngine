@@ -389,7 +389,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         #cu_dict["max_seqlen_q"] = model_config.max_seqlen_q
         #cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
         cu_dict["inference_params"] = inference_params
-        cu_dict["attn_mask_type"] = "padding" #"causal"
+        cu_dict["attn_mask_type"] = "padding_causal" #"causal"
         # for qkv_format = thd
         cu_dict["max_seqlen_q"] = model_config.max_ctx_len #max_seqlen_q_infer
         cu_dict["max_seqlen_kv"] = model_config.max_seqlen_kv
@@ -565,7 +565,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             inference_params=inference_params,
-            attn_mask_type="padding",
+            attn_mask_type="padding_causal",
             max_seqlen_q=max_seqlen_q, #config.max_ctx_len, #max_seqlen_q_infer,
             max_seqlen_kv=config.max_seqlen_kv,
             qkv_format=qkv_format,

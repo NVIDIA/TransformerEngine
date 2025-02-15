@@ -228,7 +228,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          // 9.6: adds {bshd, sbhd, thd} + padding_causal_bottom_right + self/cross-attn (sq <= skv)
          (cudnn_runtime_version >= 90600 &&
           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-          max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
+          //max_seqlen_q % 64 == 0 && max_seqlen_kv % 64 == 0 && max_seqlen_q <= max_seqlen_kv &&
           bias_type == NVTE_Bias_Type::NVTE_NO_BIAS && dropout == 0.0)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
