@@ -122,12 +122,12 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
-  TensorWrapper& kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
+  TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
 
   // Query workspace size
   transformer_engine::TensorWrapper workspace;
-  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), eps,
-                     kernel_out_cu.data(), mu_cu.data(), rsigma_cu.data(), workspace.data(),
+  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), eps, kernel_out_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(),
                      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
@@ -137,8 +137,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
   // Launch kernel
-  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), eps,
-                     kernel_out_cu.data(), mu_cu.data(), rsigma_cu.data(), workspace.data(),
+  nvte_layernorm_fwd(input_cu.data(), weight_cu.data(), bias_cu.data(), eps, kernel_out_cu.data(),
+                     mu_cu.data(), rsigma_cu.data(), workspace.data(),
                      at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                      zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
@@ -238,12 +238,12 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     py::object unquantized_out;
     std::tie(unquantized_out_cu, unquantized_out) = q.create_tensor(size, out_dtype);
   }
-  TensorWrapper& kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
+  TensorWrapper &kernel_out_cu = force_unfused_kernel ? unquantized_out_cu : out_cu;
 
   // Query workspace size
   transformer_engine::TensorWrapper workspace;
-  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), eps, kernel_out_cu.data(),
-                   rsigma_cu.data(), workspace.data(),
+  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), eps, kernel_out_cu.data(), rsigma_cu.data(),
+                   workspace.data(),
                    at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                    zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
@@ -253,8 +253,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       makeTransformerEngineTensor(workspace_data.data_ptr(), workspace.shape(), workspace.dtype());
 
   // Launch kernel
-  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), eps, kernel_out_cu.data(),
-                   rsigma_cu.data(), workspace.data(),
+  nvte_rmsnorm_fwd(input_cu.data(), weight_cu.data(), eps, kernel_out_cu.data(), rsigma_cu.data(),
+                   workspace.data(),
                    at::cuda::getCurrentDeviceProperties()->multiProcessorCount - sm_margin,
                    zero_centered_gamma, at::cuda::getCurrentCUDAStream());
 
