@@ -144,5 +144,6 @@ class NonPagedKVCacheManager(KVCacheManager):
             QKVFormat[qkv_format],
             self.num_heads, self.head_dim_k, self.head_dim_v,
             batch_size, ctx_len, self.max_seqlen, 1, True)
-
+        k_cache = k_cache[:batch_size, :ctx_len]
+        v_cache = v_cache[:batch_size, :ctx_len]
         return k_cache, v_cache, None

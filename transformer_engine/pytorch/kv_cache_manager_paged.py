@@ -266,5 +266,6 @@ class PagedKVCacheManager(KVCacheManager):
             QKVFormat[qkv_format],
             self.num_heads, self.head_dim_k, self.head_dim_v,
             batch_size, ctx_len, self.max_seqlen, self.max_pages_per_seq, False)
+        page_table = self.page_table[:batch_size]
 
-        return k_cache, v_cache, self.page_table
+        return k_cache, v_cache, page_table
