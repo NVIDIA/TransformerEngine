@@ -12,4 +12,4 @@ set -e
 cd $TE_PATH
 
 pip3 install pre-commit
-pre-commit run --all-files
+python3 -m pre_commit run --all-files
