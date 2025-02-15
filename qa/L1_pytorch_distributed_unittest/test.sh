@@ -6,10 +6,10 @@ set -e
 
 : ${TE_PATH:=/opt/transformerengine}
 
-pip install pytest==8.2.1
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops.py
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_torch_fsdp2.py
-pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
-# pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops_with_userbuffers.py  ### TODO Debug UB support with te.Sequential
-pytest -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn_with_cp.py
+pip3 install pytest==8.2.1
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops.py
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_torch_fsdp2.py
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_comm_gemm_overlap.py
+# python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops_with_userbuffers.py  ### TODO Debug UB support with te.Sequential
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn_with_cp.py
