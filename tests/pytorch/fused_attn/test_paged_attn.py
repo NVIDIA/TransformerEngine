@@ -95,8 +95,8 @@ class Simulation:
             self.poisson_rate = torch.randint(1, max_batch_size, [1]).item()
         interval_dist = Exponential(self.poisson_rate)
         arrival_intervals = interval_dist.sample((total_requests,))
-        #self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(dtype=torch.int32, device="cpu")
-        self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
+        self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(dtype=torch.int32, device="cpu")
+        #self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
         self.last_arrival = self.arrival_times.max().item()
 
         # initialize tensors
@@ -208,7 +208,7 @@ class Simulation:
 @pytest.mark.parametrize("dtype", [torch.float16])#param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
-@pytest.mark.parametrize("is_paged", [False])#, True])
+@pytest.mark.parametrize("is_paged", [False, True])
 @pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
@@ -276,6 +276,15 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         dtype=dtype,
         device="cuda",
     )
+    #print('k_full[0, 0, 0, :4]', k[0, 0, 0, :4])
+    print('k_full[7, 46:48, 0, :4]', k[7, 46:48, 0, :4])
+    #print('k_full[1, :2, 0, :4]', k[1, :2, 0, :4])
+    #print('k_full[1, 6, 0, :4]', k[1, 6, 0, :4])
+    #print('k_full[0, 17, 0, :4]', k[0, 17, 0, :4])
+    #print('k_full[2, 22, 0, :4]', k[2, 22, 0, :4])
+    #print('k_full[5, 14, 0, :4]', k[5, 14, 0, :4])
+    #print('k_full[6, 12, 0, :4]', k[6, 12, 0, :4])
+
 
     # generate reference results
     logger.info("=== Generating all tokens at once ===")

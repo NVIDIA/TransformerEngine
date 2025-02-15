@@ -110,7 +110,7 @@ class NonPagedKVCacheManager(KVCacheManager):
     ):
         # TODO: remove
         self.sequences = sequences
-        #self.step_dict = step_dict
+        self.step_dict = step_dict
         prev_batch_size = len(self.sequences)
         batch_size = len(step_dict)
 
@@ -197,12 +197,21 @@ class NonPagedKVCacheManager(KVCacheManager):
         #print('step_lens ', step_lens)
         #print('seq_lens ', seq_lens)
         #print('self.batch_indices ', self.batch_indices)
-        print('lensss ', max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+        #print('lensss ', qkv_format, step_lens, seq_lens,max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
         tex.copy_to_kv_cache(
             k, v, k_cache, v_cache,
             self.batch_indices, step_lens, seq_lens,
-            QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, self.max_batch_size,
+            QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, len(self.step_dict), #self.max_batch_size,
             max_ctx_len, max_seq_len, 1, True)#, max_ctx_tokens, max_tokens)
+        #print('self.batch_indices after', self.batch_indices)
+        #print('k_cache[0, 0, 0, :4]', k_cache[0, 0, 0, :4])
+        #print('k_cache[0, 46:48, 0, :4]', k_cache[0, 46:48, 0, :4])
+        #print('k_cache[1, :2, 0, :4]', k_cache[1, :2, 0, :4])
+        #print('k_cache[1, 6, 0, :4]', k_cache[1, 6, 0, :4])
+        #print('k_cache[0, 17, 0, :4]', k_cache[0, 17, 0, :4])
+        #print('k_cache[1, 22, 0, :4]', k_cache[1, 22, 0, :4])
+        #print('k_cache[2, 14, 0, :4]', k_cache[2, 14, 0, :4])
+        #print('k_cache[3, 12, 0, :4]', k_cache[3, 12, 0, :4])
         #print(k_cache1[0, :2, 0, :4])
         #print(k_cache1[1, :2, 0, :4])
         #print(k_cache[0, :2, 0, :4])

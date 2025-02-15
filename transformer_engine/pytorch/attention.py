@@ -7973,7 +7973,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
             # convert qkv layout to its corresponding paged attention layout
             if inference_params is not None and inference_params.is_paged:
-                qkv_layout = "paged_kv_" + qkv_format + "_2" + inference_params.qkv_format
+                qkv_layout = "paged_kv_" + qkv_format + "_2" + inference_params.cache_qkv_format
 
             global _alibi_cache
             if alibi_slopes is not None:
@@ -8252,6 +8252,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                 #ooo = output.view(output.shape[:2], -1)
                 #print('output ', output[0,0,:4]) 
                 #print('output ', output[1,0,:4]) 
+                #print('output ', output[0,0,:4]) 
+                #print('output ', output[1,6,:4]) 
                 if inference_params.input_qkv_format == "bshd":
                     output = output[:batch_size, :max_seqlen_q].contiguous()
                 if inference_params.input_qkv_format == "sbhd":

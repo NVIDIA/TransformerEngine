@@ -181,11 +181,14 @@ __global__ void reindex_kv_cache_kernel(
 		int max_seq_len) {
   // k_cache, v_cache: bshd
   // batch_indices, step_lens, seq_lens: [b + 1]
-  int actual_b = 0;
-  for (int i = 1; i < b; i++) {
-    if (batch_indices[i] > batch_indices[i-1]) {
+  int actual_b = b;
+  for (int i = 0; i < b-1; i++) {
+    if (batch_indices[i+1] < batch_indices[i]) {
       actual_b = i+1;
     }
+  }
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+	  printf("actual_b is %d\n", actual_b);
   }
   for (int batch_idx = 0; batch_idx < actual_b; batch_idx ++) {
     for (int token_idx = blockIdx.x; token_idx < seq_lens[batch_idx] - step_lens[batch_idx]; token_idx += gridDim.x) {
@@ -204,7 +207,7 @@ __global__ void reindex_kv_cache_kernel(
     }
   }
   if (blockIdx.x == 0) {
-    for (int batch_idx = threadIdx.x; batch_idx < actual_b; batch_idx ++) {
+    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx ++) {
       batch_indices[batch_idx] = batch_idx;
     }
   }
