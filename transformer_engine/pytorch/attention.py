@@ -17,7 +17,6 @@ import functools
 from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
-from einops import rearrange
 
 import torch
 import torch.nn.functional as F
@@ -1025,6 +1024,45 @@ def get_attention_backend(
         available_backends,
     )
 
+@torch.no_grad()
+def get_attn_mask(batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv):
+    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+    for i in range(batch_size):
+        attention_mask_q = torch.cat(
+            [
+                attention_mask_q,
+                torch.Tensor(
+                    [False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i])
+                )
+                .to(dtype=torch.bool)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .unsqueeze(0),
+            ],
+            dim=0,
+        )
+        attention_mask_kv = torch.cat(
+            [
+                attention_mask_kv,
+                torch.Tensor(
+                    [False] * seqlens_kv[i]
+                    + [True] * (max_seqlen_kv - seqlens_kv[i])
+                )
+                .to(dtype=torch.bool)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .unsqueeze(0),
+            ],
+            dim=0,
+        )
+    attention_mask = (
+        attention_mask_q.to(device="cuda"),
+        attention_mask_kv.to(device="cuda"),
+    )
+    return attention_mask
 
 @torch.no_grad()
 def get_full_mask(
@@ -1138,7 +1176,6 @@ def get_full_mask(
         m = attention_mask.logical_not()
         actual_seqlens_q = m[:, 0, :, 0].sum(dim=1)
         actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
-
     # apply SWA mask
     mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
         1, 1, max_seqlen_q, 1
@@ -5135,7 +5172,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(
-                self.layer_number, qkv_format
+                self.layer_number, inference_params.input_qkv_format
             )
 
         if qkv_format == "bshd":
@@ -5149,6 +5186,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.shape[0],
         )
 
+        if "padding" in attn_mask_type and qkv_format in ["bshd", "sbhd"]:
+            attention_mask = get_attn_mask(batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv)
         attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = get_full_mask(
             max_seqlen_q,
             max_seqlen_kv,
@@ -7338,8 +7377,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
                 # convert causal to causal_bottom_right in inference when KV-caching is in use
                 # so users can run with the same attn_mask_type for training and inference
-                if "padding" not in attn_mask_type:
-                    attn_mask_type = "padding_" + attn_mask_type
+                #if "padding" not in attn_mask_type:
+                #    attn_mask_type = "padding_" + attn_mask_type
                 if attn_mask_type in ["causal", "padding_causal"]:
                     attn_mask_type = attn_mask_type + "_bottom_right"
 
@@ -7375,8 +7414,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                     value_layer,
                     qkv_format,
                 )
+                #print('ssss0 ',query_layer.shape, key_layer.shape, value_layer.shape)
                 #print('cu_seqlens_q',cu_seqlens_q)
                 #print('cu_seqlens_kv',cu_seqlens_kv)
+                #print('maxxxxx ',max_seqlen_q, max_seqlen_kv)
 
                 # update cu_seqlens tensors
                 #if inference_params.is_cuda_graph:

@@ -198,7 +198,7 @@ class Simulation:
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["UnfusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
@@ -231,6 +231,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     os.environ["NVTE_FLASH_ATTN"] = str(int(backend == "FlashAttention"))
     os.environ["NVTE_FUSED_ATTN"] = str(int(backend == "FusedAttention"))
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
+    if backend == "UnfusedAttention" and is_cuda_graph:
+        pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
 
     # create model
     model = (

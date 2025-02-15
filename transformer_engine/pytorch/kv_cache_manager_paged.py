@@ -155,10 +155,6 @@ class PagedKVCacheManager(KVCacheManager):
             ]
         ).to(dtype=torch.int32, device="cpu")
         self.page_table[: self.get_sequence_count()].copy_(page_table)
-        #if self.is_cuda_graph:
-        #    self.page_table[: self.get_sequence_count()].copy_(page_table)
-        #else:
-        #    self.page_table = page_table.to(device="cuda")
         return self.page_table
 
     def allocate_page(self, seq: int):
