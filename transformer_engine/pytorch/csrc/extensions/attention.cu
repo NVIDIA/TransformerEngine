@@ -66,7 +66,6 @@ void reshape_q_launcher(
 	torch::Tensor step_lens,
 	NVTE_QKV_Format qkv_format,
 	int h_q, int d_q, int b, int max_ctx_len, int max_seq_len) {
-  printf("-------- 3 %p %d %d %d \n"); //, new_v.data_ptr(), h_kv, d_k, d_v);
   reshape_q_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(new_q.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(q_buffer.data_ptr<scalar_t>()),
@@ -136,7 +135,6 @@ void reshape_o_launcher(
 	torch::Tensor output, torch::Tensor output_buffer,
 	torch::Tensor step_lens,
 	int h_o, int d_o, int b, int max_seq_len) {
-  printf("-------- 4 %p %d %d %d \n"); //, new_v.data_ptr(), h_kv, d_k, d_v);
   reshape_o_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(output.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(output_buffer.data_ptr<scalar_t>()),
@@ -186,9 +184,6 @@ __global__ void reindex_kv_cache_kernel(
     if (batch_indices[i+1] < batch_indices[i]) {
       actual_b = i+1;
     }
-  }
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-	  printf("actual_b is %d\n", actual_b);
   }
   for (int batch_idx = 0; batch_idx < actual_b; batch_idx ++) {
     for (int token_idx = blockIdx.x; token_idx < seq_lens[batch_idx] - step_lens[batch_idx]; token_idx += gridDim.x) {
@@ -295,7 +290,6 @@ void copy_to_kv_cache_launcher(
   // 6. for THD, assumes no padding between sequences in new_k and new_v
   if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr &&
       k_cache.data_ptr() != nullptr && v_cache.data_ptr() != nullptr) {
-    printf("-------- 1 %p %d %d %d \n"); //, new_v.data_ptr(), h_kv, d_k, d_v);
     if (is_non_paged) {
       reindex_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<scalar_t*>(k_cache.data_ptr<scalar_t>()),

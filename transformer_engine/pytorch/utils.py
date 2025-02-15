@@ -326,19 +326,3 @@ def round_up_to_nearest_multiple(value, multiple):
     if multiple == 0:
         raise ValueError("multiple cannot be zero.")
     return ((value + multiple - 1) // multiple) * multiple
-
-class StaticBufferAllocator(torch.nn.Module):
-    """
-        This class is used when we use te.make_graphed_callable().
-        CUDA Graphs require all tensors to be static. Neverthless,
-        torch API make_graphed_callable() takes care of output of torch modules,
-        and makes them static. Thus by wrapping allocation of memory into
-        torch.nn.Module, we can greatly simplify our code.
-    """
-
-    # pylint: disable=no-self-use
-    def forward(self, size, dtype, device):
-        """
-            Return buffer of given size, dtype and device.
-        """
-        return torch.zeros(size, dtype=dtype, device=device)

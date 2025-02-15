@@ -247,15 +247,10 @@ def _make_graphed_callables(
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
             for ii in range(num_warmup_iters):
-                print("------ warmup ", ii)
                 hooks = []
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)
                     hooks.append(hook)
-                print(len(args), [x.shape for x in args])
-                print(len(args), [x.dtype for x in args])
-                #print(args[0][8,0,:4])
-                print(kwargs)
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
@@ -270,7 +265,6 @@ def _make_graphed_callables(
                 else:
                     grad_inputs = None
                 del outputs, grad_inputs
-            print("------ end warmup ------")
             # The following code is added specifically for MCore's special requirements,
             # aimed at preventing warmup from altering the control flow.
             for module in func.modules():
@@ -432,9 +426,6 @@ def _make_graphed_callables(
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
                     if isinstance(static_input_surface[i], torch.Tensor) and static_input_surface[i].data_ptr() != inputs[i].data_ptr():
-                        print(i, inputs[i].shape, static_input_surface[i].shape)
-                        if inputs[i].ndim == 1:
-                            print('input', i, inputs[i])
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph

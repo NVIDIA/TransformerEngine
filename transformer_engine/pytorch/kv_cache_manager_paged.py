@@ -9,7 +9,7 @@ import logging
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.kv_cache_manager_non_paged import KVCacheManager
+from transformer_engine.pytorch.kv_cache_manager import KVCacheManager
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
@@ -67,6 +67,8 @@ class PagedKVCacheManager(KVCacheManager):
         self.cache = {}
         # free pages allowed to allocate, [Page(),...]
         self.free_pages = []
+        for i in range(self.total_num_pages):
+            self.free_pages.append(Page(i))
         # allocated pages, {seq_id: [page_id,...]}
         self.allocated_pages = defaultdict(list)
         # page table, [batch_size, max_pages_per_seq]
@@ -91,11 +93,10 @@ class PagedKVCacheManager(KVCacheManager):
             device=torch.cuda.current_device(),
         )
         self.cache[layer_number] = (k_cache, v_cache)
+
         self.page_table = torch.zeros(
             self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device="cuda"
         )
-        for i in range(self.total_num_pages):
-            self.free_pages.append(Page(i))
 
     def print_cache(self):
         """Print KV cache status"""
@@ -184,13 +185,10 @@ class PagedKVCacheManager(KVCacheManager):
                 self.free_pages.append(page)
         self.allocated_pages.pop(seq)
 
-    def prepare(
+    def pre_step(
         self,
-        sequences: Dict[List, List],
         step_dict: Dict[List, List],
         ):
-        self.sequences = sequences
-        self.step_dict = step_dict
         batch_size = len(step_dict)
         step_lens = list(step_dict.values())
         cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
@@ -251,96 +249,22 @@ class PagedKVCacheManager(KVCacheManager):
         v_cache: torch.Tensor
             The value cache tensor containing previous and the current tokens
         """
-        #batch_size = len(step_dict)
-        #step_lens = list(step_dict.values())
-        #cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
-
-        ## Remove finished sequences and advance unfinished sequences
-        #unfinished_seqs = self.sequences.keys() & step_dict.keys()
-        #finished_seqs = self.sequences.keys() - unfinished_seqs
-        #for seq in finished_seqs:
-        #    self.sequences.pop(seq)
-        #    self.deallocate_sequence(seq)
-        #for seq in unfinished_seqs:
-        #    if self.sequences[seq] % self.page_size == 0 and self.sequences[seq] < self.max_seqlen:
-        #        self.allocate_page(seq)
-        #    self.sequences[seq] += 1
-
-        ## Add new sequences
-        #new_seqs = step_dict.keys() - self.sequences.keys()
-        #for seq in new_seqs:
-        #    self.sequences[seq] = step_dict[seq]
-        #    self.allocate_sequence(seq, step_dict[seq])
-
-        ## Copy new key and value tenosrs to the cache
-        #seqlens = list(self.sequences.values())
-        #packed_k = torch.Tensor([]).to(dtype=k.dtype, device=k.device)
-        #packed_v = torch.Tensor([]).to(dtype=v.dtype, device=v.device)
-        #for i in range(batch_size):
-        #    if qkv_format == "bshd":
-        #        packed_k = torch.cat([packed_k, k[i, : step_lens[i], :, :]], dim=0)
-        #        packed_v = torch.cat([packed_v, v[i, : step_lens[i], :, :]], dim=0)
-        #    if qkv_format == "sbhd":
-        #        packed_k = torch.cat([packed_k, k[: step_lens[i], i, :, :]], dim=0)
-        #        packed_v = torch.cat([packed_v, v[: step_lens[i], i, :, :]], dim=0)
-        #if qkv_format == "thd":
-        #    packed_k = k
-        #    packed_v = v
         k_cache, v_cache = self.cache[layer_number]
         step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-        #h=self.num_heads #16
-        #d=self.head_dim_k #64
-        #b=self.max_batch_size #4
-        max_ctx_len=1 #k.shape[1] if qkv_format in ["bshd", "sbhd"] else 1 #64
+        batch_size = self.max_batch_size
+        ctx_len=1
         if qkv_format == "bshd":
-            max_ctx_len=k.shape[1]
+            batch_size = k.shape[0]
+            ctx_len=k.shape[1]
         if qkv_format == "sbhd":
-            max_ctx_len=k.shape[0]
-        max_seq_len=self.max_seqlen #k_cache.shape[1] #64 #128
-        max_ctx_tokens=k.shape[0]
-        max_tokens=k_cache.shape[0]*k_cache.shape[1]
-        print('kv shapes ', [x.shape for x in [k, v, k_cache, v_cache]])
-        #print('step_lens ', step_lens)
-        #print('seq_lens ', seq_lens)
-        #print('self.batch_indices ', self.batch_indices)
-        print('lensss ', max_ctx_len, max_seq_len, max_ctx_tokens, max_tokens)
+            batch_size = k.shape[1]
+            ctx_len=k.shape[0]
         tex.copy_to_kv_cache(
             k, v, k_cache, v_cache,
             self.page_table, step_lens, seq_lens,
-            QKVFormat[qkv_format], self.num_heads, self.head_dim_k, self.head_dim_v, len(self.step_dict), #self.max_batch_size,
-            max_ctx_len, max_seq_len, self.max_pages_per_seq, False)
-
-        #for i, seq in enumerate(step_dict.keys()):
-        #    page_list = self.get_page_list(seq)
-        #    start_page, start_token = self.get_page_token_offsets(seqlens[i] - step_lens[i])
-        #    end_page, end_token = self.get_page_token_offsets(seqlens[i])
-        #    if start_page == end_page:
-        #        page_id = page_list[start_page]
-        #        k_cache[page_id, start_token:end_token, :, :] = packed_k[
-        #            cu_seqlens[i] : cu_seqlens[i + 1], :, :
-        #        ]
-        #        v_cache[page_id, start_token:end_token, :, :] = packed_v[
-        #            cu_seqlens[i] : cu_seqlens[i + 1], :, :
-        #        ]
-        #    else:
-        #        start_offset = 0
-        #        end_offset = 0
-        #        for j in range(start_page, end_page + 1):
-        #            if not (j == end_page and end_token == 0):
-        #                start_token_j = start_token if j == start_page else 0
-        #                end_token_j = end_token if j == end_page else self.page_size
-        #                page_id = page_list[start_page]
-        #                end_offset = end_token_j - start_token_j
-        #                k_cache[page_id, start_token_j:end_token_j, :, :] = packed_k[
-        #                    cu_seqlens[i] + start_offset : cu_seqlens[i] + end_offset, :, :
-        #                ]
-        #                v_cache[page_id, start_token_j:end_token_j, :, :] = packed_v[
-        #                    cu_seqlens[i] + start_offset : cu_seqlens[i] + end_offset, :, :
-        #                ]
-        #                start_offset = start_offset + end_offset
-
-        ## Get page table
-        #page_table = self.get_page_table(list(self.sequences.keys()))
+            QKVFormat[qkv_format],
+            self.num_heads, self.head_dim_k, self.head_dim_v,
+            batch_size, ctx_len, self.max_seqlen, self.max_pages_per_seq, False)
 
         return k_cache, v_cache, self.page_table
