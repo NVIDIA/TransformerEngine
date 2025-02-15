@@ -598,7 +598,9 @@ def moe_unpermute(
     """
     if probs is not None:
         if merging_probs is not None:
-            raise ValueError("Both merging_probs and probs kwarg are provided. probs is deprecated.")
+            raise ValueError(
+                "Both merging_probs and probs kwarg are provided. probs is deprecated."
+            )
         warnings.warn("probs kwarg is deprecated. Use merging_probs kwarg instead.")
         merging_probs = probs
     if map_type == "index":
