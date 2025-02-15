@@ -10,8 +10,10 @@ from typing import Dict, List
 
 from transformer_engine.pytorch import (
     moe_permute as te_permute,
+    moe_permute_with_probs as te_permute_with_probs,
     moe_unpermute as te_unpermute,
     moe_sort_chunks_by_index as te_sort_chunks_by_index,
+    moe_sort_chunks_by_index_with_probs as te_sort_chunks_by_index_with_probs,
 )
 from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
@@ -1010,17 +1012,18 @@ def _test_permutation_mask_map_alongside_probs(
     te_unpermute_bwd_input = unpermute_bwd_input if fp8 else pytorch_unpermute_bwd_input.detach()
     te_probs = probs.detach()
     te_probs.requires_grad_(True)
+    print(te_probs.shape)
 
-    te_permute_output, row_id_map, te_permuted_probs = te_permute(
+    te_permute_output, te_permuted_probs, row_id_map = te_permute_with_probs(
         te_permute_fwd_input,
+        te_probs,
         routing_map,
         num_out_tokens=num_out_tokens,
-        map_type="mask",
-        probs=te_probs,
     )
+    print(te_permuted_probs.shape)
 
-    te_permute_output, te_permuted_probs = te_sort_chunks_by_index(
-        te_permute_output, split_sizes_cuda, sorted_idxs_cuda, te_permuted_probs
+    te_permute_output, te_permuted_probs = te_sort_chunks_by_index_with_probs(
+        te_permute_output, te_permuted_probs, split_sizes_cuda, sorted_idxs_cuda
     )
 
     if fp8:
@@ -1034,18 +1037,19 @@ def _test_permutation_mask_map_alongside_probs(
         te_permute_output = _permute_output_quantizer.quantize(te_permute_output)
     else:
         te_permute_output_dtype = te_permute_output.dtype
+        print(te_permute_output.shape)
+        print(te_permuted_probs.shape)
         te_permute_output = te_permute_output * te_permuted_probs.unsqueeze(-1)
         te_permute_output = te_permute_output.to(dtype=te_permute_output_dtype)
 
-    te_permute_output, te_permuted_probs = te_sort_chunks_by_index(
-        te_permute_output, split_sizes_2_cuda, sorted_idxs_2_cuda, te_permuted_probs
+    te_permute_output = te_sort_chunks_by_index(
+        te_permute_output, split_sizes_2_cuda, sorted_idxs_2_cuda
     )
 
     te_unpermute_output = te_unpermute(
         te_permute_output,
         row_id_map,
-        None,
-        restore_shape,
+        restore_shape=restore_shape,
         map_type="mask",
     )
     te_unpermute_output.backward(te_unpermute_bwd_input, retain_graph=True)
@@ -1166,6 +1170,23 @@ def test_permutation_mask_map(
 
 
 @pytest.mark.parametrize("te_dtype", _te_dtypes)
+def test_permutation_mask_map_empty_input(te_dtype):
+    with_probs = True
+    BENCHMARK = False
+
+    _test_permutation_mask_map(
+        te_dtype=te_dtype,
+        num_tokens=0,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        with_probs=with_probs,
+        BENCHMARK=BENCHMARK,
+    )
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
 @pytest.mark.parametrize("num_tokens", [4096])
 @pytest.mark.parametrize("num_expert", [8, 16])
 @pytest.mark.parametrize("hidden_size", [4096])
@@ -1189,6 +1210,19 @@ def test_permutation_mask_map_alongside_probs(
         topK=topK,
         num_out_tokens=num_out_tokens,
         tp_size=tp_size,
+    )
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
+def test_permutation_mask_map_alongside_probs_empty_input(te_dtype):
+    _test_permutation_mask_map_alongside_probs(
+        te_dtype=te_dtype,
+        num_tokens=0,
+        num_expert=8,
+        hidden_size=4096,
+        topK=2,
+        num_out_tokens=0,
+        tp_size=2,
     )
 
 
@@ -1358,6 +1392,20 @@ def test_chunk_permutation(
         num_expert=num_expert,
         tp_size=tp_size,
         hidden_size=hidden_size,
+        BENCHMARK=BENCHMARK,
+    )
+
+
+@pytest.mark.parametrize("te_dtype", _te_dtypes)
+def test_chunk_permutation_empty_input(te_dtype):
+    BENCHMARK = False
+
+    _test_moe_chunk_sort(
+        te_dtype=te_dtype,
+        num_tokens=0,
+        num_expert=8,
+        tp_size=2,
+        hidden_size=4096,
         BENCHMARK=BENCHMARK,
     )
 

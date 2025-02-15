@@ -265,7 +265,8 @@ class _moe_permute_mask_map(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # pylint: disable=missing-function-docstring
         if not inp.numel():
-            return inp, torch.tensor([], device=inp.device), probs
+            ctx.probs = probs
+            return inp, torch.tensor([], device=inp.device), torch.tensor([], device=inp.device)
 
         assert inp.is_cuda, "TransformerEngine needs CUDA."
         assert routing_map.is_cuda, "TransformerEngine needs CUDA."
@@ -320,7 +321,7 @@ class _moe_permute_mask_map(torch.autograd.Function):
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
         if not permuted_act_grad.numel():
-            return permuted_act_grad, None, None, permuted_probs_grad
+            return permuted_act_grad, None, None, ctx.probs
 
         act_grad = None
         probs_grad = None
@@ -495,7 +496,6 @@ def moe_permute(
     num_out_tokens: int = -1,
     max_token_num: int = -1,
     map_type: str = "mask",
-    probs: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Permute the tokens based on the routing_map. Token with the same index will be grouped together.
@@ -512,10 +512,6 @@ def moe_permute(
         The values in it: 1 means the token is routed to this expert and 0 means not.
         If map_type is 'index', routing_map is of shape [num_tokens, topK] and dtype 'int32'.
         The values in it are the routed expert indices.
-    probs: torch.Tensor, default = None
-        The tensor of probabilities corresponding to the permuted tokens and is
-        of shape [num_tokens, num_experts]. If provided, it will be permuted with the tokens
-        according to the routing_map. Only available when map_type is 'mask'.
     num_out_tokens: int, default = -1
         The effective output token count, representing the number of tokens not dropped.
         By default, set to '-1', meaning no tokens are dropped.
@@ -527,30 +523,55 @@ def moe_permute(
         Type of the routing map tensor.
         Options are: 'mask', 'index'.
         Refer to `routing_map` for more details.
-        If map_type is 'index', this function returns `(permuted_act, row_id_map)`.
-        If map_type is 'mask', and probs is not provided,
-        this function returns `(permuted_act, row_id_map)`,
-        otherwise it returns `(permuted_act, row_id_map, permuted_probs)`.
     """
     if map_type == "index":
-        assert probs is None, "probs permutation is not supported when map_type is 'index'"
         return _moe_permute_index_map.apply(inp, routing_map, num_out_tokens, max_token_num)
     if map_type == "mask":
-        output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
-            inp, routing_map, num_out_tokens, probs
-        )
-        if probs is None:
-            return output, row_id_map
-        return output, row_id_map, permuted_probs
+        output, row_id_map, _ = _moe_permute_mask_map.apply(inp, routing_map, num_out_tokens, None)
+        return output, row_id_map
     raise ValueError("map_type should be one of 'mask' or 'index'")
+
+
+def moe_permute_with_probs(
+    inp: torch.Tensor,
+    probs: torch.Tensor,
+    routing_map: torch.Tensor,
+    num_out_tokens: int = -1,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Permute the tokens and probs based on the routing_map.
+    Token with the same index will be grouped together.
+    Tokens with the same designated expert will be grouped together.
+    The routing_map indicates which experts were selected by each token.
+
+    Parameters
+    ----------
+    inp: torch.Tensor
+        Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
+    probs: torch.Tensor
+        The tensor of probabilities corresponding to the permuted tokens and is
+        of shape [num_tokens, num_experts]. It will be permuted with the tokens
+        according to the routing_map.
+    routing_map: torch.Tensor
+        The token to expert mapping tensor of shape [num_tokens, num_experts] and dtype 'int32'.
+        The values in it: 1 means the token is routed to this expert and 0 means not.
+    num_out_tokens: int, default = -1
+        The effective output token count, representing the number of tokens not dropped.
+        By default, set to '-1', meaning no tokens are dropped.
+    """
+    output, row_id_map, permuted_probs = _moe_permute_mask_map.apply(
+        inp, routing_map, num_out_tokens, probs
+    )
+    return output, permuted_probs, row_id_map
 
 
 def moe_unpermute(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
-    probs: torch.Tensor = None,
+    merging_probs: torch.Tensor = None,
     restore_shape: torch.Tensor = None,
     map_type: str = "mask",
+    probs: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Unpermute a tensor with permuted tokens, and optionally merge the tokens with their
@@ -563,7 +584,7 @@ def moe_unpermute(
     row_id_map: torch.Tensor
         The tensor of a mapping table for sorted indices used to unpermute the tokens,
         which is the second output tensor of `Permute`.
-    probs: torch.Tensor
+    merging_probs: torch.Tensor, default = None
         The tensor of probabilities corresponding to the permuted tokens. If provided,
         the unpermuted tokens will be merged with their respective probabilities.
         By default, set to an empty tensor, which means that the tokens are directly merged by accumulation.
@@ -572,11 +593,18 @@ def moe_unpermute(
     map_type: str, default = 'mask'
         Type of the routing map tensor. Should be the same as the value passed to moe_permute.
         Options are: 'mask', 'index'.
+    probs: torch.Tensor, default = None
+        Renamed to merging_probs. Keep for backward compatibility.
     """
+    if probs is not None:
+        if merging_probs is not None:
+            raise ValueError("Both merging_probs and probs kwarg are provided. probs is deprecated.")
+        warnings.warn("probs kwarg is deprecated. Use merging_probs kwarg instead.")
+        merging_probs = probs
     if map_type == "index":
-        return _moe_unpermute_index_map.apply(inp, row_id_map, probs)
+        return _moe_unpermute_index_map.apply(inp, row_id_map, merging_probs)
     if map_type == "mask":
-        return _moe_unpermute_mask_map.apply(inp, row_id_map, probs, restore_shape)
+        return _moe_unpermute_mask_map.apply(inp, row_id_map, merging_probs, restore_shape)
     raise ValueError("map_type should be one of 'mask' or 'index'")
 
 
@@ -678,7 +706,6 @@ def moe_sort_chunks_by_index(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
     sorted_index: torch.Tensor,
-    probs: torch.Tensor = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Split and sort the input tensor based on the split_sizes and sorted indices.
@@ -693,12 +720,34 @@ def moe_sort_chunks_by_index(
         Chunk sizes of the inp tensor along the 0-th dimension.
     sorted_indices: torch.Tensor
         Chunk indices used to permute the chunks.
-    probs: torch.Tensor, default = None
+    """
+    output, _ = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, None)
+    return output
+
+
+def moe_sort_chunks_by_index_with_probs(
+    inp: torch.Tensor,
+    probs: torch.Tensor,
+    split_sizes: torch.Tensor,
+    sorted_index: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Split and sort the input tensor and probs based on the split_sizes and sorted indices.
+    The inp tensor is splitted along dim-0 according to the split_sizes list and then sorted
+    according to the sorted_indices.
+
+    Parameters
+    ----------
+    inp: torch.Tensor
+        Input tensor of shape `[num_tokens, hidden_size]`, on which permutation will be applied.
+    probs: torch.Tensor
         The tensor of probabilities corresponding to the permuted tokens and is
-        of shape [num_tokens]. If provided, it will be permuted with the tokens according to
+        of shape [num_tokens]. It will be permuted with the tokens according to
         the split_sizes and sorted_indices.
+    split_sizes: torch.Tensor
+        Chunk sizes of the inp tensor along the 0-th dimension.
+    sorted_indices: torch.Tensor
+        Chunk indices used to permute the chunks.
     """
     output, permuted_probs = _moe_chunk_sort.apply(inp, split_sizes, sorted_index, probs)
-    if probs is None:
-        return output
     return output, permuted_probs
