@@ -198,7 +198,7 @@ class Simulation:
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["UnfusedAttention"])#, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FlashAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
@@ -233,6 +233,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
+    if backend == "FlashAttention":
+        config.max_seqlen_q = 256
+        config.max_seqlen_kv = 256
 
     # create model
     model = (
@@ -458,6 +461,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             for i, seq in enumerate(sim.t_seq_ids):
                 start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
                 end = sim.t_total_lens[i].item()
+                print('i, seq', i, seq, start, end, sim.step_lens[i], incremental_q.shape, q.shape)
                 incremental_q[i, : sim.step_lens[i], :, :] = q[seq, start:end, :, :]
                 incremental_k[i, : sim.step_lens[i], :, :] = k[seq, start:end, :, :]
                 incremental_v[i, : sim.step_lens[i], :, :] = v[seq, start:end, :, :]
@@ -488,6 +492,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             max_seqlen_kv=config.max_seqlen_kv,
             qkv_format=qkv_format,
         )
+        print("lllllllll ", line_output.shape)
 
         # compare results
         if backend != "FlashAttention":
@@ -504,9 +509,15 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             }
         for i, seq in enumerate(sim.t_seq_ids):
             if qkv_format == "bshd":
+                print('seqq ', i, seq, sim.t_total_lens[i], sim.step_lens[i])
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(line_output[i, :, :4])
+                #print(line_output[i, sim.step_lens[i] - 1, :])
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     line_output[i, :sim.step_lens[i] - 1, :],
+                    #full_output[seq, sim.t_total_lens[i] - 1, :],
+                    #line_output[i, sim.step_lens[i] - 1, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )

@@ -5646,7 +5646,6 @@ class FlashAttention(torch.nn.Module):
         qkv_format = "".join(
             [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
         )
-
         if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
             if qkv_format == "sbhd":
                 # For now just 128, will make it more general in the future
@@ -5690,6 +5689,8 @@ class FlashAttention(torch.nn.Module):
 
             if "padding" in attn_mask_type:
                 assert not context_parallel, "Padding mask not supported with context parallelism!"
+                cu_seqlens_q = cu_seqlens_q[:batch_size+1]
+                cu_seqlens_kv = cu_seqlens_kv[:batch_size+1]
 
                 if inference_params is None or (
                     inference_params is not None and not inference_params.is_paged
@@ -5825,8 +5826,8 @@ class FlashAttention(torch.nn.Module):
                 else:
                     if _flash_attn_2_5_7_plus:
                         fa_optional_forward_kwargs["block_table"] = None
-                        if inference_params is not None:
-                            fa_optional_forward_kwargs["block_table"] = inference_params.page_table
+                        if inference_params is not None and inference_params.is_paged:
+                            fa_optional_forward_kwargs["block_table"] = inference_params.cache_manager.page_table[:batch_size]
                     func = (
                         flash_attn_varlen_func
                         if not _use_flash_attn_3
