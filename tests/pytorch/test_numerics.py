@@ -1400,7 +1400,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation):
+def _test_grouped_linear_accuracy(
+    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
@@ -1464,7 +1466,15 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, f
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, fuse_wgrad_accumulation, parallel_mode=None
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    parallel_mode=None,
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)

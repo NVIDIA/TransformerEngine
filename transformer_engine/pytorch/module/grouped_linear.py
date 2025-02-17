@@ -180,12 +180,15 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_shape_1 = weights[0].shape[1]
 
-            ctx.main_grads = [weights[i].main_grad for i in range(num_gemms)] if fuse_wgrad_accumulation else [None] * num_gemms
             tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
             ctx.weights_requires_grad = weights[0].requires_grad
+            if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                ctx.main_grads = [weights[i].main_grad for i in range(num_gemms)]
+            else:
+                ctx.main_grads = [None] * num_gemms
             ctx.device = device
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
