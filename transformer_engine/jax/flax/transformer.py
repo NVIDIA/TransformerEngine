@@ -24,7 +24,7 @@ from jax.ad_checkpoint import checkpoint_name
 
 from .module import DenseGeneral, LayerNormDenseGeneral, LayerNormMLP
 from .module import LayerNorm, Softmax
-from ..attention import AttnBiasType, AttnMaskType, QKVLayout
+from ..attention import AttnBiasType, AttnMaskType, QKVLayout, SequenceDescriptor
 from ..attention import is_fused_attn_kernel_available, make_swa_mask, canonicalize_attn_mask_type
 from ..attention import fused_attn
 from ..softmax import SoftmaxType
@@ -115,6 +115,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     float32_logits: bool = False
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
@@ -149,8 +150,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         del self.scale_factor
 
         if self.float32_logits:
-            query = query.astype(jnp.float32)
-            key = key.astype(jnp.float32)
+            query = query.astype(self.dtype)
+            key = key.astype(self.dtype)
         h_q, h_kv = query.shape[-2], key.shape[-2]
         # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
         # Therefore, we have to maintain two code paths.
@@ -261,10 +262,12 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
     attn_mask_type: AttnMaskType = AttnMaskType.CAUSAL_MASK
     attn_bias_type: Optional[AttnBiasType] = None
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     qkv_layout: QKVLayout = QKVLayout.BSHD_BSHD_BSHD
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = False
     window_size: Optional[Tuple[int, int]] = None
+    max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
 
@@ -274,7 +277,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         query: Array,
         key: Array,
         value: Array,
-        mask: Optional[Array] = None,
+        sequence_descriptor: Optional[SequenceDescriptor] = None,
         bias: Optional[Array] = None,
         *,
         dropout_rng: Optional[PRNGKey] = None,
@@ -291,8 +294,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             scale_factor = self.scale_factor
         del self.scale_factor
 
-        # TODO(rewang): integrate THD format
-        if self.qkv_layout == QKVLayout.BS3HD:
+        if self.qkv_layout.is_qkvpacked():
             """qkvpacked format, treat
             query: qkvpacked tensor, shape = [..., 3, h, d]
             key: ignore
@@ -304,7 +306,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (qkv_packed,),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -313,10 +315,11 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
-        elif self.qkv_layout == QKVLayout.BSHD_BS2HD:
+        elif self.qkv_layout.is_kvpacked():
             """kvpacked format, treat
             query: query tensor, shape = [..., h, d]
             key: kvpacked tensor, shape = [..., 2, h, d]
@@ -329,7 +332,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (query, kv_packed),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -338,10 +341,11 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
-        elif self.qkv_layout == QKVLayout.BSHD_BSHD_BSHD:
+        elif self.qkv_layout.is_separate():
             if self.transpose_batch_sequence:
                 query = query.transpose([1, 0, 2, 3])
                 key = key.transpose([1, 0, 2, 3])
@@ -349,7 +353,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
             x = fused_attn(
                 (query, key, value),
                 bias,
-                mask,
+                sequence_descriptor,
                 seed,
                 attn_mask_type=self.attn_mask_type,
                 attn_bias_type=self.attn_bias_type,
@@ -358,6 +362,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
                 dropout_probability=self.attention_dropout,
                 is_training=not deterministic,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
             )
@@ -435,6 +440,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         .. note:: :attr:`mask` in :attr:`__call__` is ignored for 'no_mask' and 'causal'.
 
+        .. note:: THD format only supports 'padding' or 'causal_padding' mask type.
+
     attn_bias_type: Optional[str], default = None
         Type of the attention bias passed in the attention.
         Available options: {'no_bias', 'pre_scale_bias', 'post_scale_bias'}.
@@ -449,13 +456,15 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     qkv_layout: str, default = 'bshd_bshd_bshd'
         Specifies the dimensional layout format for the query, key, and value tensors in __call__().
         It indicates how the inputs are processed.
-        Available options: {'bs3hd', 'bshd_bs2hd', 'bshd_bshd_bshd'}. Where
+        Available options: {'bs3hd', 'bshd_bs2hd', 'bshd_bshd_bshd', 't3hd', 'thd_t2hd', 'thd_thd_thd'}.
 
         * bs3hd: query tensor is treated as a qkvpacked tensor with shape = [b, s, 3, h, d].
           key and value arguments in :attr:`__call__()` are ignored in this layout.
         * bshd_bs2hd: query tensor with shape = [b, s, h, d]. key tensor is treaded as a kvpacked
           tensor with shape = [b, s, 2, h, d]. `value` argument in :attr:`__call__()` is ignored.
         * bshd_bshd_bshd: query, key, and value are seperated with shape = [b, s, h, d].
+        * t3hd/thd_t2hd/thd_thd_thd: Have the same layout as bshd series, but it allows multiple
+          sequences to be packed in a batch, also known as sequence packing.
 
         Explanation of denotations:
 
@@ -474,14 +483,18 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         should be in (seqlen, batch, ...), otherwise (batch, seqlen, ...).
     window_size: Optional[Tuple[int, int]], default = None
         Sliding window size. The default value is no sliding window.
+    max_segments_per_seq: Optional[int], default = 1
+        The maximum number of segments per sequence, also used for THD format (sequence packing).
     context_parallel_causal_load_balanced (bool):
             Indicates the sequences are ordered for causal mask load balancing when running context parallelism.
     context_parallel_axis (str): The name of the context parallel axis.
 
     Optimization parameters
     -----------------------
-    dtype: jax.numpy.dtype, default = jax.numpy.float32
-        The data type used to allocate the initial parameters.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     """
 
     head_dim: int
@@ -491,12 +504,14 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: AttnMaskType = "causal"
     attn_bias_type: AttnBiasType = None
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     dropout_rng_name: str = "dropout"
     float32_logits: bool = False
     qkv_layout: str = "bshd_bshd_bshd"
     scale_factor: Optional[float] = None
     transpose_batch_sequence: bool = True
     window_size: Optional[Tuple[int, int]] = None
+    max_segments_per_seq: Optional[int] = 1
     context_parallel_causal_load_balanced: bool = False
     context_parallel_axis: str = ""
 
@@ -506,10 +521,11 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         query: Array,
         key: Array,
         value: Array,
-        mask: Optional[Array] = None,
+        sequence_descriptor: Optional[Union[SequenceDescriptor, Array]] = None,
         bias: Optional[Array] = None,
         *,
         deterministic: bool = False,
+        mask: Optional[Union[SequenceDescriptor, Array]] = None,
     ) -> Array:
         """
         Parameters
@@ -536,6 +552,15 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
+
+        if mask is not None:
+            if sequence_descriptor is not None:
+                raise ValueError(
+                    "sequence_descriptor and mask cannot be provided at the same time."
+                )
+            warnings.warn("mask is deprecated, please use sequence_descriptor instead.")
+            sequence_descriptor = mask
+            del mask
 
         # For internal API, we use enum to maintain
         if self.attn_bias_type is None:
@@ -599,40 +624,61 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if not use_fused_attn:
             # unfused attention only supports splitted query, key, value
-            if qkv_layout == QKVLayout.BS3HD:
+            if qkv_layout.is_qkvpacked():
                 query, key, value = jnp.split(query, [1, 2], axis=-3)
                 query, key, value = map(
                     functools.partial(jnp.squeeze, axis=-3), [query, key, value]
                 )
-            elif qkv_layout == QKVLayout.BSHD_BS2HD:
+            elif qkv_layout.is_kvpacked():
                 key, value = jnp.split(key, [1], axis=-3)
                 key, value = map(functools.partial(jnp.squeeze, axis=-3), [key, value])
             else:
-                assert qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+                assert qkv_layout.is_separate()
+
+            assert sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray)
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 float32_logits=self.float32_logits,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 window_size=self.window_size,
-            )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
+            )(
+                query,
+                key,
+                value,
+                sequence_descriptor,
+                bias,
+                dropout_rng=dropout_rng,
+                deterministic=deterministic,
+            )
         else:
             x = _FusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
                 attn_mask_type=attn_mask_type,
                 attn_bias_type=attn_bias_type,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 scale_factor=scale_factor,
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 qkv_layout=qkv_layout,
                 window_size=self.window_size,
+                max_segments_per_seq=self.max_segments_per_seq,
                 context_parallel_causal_load_balanced=self.context_parallel_causal_load_balanced,
                 context_parallel_axis=self.context_parallel_axis,
-            )(query, key, value, mask, bias, dropout_rng=dropout_rng, deterministic=deterministic)
+            )(
+                query,
+                key,
+                value,
+                sequence_descriptor,
+                bias,
+                dropout_rng=dropout_rng,
+                deterministic=deterministic,
+            )
 
         return x
 
@@ -880,8 +926,10 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
     Optimization parameters
     -----------------------
-    dtype: jax.numpy.dtype, default = jax.numpy.float32
-        The data type used to allocate the initial parameters.
+    dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
@@ -927,6 +975,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = True
     enable_sequence_parallel: bool = False
@@ -977,7 +1026,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
 
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.dtype
+                1.0, "fan_in", "normal", dtype=self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1105,6 +1154,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     dot_input_axes=inputs_logical_axes_no_sp,
                     name="qkv",
                     dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
                 )(inputs_q)
                 qkv_proj = checkpoint_name(qkv_proj, "combined_qkv_proj")
                 qkv_layout = QKVLayout.BS3HD
@@ -1128,6 +1178,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
                     kernel_init=query_init,
                     layernorm_input_axes=inputs_logical_axes_maybe_sp,
                     dot_input_axes=inputs_logical_axes_no_sp,
@@ -1152,6 +1203,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                     low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                     name="kv",
                     dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
                 )(inputs_kv)
                 kv_proj = checkpoint_name(kv_proj, "combined_kv_proj")
                 qkv_layout = QKVLayout.BSHD_BS2HD
@@ -1169,6 +1221,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                 low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
             )
             query, ln_out = LayerNormDenseGeneral(
                 enable_layernorm=self.input_layernorm,
@@ -1189,6 +1242,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 low_rank_adaptation_dim=self.low_rank_adaptation_dim,
                 low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 kernel_init=query_init,
                 layernorm_input_axes=inputs_logical_axes_maybe_sp,
                 dot_input_axes=inputs_logical_axes_no_sp,
@@ -1266,7 +1320,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                         f"expected query shape {expected_shape} instead got {query.shape}."
                     )
 
-                cur_index = cache_index.value
+                cur_index = cache_index.value.astype(jnp.int32)
                 one_hot_indices = jax_nn.one_hot(cur_index, length, dtype=key.dtype)
                 one_hot_indices = jnp.reshape(one_hot_indices, one_hot_indices_shape)
                 key = cached_key.value + key * one_hot_indices
@@ -1326,6 +1380,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             attn_bias_type=self.attn_bias_type,
             attention_dropout=self.attention_dropout,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             dropout_rng_name=self.dropout_rng_name,
             float32_logits=self.float32_logits,
             qkv_layout=qkv_layout.name,
@@ -1351,6 +1406,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             low_rank_adaptation_dim=self.low_rank_adaptation_dim,
             low_rank_adaptation_alpha=self.low_rank_adaptation_alpha,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             name="out",
         )(x)
         out = checkpoint_name(out, "out_proj")
@@ -1379,7 +1435,9 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used to allocate the initial parameters.
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     """
 
     num_buckets: int
@@ -1388,6 +1446,7 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
     embedding_init: Callable[..., Array] = nn.linear.default_embed_init
     embedding_axes: Tuple[str, ...] = ("heads", "relpos_buckets")
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
 
     @nn.compact
     def __call__(self, q_seqlen, k_seqlen, bidirectional=True):
@@ -1440,7 +1499,7 @@ class RelativePositionBiases(nn.Module):  # pylint: disable=too-few-public-metho
             "rel_embedding",
             self.embedding_init,
             (self.num_attention_heads, self.num_buckets),
-            self.dtype,
+            self.weight_dtype,
             axes=self.embedding_axes,
         )
 
@@ -1613,7 +1672,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used to allocate the initial parameters.
+        The data type used for computation.
+    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
+        The data type of the module parameters.
     drop_path: float, default = 0.0
         When > 0.0, applies stochastic depth per sample in the main
         path of the residual block.
@@ -1666,6 +1727,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     low_rank_adaptation_dim: int = 32
     low_rank_adaptation_alpha: float = None
     dtype: DType = jnp.float32
+    weight_dtype: DType = jnp.float32
     drop_path: float = 0.0
     fuse_qkv_params: bool = True
     transpose_batch_sequence: bool = False
@@ -1677,11 +1739,11 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
     def __post_init__(self):
         if self.mha_kernel_init is None:
             self.mha_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", dtype=self.dtype
+                1.0, "fan_in", "normal", dtype=self.weight_dtype
             )
         if self.mlp_kernel_init is None:
             self.mlp_kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+                1.0, "fan_in", "truncated_normal", dtype=self.weight_dtype
             )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
@@ -1771,6 +1833,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                     max_distance=128,
                     num_attention_heads=self.num_attention_heads,
                     dtype=self.dtype,
+                    weight_dtype=self.weight_dtype,
                     embedding_init=nn.initializers.variance_scaling(1.0, "fan_avg", "uniform"),
                     name="relpos_bias",
                 )
@@ -1804,6 +1867,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         x, ln_out = MultiHeadAttention(
             num_attention_heads=self.num_attention_heads,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             head_dim=head_dim,
             num_gqa_groups=self.num_gqa_groups,
             transpose_batch_sequence=self.transpose_batch_sequence,
@@ -1882,6 +1946,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             y, ln_out = MultiHeadAttention(
                 num_attention_heads=self.num_attention_heads,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 head_dim=head_dim,
                 num_gqa_groups=self.num_gqa_groups,
                 transpose_batch_sequence=self.transpose_batch_sequence,
@@ -1947,6 +2012,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
             intermediate_dropout_rate=self.intermediate_dropout,
             intermediate_hidden_dropout_dims=self.intermediate_dropout_dims,
             dtype=self.dtype,
+            weight_dtype=self.weight_dtype,
             scale_axes=(W_NO_SHARD_AXES,),
             ln_bias_axes=(W_NO_SHARD_AXES,),
             kernel_init=self.mlp_kernel_init,
@@ -1996,6 +2062,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_axes=(W_NO_SHARD_AXES,),
                 transpose_batch_sequence=self.transpose_batch_sequence,
                 dtype=self.dtype,
+                weight_dtype=self.weight_dtype,
                 name="output_layernorm",
             )(z)
 

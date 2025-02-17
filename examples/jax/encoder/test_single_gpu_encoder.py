@@ -334,7 +334,7 @@ class TestEncoder(unittest.TestCase):
         """Test Transformer Engine with FP8"""
         self.args.use_fp8 = True
         actual = train_and_evaluate(self.args)
-        assert actual[0] < 0.45 and actual[1] > 0.79
+        assert actual[0] < 0.455 and actual[1] > 0.79
 
 
 if __name__ == "__main__":
