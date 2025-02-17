@@ -1548,6 +1548,7 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
         recipe=recipe,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
+        fuse_wgrad_accumulation=True,
     )
 
 
@@ -1562,6 +1563,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fp8=True,
         recipe=recipe,
         fp8_model_params=True,
+        fuse_wgrad_accumulation=True,
     )
 
 
