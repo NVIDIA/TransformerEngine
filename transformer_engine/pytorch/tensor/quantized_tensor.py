@@ -250,9 +250,7 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(
-        cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False
-    ):
+    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -355,9 +353,7 @@ class QuantizedTensor(torch.Tensor):
 
         # View op
         if func == torch.ops.aten.view.default:
-            raise NotImplementedError(
-                "{cls.__name__} class does not support tensor views"
-            )
+            raise NotImplementedError("{cls.__name__} class does not support tensor views")
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
@@ -383,12 +379,8 @@ class QuantizedTensor(torch.Tensor):
             super().__torch_dispatch__(func, types, new_args, new_kwargs)
             for arg, new_arg, schema_arg in zip(args, new_args, schema_args):
                 maybe_update_inplace(arg, new_arg, schema_arg)
-            for kwarg, new_kwarg, schema_arg in zip(
-                kwargs, new_kwargs, schema_args[args_len:]
-            ):
-                assert (
-                    kwarg == new_kwarg == schema_arg.name
-                ), "name of the kw argument should match"
+            for kwarg, new_kwarg, schema_arg in zip(kwargs, new_kwargs, schema_args[args_len:]):
+                assert kwarg == new_kwarg == schema_arg.name, "name of the kw argument should match"
                 maybe_update_inplace(kwargs[kwarg], new_kwargs[new_kwarg], schema_arg)
             return None
 
