@@ -726,14 +726,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.grad_added_to_main_grad = True
                 if getattr(weight, "zero_out_wgrad", False):
                     wgrad = torch.zeros(
-                        weight.main_grad.shape,
+                        weight.shape,
                         dtype=weight.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
                     wgrad = torch.empty(
-                        weight.main_grad.shape,
+                        weight.shape,
                         dtype=weight.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,

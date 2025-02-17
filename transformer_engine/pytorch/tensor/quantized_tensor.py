@@ -14,10 +14,6 @@ from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
 
-# Attributes of params that are added externally should be preserved.
-# grad_added_to_main_grad and main_grad is used by DDP in MCore.
-_preserved_attributes = ["grad_added_to_main_grad", "main_grad"]
-
 
 def prepare_for_saving(
     *tensors,
@@ -32,11 +28,7 @@ def prepare_for_saving(
             tensor_list.append(None)
             tensor_objects_list.append(None)
         elif type(tensor) in (torch.Tensor, torch.nn.Parameter):
-            saved_tensor = tensor.data
-            for attr in _preserved_attributes:
-                if hasattr(tensor, attr):
-                    setattr(saved_tensor, attr, getattr(tensor, attr))
-            tensor_list.append(saved_tensor)
+            tensor_list.append(tensor)
             tensor_objects_list.append(None)
         else:
             t, t_obj = tensor.prepare_for_saving()
@@ -124,10 +116,7 @@ class Quantizer(abc.ABC):
         """Quantize tensor in-place"""
 
     def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
+        self, tensor: torch.Tensor, *, out: Optional[QuantizedTensor] = None
     ) -> QuantizedTensor:
         """Quantize tensor"""
         if out is not None:
@@ -167,10 +156,7 @@ class Quantizer(abc.ABC):
         """
 
     def set_usage(
-        self,
-        *,
-        rowwise: Optional[bool] = None,
-        columnwise: Optional[bool] = None,
+        self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
     ) -> None:
         """Set how the quantized tensor is expected to be used
 
@@ -202,8 +188,7 @@ class _QuantizeFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        _ctx: torch.autograd.function.FunctionCtx,  # unused
-        grad: torch.Tensor,
+        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
@@ -220,9 +205,7 @@ class _IdentityFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
-        tensor: QuantizedTensor,
-        init_kwargs: Optional[Dict[str, Any]] = None,
+        ctx, tensor: QuantizedTensor, init_kwargs: Optional[Dict[str, Any]] = None
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
 
@@ -267,7 +250,9 @@ class QuantizedTensor(torch.Tensor):
 
     """
 
-    def __new__(cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False):
+    def __new__(
+        cls, shape: Iterable[int], dtype: torch.dtype, *, requires_grad: bool = False
+    ):
         # We are assuming only contiguous tensors
         stride = _stride_from_shape(shape)
         instance = torch.Tensor._make_wrapper_subclass(
@@ -370,7 +355,9 @@ class QuantizedTensor(torch.Tensor):
 
         # View op
         if func == torch.ops.aten.view.default:
-            raise NotImplementedError("{cls.__name__} class does not support tensor views")
+            raise NotImplementedError(
+                "{cls.__name__} class does not support tensor views"
+            )
 
         def maybe_unwrap(arg):
             if isinstance(arg, QuantizedTensor):
@@ -396,8 +383,12 @@ class QuantizedTensor(torch.Tensor):
             super().__torch_dispatch__(func, types, new_args, new_kwargs)
             for arg, new_arg, schema_arg in zip(args, new_args, schema_args):
                 maybe_update_inplace(arg, new_arg, schema_arg)
-            for kwarg, new_kwarg, schema_arg in zip(kwargs, new_kwargs, schema_args[args_len:]):
-                assert kwarg == new_kwarg == schema_arg.name, "name of the kw argument should match"
+            for kwarg, new_kwarg, schema_arg in zip(
+                kwargs, new_kwargs, schema_args[args_len:]
+            ):
+                assert (
+                    kwarg == new_kwarg == schema_arg.name
+                ), "name of the kw argument should match"
                 maybe_update_inplace(kwargs[kwarg], new_kwargs[new_kwarg], schema_arg)
             return None
 
@@ -416,8 +407,7 @@ class QuantizedTensor(torch.Tensor):
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
 
     def contiguous(
-        self,
-        memory_format: torch.memory_format = torch.contiguous_format,
+        self, memory_format: torch.memory_format = torch.contiguous_format
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
         raise NotImplementedError(
