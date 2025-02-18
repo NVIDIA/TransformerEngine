@@ -57,19 +57,15 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
 
 
 def _create_layernorm_parameters(
-    layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, dtype, weight_dtype
+    layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, input_dtype, dtype
 ):
-    scale = nn_partitioning.param_with_axes(
-        "scale", scale_init, shape, weight_dtype, axes=scale_axes
-    )
-    scale = scale.astype(dtype)
+    scale = nn_partitioning.param_with_axes("scale", scale_init, shape, dtype, axes=scale_axes)
+    scale = scale.astype(input_dtype)
 
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == "layernorm":
-        bias = nn_partitioning.param_with_axes(
-            "ln_bias", bias_init, shape, weight_dtype, axes=bias_axes
-        )
-        bias = bias.astype(dtype)
+        bias = nn_partitioning.param_with_axes("ln_bias", bias_init, shape, dtype, axes=bias_axes)
+        bias = bias.astype(input_dtype)
     else:
         assert layernorm_type == "rmsnorm"
         bias = None
@@ -158,15 +154,15 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
         heads = inputs.shape[1]
         q_seqlen = inputs.shape[2]
         k_seqlen = inputs.shape[3]
-        dtype = inputs.dtype
+        input_dtype = inputs.dtype
         logits = inputs
 
         if self.softmax_type is not SoftmaxType.SCALED and is_softmax_kernel_available(
-            self.softmax_type, batch, heads, q_seqlen, k_seqlen, inputs.dtype
+            self.softmax_type, batch, heads, q_seqlen, k_seqlen, input_dtype
         ):
 
             if bias is not None:
-                logits = logits + bias.astype(dtype)
+                logits = logits + bias.astype(input_dtype)
 
             mask_ = mask
             if self.softmax_type is not SoftmaxType.SCALED_MASKED:
@@ -178,25 +174,27 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             if mask is not None:
                 attention_bias = lax.select(
                     mask > 0,
-                    jnp.full(mask.shape, -1e10).astype(dtype),
-                    jnp.full(mask.shape, 0.0).astype(dtype),
+                    jnp.full(mask.shape, -1e10),
+                    jnp.full(mask.shape, 0.0),
                 )
+                attention_bias = attention_bias.astype(input_dtype)
 
             if bias is not None:
                 attention_bias = _combine_biases(attention_bias, bias)
 
             if attention_bias is not None:
-                logits = logits + attention_bias.astype(dtype)
+                logits = logits + attention_bias.astype(input_dtype)
 
             # For the case that self.softmax == SoftmaxType.SCALED_UPPER_TRIANG_MASKED
             # and kernel is unavailable, then try on pure scaled softmax custom calls.
             if is_softmax_kernel_available(
-                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, dtype
+                SoftmaxType.SCALED, batch, heads, q_seqlen, k_seqlen, input_dtype
             ):
                 outputs = softmax(logits, None, self.scale_factor, SoftmaxType.SCALED)
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
 
+        assert input_dtype == outputs.dtype
         return outputs
 
 
@@ -261,9 +259,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
-    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type of the module parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = False
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
@@ -278,7 +274,6 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
     bias_init: Initializer = nn.initializers.zeros
     bias_axes: Tuple[str, ...] = ("embed",)
     dtype: DType = jnp.float32
-    weight_dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
 
     def __post_init__(self):
@@ -303,7 +298,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
         outputs : jax.numpy.ndarray
             Output tensors.
         """
-        x = x.astype(self.dtype)
+        input_dtype = x.dtype
 
         features = x.shape[-1]
         scale, ln_bias = _create_layernorm_parameters(
@@ -313,10 +308,10 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
             self.scale_axes,
             self.bias_init,
             self.bias_axes,
+            input_dtype,
             self.dtype,
-            self.weight_dtype,
         )
-        return layernorm(
+        out = layernorm(
             x,
             scale,
             ln_bias,
@@ -324,6 +319,8 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
             zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.epsilon,
         )
+        assert out.dtype == input_dtype
+        return out
 
 
 class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-methods
@@ -408,9 +405,7 @@ class DenseGeneral(TransformerEngineBase):
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
-    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type of the module parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
@@ -428,13 +423,12 @@ class DenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    weight_dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
 
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal", dtype=self.weight_dtype
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
             )
         super().__post_init__()
 
@@ -454,24 +448,25 @@ class DenseGeneral(TransformerEngineBase):
             Output tensors.
         """
 
+        input_dtype = inputs.dtype
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
-        inputs = jnp.asarray(inputs, self.dtype)
         axis = _normalize_axes(axis, inputs.ndim)
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_shape, self.weight_dtype, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-        kernel = kernel.astype(self.dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, self.weight_dtype, axes=self.bias_axes
+                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
             )
-            bias = bias.astype(self.dtype)
+            bias = bias.astype(input_dtype)
         else:
             bias = None
 
@@ -500,11 +495,11 @@ class DenseGeneral(TransformerEngineBase):
                 "lora_a_kernel",
                 self.kernel_init,
                 lora_a_kernel_init_shape,
-                self.weight_dtype,
+                self.dtype,
                 axes=lora_a_kernel_axes,
             )
             lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
-            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+            lora_a_kernel = lora_a_kernel.astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
@@ -512,10 +507,10 @@ class DenseGeneral(TransformerEngineBase):
                 "lora_b_kernel",
                 nn.initializers.zeros,
                 lora_b_kernel_shape,
-                self.weight_dtype,
+                self.dtype,
                 axes=lora_b_kernel_axes,
             )
-            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+            lora_b_kernel = lora_b_kernel.astype(input_dtype)
 
             y += _apply_low_rank_adaptation(
                 inputs, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -524,6 +519,8 @@ class DenseGeneral(TransformerEngineBase):
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
             y += jnp.reshape(bias, bias_shape)
+
+        assert y.dtype == input_dtype
         return y
 
 
@@ -606,9 +603,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
-    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type of the module parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
@@ -638,7 +633,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    weight_dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_input_axes: Tuple[str, ...] = None
@@ -650,7 +644,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 1.0,
                 "fan_in",
                 "truncated_normal",
-                dtype=self.weight_dtype,
+                dtype=self.dtype,
             )
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
             self.scale_init,
@@ -677,6 +671,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
 
+        input_dtype = inputs.dtype
         ln_output = None
 
         fuse_layernorm = (
@@ -684,7 +679,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
-        inputs = inputs.astype(self.dtype)
 
         if self.enable_layernorm:
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
@@ -699,8 +693,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 self.scale_axes,
                 self.ln_bias_init,
                 self.ln_bias_axes,
+                input_dtype,
                 self.dtype,
-                self.weight_dtype,
             )
 
             if not fuse_layernorm:
@@ -730,9 +724,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         kernel_shape = tuple(y.shape[ax] for ax in axis) + features
         kernel_param_shape = (np.prod([inputs.shape[ax] for ax in axis]),) + features
         kernel = nn_partitioning.param_with_axes(
-            "kernel", self.kernel_init, kernel_shape, self.weight_dtype, axes=self.kernel_axes
+            "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-        kernel = kernel.astype(self.dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
 
@@ -775,11 +770,11 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 "lora_a_kernel",
                 self.kernel_init,
                 lora_a_kernel_init_shape,
-                self.weight_dtype,
+                self.dtype,
                 axes=lora_a_kernel_axes,
             )
             lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
-            lora_a_kernel = lora_a_kernel.astype(self.dtype)
+            lora_a_kernel = lora_a_kernel.astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
@@ -787,10 +782,10 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 "lora_b_kernel",
                 nn.initializers.zeros,
                 lora_b_kernel_shape,
-                self.weight_dtype,
+                self.dtype,
                 axes=lora_b_kernel_axes,
             )
-            lora_b_kernel = lora_b_kernel.astype(self.dtype)
+            lora_b_kernel = lora_b_kernel.astype(input_dtype)
 
             z += _apply_low_rank_adaptation(
                 y, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -799,9 +794,9 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         bias = None
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
-                "bias", self.bias_init, features, self.weight_dtype, axes=self.bias_axes
+                "bias", self.bias_init, features, self.dtype, axes=self.bias_axes
             )
-            bias = bias.astype(self.dtype)
+            bias = bias.astype(input_dtype)
 
         if bias is not None:
             bias_shape = (1,) * (z.ndim - bias.ndim) + bias.shape
@@ -810,6 +805,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
 
+        assert z.dtype == input_dtype
         return z, ln_output  # dense_output, layer_norm_output
 
 
@@ -915,9 +911,7 @@ class LayerNormMLP(TransformerEngineBase):
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used for computation.
-    weight_dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type of the module parameters.
+        The data type used to allocate the initial parameters.
     transpose_batch_sequence : bool, default = True
         Indicate whether the input tensors were switched axis of batch
         and sequence length dimension. If set to True, the input tensors
@@ -950,7 +944,6 @@ class LayerNormMLP(TransformerEngineBase):
     low_rank_adaptation_alpha: float = None
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
-    weight_dtype: DType = jnp.float32
     transpose_batch_sequence: bool = True
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
@@ -959,7 +952,7 @@ class LayerNormMLP(TransformerEngineBase):
     def __post_init__(self):
         if self.kernel_init is None:
             self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "truncated_normal", dtype=self.weight_dtype
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
             )
         self.scale_init = _obtain_default_layernorm_scale_init_if_need(
             self.scale_init,
@@ -988,6 +981,7 @@ class LayerNormMLP(TransformerEngineBase):
             If :attr:`return_layernorm_output=False`, then this would be None.
         """
 
+        input_dtype = inputs.dtype
         ln_output = None
 
         fuse_layernorm = (
@@ -995,8 +989,6 @@ class LayerNormMLP(TransformerEngineBase):
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
-
-        inputs = inputs.astype(self.dtype)
 
         gated_act_pool = [
             ("gelu", "linear"),
@@ -1035,8 +1027,8 @@ class LayerNormMLP(TransformerEngineBase):
                 self.scale_axes,
                 self.ln_bias_init,
                 self.ln_bias_axes,
+                input_dtype,
                 self.dtype,
-                self.weight_dtype,
             )
 
             if not fuse_layernorm:
@@ -1083,11 +1075,12 @@ class LayerNormMLP(TransformerEngineBase):
             num_activations,
             -2,
             kernel_1_each_shape,
-            self.weight_dtype,
+            self.dtype,
             axes=self.kernel_axes_1,
         )
         kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
-        kernel_1 = kernel_1.astype(self.dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel_1 = kernel_1.astype(input_dtype)
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
@@ -1096,11 +1089,12 @@ class LayerNormMLP(TransformerEngineBase):
             "wo_kernel",
             self.kernel_init,
             kernel_2_param_shape,
-            self.weight_dtype,
+            self.dtype,
             axes=self.kernel_axes_2,
         )
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
-        kernel_2 = kernel_2.astype(self.dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel_2 = kernel_2.astype(input_dtype)
         contract_ind = tuple(range(0, len(axis)))
 
         ffn1_ckpt_name = "ffn1"
@@ -1115,20 +1109,20 @@ class LayerNormMLP(TransformerEngineBase):
                     "wi_bias",
                     self.bias_init,
                     bias_1_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=self.bias_axes_1,
                 )
-                bias_1 = bias_1.astype(self.dtype)
+                bias_1 = bias_1.astype(input_dtype)
 
                 bias_2_shape = (hidden_size,)
                 bias_2 = nn_partitioning.param_with_axes(
                     "wo_bias",
                     self.bias_init,
                     bias_2_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=self.bias_axes_2,
                 )
-                bias_2 = bias_2.astype(self.dtype)
+                bias_2 = bias_2.astype(input_dtype)
             else:
                 bias_1 = None
                 bias_2 = None
@@ -1195,11 +1189,11 @@ class LayerNormMLP(TransformerEngineBase):
                     num_activations,
                     -2,
                     wi_lora_a_kernel_init_each_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=wi_lora_a_kernel_axes,
                 )
                 wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
-                wi_lora_a_kernel = wi_lora_a_kernel.astype(self.dtype)
+                wi_lora_a_kernel = wi_lora_a_kernel.astype(input_dtype)
 
                 wi_lora_b_kernel_shape = (
                     num_activations,
@@ -1211,10 +1205,10 @@ class LayerNormMLP(TransformerEngineBase):
                     "wi_lora_b_kernel",
                     nn.initializers.zeros,
                     wi_lora_b_kernel_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=wi_lora_b_kernel_axes,
                 )
-                wi_lora_b_kernel = wi_lora_b_kernel.astype(self.dtype)
+                wi_lora_b_kernel = wi_lora_b_kernel.astype(input_dtype)
 
                 x += _apply_low_rank_adaptation(
                     y,
@@ -1231,11 +1225,11 @@ class LayerNormMLP(TransformerEngineBase):
                     "wi_bias",
                     self.bias_init,
                     intermediate_dim,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=self.bias_axes_1,
                 )
                 bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
-                bias_1 = bias_1.astype(self.dtype)
+                bias_1 = bias_1.astype(input_dtype)
                 x += jnp.reshape(bias_1, bias_1_shape)
 
             x = checkpoint_name(x, ffn1_ckpt_name)
@@ -1250,7 +1244,7 @@ class LayerNormMLP(TransformerEngineBase):
                 z = functools.reduce(operator.mul, activations)
                 # Remove act axis
                 z = jnp.reshape(z, (*z.shape[:-2], -1))
-            z = z.astype(self.dtype)
+            z = z.astype(input_dtype)
 
             z = nn.Dropout(
                 rate=self.intermediate_dropout_rate,
@@ -1259,7 +1253,7 @@ class LayerNormMLP(TransformerEngineBase):
             )(z, deterministic=deterministic)
 
             z = with_sharding_constraint_by_logical_axes(z, self.dot_2_input_axes)
-            z = z.astype(self.dtype)
+            z = z.astype(input_dtype)
 
             # DenseGeneral 2
             out = type_safe_dot_general(
@@ -1273,10 +1267,10 @@ class LayerNormMLP(TransformerEngineBase):
                     "wo_lora_a_kernel",
                     self.kernel_init,
                     wo_lora_a_kernel_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=wo_lora_a_kernel_axes,
                 )
-                wo_lora_a_kernel = wo_lora_a_kernel.astype(self.dtype)
+                wo_lora_a_kernel = wo_lora_a_kernel.astype(input_dtype)
 
                 wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
                 wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
@@ -1284,10 +1278,10 @@ class LayerNormMLP(TransformerEngineBase):
                     "wo_lora_b_kernel",
                     nn.initializers.zeros,
                     wo_lora_b_kernel_shape,
-                    self.weight_dtype,
+                    self.dtype,
                     axes=wo_lora_b_kernel_axes,
                 )
-                wo_lora_b_kernel = wo_lora_b_kernel.astype(self.dtype)
+                wo_lora_b_kernel = wo_lora_b_kernel.astype(input_dtype)
 
                 out += _apply_low_rank_adaptation(
                     z,
@@ -1304,12 +1298,13 @@ class LayerNormMLP(TransformerEngineBase):
                     "wo_bias",
                     self.bias_init,
                     (hidden_size,),
-                    self.weight_dtype,
+                    self.dtype,
                     axes=self.bias_axes_2,
                 )
-                bias_2 = bias_2.astype(self.dtype)
+                bias_2 = bias_2.astype(input_dtype)
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 
+        assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output
