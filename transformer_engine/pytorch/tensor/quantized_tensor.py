@@ -40,6 +40,7 @@ def prepare_for_saving(
 def restore_from_saved(
     tensors: list[Optional[Any]],
     saved_tensors: list[Optional[Union[torch.Tensor, torch.nn.Parameter]]],
+    return_saved_tensors: bool = False,
 ) -> list[Optional[Any]]:
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
@@ -50,6 +51,9 @@ def restore_from_saved(
         else:
             saved_tensors = tensor.restore_from_saved(saved_tensors)
             tensor_objects.append(tensor)
+
+    if return_saved_tensors:
+        return tensor_objects, saved_tensors
     return tensor_objects
 
 
@@ -120,6 +124,7 @@ class Quantizer(abc.ABC):
         tensor: torch.Tensor,
         *,
         out: Optional[QuantizedTensor] = None,
+        dtype: Optional[torch.dtype] = None,  # pylint: disable=unused-argument # used by override
     ) -> QuantizedTensor:
         """Quantize tensor"""
         if out is not None:
