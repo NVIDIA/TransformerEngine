@@ -7,19 +7,10 @@ import pytest
 import subprocess
 from pathlib import Path
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.utils import get_torch_version
+
 import torch
 from packaging.version import Version as PkgVersion
-
-
-def get_torch_version():
-    """Get PyTorch version from __version__"""
-
-    def get_torch_version_str():
-        import torch
-
-        return str(torch.__version__)
-
-    return PkgVersion(get_torch_version_str())
 
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
