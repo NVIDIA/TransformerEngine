@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,7 +13,6 @@ import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 from ..constants import TE_DType as torch_to_transformer_engine_dtype
 from ..cpp_extensions import (
-    cast_from_fp8,
     cast_to_fp8,
     fp8_cast_transpose_fused,
 )
@@ -527,13 +526,12 @@ class Float8Tensor(QuantizedTensor):
             data = data.view(1, -1)
 
         # Cast from FP8
-        out = cast_from_fp8(
+        out = tex.cast_from_fp8(
             data.view(1, -1),
-            None,  # fp8_meta_tensor
-            None,  # fp8_tensor
+            self._scale_inv,
             self._fp8_dtype,
             dtype,
-            scale_inv=self._scale_inv,
+            0,
         )
 
         # Make sure output is in expected format

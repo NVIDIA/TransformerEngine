@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,6 +10,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from torch.nn.parameter import Parameter
 from torch.nn import init
+
+import transformer_engine_torch as tex
 
 from .base import (
     get_workspace,
@@ -48,7 +50,7 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 
-from .. import cpp_extensions as tex
+from .. import cpp_extensions as pytex
 
 from ..constants import dist_group_type, TE_DType
 from ..jit import no_torch_dynamo
@@ -62,13 +64,13 @@ __all__ = ["LayerNormMLP"]
 
 def _act_func(activation: str):
     funcs = {
-        "gelu": (tex.gelu, tex.dgelu),
-        "relu": (tex.relu, tex.drelu),
-        "geglu": (tex.geglu, tex.dgeglu),
-        "reglu": (tex.reglu, tex.dreglu),
-        "swiglu": (tex.swiglu, tex.dswiglu),
-        "qgelu": (tex.qgelu, tex.dqgelu),
-        "srelu": (tex.srelu, tex.dsrelu),
+        "gelu": (pytex.gelu, pytex.dgelu),
+        "relu": (pytex.relu, pytex.drelu),
+        "geglu": (pytex.geglu, pytex.dgeglu),
+        "reglu": (pytex.reglu, pytex.dreglu),
+        "swiglu": (pytex.swiglu, pytex.dswiglu),
+        "qgelu": (pytex.qgelu, pytex.dqgelu),
+        "srelu": (pytex.srelu, pytex.dsrelu),
     }
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
@@ -196,14 +198,14 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
             if fp8:
                 if ub_overlap_ag:
-                    ln_out = tex.cast_to_fp8(
+                    ln_out = pytex.cast_to_fp8(
                         ln_out,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
                         fp8_dtype_forward,
                     )
                 else:
-                    ln_out_total = tex.cast_to_fp8(
+                    ln_out_total = pytex.cast_to_fp8(
                         ln_out_total,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
@@ -262,7 +264,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         "D_dtype": fp8_dtype_forward,
                     }
                 )
-            fp8_gemm_out = tex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
+            fp8_gemm_out = pytex.fp8_gemm(*fp8_gemm_args, **fp8_gemm_kwargs)
             if not is_grad_enabled:
                 clear_tensor_data(ln_out_total)
 
@@ -318,7 +320,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size[1] = fc2_weight_fp8.size(0)
                 fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
 
-            _ = tex.fp8_gemm(
+            _ = pytex.fp8_gemm(
                 fc2_weight_fp8._data,
                 fc2_weight_fp8._scale_inv,
                 0,
@@ -361,7 +363,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     -amin, amax
                 ).float()
 
-            fc1_outputs = tex.gemm(
+            fc1_outputs = pytex.gemm(
                 fc1_weight,
                 ln_out_total,
                 activation_dtype,
@@ -417,7 +419,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 dim_size = list(gelu_out.size())
                 dim_size[1] = fc2_weight.size(0)
                 fc2_out = torch.empty(dim_size, dtype=activation_dtype, device=gelu_out.device)
-            _ = tex.gemm(
+            _ = pytex.gemm(
                 fc2_weight,
                 gelu_out,
                 activation_dtype,
@@ -657,7 +659,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 fp8_dtype_backward = get_fp8_te_dtype(ctx.fp8_meta["recipe"], fprop_tensor=False)
 
                 # FC2 DGRAD; Unconditional
-                fc2_dgrad, _ = tex.fp8_gemm(
+                fc2_dgrad, _ = pytex.fp8_gemm(
                     fc2_weight_fp8.transpose_2d(),
                     fc2_weight_fp8._scale_inv,
                     0,
@@ -681,7 +683,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     if fc2_weight.requires_grad:
                         gelu_out_t = tex.fp8_transpose(gelu_out, fp8_dtype_forward)
                         clear_tensor_data(gelu_out)
-                        fc2_wgrad, _ = tex.fp8_gemm(
+                        fc2_wgrad, _ = pytex.fp8_gemm(
                             gelu_out_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM2_INPUT,
@@ -699,7 +701,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         clear_tensor_data(gelu_out_t, grad_output_t)
 
                     if ctx.activation == "gelu":
-                        fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_dgelu_fused(
+                        fc1_bias_grad, dgelu, dgelu_t = pytex.fp8_cast_transpose_bgrad_dgelu_fused(
                             fc2_dgrad,
                             fc1_out,
                             ctx.fp8_meta["scaling_bwd"],
@@ -708,7 +710,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         )
                     else:
                         dgelu = activation_func(fc2_dgrad, fc1_out, TE_DType[fc2_dgrad.dtype])
-                        fc1_bias_grad, dgelu, dgelu_t = tex.fp8_cast_transpose_bgrad_fused(
+                        fc1_bias_grad, dgelu, dgelu_t = pytex.fp8_cast_transpose_bgrad_fused(
                             dgelu,
                             ctx.fp8_meta["scaling_bwd"],
                             tex.FP8BwdTensors.GRAD_OUTPUT2,
@@ -725,7 +727,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             TE_DType[ctx.activation_dtype],
                         )
                         clear_tensor_data(gelu_out)
-                        fc2_wgrad, _, _ = tex.gemm(
+                        fc2_wgrad, _, _ = pytex.gemm(
                             gelu_out_c,
                             grad_output,
                             ctx.activation_dtype,
@@ -749,7 +751,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_bias_grad = dgelu_no_fp8.sum(dim=0)
                     clear_tensor_data(fc1_out)
 
-                    dgelu = tex.cast_to_fp8(
+                    dgelu = pytex.cast_to_fp8(
                         dgelu_no_fp8,
                         ctx.fp8_meta["scaling_bwd"],
                         tex.FP8BwdTensors.GRAD_OUTPUT2,
@@ -810,7 +812,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_algo = None
                     ub_obj = None
                 # FC1 DGRAD: Unconditional
-                _ = tex.fp8_gemm(
+                _ = pytex.fp8_gemm(
                     fc1_weight_fp8.transpose_2d(),
                     fc1_weight_fp8._scale_inv,
                     0,
@@ -832,7 +834,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
             else:
                 # FC2 DGRAD; Unconditional
-                fc2_dgrad, _, _ = tex.gemm(
+                fc2_dgrad, _, _ = pytex.gemm(
                     fc2_weight,
                     grad_output,
                     ctx.activation_dtype,
@@ -849,7 +851,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 # FC2 WGRAD
                 if fc2_weight.requires_grad:
-                    fc2_wgrad, fc2_bias_grad, _ = tex.gemm(
+                    fc2_wgrad, fc2_bias_grad, _ = pytex.gemm(
                         gelu_out,
                         grad_output,
                         ctx.activation_dtype,
@@ -908,7 +910,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     ub_algo = None
                     ub_obj = None
                 # FC1 DGRAD: Unconditional
-                _ = tex.gemm(
+                _ = pytex.gemm(
                     fc1_weight,
                     dgelu,
                     ctx.activation_dtype,
@@ -952,7 +954,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             fc1_dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        fc1_wgrad, _ = tex.fp8_gemm(
+                        fc1_wgrad, _ = pytex.fp8_gemm(
                             ln_out_total_t,
                             fwd_scale_inverses,
                             tex.FP8FwdTensors.GEMM1_INPUT,
@@ -981,7 +983,7 @@ class _LayerNormMLP(torch.autograd.Function):
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
                         )
-                        fc1_wgrad, _, _ = tex.gemm(
+                        fc1_wgrad, _, _ = pytex.gemm(
                             ln_out_total_c,
                             dgelu_no_fp8,
                             ctx.activation_dtype,
@@ -999,7 +1001,7 @@ class _LayerNormMLP(torch.autograd.Function):
                         clear_tensor_data(ln_out_total_c, dgelu_no_fp8)
                 else:
                     # FC1 WGRAD
-                    fc1_wgrad_outputs = tex.gemm(
+                    fc1_wgrad_outputs = pytex.gemm(
                         ln_out_total,
                         dgelu,
                         ctx.activation_dtype,

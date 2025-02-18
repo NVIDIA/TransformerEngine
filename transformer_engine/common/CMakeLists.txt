@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,7 +6,11 @@ cmake_minimum_required(VERSION 3.21)
 
 # Language options
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
@@ -73,11 +77,13 @@ list(APPEND transformer_engine_SOURCES
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
      util/cast.cu
+     util/cast_gated_act.cu
      util/padding.cu
      util/cuda_driver.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
      util/system.cpp
+     swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu

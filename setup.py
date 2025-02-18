@@ -1,10 +1,11 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Installation script."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -43,7 +44,7 @@ elif "jax" in frameworks:
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
-
+archs = cuda_archs()
 
 class TimedBdist(bdist_wheel):
     """Helper class to measure build time"""
@@ -57,7 +58,7 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
@@ -104,7 +105,8 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
             test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
+            # test_reqs.extend(["numpy", "praxis"])
+            test_reqs.extend(["numpy"])
         if "paddle" in frameworks:
             install_reqs.append("paddlepaddle-gpu")
             test_reqs.append("numpy")

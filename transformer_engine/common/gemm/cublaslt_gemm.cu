@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -57,9 +57,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  int math_sm_count, int m_split, int n_split, bool gemm_producer,
                  const Tensor *inputCounter, cudaStream_t stream) {
   void *A = inputA->data.dptr;
-  void *A_scale_inverse = inputA->scale_inv.dptr;
   void *B = inputB->data.dptr;
-  void *B_scale_inverse = inputB->scale_inv.dptr;
   void *C = outputD->data.dptr;
   void *D = outputD->data.dptr;
   void *D_scale = outputD->scale.dptr;
@@ -73,14 +71,15 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(inputA->data.dtype) || is_fp8_dtype(inputB->data.dtype);
+
   const cudaDataType_t A_type = get_cuda_dtype(inputA->data.dtype);
   const cudaDataType_t B_type = get_cuda_dtype(inputB->data.dtype);
   const cudaDataType_t D_type = get_cuda_dtype(outputD->data.dtype);
   const cudaDataType_t bias_type = get_cuda_dtype(inputBias->data.dtype);
 
-  NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || A_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(inputA->data.dtype) || inputA->scale_inv.dptr != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
-  NVTE_CHECK(!is_fp8_dtype(inputB->data.dtype) || B_scale_inverse != nullptr,
+  NVTE_CHECK(!is_fp8_dtype(inputB->data.dtype) || inputB->scale_inv.dptr != nullptr,
              "FP8 input to GEMM requires inverse of scale!");
 
   // check consistency of arguments:
@@ -143,12 +142,47 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
     NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_FAST_ACCUM,
                                                      &fastAccuMode, sizeof(fastAccuMode)));
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                     CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                                     &A_scale_inverse, sizeof(A_scale_inverse)));
-    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
-                                                     CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                                     &B_scale_inverse, sizeof(B_scale_inverse)));
+
+    // Scaling factors.
+#if CUDA_VERSION >= 12080
+    cublasLtMatmulMatrixScale_t scaling_mode;
+#endif
+    if ((is_delayed_tensor_scaling(inputA->scaling_mode) &&
+         is_delayed_tensor_scaling(inputB->scaling_mode))) {
+      void *A_scale_inverse = inputA->scale_inv.dptr;
+      void *B_scale_inverse = inputB->scale_inv.dptr;
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                       &A_scale_inverse, sizeof(A_scale_inverse)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                       &B_scale_inverse, sizeof(B_scale_inverse)));
+#if CUDA_VERSION >= 12080
+      scaling_mode = CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
+#endif
+    } else if ((is_columnwise_block_scaling(inputA) && is_columnwise_block_scaling(inputB))) {
+#if CUDA_VERSION >= 12080
+      fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(inputA->scale_inv.dptr);
+      fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(inputB->scale_inv.dptr);
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                       &A_scale_inverse, sizeof(A_scale_inverse)));
+      NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
+                                                       CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                       &B_scale_inverse, sizeof(B_scale_inverse)));
+      scaling_mode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+#endif
+    } else {
+      NVTE_ERROR("Not implemented scaling modes: " + to_string(inputA->scaling_mode) + " and  " +
+                 to_string(inputB->scaling_mode) + ".");
+    }
+
+#if CUDA_VERSION >= 12080
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+    NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
+        operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaling_mode, sizeof(scaling_mode)));
+#endif
     if (is_fp8_dtype(outputD->data.dtype)) {
       // Accumulation mode not supported for FP8 output
       C = nullptr;
@@ -270,7 +304,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                    workspaceSize, stream));                 /* stream */
 
   // Update FP8 scale-inv in output tensor
-  if (is_fp8_dtype(outputD->data.dtype)) {
+  // Note: This is a WAR for the case when we have fp8 output but D->scale_inv is not allocated.
+  // TODO: Changing gemm interface so that D->scale_inv is allocated and the scale_inv can be
+  // calculated here.
+  if (is_fp8_dtype(outputD->data.dtype) && outputD->scale_inv.dptr) {
     update_tensor_scale_inv(outputD, stream);
   }
 
@@ -356,6 +393,10 @@ void nvte_cublas_atomic_gemm(const NVTETensor A, const NVTETensor B, NVTETensor 
   Tensor *outputGelu = reinterpret_cast<Tensor *>(pre_gelu_out);
   const Tensor *inputCounter = reinterpret_cast<const Tensor *>(counter);
   Tensor *wspace = reinterpret_cast<Tensor *>(workspace);
+
+  NVTE_CHECK(is_delayed_tensor_scaling(inputA->scaling_mode) &&
+                 is_delayed_tensor_scaling(inputB->scaling_mode),
+             "Atomic GEMM only supports delayed scaling.");
 
   const int m = transa ? inputA->data.shape[0] : inputA->data.shape[1];
   const int k = transa ? inputA->data.shape[1] : inputA->data.shape[0];

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Linear API"""
@@ -527,6 +527,7 @@ class _Linear(paddle.autograd.PyLayer):
         is_first_microbatch: bool,
         gather_output: bool,
     ) -> paddle.Tensor:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = weight.shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -618,10 +619,10 @@ class _Linear(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with TransformerEngineBaseLayer.prepare_backward(
             ctx.fp8_enabled, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_Linear"
         ):
-
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 inputmat_t,

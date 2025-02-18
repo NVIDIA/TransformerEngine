@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,7 +10,7 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import DelayedScaling, Format
+from transformer_engine.common.recipe import DelayedScaling, Format, CurrentScaling
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -31,6 +31,13 @@ def check_fp8_support() -> Tuple[bool, str]:
     if float(torch.version.cuda) < 12.1:
         return False, "Cuda version 12.1 or higher required for FP8 execution on Ada."
     return True, ""
+
+
+def check_mxfp8_support() -> Tuple[bool, str]:
+    """Return if fp8 support is available"""
+    if get_device_compute_capability() >= (10, 0):  # blackwell and above
+        return True, ""
+    return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
 
 def get_default_fp8_recipe() -> DelayedScaling:
@@ -90,6 +97,10 @@ class FP8GlobalStateManager:
     fp8_param_to_autocast = {}
     skip_fp8_weight_update_tensor = None
 
+    # Current scaling / MXFP8 specific parameters.
+    mxfp8_available = False
+    reason_for_no_mxfp8 = ""
+
     @classmethod
     def reset(cls) -> None:
         """Reset the global state"""
@@ -110,6 +121,8 @@ class FP8GlobalStateManager:
         cls.reason_for_no_fp8 = ""
         cls.autocast_arguments = {}
         cls.skip_fp8_weight_update_tensor = None
+        cls.mxfp8_available = None
+        cls.reason_for_no_mxfp8 = ""
 
     @classmethod
     def set_skip_fp8_weight_update_tensor(cls, skip: bool) -> None:
@@ -129,6 +142,13 @@ class FP8GlobalStateManager:
         if cls.fp8_available is None:
             cls.fp8_available, cls.reason_for_no_fp8 = check_fp8_support()
         return cls.fp8_available, cls.reason_for_no_fp8
+
+    @classmethod
+    def is_mxfp8_available(cls) -> Tuple[bool, str]:
+        """Return if MXFP8/current scaling support is available."""
+        if cls.mxfp8_available is None:
+            cls.mxfp8_available, cls.reason_for_no_mxfp8 = check_mxfp8_support()
+        return cls.mxfp8_available, cls.reason_for_no_mxfp8
 
     @staticmethod
     def get_meta_tensor_key(forward: bool = True) -> str:
@@ -392,6 +412,9 @@ class FP8GlobalStateManager:
         if enabled:
             fp8_available, reason_for_no_fp8 = cls.is_fp8_available()
             assert fp8_available, reason_for_no_fp8
+            if isinstance(fp8_recipe, CurrentScaling):
+                mxfp8_available, reason_for_no_mxfp8 = cls.is_mxfp8_available()
+                assert mxfp8_available, reason_for_no_mxfp8
 
     @classmethod
     def fp8_autocast_exit(cls, enabled: bool, _graph: bool) -> None:

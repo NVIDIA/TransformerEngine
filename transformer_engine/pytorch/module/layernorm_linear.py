@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,7 +10,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from torch.nn import init
 
-from .. import cpp_extensions as tex
+import transformer_engine_torch as tex
+from .. import cpp_extensions as pytex
 
 from .base import (
     get_workspace,
@@ -178,7 +179,7 @@ class _LayerNormLinear(torch.autograd.Function):
             if fp8:
                 if ub_overlap_ag:
                     ln_out_fp8 = ub_obj_lnout.get_ubuf_output(0)
-                    tex.cast_to_fp8(
+                    pytex.cast_to_fp8(
                         ln_out,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
@@ -188,7 +189,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     )
                     ln_out = torch.empty_like(ln_out_fp8)
                 else:
-                    ln_out_total = tex.cast_to_fp8(
+                    ln_out_total = pytex.cast_to_fp8(
                         ln_out_total,
                         fp8_meta["scaling_fwd"],
                         tex.FP8FwdTensors.GEMM1_INPUT,
@@ -239,7 +240,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     None,
                     activation_dtype,
                 )
-            out, _ = tex.fp8_gemm(
+            out, _ = pytex.fp8_gemm(
                 weight_fp8._data,
                 weight_fp8._scale_inv,
                 0,
@@ -286,7 +287,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     -amin, amax
                 ).float()
 
-            out, _, _ = tex.gemm(
+            out, _, _ = pytex.gemm(
                 weight,
                 ln_out_total,
                 activation_dtype,
@@ -526,7 +527,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ub_obj_dgrad.set_ubuf_scale_inv(meta_tensor.scale_inv[out_index])
 
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
-                _ = tex.fp8_gemm(
+                _ = pytex.fp8_gemm(
                     weight_fp8.transpose_2d(),
                     weight_fp8._scale_inv,
                     0,
@@ -553,7 +554,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 clear_tensor_data(grad_output_c)
             else:
                 # DGRAD: Evaluated unconditionally to feed into Linear backward
-                _, _, _ = tex.gemm(
+                _, _, _ = pytex.gemm(
                     weight,
                     grad_output,
                     ctx.activation_dtype,
@@ -597,7 +598,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             dgrad = ub_obj_dgrad.get_ubuf_output(0)
                     if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
                         ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        wgrad, _ = tex.fp8_gemm(
+                        wgrad, _ = pytex.fp8_gemm(
                             ln_out_total_t,
                             ln_out_scale_inv,
                             0,
@@ -630,7 +631,7 @@ class _LayerNormLinear(torch.autograd.Function):
                             fp8_dtype_forward,
                             TE_DType[ctx.activation_dtype],
                         )
-                        wgrad, _, _ = tex.gemm(
+                        wgrad, _, _ = pytex.gemm(
                             ln_out_total_c,
                             grad_output,
                             ctx.activation_dtype,
@@ -648,7 +649,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         clear_tensor_data(ln_out_total_c)
                 else:
                     # WGRAD
-                    wgrad, grad_bias, _ = tex.gemm(
+                    wgrad, grad_bias, _ = pytex.gemm(
                         ln_out_total,
                         grad_output,
                         ctx.activation_dtype,

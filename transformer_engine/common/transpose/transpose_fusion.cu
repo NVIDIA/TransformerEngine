@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -472,6 +472,10 @@ void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor 
           reduce_dbias<BiasType>(*workspace, dbias, row_length, num_rows, nvec_out,
                                  stream););  // NOLINT(*)
   );                                         // NOLINT(*)
+
+  transposed_output->scaling_mode.x = input.scaling_mode.y;
+  transposed_output->scaling_mode.y = input.scaling_mode.x;
+  // TODO: do we need to transpose the scaling factors?
 }
 
 }  // namespace transformer_engine

@@ -1,0 +1,184 @@
+/*************************************************************************
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
+#include <cmath>
+#include <cstring>
+#include <memory>
+#include <iomanip>
+#include <iostream>
+#include <random>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+
+#include <transformer_engine/cast.h>
+#include "../test_common.h"
+
+using namespace transformer_engine;
+using namespace test;
+
+namespace {
+
+template <typename IT, typename OT, typename CT>
+void compute_ref_cast_dbias_dgelu(const IT *input,
+                                  const IT *gelu_input,
+                                  const CT scale,
+                                  OT *output_c,
+                                  CT *amax_h,
+                                  IT *dbias,
+                                  const size_t N,
+                                  const size_t H) {
+  CT amax  = 0.;
+
+  std::vector<CT> acc_dbias(H, 0.);
+
+  for (size_t i = 0; i < N; i++) {
+    for (size_t j = 0; j < H; j++) {
+      CT in_elt = static_cast<CT>(input[i * H + j]);
+      const CT gelu_in = static_cast<CT>(gelu_input[i * H + j]);
+
+      const CT elt = in_elt * static_cast<float>(dgelu(static_cast<float>(gelu_in)));
+      const CT elt_abs = std::abs(elt);
+
+      // update amax
+      if (elt_abs > amax) {
+        amax = elt_abs;
+      }
+
+      output_c[i * H + j] = static_cast<OT>(scale * elt);
+
+      // dbias
+      acc_dbias[j] += elt;
+    }
+  }
+
+  *amax_h = amax;
+
+  for (size_t i = 0; i < H; i++) {
+    dbias[i] = static_cast<IT>(acc_dbias[i]);
+  }
+}
+
+template <typename IType, typename OType>
+void performTest(const size_t N, const size_t H) {
+  using namespace test;
+  using CType = fp32;
+
+  DType itype = TypeInfo<IType>::dtype;
+  DType otype = TypeInfo<OType>::dtype;
+
+  Tensor input({N, H}, itype);
+  Tensor gelu_input({N, H}, itype);
+
+  Tensor output_c({N, H}, otype);
+  // dbias has the same data type with "output grad"
+  Tensor dbias({H}, itype);
+
+  fillUniform(&input);
+  fillUniform(&gelu_input);
+  setRandomScale(&output_c);
+
+  std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
+  std::unique_ptr<IType[]> ref_output_dbias = std::make_unique<IType[]>(H);
+
+  CType ref_amax;
+  compute_ref_cast_dbias_dgelu(input.cpu_dptr<IType>(),
+                               gelu_input.cpu_dptr<IType>(),
+                               output_c.scale(),
+                               ref_output_c.get(),
+                               &ref_amax,
+                               ref_output_dbias.get(),
+                               N, H);
+
+  Tensor workspace;
+
+  nvte_fp8_quantize_dbias_dgelu(input.data(),
+                                gelu_input.data(),
+                                output_c.data(),
+                                dbias.data(),
+                                workspace.data(),
+                                0);
+
+  workspace = Tensor(workspace.shape(), workspace.dtype());
+
+
+  nvte_fp8_quantize_dbias_dgelu(input.data(),
+                                gelu_input.data(),
+                                output_c.data(),
+                                dbias.data(),
+                                workspace.data(),
+                                0);
+
+  cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  if (isFp8Type(otype)) {
+    auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
+    compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
+    float ref_scale_inv = 1.f / output_c.scale();
+    compareResults("scale_inv", output_c.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
+  }
+
+  auto [atol, rtol] = getTolerances(otype);
+  compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);
+
+  auto [atol_dbias, rtol_dbias] = getTolerances(itype);
+  rtol_dbias *= 4;
+  compareResults("output_dbias", dbias, ref_output_dbias.get(), atol_dbias, rtol_dbias);
+}
+
+std::vector<std::pair<size_t, size_t>> test_cases = {
+  {128, 128},
+  {256, 256},
+  {768, 1024},
+  {256, 65536},
+  // {2048, 12288},
+  // {65536, 128},
+  // {16384, 6144},
+};
+
+}  // namespace;
+
+
+class CastDBiasDGeluTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
+                                                                           transformer_engine::DType,
+                                                                           std::pair<size_t, size_t>>> {};
+
+TEST_P(CastDBiasDGeluTestSuite, TestCastDBiasDgelu) {
+    using namespace transformer_engine;
+    using namespace test;
+    // Skip tests for pre-Blackwell architectures
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+
+    const DType input_type = std::get<0>(GetParam());
+    const DType output_type = std::get<1>(GetParam());
+    const auto size = std::get<2>(GetParam());
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+        performTest<InputType, OutputType>(size.first, size.second);
+      );
+    );
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    CastDBiasDGeluTestSuite,
+    ::testing::Combine(
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
+        ::testing::ValuesIn(test_cases)),
+    [](const testing::TestParamInfo<CastDBiasDGeluTestSuite::ParamType>& info) {
+      std::string name = test::typeName(std::get<0>(info.param)) + "X" +
+                         test::typeName(std::get<1>(info.param)) + "X" +
+                         std::to_string(std::get<2>(info.param).first) + "X" +
+                         std::to_string(std::get<2>(info.param).second);
+      return name;
+    });

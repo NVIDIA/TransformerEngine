@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -33,6 +33,7 @@
 #include <transformer_engine/permutation.h>
 #include <transformer_engine/recipe.h>
 #include <transformer_engine/softmax.h>
+#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
@@ -47,6 +48,7 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
+#include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 
 namespace transformer_engine {
@@ -58,6 +60,19 @@ class FP8TensorMeta {
   at::Tensor scale;
   at::Tensor scale_inv;
   at::Tensor amax_history;
+};
+
+// FP8TensorMeta for block scaling, this structure allows
+// indexing into it the same way (i.e. using FP8FwdTensors
+// and FP8BwdTensors) for both hopper and blackwell recipes.
+// TODO(ksivaman): check perf with this design; should be ok
+// since there are no amax reductions, or bulk amax/scale
+// updates for block scaling.
+class MXFP8TensorMeta {
+ public:
+  std::vector<at::Tensor> scale;
+  std::vector<at::Tensor> scale_inv;
+  std::vector<at::Tensor> amax_history;
 };
 
 // Used as named indices on the `scale`, `scale_inv`,
@@ -86,6 +101,8 @@ enum FP8BwdTensors {
 };
 
 }  // namespace transformer_engine
+
+std::vector<size_t> getTensorShape(at::Tensor t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -140,11 +157,10 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const std::vector<size_t>& shape,
                                                               const transformer_engine::DType type);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
-                                                              const std::vector<size_t>& shape,
-                                                              const transformer_engine::DType type,
-                                                              void* amax_ptr, void* scale_ptr,
-                                                              void* scale_inv_ptr);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape = {1},
+    NVTEScalingMode scaling_mode = {-1, -1, 1});
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
@@ -152,9 +168,9 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor, at::Tensor amax,
-                                                              const at::Tensor scale,
-                                                              at::Tensor scale_inv);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
+    NVTEScalingMode scaling_mode = {-1, -1, 1});
 
 size_t product(const std::vector<size_t>& shape);
 

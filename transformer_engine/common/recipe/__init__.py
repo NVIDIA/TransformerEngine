@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -50,8 +50,21 @@ class _OverrideLinearPrecision(NamedTuple):
     wgrad: bool = False
 
 
+class FP8Recipe:
+    """
+    Base class for different FP8 recipes.
+    """
+    def current(self):
+        """Whether the given recipe is current scaling."""
+        return isinstance(self, CurrentScaling)
+
+    def delayed(self):
+        """Whether the given recipe is delayed scaling."""
+        return isinstance(self, DelayedScaling)
+
+
 @dataclass()
-class DelayedScaling:
+class DelayedScaling(FP8Recipe):
     """
     Use the delayed scaling factor strategy. Use scale factor from previous
     iteration and record amax history of `amax_history_len` steps.
@@ -165,3 +178,27 @@ class DelayedScaling:
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
+
+
+@dataclass()
+class CurrentScaling(FP8Recipe):
+    """
+    Use the current scaling factor strategy.
+
+    Parameters
+    ----------
+    margin : int, default = 0
+            Margin for the scaling factor computation.
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
+                Controls the FP8 data format used during forward and backward
+                pass.
+    """
+
+    margin: int = 0
+    fp8_format: Format = Format.HYBRID
+
+    def __post_init__(self) -> None:
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"

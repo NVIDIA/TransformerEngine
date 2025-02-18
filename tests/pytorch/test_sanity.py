@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -971,7 +971,7 @@ def test_sanity_gemm_with_unalignment(N, offset, datatype):
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])
 def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     offset = 16
-    scratchpad = torch.randn(N * N + offset, device="cuda", dtype=datatype)
+    scratchpad = torch.randn(N, N * N + offset, device="cuda", dtype=datatype)
 
     fp8_tensor_inp = tex.FP8FwdTensors.GEMM1_INPUT
     fp8_tensor_weight = tex.FP8FwdTensors.GEMM1_WEIGHT
@@ -985,8 +985,8 @@ def test_sanity_fp8_gemm_with_unalignment(N, datatype):
     outp_type = datatype
 
     scratchpad_fp8 = cast_to_fp8(scratchpad, meta_weight, fp8_tensor_inp, inp_type)
-    inp_fp8 = torch.reshape(scratchpad_fp8[:-offset], (N, N))
-    weight_fp8 = torch.reshape(scratchpad_fp8[offset:], (N, N))
+    inp_fp8 = torch.reshape(scratchpad_fp8[0][:-offset], (N, N))
+    weight_fp8 = torch.reshape(scratchpad_fp8[0][offset:], (N, N))
     _, _ = fp8_gemm(
         weight_fp8,
         meta_weight.scale_inv,
@@ -1069,6 +1069,8 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
                 config.num_attention_heads,
                 init_method=init_method,
                 output_layer_init_method=output_layer_init_method,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
                 fuse_qkv_params=True,
                 params_dtype=dtype,
                 device="cuda",

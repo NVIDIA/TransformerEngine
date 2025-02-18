@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -22,15 +22,20 @@ void act_fn(const Tensor &input, Tensor *output, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(IType);
-          VectorizedUnaryKernelLauncher<nvec, Param, OP>(
-              reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<OType *>(output->data.dptr),
-              reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr),
-              reinterpret_cast<ComputeType *>(output->scale_inv.dptr), tot_elts, {},
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
+          output->data.dtype, OType,
+          if (!is_fp8_dtype(output->data.dtype) ||
+              is_delayed_tensor_scaling(output->scaling_mode)) {
+            constexpr int nvec = 32 / sizeof(IType);
+            VectorizedUnaryKernelLauncher<nvec, Param, OP>(
+                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<OType *>(output->data.dptr),
+                reinterpret_cast<const ComputeType *>(output->scale.dptr),
+                reinterpret_cast<ComputeType *>(output->amax.dptr),
+                reinterpret_cast<ComputeType *>(output->scale_inv.dptr), tot_elts, {}, stream);
+          } else {
+            NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+          });  // NOLINT(*)
+  );           // NOLINT(*)
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
@@ -45,16 +50,21 @@ void dact_fn(const Tensor &grad, const Tensor &input, Tensor *output, cudaStream
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(IType);
-          VectorizedUnaryGradKernelLauncher<nvec, Param, OP>(
-              reinterpret_cast<const IType *>(grad.data.dptr),
-              reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<OType *>(output->data.dptr),
-              reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr),
-              reinterpret_cast<ComputeType *>(output->scale_inv.dptr), tot_elts, {},
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
+          output->data.dtype, OType,
+          if (!is_fp8_dtype(output->data.dtype) ||
+              is_delayed_tensor_scaling(output->scaling_mode)) {
+            constexpr int nvec = 32 / sizeof(IType);
+            VectorizedUnaryGradKernelLauncher<nvec, Param, OP>(
+                reinterpret_cast<const IType *>(grad.data.dptr),
+                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<OType *>(output->data.dptr),
+                reinterpret_cast<const ComputeType *>(output->scale.dptr),
+                reinterpret_cast<ComputeType *>(output->amax.dptr),
+                reinterpret_cast<ComputeType *>(output->scale_inv.dptr), tot_elts, {}, stream);
+          } else {
+            NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+          });  // NOLINT(*)
+  );           // NOLINT(*)
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP)(ComputeType, const Param &)>
@@ -71,16 +81,21 @@ void gated_act_fn(const Tensor &input, Tensor *output, cudaStream_t stream) {
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(IType);
-          GatedActivationKernelLauncher<nvec, ComputeType, Param, OP>(
-              reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<OType *>(output->data.dptr),
-              reinterpret_cast<const ComputeType *>(output->scale.dptr),
-              reinterpret_cast<ComputeType *>(output->amax.dptr),
-              reinterpret_cast<ComputeType *>(output->scale_inv.dptr), output->data.shape[0],
-              output->data.shape[1], {},
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
+          output->data.dtype, OType,
+          if (!is_fp8_dtype(output->data.dtype) ||
+              is_delayed_tensor_scaling(output->scaling_mode)) {
+            constexpr int nvec = 32 / sizeof(IType);
+            GatedActivationKernelLauncher<nvec, ComputeType, Param, OP>(
+                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<OType *>(output->data.dptr),
+                reinterpret_cast<const ComputeType *>(output->scale.dptr),
+                reinterpret_cast<ComputeType *>(output->amax.dptr),
+                reinterpret_cast<ComputeType *>(output->scale_inv.dptr), output->data.shape[0],
+                output->data.shape[1], {}, stream);
+          } else {
+            NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+          });  // NOLINT(*)
+  );           // NOLINT(*)
 }
 
 template <typename ComputeType, typename Param, ComputeType (*OP1)(ComputeType, const Param &),
@@ -101,14 +116,19 @@ void dgated_act_fn(const Tensor &grad, const Tensor &input, Tensor *output, cuda
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
-          output->data.dtype, OType, constexpr int nvec = 32 / sizeof(IType);
-          DGatedActivationKernelLauncher<nvec, ComputeType, Param, OP1, OP2>(
-              reinterpret_cast<const IType *>(grad.data.dptr),
-              reinterpret_cast<const IType *>(input.data.dptr),
-              reinterpret_cast<OType *>(output->data.dptr), grad.data.shape[0], grad.data.shape[1],
-              {},
-              stream););  // NOLINT(*)
-  );                      // NOLINT(*)
+          output->data.dtype, OType,
+          if (!is_fp8_dtype(output->data.dtype) ||
+              is_delayed_tensor_scaling(output->scaling_mode)) {
+            constexpr int nvec = 32 / sizeof(IType);
+            DGatedActivationKernelLauncher<nvec, ComputeType, Param, OP1, OP2>(
+                reinterpret_cast<const IType *>(grad.data.dptr),
+                reinterpret_cast<const IType *>(input.data.dptr),
+                reinterpret_cast<OType *>(output->data.dptr), grad.data.shape[0],
+                grad.data.shape[1], {}, stream);
+          } else {
+            NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
+          });  // NOLINT(*)
+  );           // NOLINT(*)
 }
 
 }  // namespace transformer_engine

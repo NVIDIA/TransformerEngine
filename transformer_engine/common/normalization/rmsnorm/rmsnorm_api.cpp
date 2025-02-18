@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -21,6 +21,11 @@ using namespace normalization;
 void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
                  Tensor *rsigma, Tensor *workspace, const int multiprocessorCount,
                  const bool zero_centered_gamma, cudaStream_t stream) {
+  if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
+      !is_rowwise_block_scaling(z->scaling_mode)) {
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
+  }
+
   NVTE_CHECK(x.data.shape.size() == 2);
 
   NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
@@ -39,11 +44,9 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
-  Tensor empty;
-
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  if (use_cudnn_norm_fwd()) {
+  if (use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode)) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
@@ -57,7 +60,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
@@ -65,7 +68,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     return;
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-    plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr, nullptr,
+    plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr /*beta*/, nullptr /*mu*/,
                   reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
                   workspace->data.dptr, stream);
   }
@@ -101,8 +104,6 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     CheckOutputTensor(*dgamma, "dgamma");
   }
 
-  Tensor empty;
-
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
   if (use_cudnn_norm_bwd()) {
@@ -128,8 +129,8 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     return;
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-    plan->execute(x.data.dptr, gamma.data.dptr, nullptr, rsigma.data.dptr, dx->data.dptr,
-                  dz.data.dptr, nullptr, dgamma->data.dptr, workspace->data.dptr, stream);
+    plan->execute(x.data.dptr, gamma.data.dptr, nullptr /*mu*/, rsigma.data.dptr, dx->data.dptr,
+                  dz.data.dptr, nullptr /*dbeta*/, dgamma->data.dptr, workspace->data.dptr, stream);
   }
   return;
 }

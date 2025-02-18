@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Linear API"""
@@ -31,6 +31,7 @@ class _LayerNorm(paddle.autograd.PyLayer):
         bwd_ln_sm_margin: int,
         zero_centered_gamma: bool,
     ) -> paddle.Tensor:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = ln_weight.shape[0]
         assert inp.shape[-1] == in_features, "LayerNorm not possible"
@@ -57,6 +58,7 @@ class _LayerNorm(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         inputmat, ln_weight, mu, rsigma = ctx.saved_tensor()
         d_ln_out = grad_output.reshape(inputmat.shape)
         dxmat, dgamma, dbeta = layernorm_bwd(
@@ -189,7 +191,7 @@ class LayerNorm(paddle.nn.Layer):
         )
 
     def forward(self, *args, **kwargs):
-        """forward"""
+        """LayerNorm Forward"""
         if self.backend == "transformer_engine":
             return self._te_forward(*args, **kwargs)
         if self.backend == "paddle":

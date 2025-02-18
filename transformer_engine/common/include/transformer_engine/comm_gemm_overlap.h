@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -53,6 +53,8 @@ class CommOverlapCore {
   int _cga_size;
   int _use_ce;
   int _ub_reg;
+  int _gemm_priority;
+  int _comm_priority;
   bool _atomic_gemm{false};
   bool _is_p2p{false};
 
@@ -67,8 +69,9 @@ class CommOverlapCore {
  public:
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
-                  int num_splits, int num_max_streams, int comm_cga_size, int num_comm_sm,
-                  bool set_sm_margin, bool use_ce, bool atomic_gemm);
+                  int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
+                  int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
+                  bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 
@@ -95,7 +98,8 @@ class CommOverlapBase : public CommOverlapCore {
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
                   int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                  int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
+                  int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
+                  bool set_sm_margin = true, bool atomic_gemm = false);
 
   virtual ~CommOverlapBase();
 
@@ -141,7 +145,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   std::vector<TensorWrapper> _ubufs;
 
-  cudaStream_t _stream_send;
+  std::vector<cudaStream_t> _stream_send;
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
 
@@ -150,8 +154,9 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
-                     int comm_cga_size = 1, int num_comm_sm = 1, bool set_sm_margin = false,
-                     bool use_ce = true, bool atomic_gemm = false, bool aggregate = false);
+                     int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
+                     int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
+                     bool atomic_gemm = false, bool aggregate = false);
 
   virtual ~CommOverlapP2PBase();
 

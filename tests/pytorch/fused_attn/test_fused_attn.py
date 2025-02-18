@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,6 +20,7 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
     RotaryPositionEmbedding,
     get_attention_backend,
+    _flash_attn_is_installed,
     _flash_attn_2_3_plus,
     _flash_attn_3_is_installed,
     check_set_window_size,
@@ -237,19 +238,18 @@ def test_dot_product_attention(
         tols = dict(atol=1.5e-2, rtol=1.5e-2)
     config = model_configs[model]
     is_mla = config.head_dim_qk != config.head_dim_v
+    is_mqa_gqa = config.num_heads != config.num_gqa_groups
     if qkv_layout is None:
         if config.attn_type == "self":
-            qkv_layout = "sb3hd" if not is_mla else "sbhd_sbhd_sbhd"
+            qkv_layout = "sb3hd" if not is_mla and not is_mqa_gqa else "sbhd_sbhd_sbhd"
         else:
-            qkv_layout = "bshd_bs2hd" if not is_mla else "bshd_bshd_bshd"
+            qkv_layout = "bshd_bs2hd" if not is_mla and not is_mqa_gqa else "bshd_bshd_bshd"
     if "3" in qkv_layout and config.attn_type == "cross":
         pytest.skip("No need to test this layout for cross attention")
 
-    # Test backend availability
-    window_size = (-1, -1)
-    if swa:
-        window_size = [2, 2]
-    config.window_size = check_set_window_size(config.attn_mask_type, window_size)
+    if config.window_size == (-1, -1) and swa:
+        config.window_size = [2, 2]
+    config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
     available_backends, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -258,11 +258,20 @@ def test_dot_product_attention(
         pad_between_seqs=pad_between_seqs,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
-    if pad_between_seqs and not (
-        config.max_seqlen_q != config.max_seqlen_kv
-        and config.attn_mask_type in ["causal", "padding_causal"]
+    if (
+        pad_between_seqs
+        and _flash_attn_is_installed
+        and not (
+            config.max_seqlen_q != config.max_seqlen_kv
+            and config.attn_mask_type in ["causal", "padding_causal"]
+        )
+        and (
+            config.window_size[0] == -1
+            or _flash_attn_2_3_plus
+        )
     ):
         flash_attn_supported = True
 
@@ -334,16 +343,16 @@ def test_dot_product_attention(
             is_training,
         )
 
-    if unfused_attn_supported and fused_attn_supported:
-        logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
-        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
-        for i, _ in enumerate(unfused_attn_bwd):
-            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if unfused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: unfused attn vs flash attn")
         torch.testing.assert_close(flash_attn_fwd, unfused_attn_fwd, **tols)
         for i, _ in enumerate(flash_attn_bwd):
             torch.testing.assert_close(unfused_attn_bwd[i], flash_attn_bwd[i], **tols)
+    if unfused_attn_supported and fused_attn_supported:
+        logging.info("[test_dot_product_attention]: unfused attn vs fused attn")
+        torch.testing.assert_close(fused_attn_fwd, unfused_attn_fwd, **tols)
+        for i, _ in enumerate(unfused_attn_bwd):
+            torch.testing.assert_close(fused_attn_bwd[i], unfused_attn_bwd[i], **tols)
     if fused_attn_supported and flash_attn_supported:
         logging.info("[test_dot_product_attention]: fused attn vs flash attn")
         torch.testing.assert_close(fused_attn_fwd, flash_attn_fwd, **tols)
@@ -399,30 +408,41 @@ def test_dpa_mla(dtype, model_configs, model):
 
 model_configs_mask = {
     #     test:             b,  h, hg,   d,   sq,  skv,   p,             mask,      bias
-    "mask_1_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "causal", "no_bias"),
-    "mask_1_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "causal", "no_bias"),
-    "mask_2_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "mask_2_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "mask_3_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "mask_3_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "mask_4_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding", "no_bias"),
-    "mask_4_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "mask_5_0": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "mask_5_1": ModelConfig(4, 16, 16, 64, 128, 256, 0.0, "padding_causal", "no_bias"),
-    "mask_6_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "mask_6_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "mask_7_0": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_7_1": ModelConfig(1, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_8_0": ModelConfig(
-        2, 24, 24, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    "mask_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
+    "mask_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "mask_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    "mask_2_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_2_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_2_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_3_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "mask_3_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "mask_3_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "mask_4_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_4_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_4_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "mask_5_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "mask_8_1": ModelConfig(
-        1, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    "mask_5_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
-    "mask_9_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
-    "mask_10_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "mask_10_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_5_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_6_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal", "no_bias"),
+    "mask_6_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal", "no_bias"),
+    "mask_7_0": ModelConfig(2, 16, 16, 128, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_7_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "mask_8_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding", "no_bias"),
+    "mask_8_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding", "no_bias"),
+    "mask_9_0": ModelConfig(2, 24, 24, 128, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_9_1": ModelConfig(2, 16, 16, 256, 1, 2048, 0.0, "padding_causal", "no_bias"),
+    "mask_10_0": ModelConfig(
+        2, 24, 24, 128, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "mask_10_1": ModelConfig(
+        2, 16, 16, 256, 1, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
 }
 
 
@@ -531,20 +551,28 @@ def test_dpa_bias_shapes(dtype, model_configs, model):
 
 model_configs_swa = {
     #    test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "swa_1_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "swa_1_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
-    "swa_2_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
-    "swa_2_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
-    "swa_3_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_3_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
-    "swa_4_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "swa_4_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
-    "swa_5_0": ModelConfig(4, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "swa_5_1": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
-    "swa_6_0": ModelConfig(
-        4, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
-    ),
+    "swa_1_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "swa_1_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "swa_1_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "no_mask", "no_bias"),
+    "swa_2_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal", "no_bias"),
+    "swa_2_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "swa_2_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal", "no_bias"),
+    "swa_3_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_3_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "causal_bottom_right", "no_bias"),
+    "swa_4_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "swa_4_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "swa_5_1": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_2": ModelConfig(2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "swa_5_3": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
     "swa_6_1": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "swa_6_2": ModelConfig(
+        2, 24, 4, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "swa_6_3": ModelConfig(
         2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
     ),
 }
@@ -623,18 +651,57 @@ def test_dpa_qkv_layout(dtype, model_configs, model, qkv_layout):
 qkv_layouts_thd = ["t3hd", "th3d", "thd_t2hd", "thd_th2d", "thd_thd_thd"]
 model_configs_layout_thd = {
     #       test:             b,  h, hg,   d,   sq,  skv,   p,             mask,             bias
-    "layout_0_1": ModelConfig(3, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_2": ModelConfig(8, 16, 4, 64, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_0_3": ModelConfig(1, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_0_4": ModelConfig(8, 16, 16, 64, 128, 128, 0.0, "padding_causal", "no_bias"),
-    "layout_1_1": ModelConfig(1, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_2": ModelConfig(8, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
-    "layout_1_3": ModelConfig(1, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_1_4": ModelConfig(8, 16, 1, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_1": ModelConfig(1, 16, 16, 128, 128, 128, 0.0, "padding", "no_bias"),
-    "layout_2_2": ModelConfig(1, 16, 16, 64, 128, 256, 0.0, "padding", "no_bias"),
-    "layout_2_3": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
-    "layout_2_4": ModelConfig(8, 16, 16, 64, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "layout_0_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias"),
+    "layout_0_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "layout_0_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias"),
+    "layout_1_0": ModelConfig(2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_1": ModelConfig(2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "layout_1_2": ModelConfig(2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias"),
+    "layout_2_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_2_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal_bottom_right", "no_bias"
+    ),
+    "layout_3_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_3_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding", "no_bias", window_size=(4, 4)
+    ),
+    "layout_4_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_4_2": ModelConfig(
+        2, 24, 24, 128, 2048, 4096, 0.0, "padding_causal", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_0": ModelConfig(
+        2, 16, 16, 64, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_1": ModelConfig(
+        2, 24, 1, 128, 2048, 2048, 0.0, "padding_causal_bottom_right", "no_bias", window_size=(4, 0)
+    ),
+    "layout_5_2": ModelConfig(
+        2,
+        24,
+        24,
+        128,
+        2048,
+        4096,
+        0.0,
+        "padding_causal_bottom_right",
+        "no_bias",
+        window_size=(4, 0),
+    ),
 }
 
 
@@ -651,11 +718,13 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
+    logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = True")
     pad_between_seqs = True
     test_dot_product_attention(
         dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
     if get_cudnn_version() >= (9, 3, 0):
+        logging.info("[test_dpa_qkv_layout_thd]: pad_between_seqs = False")
         # cuDNN 9.3.0+ is required to run pad_between_seqs = False/True in the same run
         pad_between_seqs = False
         test_dot_product_attention(
@@ -695,9 +764,12 @@ def _run_dot_product_attention(
             )
             seqlens_kv = seqlens_q
         if config.attn_type == "cross":
-            seqlens_q = torch.randint(
-                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
-            )
+            if config.max_seqlen_q > 1:
+                seqlens_q = torch.randint(
+                    1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+                )
+            else:
+                seqlens_q = torch.ones([config.batch_size], dtype=torch.int32, device="cuda")
             seqlens_kv = torch.randint(
                 1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
             )
@@ -1303,13 +1375,18 @@ def _run_transformer_layer(
 
 model_configs_fp8_vs_f16 = {
     #  test:             b,  h, hg,   d,   sq,  skv,   p,      mask,      bias
-    "fp8_9": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_10": ModelConfig(2, 24, 24, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_11": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
-    "fp8_12": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
-    "fp8_13": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "no_mask", "no_bias"),
+    "fp8_9": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_10": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_11": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "no_mask", "no_bias"),
+    "fp8_12": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "causal", "no_bias"),
+    "fp8_13": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "causal", "no_bias"),
     "fp8_14": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "causal", "no_bias"),
-    "fp8_15": ModelConfig(1, 16, 16, 128, 2048, 2048, 0.0, "no_mask", "no_bias"),
+    "fp8_15": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "fp8_16": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding", "no_bias"),
+    "fp8_17": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding", "no_bias"),
+    "fp8_18": ModelConfig(2, 16, 16, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "fp8_19": ModelConfig(2, 24, 12, 128, 2048, 2048, 0.0, "padding_causal", "no_bias"),
+    "fp8_20": ModelConfig(1, 32, 4, 128, 8192, 8192, 0.0, "padding_causal", "no_bias"),
 }
 
 param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
@@ -1358,8 +1435,10 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
+    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (9, 7, 0):
+        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
 
-    if _flash_attn_3_is_installed and not is_training:
+    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1385,7 +1464,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_is_installed and not is_training:
+    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1461,12 +1540,26 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
         if not is_training:
             mha = mha.eval()
 
-    seqlens_q = torch.full(
-        [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-    )
-    seqlens_kv = torch.full(
-        [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-    )
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+        if config.attn_type == "self":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = torch.randint(
+                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -1503,6 +1596,8 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
             core_attention_bias_type=config.attn_bias_type,
             is_first_microbatch=None,
             rotary_pos_emb=rotary_pos_emb,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
         )
         if is_training:
             out.backward(out_grad)
@@ -1532,13 +1627,25 @@ def _run_mha_fp8_vs_f16(dtype, config, fp8_mha, qkv_format, input_layernorm, RoP
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     config = model_configs_fp8_vs_f16[model]
 
+    # TODO(cyang): think of another way to verify dropout results
+    # test cuDNN FP8 dropout
+    # 1. we modify the config here to not affect mha_fp8_vs_f16 tests
+    # 2. there is no other backend that implements dropout the same way as cuDNN FP8, and as an
+    #    indirect verification method, we create Q/K/V as all 1s and check if O is all 1s
+    # 3. we avoid running FP16/BF16 kernels as they do not have dropout support on Blackwell
+    #if "padding" not in config.attn_mask_type and "causal" not in config.attn_mask_type:
+    #    if get_device_compute_capability() >= (10, 0):
+    #        config.dropout_p = 0.1
+
+    if ("padding" in config.attn_mask_type or config.head_dim_qk != 128) and get_cudnn_version() < (9, 7, 0):
+        pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
 
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if _flash_attn_3_is_installed and not is_training:
+    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1555,17 +1662,19 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
         dtype, config, True, qkv_layout, is_training
     )
 
-    logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
-    fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
-        dtype, config, False, qkv_layout, is_training
-    )
+    if config.dropout_p == 0.0:
+        # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
+        logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False")
+        fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
+            dtype, config, False, qkv_layout, is_training
+        )
 
     atol = 5e-1
     rtol = 5e-2
-    rmse_tol = 0.1
+    rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_is_installed and not is_training:
+    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1575,27 +1684,33 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
             rtol,
             rmse_tol,
         )
-    _error(
-        fused_attn_fwd_fp8,
-        fused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "fused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-    )
-    if is_training:
-        for i, _ in enumerate(fused_attn_bwd_f16):
-            logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
-            _error(
-                fused_attn_bwd_fp8[i],
-                fused_attn_bwd_f16[i],
-                f"fused_attn_bwd_fp8[{i}]",
-                f"fused_attn_bwd_f16[{i}]",
-                atol,
-                rtol,
-                rmse_tol,
-            )
+    if config.dropout_p != 0.0:
+        # test cuDNN FP8 dropout
+        assert torch.all(
+            fused_attn_fwd_fp8 == 1
+        ), "fused_attn_fwd_fp8 must be all 1s when Q/K/V are all 1s."
+    else:
+        _error(
+            fused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "fused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+        )
+        if is_training:
+            for i, _ in enumerate(fused_attn_bwd_f16):
+                logging.debug("========== {:^25s} ==========".format(bwd_names[i]))
+                _error(
+                    fused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"fused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                )
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
@@ -1634,12 +1749,26 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
         if not is_training:
             dpa = dpa.eval()
 
-    seqlens_q = torch.full(
-        [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
-    )
-    seqlens_kv = torch.full(
-        [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
-    )
+    if "padding" in config.attn_mask_type or qkv_format == "thd":
+        if config.attn_type == "self":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = seqlens_q
+        if config.attn_type == "cross":
+            seqlens_q = torch.randint(
+                1, config.max_seqlen_q, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+            seqlens_kv = torch.randint(
+                1, config.max_seqlen_kv, [config.batch_size], dtype=torch.int32, device="cuda"
+            )
+    else:
+        seqlens_q = torch.full(
+            [config.batch_size], config.max_seqlen_q, dtype=torch.int32, device="cuda"
+        )
+        seqlens_kv = torch.full(
+            [config.batch_size], config.max_seqlen_kv, dtype=torch.int32, device="cuda"
+        )
     cu_seqlens_q = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_kv = torch.zeros(config.batch_size + 1, dtype=torch.int32, device="cuda")
     cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
@@ -1668,7 +1797,11 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training):
             layout = layout.replace("h", "hg")
             layout = layout.replace("t", "tg")
         tensor_shape = [dim_to_num[j] for j in layout.split("_")]
-        tensor = torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        if config.dropout_p == 0.0:
+            tensor = torch.randn(tensor_shape, dtype=dtype, device="cuda")
+        else:
+            # test cuDNN FP8 dropout
+            tensor = torch.ones(tensor_shape, dtype=dtype, device="cuda")
         tensor_count = 1
         split_dim = 0
         for dim, l in enumerate(layout.split("_")):

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -141,31 +141,34 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
  **************************************************************************************************/
 
 void te_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
-             bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-             transformer_engine::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
+             std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+             at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+             std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
              transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
              transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad,
              at::Tensor workspace, size_t workspaceSize, bool accumulate,
              bool use_split_accumulator, int math_sm_count);
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
-                    bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-                    transformer_engine::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
-                    transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-                    transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad,
-                    at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                    std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                    at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
+                    at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
+                    at::Tensor bias, transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
+                    bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter);
 
 void te_grouped_gemm(std::vector<at::Tensor> A, at::Tensor A_scale_inverse, int A_offset,
-                     transformer_engine::DType A_type, bool transa, std::vector<at::Tensor> B,
-                     at::Tensor B_scale_inverse, int B_offset, transformer_engine::DType B_type,
-                     bool transb, std::vector<at::Tensor> D, int D_offset, at::Tensor D_scale,
-                     transformer_engine::DType D_type, at::Tensor D_amax,
-                     std::vector<at::Tensor> bias, transformer_engine::DType bias_type,
-                     std::vector<at::Tensor> pre_gelu_out, bool grad,
-                     std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
-                     bool use_split_accumulator, int math_sm_count);
+                     transformer_engine::DType A_type, std::vector<int64_t> A_scaling_mode,
+                     bool transa, std::vector<at::Tensor> B, at::Tensor B_scale_inverse,
+                     int B_offset, transformer_engine::DType B_type,
+                     std::vector<int64_t> B_scaling_mode, bool transb, std::vector<at::Tensor> D,
+                     int D_offset, at::Tensor D_scale, transformer_engine::DType D_type,
+                     at::Tensor D_amax, std::vector<at::Tensor> bias,
+                     transformer_engine::DType bias_type, std::vector<at::Tensor> pre_gelu_out,
+                     bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize,
+                     bool accumulate, bool use_split_accumulator, int math_sm_count);
 
 void te_grouped_gemm_single_output(
     std::vector<at::Tensor> A, std::vector<at::Tensor> A_scale_inverse, int A_offset,
@@ -360,17 +363,102 @@ at::Tensor rmsnorm_fwd_inf(const at::Tensor &input, const at::Tensor &weight, fl
 
 at::Tensor cast_to_fp8(const at::Tensor &input, const at::Tensor &scale, at::Tensor amax,
                        at::Tensor scale_inv, transformer_engine::DType otype,
-                       const int scale_offset = 0, const int amax_offset = 0,
-                       const int scale_inv_offset = 0);
+                       std::vector<int64_t> scaling_mode, const int scale_offset = 0,
+                       const int amax_offset = 0, const int scale_inv_offset = 0);
 
 void cast_to_fp8_noalloc(const at::Tensor &input, const at::Tensor &scale, at::Tensor output,
                          at::Tensor amax, at::Tensor scale_inv, transformer_engine::DType otype,
-                         const int scale_offset = 0, const int amax_offset = 0,
-                         const int scale_inv_offset = 0);
+                         std::vector<int64_t> scaling_mode, const int scale_offset = 0,
+                         const int amax_offset = 0, const int scale_inv_offset = 0);
 
 at::Tensor cast_from_fp8(const at::Tensor &input, const at::Tensor &scale_inv,
                          transformer_engine::DType itype, transformer_engine::DType otype,
                          const int scale_inv_offset = 0);
+
+/***************************************************************************************************
+ * Cast fusions
+ **************************************************************************************************/
+
+std::vector<at::Tensor> fp8_cast_dbias(const at::Tensor &input, const at::Tensor &scale,
+                                       at::Tensor amax, at::Tensor scale_inv,
+                                       transformer_engine::DType otype,
+                                       std::vector<int64_t> scaling_mode, const int scale_offset,
+                                       const int amax_offset, const int scale_inv_offset);
+
+std::vector<at::Tensor> fp8_cast_dbias_dgelu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsilu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_drelu(at::Tensor grad_output, at::Tensor act_input,
+                                             at::Tensor scale, at::Tensor amax,
+                                             at::Tensor scale_inv, transformer_engine::DType otype,
+                                             std::vector<int64_t> scaling_mode,
+                                             int scale_offset = 0, int amax_offset = 0,
+                                             int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dqgelu(at::Tensor grad_output, at::Tensor act_input,
+                                              at::Tensor scale, at::Tensor amax,
+                                              at::Tensor scale_inv, transformer_engine::DType otype,
+                                              std::vector<int64_t> scaling_mode,
+                                              int scale_offset = 0, int amax_offset = 0,
+                                              int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsrelu(at::Tensor grad_output, at::Tensor act_input,
+                                              at::Tensor scale, at::Tensor amax,
+                                              at::Tensor scale_inv, transformer_engine::DType otype,
+                                              std::vector<int64_t> scaling_mode,
+                                              int scale_offset = 0, int amax_offset = 0,
+                                              int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_x2(const at::Tensor &input, const at::Tensor &scale,
+                                          at::Tensor amax, at::Tensor scale_inv,
+                                          transformer_engine::DType otype, const int scale_offset,
+                                          const int amax_offset, const int scale_inv_offset);
+
+std::vector<at::Tensor> fp8_cast_dbias_dgelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsilu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_drelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                at::Tensor scale, at::Tensor amax,
+                                                at::Tensor scale_inv,
+                                                transformer_engine::DType otype,
+                                                int scale_offset = 0, int amax_offset = 0,
+                                                int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dqgelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                 at::Tensor scale, at::Tensor amax,
+                                                 at::Tensor scale_inv,
+                                                 transformer_engine::DType otype,
+                                                 int scale_offset = 0, int amax_offset = 0,
+                                                 int scale_inv_offset = 0);
+
+std::vector<at::Tensor> fp8_cast_dbias_dsrelu_x2(at::Tensor grad_output, at::Tensor act_input,
+                                                 at::Tensor scale, at::Tensor amax,
+                                                 at::Tensor scale_inv,
+                                                 transformer_engine::DType otype,
+                                                 int scale_offset = 0, int amax_offset = 0,
+                                                 int scale_inv_offset = 0);
 
 /***************************************************************************************************
  * Softmax
@@ -513,6 +601,13 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> padded_input_row_list);
 
 /***************************************************************************************************
+ * swizzle
+ **************************************************************************************************/
+
+at::Tensor swizzle_scaling_factors(at::Tensor input, at::Tensor scale_inv,
+                                   std::vector<int64_t> scaling_mode);
+
+/***************************************************************************************************
  * Comm+GEMM Overlap Wrappers
  **************************************************************************************************/
 
@@ -553,7 +648,8 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
               CommOverlapHelper *helper, int tp_size, int num_splits = 3,
               int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-              int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false);
+              int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
+              bool set_sm_margin = true, bool atomic_gemm = false);
 
   void set_ubuf_scale_inv(torch::Tensor scale_inv) {
     assert(scale_inv.numel());
@@ -571,23 +667,23 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   ** This function assumes the communication input is pre-copied to _ubuf
   */
   std::vector<at::Tensor> bulk_overlap(
-      at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-      transformer_engine::DType A_type, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
-      int64_t B_fp8_tensor, transformer_engine::DType B_type, bool transb, at::Tensor D,
-      at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
-      transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-      size_t workspaceSize, bool accumulate, bool use_split_accumulator,
+      at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+      std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+      transformer_engine::DType B_type, std::vector<int64_t> B_scaling_mode, bool transb,
+      at::Tensor D, at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
+      at::Tensor bias, transformer_engine::DType bias_type, at::Tensor pre_gelu_out, bool grad,
+      at::Tensor workspace, size_t workspaceSize, bool accumulate, bool use_split_accumulator,
       transformer_engine::CommOverlapType comm_type, at::Tensor rs_output);
 
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                              transformer_engine::DType A_type, bool transa, at::Tensor B,
-                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                              transformer_engine::DType B_type, bool transb, at::Tensor D,
-                              at::Tensor D_scale, transformer_engine::DType D_type,
-                              at::Tensor D_amax, at::Tensor bias,
+  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse,
+                              transformer_engine::DType A_type, std::vector<int64_t> A_scaling_mode,
+                              bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+                              transformer_engine::DType B_type, std::vector<int64_t> B_scaling_mode,
+                              bool transb, at::Tensor D, at::Tensor D_scale,
+                              transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, bool gemm_overlap,
@@ -596,10 +692,10 @@ class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOve
   /*
   ** Split FPROP GEMM + ReduceScatter
   */
-  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                        transformer_engine::DType A_type, bool transa, at::Tensor B,
-                        at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                        transformer_engine::DType B_type, bool transb, at::Tensor D,
+  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+                        std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                        at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                        std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
                         at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
                         at::Tensor bias, transformer_engine::DType bias_type,
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
@@ -617,8 +713,9 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
                  CommOverlapHelper *helper, int tp_size,
                  transformer_engine::CommOverlapType comm_type,
                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int num_comm_sm = 3, bool set_sm_margin = true, bool atomic_gemm = false,
-                 bool use_ce = true, bool aggregate = false);
+                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
+                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                 bool aggregate = false);
 
   void set_ubuf_scale_inv(torch::Tensor scale_inv) {
     assert(scale_inv.numel());
@@ -638,12 +735,12 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void atomic_gemm_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                              transformer_engine::DType A_type, bool transa, at::Tensor B,
-                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                              transformer_engine::DType B_type, bool transb, at::Tensor D,
-                              at::Tensor D_scale, transformer_engine::DType D_type,
-                              at::Tensor D_amax, at::Tensor bias,
+  void atomic_gemm_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse,
+                              transformer_engine::DType A_type, std::vector<int64_t> A_scaling_mode,
+                              bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+                              transformer_engine::DType B_type, std::vector<int64_t> B_scaling_mode,
+                              bool transb, at::Tensor D, at::Tensor D_scale,
+                              transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, at::Tensor B_copy);
@@ -655,10 +752,10 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   ** in each rank to be in the contiguous memory space after all ring exchange
   *phases.
   */
-  void split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                        transformer_engine::DType A_type, bool transa, at::Tensor B,
-                        at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                        transformer_engine::DType B_type, bool transb, at::Tensor D,
+  void split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+                        std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                        at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                        std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
                         at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
                         at::Tensor bias, transformer_engine::DType bias_type,
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
@@ -668,12 +765,12 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                              transformer_engine::DType A_type, bool transa, at::Tensor B,
-                              at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                              transformer_engine::DType B_type, bool transb, at::Tensor D,
-                              at::Tensor D_scale, transformer_engine::DType D_type,
-                              at::Tensor D_amax, at::Tensor bias,
+  void atomic_gemm_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse,
+                              transformer_engine::DType A_type, std::vector<int64_t> A_scaling_mode,
+                              bool transa, at::Tensor B, at::Tensor B_scale_inverse,
+                              transformer_engine::DType B_type, std::vector<int64_t> B_scaling_mode,
+                              bool transb, at::Tensor D, at::Tensor D_scale,
+                              transformer_engine::DType D_type, at::Tensor D_amax, at::Tensor bias,
                               transformer_engine::DType bias_type, at::Tensor pre_gelu_out,
                               bool grad, at::Tensor workspace, size_t workspaceSize,
                               bool accumulate, bool use_split_accumulator, at::Tensor rs_output);
@@ -681,10 +778,10 @@ class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::Comm
   /*
   ** Split ReduceScatter + GEMM using P2P communication
   */
-  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                        transformer_engine::DType A_type, bool transa, at::Tensor B,
-                        at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                        transformer_engine::DType B_type, bool transb, at::Tensor D,
+  void split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, transformer_engine::DType A_type,
+                        std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                        at::Tensor B_scale_inverse, transformer_engine::DType B_type,
+                        std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
                         at::Tensor D_scale, transformer_engine::DType D_type, at::Tensor D_amax,
                         at::Tensor bias, transformer_engine::DType bias_type,
                         at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -25,6 +25,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, Tensor* workspace,
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
+  if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
+      !is_rowwise_block_scaling(z->scaling_mode)) {
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
+  }
+
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
   NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
@@ -51,7 +56,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  if (use_cudnn_norm_fwd()) {
+  if (use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode)) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
@@ -66,7 +71,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();

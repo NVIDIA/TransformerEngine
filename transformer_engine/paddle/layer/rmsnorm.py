@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """RMSNorm API"""
@@ -28,6 +28,7 @@ class _RMSNorm(paddle.autograd.PyLayer):
         bwd_rmsnorm_sm_margin: int,
         zero_centered_gamma: bool,
     ) -> paddle.Tensor:
+        # pylint: disable=missing-function-docstring
         # Make sure input dimensions are compatible
         in_features = rmsnorm_weight.shape[0]
         assert inp.shape[-1] == in_features, "RMSNorm not possible"
@@ -53,6 +54,7 @@ class _RMSNorm(paddle.autograd.PyLayer):
 
     @staticmethod
     def backward(ctx, grad_output: paddle.Tensor) -> Tuple[Union[paddle.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         inputmat, rmsnorm_weight, rsigma = ctx.saved_tensor()
         d_rmsnorm_out = grad_output.reshape(inputmat.shape)
         dxmat, dgamma = rmsnorm_bwd(
@@ -168,6 +170,7 @@ class RMSNorm(paddle.nn.Layer):
         return y
 
     def forward(self, *args, **kwargs):
+        """RMSNorm Forward"""
         if self.backend == "transformer_engine":
             return self._te_forward(*args, **kwargs)
         if self.backend == "paddle":

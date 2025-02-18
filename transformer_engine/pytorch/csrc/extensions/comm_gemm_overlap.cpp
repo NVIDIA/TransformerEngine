@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -14,38 +14,30 @@ using namespace std::placeholders;
 
 namespace te = transformer_engine;
 
-#define MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inv, A_fp8_index, A_type, B, B_scale_inv,       \
-                                        B_fp8_index, B_type, D, D_amax, D_scale, D_type, bias,     \
+#define MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inv, A_scaling_mode, A_type, B, B_scale_inv,    \
+                                        B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,  \
                                         bias_type, pre_gelu_out, workspace)                        \
   A = A.contiguous();                                                                              \
-  void *A_scale_inv_ptr = nullptr;                                                                 \
-  if (te::is_fp8_dtype(A_type)) {                                                                  \
-    assert(A_scale_inv.numel());                                                                   \
-    A_scale_inv_ptr = A_scale_inv[A_fp8_index].data_ptr();                                         \
-  }                                                                                                \
+  auto dimA = A_scaling_mode.size();                                                               \
+  NVTE_CHECK(dimA == 3, "Incorrect size ", dimA, " for scaling mode.");                            \
+  NVTEScalingMode nvte_scaling_modeA = {static_cast<int>(A_scaling_mode[0]),                       \
+                                        static_cast<int>(A_scaling_mode[1]),                       \
+                                        static_cast<int>(A_scaling_mode[2])};                      \
   auto A_ = makeTransformerEngineTensor(                                                           \
       A.data_ptr(), {static_cast<size_t>(A.size(0)), static_cast<size_t>(A.size(1))}, A_type,      \
-      nullptr, nullptr, A_scale_inv_ptr);                                                          \
+      nullptr, nullptr, A_scale_inv.data_ptr(), getTensorShape(A_scale_inv), nvte_scaling_modeA);  \
   B = B.contiguous();                                                                              \
-  void *B_scale_inv_ptr = nullptr;                                                                 \
-  if (te::is_fp8_dtype(B_type)) {                                                                  \
-    assert(B_scale_inv.numel());                                                                   \
-    B_scale_inv_ptr = B_scale_inv[B_fp8_index].data_ptr();                                         \
-  }                                                                                                \
+  auto dimB = B_scaling_mode.size();                                                               \
+  NVTE_CHECK(dimB == 3, "Incorrect size ", dimB, " for scaling mode.");                            \
+  NVTEScalingMode nvte_scaling_modeB = {static_cast<int>(B_scaling_mode[0]),                       \
+                                        static_cast<int>(B_scaling_mode[1]),                       \
+                                        static_cast<int>(B_scaling_mode[2])};                      \
   auto B_ = makeTransformerEngineTensor(                                                           \
       B.data_ptr(), {static_cast<size_t>(B.size(0)), static_cast<size_t>(B.size(1))}, B_type,      \
-      nullptr, nullptr, B_scale_inv_ptr);                                                          \
-  void *D_amax_ptr = nullptr;                                                                      \
-  void *D_scale_ptr = nullptr;                                                                     \
-  if (te::is_fp8_dtype(D_type)) {                                                                  \
-    assert(D_amax.numel());                                                                        \
-    D_amax_ptr = D_amax.data_ptr();                                                                \
-    assert(D_scale.numel());                                                                       \
-    D_scale_ptr = D_scale.data_ptr();                                                              \
-  }                                                                                                \
+      nullptr, nullptr, B_scale_inv.data_ptr(), getTensorShape(B_scale_inv), nvte_scaling_modeB);  \
   auto D_ = makeTransformerEngineTensor(                                                           \
       D.data_ptr(), {static_cast<size_t>(D.size(0)), static_cast<size_t>(D.size(1))}, D_type,      \
-      D_amax_ptr, D_scale_ptr, nullptr);                                                           \
+      D_amax.data_ptr(), D_scale.data_ptr(), nullptr);                                             \
   auto bias_ = makeTransformerEngineTensor(                                                        \
       bias.data_ptr(), std::vector<size_t>{static_cast<size_t>(bias.size(0))}, bias_type);         \
   const auto gelu_shape = (pre_gelu_out.data_ptr() == nullptr)                                     \
@@ -185,14 +177,14 @@ void CommOverlapHelper::ub_barrier(ExtComm group) {
 
 CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                          CommOverlapHelper *helper, int tp_size, int num_splits,
-                         int num_max_streams, int comm_cga_size, int num_comm_sm,
-                         bool set_sm_margin, bool atomic_gemm)
-    : te::CommOverlapBase(buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank,
-                          helper->numranks, helper->mylocal, helper->numlocal, helper->mynode,
-                          helper->numnodes, tp_size,
-                          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
-                          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits,
-                          num_max_streams, comm_cga_size, num_comm_sm, set_sm_margin, atomic_gemm) {
+                         int num_max_streams, int comm_cga_size, int gemm_priority,
+                         int comm_priority, int num_comm_sm, bool set_sm_margin, bool atomic_gemm)
+    : te::CommOverlapBase(
+          buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
+          helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
+          std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
+          std::bind(&CommOverlapHelper::ub_barrier, helper, _1), num_splits, num_max_streams,
+          comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, atomic_gemm) {
   // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
   // for PyTorch to factor externally allocated memory into its memory pool and garbage collection
   // threshold calculation.
@@ -210,15 +202,15 @@ CommOverlap::CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType
 ** This function assumes the communication input is pre-copied to _ubuf
 */
 std::vector<at::Tensor> CommOverlap::bulk_overlap(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator,
-    te::CommOverlapType comm_type, at::Tensor rs_output) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+    at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type, std::vector<int64_t> A_scaling_mode,
+    bool transa, at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
+    te::DType D_type, at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+    at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, te::CommOverlapType comm_type, at::Tensor rs_output) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto rs_out_ = makeTransformerEngineTensor(rs_output);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -246,15 +238,15 @@ std::vector<at::Tensor> CommOverlap::bulk_overlap(
 ** Split FPROP GEMM + ReduceScatter
 */
 void CommOverlap::atomic_gemm_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, bool gemm_overlap,
-    at::Tensor rs_output) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+    at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type, std::vector<int64_t> A_scaling_mode,
+    bool transa, at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
+    te::DType D_type, at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+    at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, bool gemm_overlap, at::Tensor rs_output) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto rs_out_ = makeTransformerEngineTensor(rs_output);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -266,18 +258,18 @@ void CommOverlap::atomic_gemm_overlap_rs(
 /*
 ** Split FPROP GEMM + ReduceScatter
 */
-void CommOverlap::split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor,
-                                   te::DType A_type, bool transa, at::Tensor B,
-                                   at::Tensor B_scale_inverse, int64_t B_fp8_tensor,
-                                   te::DType B_type, bool transb, at::Tensor D, at::Tensor D_scale,
-                                   te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-                                   te::DType bias_type, at::Tensor pre_gelu_out, bool grad,
-                                   at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                                   bool use_split_accumulator, bool gemm_overlap,
+void CommOverlap::split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type,
+                                   std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
+                                   at::Tensor B_scale_inverse, te::DType B_type,
+                                   std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D,
+                                   at::Tensor D_scale, te::DType D_type, at::Tensor D_amax,
+                                   at::Tensor bias, te::DType bias_type, at::Tensor pre_gelu_out,
+                                   bool grad, at::Tensor workspace, size_t workspaceSize,
+                                   bool accumulate, bool use_split_accumulator, bool gemm_overlap,
                                    at::Tensor rs_output) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto rs_out_ = makeTransformerEngineTensor(rs_output);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -333,14 +325,16 @@ torch::Tensor CommOverlap::get_ubuf_output(int comm_type) {
 CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
                                CommOverlapHelper *helper, int tp_size,
                                te::CommOverlapType comm_type, int num_max_streams,
-                               int comm_cga_size, int num_comm_sm, bool set_sm_margin,
-                               bool atomic_gemm, bool use_ce, bool aggregate)
+                               int comm_cga_size, int gemm_priority, int comm_priority,
+                               int num_comm_sm, bool set_sm_margin, bool atomic_gemm, bool use_ce,
+                               bool aggregate)
     : te::CommOverlapP2PBase(
           buffer_shape, GetTransformerEngineDType(buffer_dtype), helper->myrank, helper->numranks,
           helper->mylocal, helper->numlocal, helper->mynode, helper->numnodes, tp_size,
           std::bind(&CommOverlapHelper::ub_allgather, helper, _1, _2, _3, _4, _5),
           std::bind(&CommOverlapHelper::ub_barrier, helper, _1), comm_type, num_max_streams,
-          comm_cga_size, num_comm_sm, set_sm_margin, use_ce, atomic_gemm, aggregate) {
+          comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
+          atomic_gemm, aggregate) {
   // Even though we never use these PyTorch tensor wrappers directly, they're still necessary to
   // for PyTorch to factor externally allocated memory into its memory pool and garbage collection
   // threshold calculation.
@@ -361,14 +355,15 @@ CommOverlapP2P::CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::Scal
 *phases.
 */
 void CommOverlapP2P::atomic_gemm_overlap_ag(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+    at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type, std::vector<int64_t> A_scaling_mode,
+    bool transa, at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
+    te::DType D_type, at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+    at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, at::Tensor B_copy) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto B_copy_ = makeTransformerEngineTensor(B_copy);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -384,15 +379,18 @@ void CommOverlapP2P::atomic_gemm_overlap_ag(
 ** in each rank to be in the contiguous memory space after all ring exchange
 *phases.
 */
-void CommOverlapP2P::split_overlap_ag(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor B_copy) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+void CommOverlapP2P::split_overlap_ag(at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type,
+                                      std::vector<int64_t> A_scaling_mode, bool transa,
+                                      at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+                                      std::vector<int64_t> B_scaling_mode, bool transb,
+                                      at::Tensor D, at::Tensor D_scale, te::DType D_type,
+                                      at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+                                      at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                                      size_t workspaceSize, bool accumulate,
+                                      bool use_split_accumulator, at::Tensor B_copy) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto B_copy_ = makeTransformerEngineTensor(B_copy);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -405,14 +403,15 @@ void CommOverlapP2P::split_overlap_ag(
 ** Split ReduceScatter + GEMM using P2P communication
 */
 void CommOverlapP2P::atomic_gemm_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor rs_output) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+    at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type, std::vector<int64_t> A_scaling_mode,
+    bool transa, at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+    std::vector<int64_t> B_scaling_mode, bool transb, at::Tensor D, at::Tensor D_scale,
+    te::DType D_type, at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+    at::Tensor pre_gelu_out, bool grad, at::Tensor workspace, size_t workspaceSize, bool accumulate,
+    bool use_split_accumulator, at::Tensor rs_output) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto rs_out_ = makeTransformerEngineTensor(rs_output);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());
@@ -424,15 +423,18 @@ void CommOverlapP2P::atomic_gemm_overlap_rs(
 /*
 ** Split ReduceScatter + GEMM using P2P communication
 */
-void CommOverlapP2P::split_overlap_rs(
-    at::Tensor A, at::Tensor A_scale_inverse, int64_t A_fp8_tensor, te::DType A_type, bool transa,
-    at::Tensor B, at::Tensor B_scale_inverse, int64_t B_fp8_tensor, te::DType B_type, bool transb,
-    at::Tensor D, at::Tensor D_scale, te::DType D_type, at::Tensor D_amax, at::Tensor bias,
-    te::DType bias_type, at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
-    size_t workspaceSize, bool accumulate, bool use_split_accumulator, at::Tensor rs_output) {
-  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_fp8_tensor, A_type, B, B_scale_inverse,
-                                  B_fp8_tensor, B_type, D, D_amax, D_scale, D_type, bias, bias_type,
-                                  pre_gelu_out, workspace)
+void CommOverlapP2P::split_overlap_rs(at::Tensor A, at::Tensor A_scale_inverse, te::DType A_type,
+                                      std::vector<int64_t> A_scaling_mode, bool transa,
+                                      at::Tensor B, at::Tensor B_scale_inverse, te::DType B_type,
+                                      std::vector<int64_t> B_scaling_mode, bool transb,
+                                      at::Tensor D, at::Tensor D_scale, te::DType D_type,
+                                      at::Tensor D_amax, at::Tensor bias, te::DType bias_type,
+                                      at::Tensor pre_gelu_out, bool grad, at::Tensor workspace,
+                                      size_t workspaceSize, bool accumulate,
+                                      bool use_split_accumulator, at::Tensor rs_output) {
+  MAKE_TRANSFORMER_ENGINE_TENSORS(A, A_scale_inverse, A_scaling_mode, A_type, B, B_scale_inverse,
+                                  B_scaling_mode, B_type, D, D_amax, D_scale, D_type, bias,
+                                  bias_type, pre_gelu_out, workspace)
 
   auto rs_out_ = makeTransformerEngineTensor(rs_output);
   cudaStream_t stream_main = static_cast<cudaStream_t>(at::cuda::getCurrentCUDAStream());

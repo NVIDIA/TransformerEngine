@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
+#include "common/util/system.h"
 #include "userbuffers.h"
 
 #define MAX_THREADS 1024

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,8 +8,6 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_SYSTEM_H_
 
 #include <string>
-
-#include "../common.h"
 
 namespace transformer_engine {
 

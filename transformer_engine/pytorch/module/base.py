@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -48,6 +48,7 @@ _multi_stream_cublas_workspace = []
 _cublas_workspace = None
 _ub_communicators = None
 _NUM_MAX_UB_STREAMS = 3
+_MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
 
@@ -295,8 +296,11 @@ def initialize_ub(
         raise KeyError(f"Given layer name {name} does not exist.")
 
     def get_default_config(name):
+        global _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY
         method = get_method(name)
         is_reduce_scatter = name in layers_reduce_scatter_overlap
+        if _MIN_STREAM_PRIORITY is None or _MAX_STREAM_PRIORITY is None:
+            _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = tex.get_stream_priority_range()
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
@@ -308,6 +312,8 @@ def initialize_ub(
             "atomic_gemm": False,
             "use_ce": True,
             "fp8_buf": name in layers_all_gather_overlap,
+            "comm_priority": _MAX_STREAM_PRIORITY,
+            "gemm_priority": _MIN_STREAM_PRIORITY,
         }
         return default_cfg
 
@@ -323,6 +329,8 @@ def initialize_ub(
         atomic_gemm: int = 0,
         use_ce: bool = True,
         fp8_buf: bool = False,
+        comm_priority: int = 0,
+        gemm_priority: int = 0,
     ) -> None:
         if atomic_gemm:
             warnings.warn(
@@ -373,6 +381,8 @@ def initialize_ub(
                 atomic_gemm=atomic_gemm,
                 use_ce=use_ce,
                 aggregate=aggregate,
+                gemm_priority=gemm_priority,
+                comm_priority=comm_priority,
             )
         else:
             ub_obj = tex.CommOverlap(
@@ -386,6 +396,8 @@ def initialize_ub(
                 num_comm_sm=num_sm,
                 set_sm_margin=set_sm_margin,
                 atomic_gemm=atomic_gemm,
+                gemm_priority=gemm_priority,
+                comm_priority=comm_priority,
             )
         _ub_communicators[name] = ub_obj
 
@@ -516,37 +528,56 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             self.fp8_meta[meta_key].amax_history
                         )
 
-    def set_meta_tensor(self, fwd: bool) -> None:
+    def set_meta_tensor(self, fwd: bool, _inp_shape: Optional[torch.Size] = None) -> None:
         """Init scales and amaxes for fwd | bwd."""
         fp8_meta_tensor_key = "scaling_fwd" if fwd else "scaling_bwd"
 
-        if self.fp8_meta_tensors_initialized:
-            # Handle changed amax history size.
-            self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
-            return
+        if self.fp8_meta["recipe"].delayed:
+            if self.fp8_meta_tensors_initialized:
+                # Handle changed amax history size.
+                self.adjust_amax_history_length(self.fp8_meta["recipe"].amax_history_len, fwd=fwd)
+                return
 
-        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
-        # 2 (grad_output and grad_input) for bwd
-        num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+            # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
+            # 2 (grad_output and grad_input) for bwd
+            num_fp8_tensors = (
+                self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+            )
+            self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
 
-        self.fp8_meta[fp8_meta_tensor_key] = tex.FP8TensorMeta()
-        self.fp8_meta[fp8_meta_tensor_key].scale = torch.ones(
-            num_fp8_tensors, dtype=torch.float32, device="cuda"
-        )
-        self.fp8_meta[fp8_meta_tensor_key].scale_inv = torch.ones(
-            num_fp8_tensors, dtype=torch.float32, device="cuda"
-        )
-        self.fp8_meta[fp8_meta_tensor_key].amax_history = torch.zeros(
-            self.fp8_meta["recipe"].amax_history_len,
-            num_fp8_tensors,
-            dtype=torch.float32,
-            device="cuda",
-        )
+            self.fp8_meta[fp8_meta_tensor_key].scale = torch.ones(
+                num_fp8_tensors, dtype=torch.float32, device="cuda"
+            )
+            self.fp8_meta[fp8_meta_tensor_key].scale_inv = torch.ones(
+                num_fp8_tensors, dtype=torch.float32, device="cuda"
+            )
+            self.fp8_meta[fp8_meta_tensor_key].amax_history = torch.zeros(
+                self.fp8_meta["recipe"].amax_history_len,
+                num_fp8_tensors,
+                dtype=torch.float32,
+                device="cuda",
+            )
+        elif self.fp8_meta["recipe"].current():
+            self.fp8_meta[fp8_meta_tensor_key] = tex.MXFP8TensorMeta()
+            self.fp8_meta[fp8_meta_tensor_key].scale = [
+                torch.ones(num_fp8_tensors, dtype=torch.float32, device="cuda")
+            ]
+            self.fp8_meta[fp8_meta_tensor_key].scale_inv = [
+                torch.ones(num_fp8_tensors, dtype=torch.float32, device="cuda")
+            ]
+            self.fp8_meta[fp8_meta_tensor_key].amax_history = [
+                torch.zeros(
+                    self.fp8_meta["recipe"].amax_history_len,
+                    num_fp8_tensors,
+                    dtype=torch.float32,
+                    device="cuda",
+                )
+            ]
 
-    def init_fp8_meta_tensors(self) -> None:
+    def init_fp8_meta_tensors(self, inp_shape: Optional[torch.Size] = None) -> None:
         """Init scales and amaxes."""
-        self.set_meta_tensor(True)
-        self.set_meta_tensor(False)
+        self.set_meta_tensor(True, inp_shape)
+        self.set_meta_tensor(False, inp_shape)
         self.fp8_meta_tensors_initialized = True
 
     def get_fp8_meta_tensors(self) -> None:
@@ -737,16 +768,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
     # This routine is shared across FP8 and FP8_calibration paths so should not actually
     # assume FP8 execution.
-    def init_fp8_metadata(self, num_gemms: int = 1) -> None:
+    def init_fp8_metadata(self, num_gemms: int = 1, inp_shape: Optional[torch.Size] = None) -> None:
         """Initialize fp8 related metadata and tensors during fprop."""
         self.fp8_parameters = FP8GlobalStateManager.with_fp8_parameters()
         self.fp8 = FP8GlobalStateManager.is_fp8_enabled()
         self.fp8_calibration = FP8GlobalStateManager.is_fp8_calibration()
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
+        self.fp8_meta["inp_shape"] = inp_shape
 
         if self.fp8_parameters and not self.fp8_initialized:
             self.fp8_meta["num_gemms"] = num_gemms
-            self.init_fp8_meta_tensors()
+            self.init_fp8_meta_tensors(inp_shape=inp_shape)
 
         if self.fp8 or self.fp8_calibration:
             # FP8 init has already been run and recipe is the same, don't do anything.
@@ -766,7 +798,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
-            self.init_fp8_meta_tensors()
+            self.init_fp8_meta_tensors(inp_shape=inp_shape)
             self.fp8_initialized = True
         else:
             # If fp8 isn't enabled, turn off and return.
@@ -796,7 +828,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 assert self.tp_group_initialized, "TP group not initialized."
 
             self.set_activation_dtype(inp)
-            self.init_fp8_metadata(num_gemms=num_gemms)
+            self.init_fp8_metadata(num_gemms=num_gemms, inp_shape=inp.shape)
 
             if self.fp8 and self.sequence_parallel:
                 assert self.fp8_meta["recipe"].reduce_amax, (

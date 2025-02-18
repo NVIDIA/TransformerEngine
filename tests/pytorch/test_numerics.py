@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -741,7 +741,7 @@ def _test_e2e_checkpointing(bs, dtype, config, checkpoint=False, steps=10, path=
 
         del block
         block = _test_e2e_checkpointing_get_model(config, dtype)
-        block.load_state_dict(torch.load(path))
+        block.load_state_dict(torch.load(path, weights_only=False))
         reset_rng_states()
 
         for p in block.parameters():

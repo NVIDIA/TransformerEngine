@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -277,15 +277,6 @@ void amax_and_scale_update(const Tensor& amax_history, const Tensor& scale, cons
   auto& updated_scale = *updated_scale_;
   auto& updated_scale_inv = *updated_scale_inv_;
 
-  // Number of elements in tensor
-  auto numel = [](const Tensor& tensor) -> size_t {
-    size_t acc = 1;
-    for (const auto& dim : tensor.data.shape) {
-      acc *= dim;
-    }
-    return acc;
-  };
-
   // Check tensors
   NVTE_CHECK(amax_history.data.shape.size() == 2, "Found ", amax_history.data.shape.size(),
              " dims");
@@ -293,15 +284,15 @@ void amax_and_scale_update(const Tensor& amax_history, const Tensor& scale, cons
   const size_t num_scales = amax_history.data.shape[1];
   NVTE_CHECK(amax_history.data.dtype == DType::kFloat32, "Found ",
              dtype_name(amax_history.data.dtype), ".");
-  NVTE_CHECK(numel(scale) == num_scales, "Expected ", num_scales, " elements, ", "but found ",
-             numel(scale), ".");
+  NVTE_CHECK(scale.numel() == num_scales, "Expected ", num_scales, " elements, ", "but found ",
+             scale.numel(), ".");
   NVTE_CHECK(scale.data.dtype == DType::kFloat32, "Found ", dtype_name(scale.data.dtype), ".");
   if (scale_inv_mask.data.dptr != nullptr) {
-    NVTE_CHECK(numel(scale_inv) == num_scales, "Expected ", num_scales, " elements, ", "but found ",
-               numel(scale_inv), ".");
+    NVTE_CHECK(scale_inv.numel() == num_scales, "Expected ", num_scales, " elements, ",
+               "but found ", scale_inv.numel(), ".");
     NVTE_CHECK(scale_inv.data.dtype == DType::kFloat32);
-    NVTE_CHECK(numel(scale_inv_mask) == num_scales, "Expected ", num_scales, " elements, ",
-               "but found ", numel(scale_inv_mask), ".");
+    NVTE_CHECK(scale_inv_mask.numel() == num_scales, "Expected ", num_scales, " elements, ",
+               "but found ", scale_inv_mask.numel(), ".");
     NVTE_CHECK(scale_inv_mask.data.dtype == DType::kByte, "Found ",
                dtype_name(scale_inv_mask.data.dtype), ".");
   }
@@ -313,12 +304,12 @@ void amax_and_scale_update(const Tensor& amax_history, const Tensor& scale, cons
              "but found ", updated_amax_history.data.shape[1]);
   NVTE_CHECK(updated_amax_history.data.dtype == DType::kFloat32, "Got ",
              dtype_name(updated_amax_history.data.dtype), ".");
-  NVTE_CHECK(numel(updated_scale) == num_scales, "Expected ", num_scales, " elements, ",
-             "but found ", numel(updated_scale), ".");
+  NVTE_CHECK(updated_scale.numel() == num_scales, "Expected ", num_scales, " elements, ",
+             "but found ", updated_scale.numel(), ".");
   NVTE_CHECK(updated_scale.data.dtype == DType::kFloat32, "Got ",
              dtype_name(updated_scale.data.dtype), ".");
-  NVTE_CHECK(numel(updated_scale_inv) == num_scales, "Expected ", num_scales, " elements, ",
-             "but found ", numel(updated_scale_inv), ".");
+  NVTE_CHECK(updated_scale_inv.numel() == num_scales, "Expected ", num_scales, " elements, ",
+             "but found ", updated_scale_inv.numel(), ".");
   NVTE_CHECK(updated_scale_inv.data.dtype == DType::kFloat32, "Got ",
              dtype_name(updated_scale_inv.data.dtype), ".");
 
@@ -370,15 +361,6 @@ void amax_and_scale_update_after_reduction(const Tensor& amax_reduction_buffer,
   // Expected maximum value after scale is applied
   const float scaled_max = fp8_dtype_max(fp8_dtype) * std::pow(2.f, -margin);
 
-  // Number of elements in tensor
-  auto numel = [](const Tensor* tensor) -> size_t {
-    size_t acc = 1;
-    for (const auto& dim : tensor->data.shape) {
-      acc *= dim;
-    }
-    return acc;
-  };
-
   // Number of tensors in the bulk
   const size_t num_tensors = amax_histories.size();
   size_t num_remaining_tensors = num_tensors;
@@ -404,15 +386,15 @@ void amax_and_scale_update_after_reduction(const Tensor& amax_reduction_buffer,
                  dtype_name(amax_histories[i]->data.dtype), ".");
       NVTE_CHECK(amax_histories[i]->data.shape.size() == 2, "Found ",
                  amax_histories[i]->data.shape.size(), " dims");
-      NVTE_CHECK(numel(amax_histories[i]) == amax_history_length * num_scale, "Expected ",
+      NVTE_CHECK(amax_histories[i]->numel() == amax_history_length * num_scale, "Expected ",
                  amax_history_length * num_scale, " elements, ", "but found ",
-                 numel(amax_histories[i]), ".");
+                 amax_histories[i]->numel(), ".");
       NVTE_CHECK(scales[i]->data.dtype == DType::kFloat32, "Found ",
                  dtype_name(scales[i]->data.dtype), ".");
       NVTE_CHECK(scales[i]->data.shape.size() == 1, "Found ", scales[i]->data.shape.size(),
                  " dims");
-      NVTE_CHECK(numel(scales[i]) == num_scale, "Expected ", num_scale, " elements, ", "Found ",
-                 numel(scales[i]), ".");
+      NVTE_CHECK(scales[i]->numel() == num_scale, "Expected ", num_scale, " elements, ", "Found ",
+                 scales[i]->numel(), ".");
 
       // amax parameters
       kernel_num_scales += num_scale;

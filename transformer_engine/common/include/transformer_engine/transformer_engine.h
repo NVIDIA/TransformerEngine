@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -43,6 +43,23 @@ struct NVTEShape {
   size_t ndim;
 };
 
+/*! \struct NVTEScalingMode
+ * \brief Granularity of scaling in each direction:
+ *  - {-1, -1, 1} - per tensor delayed scaling
+ *  - {-1, -1, 0} - per tensor current scaling
+ *  - {1, -1, 0} - rowwise scaling (not implemented)
+ *  - {-1, 1, 0} - columnwise scaling (not implemented)
+ *  - {1, 32, 0} - 1D blockwise scaling (rowwise)
+ *  - {32, 1, 0} - 1D blockwise scaling (columnwise)
+ *  - {32, 32, 0} - 2D blockwise scaling
+ */
+struct NVTEScalingMode {
+  int x;
+  int y;
+
+  int delayed_scaling;
+};
+
 /*! \brief TE Tensor type
  *
  * NVTETensor is a contiguous tensor type storing a pointer
@@ -63,11 +80,40 @@ typedef void *NVTETensor;
  *  \param[in] amax_dptr       Pointer to the AMAX value.
  *  \param[in] scale_dptr      Pointer to the scale value.
  *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
+ *  \param[in] scaling_mode    Scaling mode of the tensor.
  *
  *  \return A new TE tensor.
  */
 NVTETensor nvte_create_tensor(void *dptr, const NVTEShape shape, const NVTEDType dtype,
-                              float *amax_dptr, float *scale_dptr, float *scale_inv_dptr);
+                              float *amax_dptr, float *scale_dptr, float *scale_inv_dptr,
+                              NVTEShape scale_inv_shape, NVTEScalingMode scaling_mode);
+
+/*! \brief Create a new TE tensor.
+ *
+ * Create a new TE tensor with a given shape, datatype and data.
+ * TE tensors are just wrappers on top of raw data and do not
+ * own memory.
+ *
+   *  \param[in] dptr                       Pointer to the tensor data.
+   *  \param[in] shape                      Shape of the tensor.
+   *  \param[in] columnwise_dptr            Pointer to the tensor data.
+   *  \param[in] columnwise_shape           Shape of the tensor.
+   *  \param[in] dtype                      Data type of the tensor.
+   *  \param[in] scale_inv_dptr             Pointer to the inverse of scale value.
+   *  \param[in] scale_inv_shape            Shape of scale_inv
+   *  \param[in] columnwise_scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] columnwise_scale_inv_shape Shape of scale_inv
+   *  \param[in] scale_inv_dtype            Data type of scale_inv.
+   *  \param[in] scaling_mode               Scaling mode of the tensor.
+ *
+ *  \return A new TE tensor.
+ */
+NVTETensor nvte_create_tensor_2x(void *dptr, const NVTEShape shape, void *columnwise_dptr,
+                                 const NVTEShape columnwise_shape, const NVTEDType dtype,
+                                 void *scale_inv, const NVTEShape scale_inv_shape,
+                                 void *columnwise_scale_inv,
+                                 const NVTEShape columnwise_scale_inv_shape,
+                                 const NVTEDType scale_inv_dtype, NVTEScalingMode scaling_mode);
 
 /*! \brief Destroy a TE tensor.
  *
@@ -86,6 +132,14 @@ void nvte_destroy_tensor(NVTETensor tensor);
  */
 void *nvte_tensor_data(const NVTETensor tensor);
 
+/*! \brief Get a raw pointer to the tensor's data.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A raw pointer to tensor's data.
+ */
+void *nvte_tensor_columnwise_data(const NVTETensor tensor);
+
 /*! \brief Get a tensor's data shape.
  *
  *  \param[in] tensor Tensor.
@@ -93,6 +147,14 @@ void *nvte_tensor_data(const NVTETensor tensor);
  *  \return A shape of the input tensor.
  */
 NVTEShape nvte_tensor_shape(const NVTETensor tensor);
+
+/*! \brief Get a tensor's data shape.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A shape of the input tensor.
+ */
+NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor);
 
 /*! \brief Get a tensor's number of dimensions.
  *
@@ -159,6 +221,46 @@ float *nvte_tensor_scale(const NVTETensor tensor);
  */
 float *nvte_tensor_scale_inv(const NVTETensor tensor);
 
+/*! \brief Get a pointer to the tensor's inverse of scale data.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A pointer to tensor's inverse of scale data.
+ */
+void *nvte_tensor_columnwise_scale_inv(const NVTETensor tensor);
+
+/*! \brief Get a tensor's scale_inv shape.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A scale_inv shape of the input tensor.
+ */
+NVTEShape nvte_tensor_scale_inv_shape(const NVTETensor tensor);
+
+/*! \brief Get a tensor's scale_inv shape.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A scale_inv shape of the input tensor.
+ */
+NVTEShape nvte_tensor_columnwise_scale_inv_shape(const NVTETensor tensor);
+
+/*! \brief Get a tensor's scale inv data type.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A scale inv data type of the input tensor.
+ */
+NVTEDType nvte_tensor_scale_inv_dtype(const NVTETensor tensor);
+
+/*! \brief Get the granularity of scaling of this tensor.
+ *
+ *  \param[in] tensor Tensor.
+ *
+ *  \return A struct containing the granularity of tensor's scaling.
+ */
+NVTEScalingMode nvte_tensor_scaling_mode(const NVTETensor tensor);
+
 /*! \struct NVTETensorPack
     \brief Pack of tensors, generally used for auxiliary outputs.
  */
@@ -220,12 +322,15 @@ class TensorWrapper {
    *  \param[in] dtype Data type of the tensor.
    *  \param[in] amax_dptr       Pointer to the AMAX value.
    *  \param[in] scale_dptr      Pointer to the scale value.
+   *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
    */
   TensorWrapper(void *dptr, const NVTEShape &shape, const DType dtype, float *amax_dptr = nullptr,
-                float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr)
+                float *scale_dptr = nullptr, float *scale_inv_dptr = nullptr,
+                const NVTEShape scale_inv_shape = defaultShape,
+                const NVTEScalingMode scaling_mode = {-1, -1, 1})
       : tensor_(nvte_create_tensor(dptr, shape, static_cast<NVTEDType>(dtype), amax_dptr,
-                                   scale_dptr, scale_inv_dptr)) {}
+                                   scale_dptr, scale_inv_dptr, scale_inv_shape, scaling_mode)) {}
 
   /*! \brief Constructs new TensorWrapper.
    *
@@ -238,13 +343,75 @@ class TensorWrapper {
    *  \param[in] dtype Data type of the tensor.
    *  \param[in] amax_dptr       Pointer to the AMAX value.
    *  \param[in] scale_dptr      Pointer to the scale value.
+   *  \param[in] scale_inv_shape Shape of scale_inv
    *  \param[in] scale_inv_dptr  Pointer to the inverse of scale value.
    */
   TensorWrapper(void *dptr, const std::vector<size_t> &shape, const DType dtype,
                 float *amax_dptr = nullptr, float *scale_dptr = nullptr,
-                float *scale_inv_dptr = nullptr)
+                float *scale_inv_dptr = nullptr, const std::vector<size_t> &scale_inv_shape = {1},
+                const NVTEScalingMode scaling_mode = {-1, -1, 1})
       : TensorWrapper(dptr, NVTEShape{shape.data(), shape.size()}, dtype, amax_dptr, scale_dptr,
-                      scale_inv_dptr) {}
+                      scale_inv_dptr, NVTEShape{scale_inv_shape.data(), scale_inv_shape.size()},
+                      scaling_mode) {}
+
+  /*! \brief Constructs new TensorWrapper.
+   *
+   * Create a new TE tensor with a given shape, datatype and data.
+   * TE tensors are just wrappers on top of raw data and do not
+   * own memory.
+   *
+   *  \param[in] dptr                       Pointer to the tensor data.
+   *  \param[in] shape                      Shape of the tensor.
+   *  \param[in] columnwise_dptr            Pointer to the tensor data.
+   *  \param[in] columnwise_shape           Shape of the tensor.
+   *  \param[in] dtype                      Data type of the tensor.
+   *  \param[in] scale_inv_dptr             Pointer to the inverse of scale value.
+   *  \param[in] scale_inv_shape            Shape of scale_inv
+   *  \param[in] columnwise_scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] columnwise_scale_inv_shape Shape of scale_inv
+   *  \param[in] scale_inv_dtype            Data type of scale_inv.
+   *  \param[in] scaling_mode               Scaling mode of the tensor.
+   */
+  TensorWrapper(void *dptr, const NVTEShape &shape, void *columnwise_dptr,
+                const NVTEShape &columnwise_shape, const DType dtype, void *scale_inv_dptr,
+                const NVTEShape scale_inv_shape, void *columnwise_scale_inv_dptr,
+                const NVTEShape columnwise_scale_inv_shape, const DType scale_inv_dtype,
+                const NVTEScalingMode scaling_mode)
+      : tensor_(nvte_create_tensor_2x(
+            dptr, shape, columnwise_dptr, columnwise_shape, static_cast<NVTEDType>(dtype),
+            scale_inv_dptr, scale_inv_shape, columnwise_scale_inv_dptr, columnwise_scale_inv_shape,
+            static_cast<NVTEDType>(scale_inv_dtype), scaling_mode)) {}
+
+  /*! \brief Constructs new Tensor2xWrapper.
+   *
+   * Create a new TE tensor with a given shape, datatype and data.
+   * TE tensors are just wrappers on top of raw data and do not
+   * own memory.
+   *
+   *  \param[in] dptr                       Pointer to the tensor data.
+   *  \param[in] shape                      Shape of the tensor.
+   *  \param[in] columnwise_dptr            Pointer to the tensor data.
+   *  \param[in] columnwise_shape           Shape of the tensor.
+   *  \param[in] dtype                      Data type of the tensor.
+   *  \param[in] scale_inv_dptr             Pointer to the inverse of scale value.
+   *  \param[in] scale_inv_shape            Shape of scale_inv
+   *  \param[in] columnwise_scale_inv_dptr  Pointer to the inverse of scale value.
+   *  \param[in] columnwise_scale_inv_shape Shape of scale_inv
+   *  \param[in] scale_inv_dtype            Data type of scale_inv.
+   *  \param[in] scaling_mode               Scaling mode of the tensor.
+   */
+  TensorWrapper(void *dptr, const std::vector<size_t> &shape, void *columnwise_dptr,
+                const std::vector<size_t> &columnwise_shape, const DType dtype,
+                void *scale_inv_dptr, const std::vector<size_t> &scale_inv_shape,
+                void *columnwise_scale_inv_dptr,
+                const std::vector<size_t> &columnwise_scale_inv_shape, const DType scale_inv_dtype,
+                const NVTEScalingMode scaling_mode)
+      : TensorWrapper(
+            dptr, NVTEShape{shape.data(), shape.size()}, columnwise_dptr,
+            NVTEShape{columnwise_shape.data(), columnwise_shape.size()}, dtype, scale_inv_dptr,
+            NVTEShape{scale_inv_shape.data(), scale_inv_shape.size()}, columnwise_scale_inv_dptr,
+            NVTEShape{columnwise_scale_inv_shape.data(), columnwise_scale_inv_shape.size()},
+            scale_inv_dtype, scaling_mode) {}
 
   /*! \brief Constructs new empty TensorWrapper.
    *
@@ -296,6 +463,15 @@ class TensorWrapper {
   const NVTEShape shape() const noexcept {
     if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
     return nvte_tensor_shape(tensor_);
+  }
+
+  /*! \brief Get the shape of this TensorWrapper.
+   *
+   *  \return Shape of this TensorWrapper.
+   */
+  const NVTEShape columnwise_shape() const noexcept {
+    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    return nvte_tensor_columnwise_shape(tensor_);
   }
 
   /*! \brief Get the size of this TensorWrapper in the given dimension.
@@ -366,6 +542,15 @@ class TensorWrapper {
     return nvte_tensor_data(tensor_);
   }
 
+  /*! \brief Get a raw pointer to the tensor's data.
+   *
+   *  \return A raw pointer to tensor's data.
+   */
+  void *columnwise_dptr() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_columnwise_data(tensor_);
+  }
+
   /*! \brief Get a pointer to the tensor's amax data.
    *
    *  \return A pointer to tensor's amax data.
@@ -392,6 +577,54 @@ class TensorWrapper {
     if (tensor_ == nullptr) return nullptr;
     return nvte_tensor_scale_inv(tensor_);
   }
+
+  /*! \brief Get a pointer to the tensor's inverse of scale data.
+   *
+   *  \return A pointer to tensor's inverse of scale data.
+   */
+  void *columnwise_scale_inv() const noexcept {
+    if (tensor_ == nullptr) return nullptr;
+    return nvte_tensor_columnwise_scale_inv(tensor_);
+  }
+
+  /*! \brief Get the scale_inv_shape of this TensorWrapper.
+   *
+   *  \return scale_inv_shape of this TensorWrapper.
+   */
+  const NVTEShape scale_inv_shape() const noexcept {
+    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    return nvte_tensor_scale_inv_shape(tensor_);
+  }
+
+  /*! \brief Get the scale_inv_shape of this TensorWrapper.
+   *
+   *  \return scale_inv_shape of this TensorWrapper.
+   */
+  const NVTEShape columnwise_scale_inv_shape() const noexcept {
+    if (tensor_ == nullptr) return NVTEShape{nullptr, 0};
+    return nvte_tensor_columnwise_scale_inv_shape(tensor_);
+  }
+
+  /*! \brief Get the scale_inv data type of this TensorWrapper.
+   *
+   *  \return Data type of this TensorWrapper.
+   */
+  DType scale_inv_dtype() const noexcept {
+    if (tensor_ == nullptr) return DType::kNumTypes;
+    return static_cast<DType>(nvte_tensor_scale_inv_dtype(tensor_));
+  }
+
+  /*! \brief Get a scaling mode of the tensor.
+   *
+   *  \return Scaling mode of the tensor.
+   */
+  NVTEScalingMode scaling_mode() const noexcept {
+    if (tensor_ == nullptr) return {-1, -1, 1};
+    return nvte_tensor_scaling_mode(tensor_);
+  }
+
+  static constexpr size_t defaultData = 1;
+  static constexpr NVTEShape defaultShape = {&defaultData, 1};
 
  private:
   /*! \brief Wrapped NVTETensor. */

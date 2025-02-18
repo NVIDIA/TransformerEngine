@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """LayerNormLinear API"""
@@ -205,6 +205,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
         fuse_wgrad_accumulation: bool,
         is_first_microbatch: bool,
     ) -> Union[Tuple[paddle.Tensor, ...], paddle.Tensor]:
+        # pylint: disable=missing-function-docstring
         if normalization == "RMSNorm":
             assert ln_bias is None, "RMSNorm does not support bias!"
         else:  # LayerNorm
@@ -307,6 +308,7 @@ class _LayerNormLinear(paddle.autograd.PyLayer):
     def backward(
         ctx, *grad_outputs: Tuple[paddle.Tensor, ...]
     ) -> Tuple[Union[paddle.Tensor, None], ...]:
+        # pylint: disable=missing-function-docstring
         with TransformerEngineBaseLayer.prepare_backward(
             ctx.fp8_enabled, ctx.fp8_meta, ctx.tp_group, ctx.tp_size, name="_LayerNormLinear"
         ):

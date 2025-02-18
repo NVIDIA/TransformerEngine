@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -10,7 +10,6 @@
 #include <iomanip>
 #include <iostream>
 #include <random>
-#include <stdlib.h>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -176,6 +175,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
     GTEST_SKIP() << "LN kernel does not support OutputType > InputType";
     return;
   }
+
+  if (getDeviceComputeCapability() < blackwellComputeCapability && use_cudnn) {
+    GTEST_SKIP() << "cuDNN normalizations not supported on pre-Blackwell GPUs yet!";
+  }
+
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;
   DType wtype = TypeInfo<WeightType>::dtype;
@@ -357,24 +361,24 @@ TEST_P(NormTestSuite, TestNorm) {
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    OperatorTest,
-    NormTestSuite,
-    ::testing::Combine(
-        ::testing::Values(false), //TODO: enabling tests for cudnn backend
-        ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
-        ::testing::ValuesIn(test_cases),
-        ::testing::Values(false, true)),
-    [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
+  OperatorTest,
+  NormTestSuite,
+  ::testing::Combine(
+    ::testing::Values(true, false),
+    ::testing::Values(NormType::LayerNorm, NormType::RMSNorm),
+    ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+    ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16, DType::kFloat8E4M3),
+    ::testing::ValuesIn(test_cases),
+    ::testing::Values(false, true)),
+  [](const testing::TestParamInfo<NormTestSuite::ParamType>& info) {
     auto backend = std::get<0>(info.param) == false ? "Te" : "Cudnn";
-std::string name =
-  backend +
-  normToString.at(std::get<1>(info.param)) + "_" +
-  test::typeName(std::get<2>(info.param)) + "X" +
-  test::typeName(std::get<3>(info.param)) + "X" +
-  std::to_string(std::get<4>(info.param).first) + "X" +
-  std::to_string(std::get<4>(info.param).second) + "X" +
-  std::to_string(std::get<5>(info.param));
-      return name;
-    });
+    std::string name =
+      backend +
+      normToString.at(std::get<1>(info.param)) + "_" +
+      test::typeName(std::get<2>(info.param)) + "X" +
+      test::typeName(std::get<3>(info.param)) + "X" +
+      std::to_string(std::get<4>(info.param).first) + "X" +
+      std::to_string(std::get<4>(info.param).second) + "X" +
+      std::to_string(std::get<5>(info.param));
+    return name;
+  });

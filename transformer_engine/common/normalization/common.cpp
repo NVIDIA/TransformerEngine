@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -38,13 +38,15 @@ Compute always in FP32
 namespace transformer_engine {
 namespace normalization {
 
-TupleKeyType get_key(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
-                     DType otype, DType ctype, uint64_t batch_size, uint64_t hidden_size,
-                     bool zero_centered_gamma, bool is_tuned) {
+TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
+                     NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
+                     uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
+                     bool is_tuned) {
+  // TODO: Add scaling_mode to general_key is needed
   uint64_t general_key = static_cast<uint32_t>(itype) | (static_cast<uint32_t>(otype) << 3) |
                          (static_cast<uint32_t>(ctype) << 6) | (static_cast<uint32_t>(wtype) << 9) |
                          (uint32_t(NormType) << 12) | (uint32_t(NormStage)) << 14 |
-                         (uint32_t(zero_centered_gamma) << 16);
+                         (uint32_t(NormBackend) << 16) | (uint32_t(zero_centered_gamma) << 18);
   return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
 }
 
@@ -64,8 +66,8 @@ TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
     kernel_params.fp8_out = is_fp8_dtype(otype);
   }
   // TE kernels have no template for batch_size and zero_centered_gamma, thus zero out those
-  auto key =
-      get_key(NormType, NormStage, wtype, itype, otype, ctype, 0, hidden_size, false, is_tuned);
+  auto key = get_key(NVTE_Norm_Backend::Te, NormType, NormStage, wtype, itype, otype, ctype, 0,
+                     hidden_size, false, is_tuned);
   _kernel = KernelRegistry::getKernel(key);
 
   this->_build();
@@ -179,12 +181,20 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
                                                DType wtype, DType itype, DType otype, DType ctype,
                                                const size_t batch_size, const size_t hidden_size,
                                                const size_t sm_count,
-                                               const bool zero_centered_gamma)
+                                               const bool zero_centered_gamma,
+                                               const NVTEScalingMode& mode)
     : _fp8_out(is_fp8_dtype(otype)), _zero_centered(zero_centered_gamma) {
   static_assert(CUDNN_FRONTEND_VERSION >= 10601,
                 "CUDNN_FRONTEND_VERSION should be at least 1.6.1!");
 
   namespace fe = cudnn_frontend;
+
+  if (is_tensor_scaling(mode)) {
+    _ndim_scale_block = 0;
+  } else {
+    NVTE_CHECK(mode.x < mode.y, "Scaling mode should be with 1D-rowwise block scaling.");
+    _ndim_scale_block = 1 + (mode.x == mode.y);
+  }
 
   _scalar_dptr = std::make_unique<char[]>(typeToSize(wtype));
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -265,24 +275,58 @@ CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Nor
     _z->set_output(!_fp8_out).set_data_type(get_cudnn_fe_dtype(ZDtype));
 
     if (_fp8_out) {
-      // create a scale node
-      _z_scale = _graph.tensor(fe::graph::Tensor_attributes()
-                                   .set_name("z_scale")
-                                   .set_dim({1, 1, 1, 1})
-                                   .set_stride({1, 1, 1, 1})
-                                   .set_data_type(get_cudnn_fe_dtype(ctype)));
-      auto z_scale_options = fe::graph::Pointwise_attributes()
-                                 .set_mode(fe::PointwiseMode_t::MUL)
-                                 .set_compute_data_type(get_cudnn_fe_dtype(ctype));
-      _z_fp8 = _graph.pointwise(_z, _z_scale, z_scale_options);
+      if (is_tensor_scaling(mode)) {
+        // create a scale node
+        _z_scale = _graph.tensor(fe::graph::Tensor_attributes()
+                                     .set_name("z_scale")
+                                     .set_dim({1, 1, 1, 1})
+                                     .set_stride({1, 1, 1, 1})
+                                     .set_data_type(get_cudnn_fe_dtype(ctype)));
+        auto z_scale_options = fe::graph::Pointwise_attributes()
+                                   .set_mode(fe::PointwiseMode_t::MUL)
+                                   .set_compute_data_type(get_cudnn_fe_dtype(ctype));
+        _z_fp8 = _graph.pointwise(_z, _z_scale, z_scale_options);
 
-      _z_fp8->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
+        _z_fp8->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
 
-      // create an amax reduction node
-      _amax = _graph.reduction(_z, fe::graph::Reduction_attributes()
-                                       .set_mode(fe::ReductionMode_t::AMAX)
-                                       .set_compute_data_type(get_cudnn_fe_dtype(ctype)));
-      _amax->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype)).set_dim({1, 1, 1, 1});
+        // create an amax reduction node
+        _amax = _graph.reduction(_z, fe::graph::Reduction_attributes()
+                                         .set_mode(fe::ReductionMode_t::AMAX)
+                                         .set_compute_data_type(get_cudnn_fe_dtype(ctype)));
+        _amax->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype)).set_dim({1, 1, 1, 1});
+        _one_for_div = _graph.tensor(fe::graph::Tensor_attributes()
+                                         .set_name("one_for_div")
+                                         .set_dim({1, 1, 1, 1})
+                                         .set_stride({1, 1, 1, 1})
+                                         .set_data_type(get_cudnn_fe_dtype(ctype))
+                                         .set_is_pass_by_value(true));
+        auto div_options = fe::graph::Pointwise_attributes()
+                               .set_mode(fe::PointwiseMode_t::DIV)
+                               .set_compute_data_type(get_cudnn_fe_dtype(ctype));
+        _z_scale_inv = _graph.pointwise(_one_for_div, _z_scale, div_options);
+        _z_scale_inv->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
+      } else if (_ndim_scale_block == 1) {  // 1d block scaling
+        auto z_2d = _graph.reshape(_z, fe::graph::Reshape_attributes());
+        z_2d->set_dim({batch_dim, hidden_dim});
+
+        auto mx_quantize_row_opts = fe::graph::Block_scale_quantize_attributes()
+                                        .set_block_size(mode.y)
+                                        .set_axis(1)
+                                        .set_transpose(false);
+        auto bs_row_ret = _graph.block_scale_quantize(z_2d, mx_quantize_row_opts);
+        std::tie(_z_mx_row, _sf_row) = std::make_tuple(bs_row_ret[0], bs_row_ret[1]);
+        _z_mx_row->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
+        _sf_row->set_output(true).set_data_type(fe::DataType_t::FP8_E8M0);  //TODO
+
+        auto mx_quantize_col_opts = fe::graph::Block_scale_quantize_attributes()
+                                        .set_block_size(mode.y)
+                                        .set_axis(0)
+                                        .set_transpose(false);
+        auto bs_col_ret = _graph.block_scale_quantize(z_2d, mx_quantize_col_opts);
+        std::tie(_z_mx_col, _sf_col) = std::make_tuple(bs_col_ret[0], bs_col_ret[1]);
+        _z_mx_col->set_output(true).set_data_type(get_cudnn_fe_dtype(otype));
+        _sf_col->set_output(true).set_data_type(fe::DataType_t::FP8_E8M0);
+      }
     }
   } else {
     _dz = _graph.tensor(fe::graph::Tensor_attributes()
@@ -352,16 +396,23 @@ void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, 
   else
     _variant_pack.insert({{_gamma, gamma_dptr}});
 
-  if (_fp8_out)
-    _variant_pack.insert(
-        {{_z_scale, z->scale.dptr}, {_amax, z->amax.dptr}, {_z_fp8, z->data.dptr}});
+  if (_fp8_out && _ndim_scale_block == 0)
+    _variant_pack.insert({{_one_for_div, reinterpret_cast<void*>(_one_dptr.get())},
+                          {_z_scale, z->scale.dptr},
+                          {_z_scale_inv, z->scale_inv.dptr},
+                          {_amax, z->amax.dptr},
+                          {_z_fp8, z->data.dptr}});
+  else if (_fp8_out && _ndim_scale_block == 1)
+    _variant_pack.insert({{_z_mx_row, z->data.dptr},
+                          {_sf_row, z->scale_inv.dptr},
+                          {_z_mx_col, z->columnwise_data.dptr},
+                          {_sf_col, z->columnwise_scale_inv.dptr}});
   else
     _variant_pack.insert({{_z, z->data.dptr}});
 
   // Execute the computation
   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
-  if (_fp8_out) update_tensor_scale_inv(z, stream);
 }
 
 void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
@@ -389,11 +440,12 @@ void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_
 NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype,
     DType itype, DType otype, const size_t batch_size, const size_t hidden_size,
-    const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned) {
+    const size_t sm_count, const bool zero_centered_gamma, const bool is_aligned,
+    const NVTEScalingMode mode) {
   const DType ctype = DType::kFloat32;
   bool is_tuned = is_aligned && (batch_size % 4 == 0);
-  auto key = get_key(NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size,
-                     zero_centered_gamma, is_tuned);
+  auto key = get_key(NormBackend, NormType, NormStage, wtype, itype, otype, ctype, batch_size,
+                     hidden_size, zero_centered_gamma, is_tuned);
 
   auto it = normalizationPlanMap.find(key);
   if (it != normalizationPlanMap.end()) {
@@ -404,7 +456,7 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
   if (NormBackend == NVTE_Norm_Backend::Cudnn) {
     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
                                                     batch_size, hidden_size, sm_count,
-                                                    zero_centered_gamma);
+                                                    zero_centered_gamma, mode);
   } else if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -118,6 +118,14 @@ std::vector<size_t> qdq_test_cases = {2048* 12288,
 
 } //namespace
 
+static const int32_t deviceComputeCapability = []() {
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0);
+  return 10 * deviceProp.major + deviceProp.minor;
+}();
+
+static bool is_supported_by_CC_100() { return deviceComputeCapability >= 100; }
+
 class QDQTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engine::DType,
                                                                 transformer_engine::DType,
                                                                 size_t>> {};
@@ -125,6 +133,11 @@ class QDQTestSuite : public ::testing::TestWithParam<std::tuple<transformer_engi
 TEST_P(QDQTestSuite, TestQ) {
     using namespace transformer_engine;
     using namespace test;
+
+    // Skips test for Archs >= 10.0
+    if (is_supported_by_CC_100()) {
+      GTEST_SKIP();
+    }
 
     const DType input_type = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
@@ -140,6 +153,11 @@ TEST_P(QDQTestSuite, TestQ) {
 TEST_P(QDQTestSuite, TestDQ) {
     using namespace transformer_engine;
     using namespace test;
+
+    // Skips test for Archs >= 10.0
+    if (is_supported_by_CC_100()) {
+      GTEST_SKIP();
+    }
 
     const DType input_type = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
