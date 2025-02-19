@@ -307,7 +307,7 @@ def cross_entropy_forward(
         num_warps=32,
     )
 
-    loss = loss_1d if not reduce_loss else (torch.sum(loss_1d) / n_rows)
+    loss = torch.reshape(loss_1d,(B,SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
 
     return loss, _input
 
