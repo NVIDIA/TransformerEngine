@@ -77,7 +77,7 @@ class Simulation:
         self.context_lens = torch.randint(
             1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         )
-        #self.context_lens = 10 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        #self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -88,7 +88,7 @@ class Simulation:
         self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(
             dtype=torch.int32, device="cpu"
         )
-        #self.gen_lens = 5 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        #self.gen_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate arrival times in Poisson distribution
         if poisson_rate is None:
@@ -198,7 +198,7 @@ class Simulation:
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FlashAttention"])#, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention", "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
@@ -285,7 +285,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     max_batch_size = config.batch_size
     page_size = None
     total_num_pages = None
-    if is_paged: 
+    if is_paged:
         page_size = 256 if backend == "FlashAttention" else 16
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
@@ -385,9 +385,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     #      increase counter for gen_lens = [3, 5, 1, 1]
     max_tokens = config.batch_size * config.max_ctx_len
     while True:
-        if inference_params.is_paged:
-            inference_params.cache_manager.print_cache()
-
         # prepare batch for the current step
         dynamic_fill = True #inference_params.is_paged
         sim.step(dynamic_fill=dynamic_fill)
@@ -461,7 +458,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             for i, seq in enumerate(sim.t_seq_ids):
                 start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
                 end = sim.t_total_lens[i].item()
-                print('i, seq', i, seq, start, end, sim.step_lens[i], incremental_q.shape, q.shape)
                 incremental_q[i, : sim.step_lens[i], :, :] = q[seq, start:end, :, :]
                 incremental_k[i, : sim.step_lens[i], :, :] = k[seq, start:end, :, :]
                 incremental_v[i, : sim.step_lens[i], :, :] = v[seq, start:end, :, :]
@@ -480,6 +476,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             zip(sim.t_seq_ids.tolist(), sim.step_lens.tolist())
         )
         inference_params.pre_step(step_dict)
+        if inference_params.is_paged:
+            inference_params.cache_manager.print_cache()
         line_output = model(
             incremental_q,
             incremental_k,
@@ -492,7 +490,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             max_seqlen_kv=config.max_seqlen_kv,
             qkv_format=qkv_format,
         )
-        print("lllllllll ", line_output.shape)
 
         # compare results
         if backend != "FlashAttention":
@@ -508,30 +505,31 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                 torch.bfloat16: 1e-2,
             }
         for i, seq in enumerate(sim.t_seq_ids):
+            token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
             if qkv_format == "bshd":
-                print('seqq ', i, seq, sim.t_total_lens[i], sim.step_lens[i])
-                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(line_output[i, :, :4])
-                #print(line_output[i, sim.step_lens[i] - 1, :])
                 torch.testing.assert_close(
-                    full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    line_output[i, :sim.step_lens[i] - 1, :],
-                    #full_output[seq, sim.t_total_lens[i] - 1, :],
-                    #line_output[i, sim.step_lens[i] - 1, :],
+                    #full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
+                    #line_output[:sim.step_lens[i] - 1, i, :],
+                    full_output[seq, sim.t_total_lens[i] - 1, :],
+                    line_output[i, token_index, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )
             if qkv_format == "sbhd":
                 torch.testing.assert_close(
-                    full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    line_output[:sim.step_lens[i] - 1, i, :],
+                    #full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
+                    #line_output[:sim.step_lens[i] - 1, i, :],
+                    full_output[seq, sim.t_total_lens[i] - 1, :],
+                    line_output[token_index, i, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
                 torch.testing.assert_close(
-                    full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    line_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
+                    #full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
+                    #line_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
+                    full_output[seq, sim.t_total_lens[i] - 1, :],
+                    line_output[cu_seqlens_q[i + 1] - 1, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )

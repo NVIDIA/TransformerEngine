@@ -74,6 +74,14 @@ class PagedKVCacheManager(KVCacheManager):
         # page table, [batch_size, max_pages_per_seq]
         self.page_table = None
 
+    def reset(self):
+        self.sequences = OrderedDict()
+        self.free_pages = []
+        for i in range(self.total_num_pages):
+            self.free_pages.append(Page(i))
+        self.allocated_pages = defaultdict(list)
+        self.page_table.fill_(0)
+
     def allocate_memory(self, layer_number):
         """Allocate memory for the KV cache"""
         k_cache = torch.empty(

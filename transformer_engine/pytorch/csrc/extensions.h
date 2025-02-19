@@ -43,7 +43,7 @@ void reshape_q(
 void reshape_o(
         torch::Tensor output, torch::Tensor output_buffer,
         torch::Tensor step_lens,
-        int h_o, int d_o, int b, int max_seq_len);
+        int h_o, int d_o, int b, int max_seq_len, bool is_output_right_aligned);
 
 void copy_to_kv_cache(
         torch::Tensor new_k, torch::Tensor new_v,

@@ -111,12 +111,15 @@ __global__ void reshape_o_kernel(
 		scalar_t* output_buffer,
 		int* step_lens,
 	        int h_o, int d_o,
-                int b, int max_seq_len) {
+                int b, int max_seq_len, bool is_output_right_aligned) {
   // output: bshd; output_buffer: thd; 
   // step_lens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
     int num_elts = step_lens[batch_idx] * h_o * d_o;
     int output_offset = batch_idx * max_seq_len * h_o * d_o;
+    if (is_output_right_aligned) {
+      output_offset = ((batch_idx + 1) * max_seq_len - step_lens[batch_idx]) * h_o * d_o;
+    }
     int output_buffer_offset = 0;
     for (int t = 0; t < batch_idx; t ++) {
       output_buffer_offset += step_lens[t];
@@ -134,36 +137,36 @@ template <typename scalar_t>
 void reshape_o_launcher(
 	torch::Tensor output, torch::Tensor output_buffer,
 	torch::Tensor step_lens,
-	int h_o, int d_o, int b, int max_seq_len) {
+	int h_o, int d_o, int b, int max_seq_len, bool is_output_right_aligned) {
   reshape_o_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t*>(output.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t*>(output_buffer.data_ptr<scalar_t>()),
       step_lens.data_ptr<int>(),
-      h_o, d_o, b, max_seq_len);
+      h_o, d_o, b, max_seq_len, is_output_right_aligned);
 }
 
 void reshape_o(
 	torch::Tensor output, torch::Tensor output_buffer,
 	torch::Tensor step_lens,
-	int h_o, int d_o, int b, int max_seq_len) {
+	int h_o, int d_o, int b, int max_seq_len, bool is_output_right_aligned) {
   NVTE_CHECK(
         output.scalar_type() == output_buffer.scalar_type(),
 	"output and output_buffer must be of the same data type.");
   if (output.scalar_type() == at::ScalarType::Half) {
     using dtype = at::Half;
-    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len);
+    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len, is_output_right_aligned);
   } else if (output.scalar_type() == at::ScalarType::BFloat16) {
     using dtype = at::BFloat16;
-    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len);
+    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len, is_output_right_aligned);
   } else if (output.scalar_type() == at::ScalarType::Float) {
     using dtype = float;
-    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len);
+    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len, is_output_right_aligned);
 //  } else if (output.scalar_type() == at::ScalarType::Float8_e4m3fn) {
 //    using dtype = at::kFloat8_e4m3fn;
-//    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len);
+//    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len, is_output_right_aligned);
 //  } else if (output.scalar_type() == at::ScalarType::Float8_e5m2) {
 //    using dtype = at::kFloat8_e5m2;
-//    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len);
+//    reshape_o_launcher<dtype>(output, output_buffer, step_lens, h_o, d_o, b, max_seq_len, is_output_right_aligned);
   } else {
     NVTE_ERROR("Unsupported dtype for KV cache.\n");
   }
