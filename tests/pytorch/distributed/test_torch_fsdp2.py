@@ -7,10 +7,9 @@ import pytest
 import subprocess
 from pathlib import Path
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.utils import get_torch_version
+from transformer_engine.pytorch.utils import torch_version
 
 import torch
-from packaging.version import Version as PkgVersion
 
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -35,7 +34,7 @@ def _run_test(fp_init, sharding_dims):
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
-@pytest.mark.skipif(not get_torch_version() >= PkgVersion("2.4"), reason="Requires PyTorch 2.4.0+")
+@pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
 @pytest.mark.parametrize("sharding_dims", ([NUM_PROCS], [2, NUM_PROCS // 2]))
 @pytest.mark.parametrize("fp8_init", (False, True))
 def test_distributed(fp8_init, sharding_dims):

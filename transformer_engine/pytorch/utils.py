@@ -389,10 +389,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
     torch.cuda.nvtx.range_pop()
 
 
-def get_torch_version():
-    """Get PyTorch version from __version__"""
-
-    def get_torch_version_str():
-        return str(torch.__version__)
-
-    return PkgVersion(get_torch_version_str())
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
