@@ -53,7 +53,7 @@ def online_softmax_kernel(
 
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
-    if y >= vocab_start_idx and y < vocab_end_idx:
+    if vocab_start_idx <= y < vocab_end_idx:
         X_y = tl.load(X_ptr + y - vocab_start_idx).to(tl.float32)
     else:
         X_y = float("-inf")
@@ -189,7 +189,7 @@ def cross_entropy_kernel(
     # 6. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
-    if y >= vocab_start_idx and y < vocab_end_idx:
+    if vocab_start_idx <= y < vocab_end_idx:
         X_y = tl.load(X_ptr + y - vocab_start_idx)
         X_y += -(1 - label_smoothing) / (n_non_ignore)
         tl.store(X_ptr + y - vocab_start_idx, X_y)
@@ -244,6 +244,7 @@ def cross_entropy_forward(
     reduce_loss: bool,
     dist_process_group: Union[dist.ProcessGroup, None],
 ):
+    """Forward implementation of Cross Entropy kernel"""
 
     B, SQ, V = _input.shape
     n_rows = B * SQ
@@ -313,6 +314,8 @@ def cross_entropy_forward(
 
 
 def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
+
+    """Backward implementation of cross entropy loss kernel"""
 
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
     if torch.equal(grad_output, torch.tensor(1.0, device=grad_output.device)):
