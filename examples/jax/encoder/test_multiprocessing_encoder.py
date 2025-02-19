@@ -57,7 +57,6 @@ class Net(nn.Module):
             layer_type=te_flax.TransformerLayerType.ENCODER,
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
-            dtype=jnp.bfloat16,
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
@@ -67,17 +66,15 @@ class Net(nn.Module):
             features=256,
             kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
             bias_axes=(NAMED_TP_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
         x = te_flax.DenseGeneral(
             features=256,
             kernel_axes=(NAMED_TP_AXIS, NAMED_BROADCAST_AXIS),
             bias_axes=(NAMED_BROADCAST_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
-        x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
+        x = nn.Dense(features=2)(x)
         return x
 
 
