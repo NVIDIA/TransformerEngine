@@ -6,7 +6,7 @@ Precision debug tools
 ==============================================
 
 .. toctree::
-   :caption: Debug
+   :caption: Precision debug tools
 
    debug/1_getting_started.ipynb
    debug/2_config_file_structure.ipynb

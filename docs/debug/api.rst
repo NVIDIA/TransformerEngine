@@ -6,7 +6,7 @@ API
 ============
 
 .. toctree::
-   :caption: Debug
+   :caption: Precision debug tools API
 
    3_api_debug_setup.ipynb
    3_api_features.ipynb
