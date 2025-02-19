@@ -837,7 +837,7 @@ L1_pytorch_mcore_integration--B200_1GPU:
       FRAMEWORK: pytorch
     needs: [ pytorch-py3-devel ]
     extends:
-    - .L1_test
+    - .L1_test_on_cluster
     - .B200_1GPU
 
 L1_pytorch_distributed_unittest--H100_4GPU:
