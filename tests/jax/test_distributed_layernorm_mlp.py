@@ -271,7 +271,6 @@ class TestDistributedLayernormMLP:
                 transpose_batch_sequence=False,  # input: [batch, seqlen, hidden]
                 intermediate_dim=INTERMEDIATE,
                 activations=activation_type,
-                dtype=dtype,
                 use_bias=use_bias,
             )
             params_single = ln_mlp_single.init(init_rngs, x)
@@ -289,7 +288,6 @@ class TestDistributedLayernormMLP:
                 transpose_batch_sequence=False,
                 intermediate_dim=INTERMEDIATE,
                 activations=activation_type,
-                dtype=dtype,
                 scale_axes=(W_NO_SHARD_AXES,),
                 ln_bias_axes=(W_NO_SHARD_AXES,),
                 kernel_axes_1=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
