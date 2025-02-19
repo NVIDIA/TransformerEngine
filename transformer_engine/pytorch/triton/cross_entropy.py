@@ -5,6 +5,8 @@
 """Efficient Cross Entropy kernels written with OpenAI Triton."""
 
 from typing import Union
+from functools import reduce
+from operator import mul
 
 import torch
 import torch.distributed as dist
@@ -246,7 +248,7 @@ def cross_entropy_forward(
     B, SQ, V = _input.shape
     n_rows = B * SQ
 
-    assert target.size()[0] == (B * SQ), "Each token needs a target token ID."
+    assert reduce(mul, list(target.size())) == (B * SQ), "Each token needs a target token ID."
 
     BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
