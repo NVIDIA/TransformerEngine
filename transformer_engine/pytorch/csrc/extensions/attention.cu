@@ -4,11 +4,10 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "common/common.h"
+//#include "common/common.h"
 #include "common/fused_attn/thd_utils.h"
 #include "extensions.h"
-
-using namespace transformer_engine::fused_attn;
+#include "thd_util.cuh"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
@@ -677,10 +676,10 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
     grid_y *= tensor.size(i);
   }
   dim3 grid = {grid_x, grid_y};
-  thd_read_half_tensor_kernel<<<grid, block, sizeof(int) * (batch + 1),
-                                at::cuda::getCurrentCUDAStream()>>>(
-      half.data_ptr(), tensor.data_ptr(), cu_seqlens.data_ptr<int>(), batch, hidden_size_in_bytes,
-      half_idx, tensor.size(seq_dim));
+  transformer_engine::fused_attn::thd_read_half_tensor_kernel<int>
+      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+          half.data_ptr(), tensor.data_ptr(), cu_seqlens.data_ptr<int>(), batch,
+          hidden_size_in_bytes, half_idx, tensor.size(seq_dim));
 
   return half;
 }
@@ -729,12 +728,12 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
   if (lse_packed) {
-    thd_lse_kernel<double, true, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<double, true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<double, false, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<double, false, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
@@ -780,12 +779,12 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
   if (lse_packed) {
-    thd_lse_kernel<float, true, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<float, true, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    thd_lse_kernel<float, false, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<float, false, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
@@ -844,13 +843,13 @@ static void thd_out_correction_helper(at::Tensor out, const at::Tensor &out_per_
   dim3 grid = {grid_x, (unsigned int)num_heads};
 
   if (lse_packed) {
-    thd_out_correction_kernel<dtype, only_second_half, tile, true>
+    transformer_engine::fused_attn::thd_out_correction_kernel<dtype, only_second_half, tile, true>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
             dim_per_head, lse_seqlen, lse_per_step_seqlen);
   } else {
-    thd_out_correction_kernel<dtype, only_second_half, tile, false>
+    transformer_engine::fused_attn::thd_out_correction_kernel<dtype, only_second_half, tile, false>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             out.data_ptr<dtype>(), out_per_step.data_ptr<dtype>(), lse.data_ptr<float>(),
             lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch, num_heads,
@@ -940,7 +939,8 @@ static void thd_grad_correction_helper(at::Tensor grad, const at::Tensor &grad_p
   }
   dim3 grid = {grid_x, grid_y};
 
-  thd_grad_correction_kernel<dtype, Functor_0, Functor_1, functor_idx, 32>
+  transformer_engine::fused_attn::thd_grad_correction_kernel<dtype, Functor_0, Functor_1,
+                                                             functor_idx, 32>
       <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
           grad.data_ptr<dtype>(), grad_per_step.data_ptr<dtype>(), cu_seqlens.data_ptr<int>(),
           batch, hidden_size, total_tokens);
@@ -1007,9 +1007,10 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
   constexpr unsigned int block = 256;
   unsigned int grid = (output.size(0) + block - 1) / block;
-  thd_partition_indices_kernel<<<grid, block, sizeof(int) * (batch + 1),
-                                 at::cuda::getCurrentCUDAStream()>>>(
-      output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size, rank);
+  transformer_engine::fused_attn::thd_partition_indices_kernel<int>
+      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+          output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size,
+          rank);
 
   return output;
 }
