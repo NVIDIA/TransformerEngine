@@ -33,6 +33,7 @@ from transformer_engine.pytorch.constants import (
     dist_group_type,
 )
 from transformer_engine.pytorch.distributed import get_distributed_world_size
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
@@ -699,12 +700,14 @@ class TransformerLayer(torch.nn.Module):
             fast_zero_fill=fast_zero_fill,
         )
 
+
         if self.apply_residual_connection_post_layernorm and not self.output_layernorm:
             attention_output, attention_bias, residual = self_attention_outputs
             hidden_states = self._bias_dropout_add(
                 attention_output, attention_bias, residual, self.drop_path
             )
         elif not self.parallel_attention_mlp:
+
             attention_output, attention_bias = self_attention_outputs
             hidden_states = self._bias_dropout_add(
                 attention_output, attention_bias, hidden_states, self.drop_path
@@ -757,7 +760,7 @@ class TransformerLayer(torch.nn.Module):
         return output
 
     def _bias_dropout_add(self, hidden_state, bias, residual, drop_path=None):
-        if drop_path is None and bias is not None and bias.numel() != 0:
+        if drop_path is None and bias is not None and bias.numel() != 0 and not is_in_onnx_export_mode():
             if self.bias_dropout_fusion:
                 if self.training:
                     bias_dropout_add_func = bias_dropout_add_fused_train

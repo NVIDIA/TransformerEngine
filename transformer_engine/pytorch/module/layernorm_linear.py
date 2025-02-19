@@ -56,6 +56,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
+from ..export import is_in_onnx_export_mode
 
 from ..cpp_extensions import (
     general_gemm,
@@ -1201,6 +1202,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp, fp8_output)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1214,28 +1217,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         ) as inp:
 
             # Get concatenated weight and bias tensors
-            unfused_weights = [getattr(self, name) for name in self.weight_names]
-            if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
-                if self.fp8:
-                    if len(unfused_weights) != 1:
-                        raise RuntimeError(
-                            "Splitting QuantizedTensor into multiple params is not supported"
-                        )
-                else:
-                    unfused_weights = [w.dequantize() for w in unfused_weights]
-
-            weight_tensor = noop_cat(unfused_weights)
-            if self.use_bias:
-                bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
-            else:
-                bias_tensor = getattr(self, self.bias_names[0])  # Unused
+            weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             (
-                input_quantizer,
-                weight_quantizer,
-                output_quantizer,
-                grad_output_quantizer,
-                grad_input_quantizer,
+                self.input_quantizer,
+                self.weight_quantizer,
+                self.output_quantizer,
+                self.grad_output_quantizer,
+                self.grad_input_quantizer,
             ) = self._get_quantizers(fp8_output)
 
             if torch.is_grad_enabled():
@@ -1256,11 +1245,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8,
                 self.fp8_calibration,
                 self.fuse_wgrad_accumulation,
-                input_quantizer,
-                weight_quantizer,
-                output_quantizer,
-                grad_output_quantizer,
-                grad_input_quantizer,
+                self.input_quantizer,
+                self.weight_quantizer,
+                self.output_quantizer,
+                self.grad_output_quantizer,
+                self.grad_input_quantizer,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
@@ -1325,3 +1314,54 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_output_quantizer,
             grad_input_quantizer,
         )
+    
+        
+    def _get_weight_and_bias_tensors(self):
+        # Get concatenated weight and bias tensors
+        unfused_weights = [getattr(self, name) for name in self.weight_names]
+        if any(isinstance(w, QuantizedTensor) for w in unfused_weights):
+            if self.fp8:
+                if len(unfused_weights) != 1:
+                    raise RuntimeError(
+                        "Splitting QuantizedTensor into multiple params is not supported"
+                    )
+            else:
+                unfused_weights = [w.dequantize() for w in unfused_weights]
+        weight_tensor = noop_cat(unfused_weights)
+        if self.use_bias:
+            bias_tensor = noop_cat([getattr(self, name) for name in self.bias_names])
+        else:
+            bias_tensor = None
+        return weight_tensor, bias_tensor
+    
+    def onnx_forward(
+        self,
+        input: torch.Tensor,
+        fp8_output: bool,
+    ) -> torch.Tensor:
+        weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
+
+        ln_weight = self.layer_norm_weight if not self.zero_centered_gamma else self.layer_norm_weight + 1
+        if self.normalization == "RMSNorm":
+            ln_out = torch.nn.functional.rms_norm(input, input.shape[-1:], ln_weight, self.eps)
+        else:
+            ln_out = torch.nn.functional.layer_norm(input, input.shape[-1:], ln_weight, self.layer_norm_bias, self.eps)
+        
+
+        if self.input_quantizer is not None:
+            ln_out, ln_out_dtype = self.input_quantizer.onnx_quantize(ln_out)
+            ln_out = self.input_quantizer.onnx_dequantize(ln_out, ln_out_dtype)
+        
+        if self.weight_quantizer is not None:
+            weight_tensor, weight_tensor_dtype = self.weight_quantizer.onnx_quantize(weight_tensor)
+            weight_tensor = self.weight_quantizer.onnx_dequantize(weight_tensor, weight_tensor_dtype)
+        
+        output = torch.ops.tex.gemm_inf(ln_out, weight_tensor, bias_tensor)
+        
+        if self.output_quantizer is not None:
+            output, output_dtype = self.output_quantizer.onnx_quantize(output)
+            output = self.output_quantizer.onnx_dequantize(output, output_dtype)
+
+        if self.return_layernorm_output:
+            return output, ln_out
+        return output

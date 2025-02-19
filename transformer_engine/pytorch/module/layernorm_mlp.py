@@ -69,7 +69,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-
+from ..export import is_in_onnx_export_mode
 __all__ = ["LayerNormMLP"]
 
 
@@ -1339,6 +1339,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            print(f"inp: {str(inp)[:100]}")
+            return self.onnx_forward(inp)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1350,14 +1353,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
         with self.prepare_forward(inp, num_gemms=2) as inp:
             # Get quantizers
             (
-                fc1_input_quantizer,
-                fc1_weight_quantizer,
-                fc2_input_quantizer,
-                fc2_weight_quantizer,
-                output_quantizer,
-                grad_fc1_output_quantizer,
-                grad_fc2_output_quantizer,
-                grad_input_quantizer,
+                self.fc1_input_quantizer,
+                self.fc1_weight_quantizer,
+                self.fc2_input_quantizer,
+                self.fc2_weight_quantizer,
+                self.output_quantizer,
+                self.grad_fc1_output_quantizer,
+                self.grad_fc2_output_quantizer,
+                self.grad_input_quantizer,
             ) = self._get_quantizers()
 
             # Get weight tensors
@@ -1396,14 +1399,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.fp8,
                 self.fp8_calibration,
                 self.fuse_wgrad_accumulation,
-                fc1_input_quantizer,
-                fc1_weight_quantizer,
-                fc2_input_quantizer,
-                fc2_weight_quantizer,
-                output_quantizer,
-                grad_input_quantizer,
-                grad_fc1_output_quantizer,
-                grad_fc2_output_quantizer,
+                self.fc1_input_quantizer,
+                self.fc1_weight_quantizer,
+                self.fc2_input_quantizer,
+                self.fc2_weight_quantizer,
+                self.output_quantizer,
+                self.grad_input_quantizer,
+                self.grad_fc1_output_quantizer,
+                self.grad_fc2_output_quantizer,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
@@ -1490,3 +1493,71 @@ class LayerNormMLP(TransformerEngineBaseModule):
             grad_fc2_output_quantizer,
             grad_input_quantizer,
         )
+
+    def onnx_forward(
+        self,
+        input: torch.Tensor
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        fc1_weight = self.fc1_weight
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        fc2_weight = self.fc2_weight
+        fc2_bias = self.fc2_bias if self.use_bias else None
+
+        ln_weight = self.layer_norm_weight if not self.zero_centered_gamma else self.layer_norm_weight + 1
+        if self.normalization == "RMSNorm":
+            ln_out = torch.nn.functional.rms_norm(input, input.shape[-1:], ln_weight, self.eps)
+        else:
+            ln_out = torch.nn.functional.layer_norm(input, input.shape[-1:], ln_weight, self.layer_norm_bias, self.eps)        
+
+        if self.fc1_input_quantizer is not None:
+            ln_out, ln_out_dtype = self.fc1_input_quantizer.onnx_quantize(ln_out)
+            ln_out = self.fc1_input_quantizer.onnx_dequantize(ln_out, ln_out_dtype)
+        
+        if self.fc1_weight_quantizer is not None:
+            fc1_weight, fc1_weight_dtype = self.fc1_weight_quantizer.onnx_quantize(fc1_weight)
+            fc1_weight = self.fc1_weight_quantizer.onnx_dequantize(fc1_weight, fc1_weight_dtype)
+        
+        if self.fc2_weight_quantizer is not None:
+            fc2_weight, fc2_weight_dtype = self.fc2_weight_quantizer.onnx_quantize(fc2_weight)
+            fc2_weight = self.fc2_weight_quantizer.onnx_dequantize(fc2_weight, fc2_weight_dtype)
+        
+        fc1_out = torch.ops.tex.gemm_inf(ln_out, fc1_weight, fc1_bias)
+
+        if self.activation == "gelu":
+            act_out = torch.nn.functional.gelu(fc1_out)
+        elif self.activation == "relu":
+            act_out = torch.nn.functional.relu(fc1_out)
+        elif self.activation == "swiglu":
+            act_out = torch.nn.functional.silu(fc1_out)
+        elif self.activation == "squared_relu":
+            act_out = torch.square(torch.nn.functional.relu(fc1_out))
+        elif self.activation == "geglu":
+            x1, x2 = fc1_out.chunk(2, dim=-1)
+            act_out = x1 * torch.nn.functional.gelu(x2)
+        elif self.activation == "reglu":
+            x1, x2 = fc1_out.chunk(2, dim=-1)
+            act_out = x1 * torch.nn.functional.relu(x2)
+        elif self.activation == "qgelu":
+            act_out = torch.nn.functional.gelu(fc1_out, approximate='tanh')
+        elif self.activation == "srelu":
+            act_out = torch.nn.functional.softplus(fc1_out)
+        else:
+            raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
+        
+        if self.fc2_input_quantizer is not None:
+            act_out, act_out_dtype = self.fc2_input_quantizer.onnx_quantize(act_out)
+            act_out = self.fc2_input_quantizer.onnx_dequantize(act_out, act_out_dtype)
+        
+        fc2_out = torch.ops.tex.gemm_inf(act_out, fc2_weight, fc2_bias)
+        
+        if self.output_quantizer is not None:
+            fc2_out, fc2_out_dtype = self.output_quantizer.onnx_quantize(fc2_out)
+            fc2_out = self.output_quantizer.onnx_dequantize(fc2_out, fc2_out_dtype)
+
+        if self.return_layernorm_output:
+            if self.return_bias:
+                return fc2_out, fc2_bias, ln_out
+            return fc2_out, ln_out
+        if self.return_bias:
+            return fc2_out, fc2_bias
+        return fc2_out

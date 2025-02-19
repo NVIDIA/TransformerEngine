@@ -86,7 +86,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -461,6 +461,15 @@ def get_attention_backend(
         if use_flash_attention and _flash_attn_3_is_installed:
             logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
         _use_flash_attn_3 = False
+    
+    # Filter: ONNX mode
+    if is_in_onnx_export_mode():
+        if use_flash_attention and _flash_attn_is_installed:
+            logger.debug("Disabling FlashAttention due to ONNX mode")
+        use_flash_attention = False
+        if use_fused_attention:
+            logger.debug("Disabling FusedAttention due to ONNX mode")
+        use_fused_attention = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
@@ -4975,8 +4984,9 @@ class _SplitAlongDim(torch.autograd.Function):
         squeeze=False,
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
-        ctx.split_dim = split_dim
-        ctx.split_size_or_sections = split_size_or_sections
+        if torch.is_grad_enabled() and not is_in_onnx_export_mode():
+            ctx.split_dim = split_dim
+            ctx.split_size_or_sections = split_size_or_sections
         if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
@@ -5485,7 +5495,10 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    qkv_layout = run_iteratively(q, k, v)
+    if not is_in_onnx_export_mode():
+        qkv_layout = run_iteratively(q, k, v)
+    else:
+        qkv_layout = "not_supported"
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]
@@ -6989,7 +7002,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
 
-    @no_torch_dynamo(recursive=False)
+    @no_torch_dynamo()
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -8297,8 +8310,13 @@ class MultiheadAttention(torch.nn.Module):
             # not qkv_weight_interleaved:
             #  [sq, b, (np/ng + 2), ng, hn]
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = _SplitAlongDim.apply(
-                mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+            fn = _SplitAlongDim.apply
+            n = []
+            if is_in_onnx_export_mode():
+                fn = _SplitAlongDim.forward
+                n = [None]
+            query_layer, key_layer, value_layer = fn(
+                *n, mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
             )
 
             if self.qkv_format == "thd":

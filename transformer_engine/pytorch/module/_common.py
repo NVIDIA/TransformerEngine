@@ -17,6 +17,7 @@ from ..constants import TE_DType
 from ..utils import get_default_init_method
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..export import is_in_onnx_export_mode
 
 _use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
@@ -213,6 +214,8 @@ def noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
+    if is_in_onnx_export_mode():
+        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 

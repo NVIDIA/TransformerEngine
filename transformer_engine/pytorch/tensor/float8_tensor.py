@@ -4,13 +4,14 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, List
 import warnings
 
 import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
+from ..constants import TE_DType as TE_DType_map
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -165,6 +166,22 @@ class Float8Quantizer(Quantizer):
             quantizer=self,
         )
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Symbolic function for ONNX export"""
+        # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
+        # custom ops, so cast the input if needed.
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data = torch.ops.tex.quantize(tensor, id(Float8Quantizer), self.amax, self.scale, 1 / self.scale, int(self.dtype))
+        return data, tensor.dtype
+    
+    def onnx_dequantize(self, tensor: QuantizedTensor, fake_dtype: torch.dtype) -> torch.Tensor:
+        """Symbolic function for ONNX export"""
+        out =  torch.ops.tex.dequantize(tensor, id(Float8Quantizer), self.amax, self.scale,  int(self.dtype), int(TE_DType_map[fake_dtype]))
+        if out.dtype != torch.float32:
+            out = out.to(torch.float32)
+        return out
+
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -198,11 +215,15 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
+        try:
+            repr_str = str(self.dequantize(dtype=self.dtype))
+        except Exception as e:
+            repr_str = str(self._data) + " (failed to dequantize)"
         return (
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
-            f"data={self.dequantize(dtype=self.dtype)}"
+            f"data={repr_str}"
             ")"
         )
 
