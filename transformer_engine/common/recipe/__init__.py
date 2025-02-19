@@ -164,13 +164,24 @@ class DelayedScaling(Recipe):
 @dataclass()
 class MXFP8BlockScaling(Recipe):
     """
-    Use the current scaling factor strategy.
+    Use the MXFP8 scaling factor strategy.
+
+    In this strategy, tensors are scaled in blockwise fashion. Each group
+    of 32 consecutive values is scaled together using their own scaling
+    factor. The type of the scaling factor is E8M0 (8 bits of exponent,
+    0 bits of mantissa), equivalent to scaling by a power of 2.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), in this recipe the quantized tensor and its transpose
+    are not numerically equivalent. Due to this, when Transformer Engine
+    needs both the MXFP8 tensor and its transpose (e.g. to calculate both
+    forward and backward pass), during the quantization both versions are
+    computed from the high precision input to avoid double quantization
+    errors.
 
     Parameters
     ----------
-    margin : int, default = 0
-            Margin for the scaling factor computation.
-    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
                 Controls the FP8 data format used during forward and backward
                 pass.
     """

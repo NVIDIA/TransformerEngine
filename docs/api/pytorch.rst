@@ -48,11 +48,15 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs  
+
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
 
 .. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
 
 .. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 
