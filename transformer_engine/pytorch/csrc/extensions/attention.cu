@@ -4,7 +4,6 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-//#include "common/common.h"
 #include "common/fused_attn/thd_utils.h"
 #include "extensions.h"
 #include "thd_util.cuh"
@@ -727,6 +726,7 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
+
   if (lse_packed) {
     transformer_engine::fused_attn::thd_lse_kernel<double, true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
@@ -778,6 +778,7 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   unsigned int grid_x = (lse_seqlen / 2 + block - 1) / block;
   unsigned int grid_y = num_heads;
   dim3 grid = {grid_x, grid_y};
+
   if (lse_packed) {
     transformer_engine::fused_attn::thd_lse_kernel<float, true, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(

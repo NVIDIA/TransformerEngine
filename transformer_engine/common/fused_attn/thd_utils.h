@@ -10,7 +10,6 @@
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
-//#include "../cudnn_utils.h"
 
 namespace transformer_engine {
 namespace fused_attn {
