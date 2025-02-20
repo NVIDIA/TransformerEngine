@@ -53,8 +53,11 @@ def online_softmax_kernel(
 
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
-    if vocab_start_idx <= y < vocab_end_idx:
-        X_y = tl.load(X_ptr + y - vocab_start_idx).to(tl.float32)
+    if y >= vocab_start_idx:
+        if y < vocab_end_idx:
+            X_y = tl.load(X_ptr + y - vocab_start_idx).to(tl.float32)
+        else:
+            X_y = float("-inf")
     else:
         X_y = float("-inf")
 
@@ -189,10 +192,11 @@ def cross_entropy_kernel(
     # 6. Specially handle the i==y case where `dx_y = (softmax(x_y) - (1 - label_smoothing) / N`
     vocab_start_idx = rank * n_cols
     vocab_end_idx = (rank + 1) * n_cols
-    if vocab_start_idx <= y < vocab_end_idx:
-        X_y = tl.load(X_ptr + y - vocab_start_idx)
-        X_y += -(1 - label_smoothing) / (n_non_ignore)
-        tl.store(X_ptr + y - vocab_start_idx, X_y)
+    if y >= vocab_start_idx:
+        if y < vocab_end_idx:
+            X_y = tl.load(X_ptr + y - vocab_start_idx)
+            X_y += -(1 - label_smoothing) / (n_non_ignore)
+            tl.store(X_ptr + y - vocab_start_idx, X_y)
 
     tl.store(loss_ptr, loss)
 
