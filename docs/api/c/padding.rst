@@ -3,7 +3,8 @@
 
     See LICENSE for license information.
 
-layer_norm.h
-============
+padding.h
+=========
 
-.. doxygenfile:: layer_norm.h
+.. doxygenfile:: padding.h
+
