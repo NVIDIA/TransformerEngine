@@ -318,7 +318,6 @@ def cross_entropy_forward(
 
 
 def cross_entropy_backward(_input: torch.Tensor, grad_output: torch.Tensor):
-
     """Backward implementation of cross entropy loss kernel"""
 
     # If cross entropy is the last layer, grad_output is 1.0. Skip the mul to save time
