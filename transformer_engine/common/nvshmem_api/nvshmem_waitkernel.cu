@@ -14,8 +14,8 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include "../util/logging.h"
 
+#include "../util/logging.h"
 #include "nvshmem_waitkernel.h"
 
 namespace transformer_engine {

@@ -51,8 +51,10 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
   nvshmemx_set_attr_uniqueid_args(my_rank, num_ranks, &id, &attr);
   nvshmemx_init_attr(NVSHMEMX_INIT_WITH_UNIQUEID, &attr);
 
-  NVTE_CHECK(my_rank == nvshmem_my_pe(), "my_rank: ", my_rank, " != nvshmem_my_pe(): ", nvshmem_my_pe());
-  NVTE_CHECK(num_ranks == nvshmem_n_pes(), "num_ranks: ", num_ranks, " != nvshmem_n_pes(): ", nvshmem_n_pes());
+  NVTE_CHECK(my_rank == nvshmem_my_pe(), "my_rank: ", my_rank,
+             " != nvshmem_my_pe(): ", nvshmem_my_pe());
+  NVTE_CHECK(num_ranks == nvshmem_n_pes(), "num_ranks: ", num_ranks,
+             " != nvshmem_n_pes(): ", nvshmem_n_pes());
 #else
   NVTE_ERROR("Internal TE error: init_nvshmem_backend cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
