@@ -8,6 +8,7 @@ import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Tuple
+from packaging.version import Version as PkgVersion
 
 import torch
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -386,3 +387,9 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
 
     # Pop NVTX range
     torch.cuda.nvtx.range_pop()
+
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
