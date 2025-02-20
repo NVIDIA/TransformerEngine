@@ -19,6 +19,7 @@ from .base import (
     get_workspace,
     get_ub,
     TransformerEngineBaseModule,
+    get_dummy_wgrad,
     _2X_ACC_FPROP,
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
@@ -796,18 +797,15 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
-                    wgrad = torch.zeros(
-                        origin_weight.main_grad.shape,
-                        dtype=origin_weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
+                    wgrad = get_dummy_wgrad(
+                        list(weight.main_grad.shape),
+                        weight.dtype,
+                        zero=True,
                     )
                 else:
-                    wgrad = torch.empty(
-                        origin_weight.main_grad.shape,
-                        dtype=origin_weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
+                    wgrad = get_dummy_wgrad(
+                        list(weight.main_grad.shape),
+                        weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
