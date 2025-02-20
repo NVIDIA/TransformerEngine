@@ -54,7 +54,9 @@ class TestParallelCrossEntropy:
         if reduce_loss:
             ref_loss.backward()
 
-        torch.testing.assert_close(torch.flatten(test_loss), ref_loss, check_dtype=False)
+        test_loss = torch.flatten(test_loss) if not reduce_loss else test_loss
+
+        torch.testing.assert_close(test_loss, ref_loss, check_dtype=False)
         if reduce_loss:
             torch.testing.assert_close(
                 torch.flatten(self.input_test.grad, start_dim=0, end_dim=1), self.input_ref.grad
