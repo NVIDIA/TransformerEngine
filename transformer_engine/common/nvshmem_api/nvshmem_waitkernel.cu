@@ -14,6 +14,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include "../util/logging.h"
 
 #include "nvshmem_waitkernel.h"
 
@@ -29,7 +30,7 @@ void nvshmem_wait_on_stream(uint64_t* sig_addr, int wait_kind, cudaStream_t stre
   uint64_t signal_reset = 0;
   cudaStream_t cur_stream = stream;
 
-  assert(wait_kind <= 2);
+  NVTE_CHECK(wait_kind >= 0 && wait_kind <= 2, "Invalid wait kind: ", wait_kind);
 
   if (wait_kind == 0) {
     wait_until_on_stream_and_reset<<<1, 1, 0, cur_stream>>>(sig_addr, wait_value, signal_reset);
