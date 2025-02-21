@@ -116,6 +116,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         # NonPagedKVCacheManager and PagedKVCacheManager only support 'bshd' cache
         self.cache_qkv_format = "bshd"
         self.input_qkv_format = qkv_format
+        self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
 
         self.sequences_prev = collections.OrderedDict()
         self.sequences = collections.OrderedDict()
@@ -221,6 +222,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
         )
         seq_lens = list(self.sequences.values())
+        #seq_lens = [self.max_seqlen_kv] * self.batch_size
         cu_seqlens_kv = [0] + [sum(seq_lens[:i]) for i in range(1, actual_batch_size + 1)]
         cu_seqlens_kv = cu_seqlens_kv + [cu_seqlens_kv[-1]] * (self.max_batch_size - actual_batch_size)
         self.cu_seqlens_kv.copy_(
@@ -338,6 +340,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             The page table if is_paged = True; else `None`
         """
         self.input_qkv_format = qkv_format
+        self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
 
         if qkv_format == "bshd":
             q_buffer = q.contiguous()
@@ -346,27 +349,28 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             q_buffer = q.transpose(0, 1).contiguous()
             self.max_seqlen_q = q_buffer.shape[1]
         if qkv_format == "thd":
-            self.q_orig[layer_number] = q
-            self.max_seqlen_q = self.max_ctx_len
+            q_buffer = q
+        #    self.q_orig[layer_number] = q
+        #    self.max_seqlen_q = self.max_ctx_len
 
-            q_buffer = self.q_buffer[layer_number]
-            step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
-            ctx_len = 1
-            if qkv_format == "bshd":
-                ctx_len = q.shape[1]
-            if qkv_format == "sbhd":
-                ctx_len = q.shape[0]
-            tex.reshape_q(
-                q, q_buffer, step_lens,
-                QKVFormat[qkv_format],
-                self.num_heads_q, self.head_dim_q,
-                self.max_batch_size, ctx_len, self.max_ctx_len)
+        #    q_buffer = self.q_buffer[layer_number]
+        #    step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
+        #    ctx_len = 1
+        #    if qkv_format == "bshd":
+        #        ctx_len = q.shape[1]
+        #    if qkv_format == "sbhd":
+        #        ctx_len = q.shape[0]
+        #    tex.reshape_q(
+        #        q, q_buffer, step_lens,
+        #        QKVFormat[qkv_format],
+        #        self.num_heads_q, self.head_dim_q,
+        #        self.max_batch_size, ctx_len, self.max_ctx_len)
 
         k_cache, v_cache, page_table = self.cache_manager.step(
             layer_number, k, v, self.cu_seqlens_q, self.cu_seqlens_kv, qkv_format,
         )
 
-        return q_buffer, k_cache, v_cache, page_table, self.cu_seqlens_q, self.cu_seqlens_kv, self.max_seqlen_q, self.max_seqlen_kv, self.cache_qkv_format
+        return q_buffer, k_cache, v_cache, page_table, self.cu_seqlens_q, self.cu_seqlens_kv, self.max_seqlen_q, self.max_seqlen_kv, self.output_qkv_format
 
     def post_step(
         self,
@@ -381,12 +385,13 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         if self.input_qkv_format == "sbhd":
             output = output[:self.batch_size, :self.max_seqlen_q].transpose(0, 1).contiguous()
         if self.input_qkv_format == "thd":
-            #print('oooo ', output[:2, :, :4])
-            output_buffer = self.q_orig[layer_number]
-            step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
-            tex.reshape_o(output, output_buffer, step_lens,
-                self.num_heads_q, self.head_dim_q, self.batch_size, self.max_ctx_len, self.is_output_right_aligned)
-            output = output_buffer.view(output_buffer.shape[0], -1)
+            print('oooo ', output.shape)
+            print(output[:2, :4])
+            #output_buffer = self.q_orig[layer_number]
+            #step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
+            #tex.reshape_o(output, output_buffer, step_lens,
+            #    self.num_heads_q, self.head_dim_q, self.batch_size, self.max_ctx_len, self.is_output_right_aligned)
+            #output = output_buffer.view(output_buffer.shape[0], -1)
 
         return output
 

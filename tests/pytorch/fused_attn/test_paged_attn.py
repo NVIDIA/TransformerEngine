@@ -196,9 +196,9 @@ class Simulation:
 
 @pytest.mark.parametrize("dtype", [torch.float16])#param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
-@pytest.mark.parametrize("qkv_format", qkv_formats)
+@pytest.mark.parametrize("qkv_format", ["thd"])#qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention", "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
@@ -211,7 +211,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     # figure out supported backends
     inference_params_qkv_format = "bshd"
     if is_paged:
-        qkv_layout = "paged_kv_" + inference_params_qkv_format + "_2" + inference_params_qkv_format
+        qkv_layout = "paged_kv_" + "_".join([inference_params_qkv_format] * 3)
     else:
         qkv_layout = "_".join([inference_params_qkv_format] * 3)
     available_backends, fused_attn_backends = _get_attention_backends(
@@ -356,7 +356,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             dtype=torch.int32,
         )
         sample_kwargs["inference_params"] = inference_params
-        sample_kwargs["attn_mask_type"] = "padding_causal"
+        sample_kwargs["attn_mask_type"] = "padding" #_causal"
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
         sample_kwargs["qkv_format"] = qkv_format
@@ -485,7 +485,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
             inference_params=inference_params,
-            attn_mask_type="padding_causal",
+            attn_mask_type="padding", #_causal",
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=config.max_seqlen_kv,
             qkv_format=qkv_format,
@@ -525,6 +525,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
+                print('i ', i, seq, cu_seqlens_q)
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(line_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
                     #full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     #line_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],

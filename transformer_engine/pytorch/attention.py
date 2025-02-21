@@ -5431,10 +5431,22 @@ def get_qkv_layout(
     v: torch.Tensor
         Value tensor. It may be different from input `v` as we try to fit tensors to
         a supported layout.
+    q_format: str
+        Format of the query tensor, {`bshd`, `sbhd`, `thd`}.
+    kv_format: str
+        Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 
     check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
     assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
+    if "_2" in qkv_format:
+        q_format, kv_format = qkv_format.split("_2")
+        is_same_q_kv_format = False
+    else:
+        q_format = qkv_format
+        kv_format = qkv_format
+        is_same_q_kv_format = True
+    print('qkv format', qkv_format, is_same_q_kv_format, q_format, kv_format)
 
     def run_iteratively(q, k, v):
         # check data pointers
@@ -5516,12 +5528,26 @@ def get_qkv_layout(
             check_strides_kv
             and check_shapes_kv
             and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
+            and is_same_q_kv_format
         ):
             # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
             # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
             # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
             # check_ptrs_qk=True or check_ptrs_kv=True
             qkv_layout = "_".join(list([qkv_format]) * 3)
+            print('xxxxx0')
+        elif (
+            check_strides_kv
+            and check_shapes_kv
+            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
+            and not is_same_q_kv_format
+        ):
+            # sbhd_bshd_bshd, bshd_sbhd_sbhd, thd_bshd_bshd, thd_sbhd_sbhd
+            # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
+            # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
+            # check_ptrs_qk=True or check_ptrs_kv=True
+            qkv_layout = q_format + "_" + kv_format + "_" + kv_format
+            print('xxxxx1')
         else:
             qkv_layout = "not_supported"
 
@@ -5535,7 +5561,7 @@ def get_qkv_layout(
     if qkv_layout == "not_supported":
         raise RuntimeError("The provided qkv memory layout is not supported!")
 
-    return qkv_layout, q, k, v
+    return qkv_layout, q, k, v, q_format, kv_format
 
 
 def check_set_window_size(
@@ -7439,6 +7465,24 @@ class DotProductAttention(TransformerEngineBaseModule):
                 #    max_seqlen_q = inference_params.max_seqlen_q
                 #    max_seqlen_kv = inference_params.max_seqlen_kv
 
+            if (
+                isinstance(query_layer, Float8Tensor)
+                and isinstance(key_layer, Float8Tensor)
+                and isinstance(value_layer, Float8Tensor)
+            ):
+                qkv_layout, query_layer._data, key_layer._data, value_layer._data, q_format, kv_format = get_qkv_layout(
+                    query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
+                )
+            else:
+                qkv_layout, query_layer, key_layer, value_layer, q_format, kv_format = get_qkv_layout(
+                    query_layer, key_layer, value_layer, qkv_format=qkv_format
+                )
+            # convert qkv layout to its corresponding paged attention layout
+            if inference_params is not None and inference_params.is_paged:
+                #qkv_layout = "paged_kv_" + qkv_format + "_2" + qkv_format
+                #qkv_layout = "paged_kv_thd_2bshd"# + qkv_format + "_2" + qkv_format
+                qkv_layout = "paged_kv_" + qkv_layout
+
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
@@ -7447,26 +7491,35 @@ class DotProductAttention(TransformerEngineBaseModule):
                     cp_size *= get_distributed_world_size(group)
             context_parallel = cp_size > 1
 
-            if qkv_format in ["sbhd", "bshd"]:
+            if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
-                max_seqlen_kv *= cp_size
-                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                if cu_seqlens_q is None:
                     if "padding" in attn_mask_type:
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
                             cu_seqlens_q = get_cu_seqlens(attention_mask)
-                            cu_seqlens_kv = cu_seqlens_q
                         else:
                             cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
                     else:
                         cu_seqlens_q = _get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_q,
                             query_layer.device,
                         )
+            if kv_format in ["sbhd", "bshd"]:
+                max_seqlen_kv *= cp_size
+                if cu_seqlens_kv is None:
+                    if "padding" in attn_mask_type:
+                        assert (
+                            attention_mask is not None
+                        ), "Please provide attention_mask for padding!"
+                        if self.attention_type == "self":
+                            cu_seqlens_kv = get_cu_seqlens(attention_mask)
+                        else:
+                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                    else:
                         cu_seqlens_kv = _get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
@@ -7476,22 +7529,6 @@ class DotProductAttention(TransformerEngineBaseModule):
             #print('max_seqlen_kv ', max_seqlen_kv)
             #print('cu_seqlens_q ', cu_seqlens_q)
             #print('cu_seqlens_kv ', cu_seqlens_kv)
-
-            if (
-                isinstance(query_layer, Float8Tensor)
-                and isinstance(key_layer, Float8Tensor)
-                and isinstance(value_layer, Float8Tensor)
-            ):
-                qkv_layout, query_layer._data, key_layer._data, value_layer._data = get_qkv_layout(
-                    query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
-                )
-            else:
-                qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
-                    query_layer, key_layer, value_layer, qkv_format=qkv_format
-                )
-            # convert qkv layout to its corresponding paged attention layout
-            if inference_params is not None and inference_params.is_paged:
-                qkv_layout = "paged_kv_" + qkv_format + "_2" + qkv_format
 
             global _alibi_cache
             if alibi_slopes is not None:

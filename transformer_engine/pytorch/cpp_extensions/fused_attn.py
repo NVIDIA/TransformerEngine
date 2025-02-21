@@ -36,6 +36,10 @@ QKVFormat = {
     "bshd": NVTE_QKV_Format.NVTE_BSHD,
     "sbhd": NVTE_QKV_Format.NVTE_SBHD,
     "thd": NVTE_QKV_Format.NVTE_THD,
+    "sbhd_2bshd": NVTE_QKV_Format.NVTE_SBHD_2BSHD,
+    "bshd_2sbhd": NVTE_QKV_Format.NVTE_BSHD_2SBHD,
+    "thd_2bshd": NVTE_QKV_Format.NVTE_THD_2BSHD,
+    "thd_2sbhd": NVTE_QKV_Format.NVTE_THD_2SBHD,
 }
 
 QKVLayout = {
@@ -54,12 +58,14 @@ QKVLayout = {
     "thd_t2hd": NVTE_QKV_Layout.NVTE_THD_T2HD,
     "thd_th2d": NVTE_QKV_Layout.NVTE_THD_TH2D,
     "thd_thd_thd": NVTE_QKV_Layout.NVTE_THD_THD_THD,
-    "paged_kv_bshd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_2BSHD,
-    "paged_kv_bshd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_2SBHD,
-    "paged_kv_sbhd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_2BSHD,
-    "paged_kv_sbhd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_2SBHD,
-    "paged_kv_thd_2bshd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_2BSHD,
-    "paged_kv_thd_2sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_2SBHD,
+    "thd_bshd_bshd": NVTE_QKV_Layout.NVTE_THD_BSHD_BSHD,
+    "thd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_THD_SBHD_SBHD,
+    "paged_kv_bshd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_BSHD_BSHD,
+    "paged_kv_bshd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_SBHD_SBHD,
+    "paged_kv_sbhd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_BSHD_BSHD,
+    "paged_kv_sbhd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_SBHD_SBHD,
+    "paged_kv_thd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_BSHD_BSHD,
+    "paged_kv_thd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_SBHD_SBHD,
 }
 
 AttnBiasType = {
@@ -268,6 +274,32 @@ def fused_attn_fwd(
 
     # execute kernel
 
+    print(max_seqlen_q,
+        max_seqlen_kv,
+        is_training,
+        attn_scale,
+        dropout,
+        fast_zero_fill,
+        QKVLayout[qkv_layout],
+        AttnBiasType[attn_bias_type],
+        AttnMaskType[attn_mask_type],
+        window_size,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        q.shape,
+        k.shape,
+        v.shape,
+        fake_dtype,
+        cu_seqlens_q_padded,
+        cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
+        s_quantizer,
+        o_quantizer,
+        attn_bias,
+        rng_gen,
+        rng_elts_per_thread,
+    )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,

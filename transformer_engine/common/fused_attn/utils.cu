@@ -117,7 +117,7 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
       }
       break;
     case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
-    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_2SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD:
       if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_K_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix) ||
@@ -224,8 +224,9 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
       break;
     case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
-    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_2BSHD:
-    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_2BSHD:
+    case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD:
       if ((matrix == NVTE_QKV_Matrix::NVTE_Q_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_O_Matrix)) {
         strideA[batch_dim_idx] = s_q * h * d;
@@ -246,7 +247,7 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_transpose_dim_idx] = 1;
       }
       break;
-    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_2BSHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
       if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
         strideA[batch_dim_idx] = s_kv * h * d;
@@ -267,8 +268,9 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_dim_idx] = 1;
       }
       break;
-    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_2SBHD:
-    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_2SBHD:
+    case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
+    case NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD:
       if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
         strideA[batch_dim_idx] = h * d;
@@ -425,28 +427,42 @@ __device__ void cu_seqlens_padded_to_offsets_impl(
   size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
   auto cu_seqlens_id = min(tid, actual_b);
   if (tid <= max_b) {
-    offsets_o[tid] = h * d_v * cu_seqlens_q_padded[cu_seqlens_id];
     if (offsets_s != nullptr) {
       offsets_s[tid] = h * cu_seqlens_q_padded[cu_seqlens_id];
     }
-    switch (layout_group) {
-      case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-        offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
-        offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[cu_seqlens_id];
-        break;
-      case NVTE_QKV_Layout_Group::NVTE_3HD:
-      case NVTE_QKV_Layout_Group::NVTE_H3D:
-        offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-        offsets_k[tid] = offsets_q[cu_seqlens_id];
-        offsets_v[tid] = offsets_q[cu_seqlens_id];
-        break;
-      case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
-      case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
-        offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-        offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
-        offsets_v[tid] = offsets_k[cu_seqlens_id];
-        break;
+    if (offsets_q != nullptr && offsets_o != nullptr) {
+      offsets_o[tid] = h * d_v * cu_seqlens_q_padded[cu_seqlens_id];
+      switch (layout_group) {
+        case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
+          offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+          break;
+        case NVTE_QKV_Layout_Group::NVTE_3HD:
+        case NVTE_QKV_Layout_Group::NVTE_H3D:
+          offsets_q[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+          break;
+        case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
+        case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
+          offsets_q[tid] = h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+          break;
+      }
+    }
+    if (offsets_k != nullptr && offsets_v != nullptr) {
+      switch (layout_group) {
+        case NVTE_QKV_Layout_Group::NVTE_HD_HD_HD:
+          offsets_k[tid] = hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+          offsets_v[tid] = hg * d_v * cu_seqlens_kv_padded[cu_seqlens_id];
+          break;
+        case NVTE_QKV_Layout_Group::NVTE_3HD:
+        case NVTE_QKV_Layout_Group::NVTE_H3D:
+          offsets_k[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
+          offsets_v[tid] = offsets_v[cu_seqlens_id];
+          break;
+        case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
+        case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
+          offsets_k[tid] = 2 * hg * d_qk * cu_seqlens_kv_padded[cu_seqlens_id];
+          offsets_v[tid] = offsets_k[cu_seqlens_id];
+          break;
+      }
     }
   }
 }
