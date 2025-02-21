@@ -673,10 +673,10 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
     grid_y *= tensor.size(i);
   }
   dim3 grid = {grid_x, grid_y};
-  transformer_engine::fused_attn::thd_read_half_tensor_kernel<int>
-      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-          half.data_ptr(), tensor.data_ptr(), cu_seqlens.data_ptr<int>(), batch,
-          hidden_size_in_bytes, half_idx, tensor.size(seq_dim));
+  transformer_engine::fused_attn::thd_read_half_tensor_kernel<<<
+      grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+      half.data_ptr(), tensor.data_ptr(), cu_seqlens.data_ptr<int>(), batch, hidden_size_in_bytes,
+      half_idx, tensor.size(seq_dim));
 
   return half;
 }
@@ -1006,10 +1006,9 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
   constexpr unsigned int block = 256;
   unsigned int grid = (output.size(0) + block - 1) / block;
-  transformer_engine::fused_attn::thd_partition_indices_kernel<int>
-      <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-          output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size,
-          rank);
+  transformer_engine::fused_attn::thd_partition_indices_kernel<<<
+      grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
+      output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size, rank);
 
   return output;
 }

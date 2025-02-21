@@ -9,9 +9,6 @@
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
-/***************************************************************************************************
- * Support THD format for Context Parallel: softmax_lse related operations
- **************************************************************************************************/
 
 struct LseCorrectionFunctor {
   __forceinline__ __device__ static void run(double *lse, float *half_lse, size_t idx,
@@ -30,10 +27,6 @@ struct ReadLseFunctor {
     half_lse[half_idx] = lse[idx];
   }
 };
-
-/***************************************************************************************************
- * Support THD format for Context Parallel: Gradients correction in backward
- **************************************************************************************************/
 
 struct EmptyFunctor {
   __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {}
@@ -86,11 +79,8 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
-// Templatizing this kernel ONLY so that when it is used in framework
-// extensions, it is dynamically compiled
-template <typename rank_dtype>
 __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int batch,
-                                             int total_tokens, int world_size, rank_dtype rank) {
+                                             int total_tokens, int world_size, int rank) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
     int seqlen = cu_seqlens[i];
@@ -117,11 +107,8 @@ __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int b
 /***************************************************************************************************
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/
-// Templatizing this kernel ONLY so that when it is used in framework
-// extensions, it is dynamically compiled
-template <typename half_dtype>
 __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_seqlens, int batch,
-                                            int hidden_size_in_bytes, half_dtype half_idx,
+                                            int hidden_size_in_bytes, int half_idx,
                                             int dim_size_of_token) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
