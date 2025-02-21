@@ -9,7 +9,9 @@ from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
 
-@pytest.mark.skipif(get_device_compute_capability() >= (10,), reason="Triton does not yet support Blackwell")
+@pytest.mark.skipif(
+    get_device_compute_capability() >= (10,), reason="Triton does not yet support Blackwell"
+)
 class TestParallelCrossEntropy:
 
     def generate_iters(self, iters: int):
