@@ -2,8 +2,6 @@
 #
 # See LICENSE for license information.
 
-set -e
-
 : ${TE_PATH:=/opt/transformerengine}
 
 pip install pytest==8.2.1
