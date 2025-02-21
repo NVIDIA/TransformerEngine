@@ -3,13 +3,65 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_H_
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_CUH_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_CUH_
 
 #include <assert.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
+/***************************************************************************************************
+ * Support THD format for Context Parallel: softmax_lse related operations
+ **************************************************************************************************/
+
+struct LseCorrectionFunctor {
+  __forceinline__ __device__ static void run(double *lse, float *half_lse, size_t idx,
+                                             size_t half_idx) {
+    double val = lse[idx];
+    float val_per_step = half_lse[half_idx];
+    double max_scale = max(val, val_per_step);
+    double min_scale = min(val, val_per_step);
+    lse[idx] = max_scale + log(1.0 + exp(min_scale - max_scale));
+  }
+};
+
+struct ReadLseFunctor {
+  __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
+                                             size_t half_idx) {
+    half_lse[half_idx] = lse[idx];
+  }
+};
+
+/***************************************************************************************************
+ * Support THD format for Context Parallel: Gradients correction in backward
+ **************************************************************************************************/
+
+struct EmptyFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {}
+};
+
+struct CopyFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {
+    reinterpret_cast<float4 *>(token)[idx] = reinterpret_cast<float4 *>(token_per_step)[idx];
+  }
+};
+
+template <typename dtype>
+struct AddFunctor {
+  __forceinline__ __device__ static void run(dtype *token, dtype *token_per_step, int idx) {
+    float4 d_ = reinterpret_cast<float4 *>(token)[idx];
+    dtype *p_ = reinterpret_cast<dtype *>(&d_);
+
+    float4 d = reinterpret_cast<float4 *>(token_per_step)[idx];
+    dtype *p = reinterpret_cast<dtype *>(&d);
+
+#pragma unroll
+    for (int i = 0; i < sizeof(float4) / sizeof(dtype); i++) {
+      p_[i] += p[i];
+    }
+
+    reinterpret_cast<float4 *>(token)[idx] = d_;
+  }
+};
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -260,5 +312,4 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
 
 }  // namespace fused_attn
 }  // namespace transformer_engine
-
 #endif

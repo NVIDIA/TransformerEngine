@@ -3,10 +3,8 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
-#include "common/fused_attn/thd_utils.h"
 #include "extensions.h"
-#include "thd_util.cuh"
+#include "thd_utils.cuh"
 
 constexpr int block_size = 512;
 constexpr int ctas_per_sm = 4;
