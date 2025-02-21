@@ -6,7 +6,7 @@
 
 pip install pytest==8.2.1
 
-FAIL=0  
+FAIL=0
 
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/distributed/test_fusible_ops.py || FAIL=1
