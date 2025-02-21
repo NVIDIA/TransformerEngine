@@ -152,6 +152,7 @@ class _Linear(torch.autograd.Function):
                 )
                 if not isinstance(inputmat, QuantizedTensor):
                     inputmat = input_quantizer(inputmat)
+                    own_quantized_input = True
                 elif backward_needs_input:
                     inputmat.update_usage(rowwise_usage=True, columnwise_usage=True)
                 inputmat_total = inputmat

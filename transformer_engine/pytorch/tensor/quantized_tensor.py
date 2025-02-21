@@ -289,7 +289,11 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement detach function"
         )
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
         """Indicate to the tensor how it is going to be used
 
         This enables optimizations to memory usage in some cases
