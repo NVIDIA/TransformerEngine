@@ -570,7 +570,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # Delete the references to tensor objects once they've been consumed
             # by the `restor_from_saved` method to construct back the actual tensors.
             ctx.tensor_objects = None
-            
+
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             fc1_weight_main_grad = (
                 ctx.fc1_main_grad
