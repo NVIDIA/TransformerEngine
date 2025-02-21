@@ -119,7 +119,7 @@ class _Linear(torch.autograd.Function):
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
-        inputmat = inp
+        inputmat = inp.view(-1, in_features)
         inputmat_total = None
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
