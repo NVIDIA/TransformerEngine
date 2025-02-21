@@ -352,6 +352,9 @@ class _Linear(torch.autograd.Function):
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
+            # Delete the references to tensor objects once they've been consumed
+            # by the `restor_from_saved` method to construct back the actual tensors.
+            ctx.tensor_objects = None
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
