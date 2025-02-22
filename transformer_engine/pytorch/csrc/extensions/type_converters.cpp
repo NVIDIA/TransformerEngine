@@ -27,7 +27,7 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
 
   // FP8 data transpose
   if (!tensor.attr("_transpose_invalid").cast<bool>()
-      && !tensor.attr("_data").is_none()) {
+      && !tensor.attr("_transpose").is_none()) {
     const auto &data_transpose = tensor.attr("_transpose").cast<at::Tensor>();
     ret.set_columnwise_data(data_transpose.data_ptr(),
                             fp8_dtype,
