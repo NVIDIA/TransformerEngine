@@ -43,14 +43,16 @@ enum NVTE_QKV_Layout {
   NVTE_THD_T2HD = 12,            /*!< THD_T2HD layout */
   NVTE_THD_TH2D = 13,            /*!< THD_TH2D layout */
   NVTE_THD_THD_THD = 14,         /*!< THD_THD_THD layout */
-  NVTE_THD_BSHD_BSHD = 15,       /*!< THD_BSHD_BSHD layout */
-  NVTE_THD_SBHD_SBHD = 16,       /*!< THD_SBHD_SBHD layout */
-  NVTE_Paged_KV_BSHD_BSHD_BSHD = 17, /*!< Paged_KV_BSHD_BSHD_BSHD layout */
-  NVTE_Paged_KV_BSHD_SBHD_SBHD = 18, /*!< Paged_KV_BSHD_SBHD_SBHD layout */
-  NVTE_Paged_KV_SBHD_BSHD_BSHD = 19, /*!< Paged_KV_SBHD_BSHD_BSHD layout */
-  NVTE_Paged_KV_SBHD_SBHD_SBHD = 20, /*!< Paged_KV_SBHD_SBHD_SBHD layout */
-  NVTE_Paged_KV_THD_BSHD_BSHD = 21,  /*!< Paged_KV_THD_BSHD_BSHD layout */
-  NVTE_Paged_KV_THD_SBHD_SBHD = 22,  /*!< Paged_KV_THD_SBHD_SBHD layout */
+  NVTE_SBHD_BSHD_BSHD = 15,       /*!< SBHD_BSHD_BSHD layout */
+  NVTE_BSHD_SBHD_SBHD = 16,       /*!< BSHD_SBHD_SBHD layout */
+  NVTE_THD_BSHD_BSHD = 17,       /*!< THD_BSHD_BSHD layout */
+  NVTE_THD_SBHD_SBHD = 18,       /*!< THD_SBHD_SBHD layout */
+  NVTE_Paged_KV_BSHD_BSHD_BSHD = 19, /*!< Paged_KV_BSHD_BSHD_BSHD layout */
+  NVTE_Paged_KV_BSHD_SBHD_SBHD = 20, /*!< Paged_KV_BSHD_SBHD_SBHD layout */
+  NVTE_Paged_KV_SBHD_BSHD_BSHD = 21, /*!< Paged_KV_SBHD_BSHD_BSHD layout */
+  NVTE_Paged_KV_SBHD_SBHD_SBHD = 22, /*!< Paged_KV_SBHD_SBHD_SBHD layout */
+  NVTE_Paged_KV_THD_BSHD_BSHD = 23,  /*!< Paged_KV_THD_BSHD_BSHD layout */
+  NVTE_Paged_KV_THD_SBHD_SBHD = 24,  /*!< Paged_KV_THD_SBHD_SBHD layout */
 };
 
 /*! \enum NVTE_QKV_Layout_Group
@@ -81,9 +83,9 @@ enum NVTE_QKV_Format {
   NVTE_BSHD = 1,
   /*! THD QKV format, i.e. T3HD, TH3D, THD_T2HD, THD_TH2D, THD_THD_THD */
   NVTE_THD = 2,
-  /*! BSHD format for Q and SBHD format for KV, i.e. Paged_KV_BSHD_SBHD_SBHD */
+  /*! BSHD format for Q and SBHD format for KV, i.e. BSHD_SBHD_SBHD, Paged_KV_BSHD_SBHD_SBHD */
   NVTE_BSHD_2SBHD = 3,
-  /*! SBHD format for Q and BSHD format for KV, i.e. Paged_KV_SBHD_BSHD_BSHD */
+  /*! SBHD format for Q and BSHD format for KV, i.e. SBHD_BSHD_BSHD, Paged_KV_SBHD_BSHD_BSHD */
   NVTE_SBHD_2BSHD = 4,
   /*! THD format for Q and BSHD format for KV, i.e. THD_BSHD_BSHD, Paged_KV_THD_BSHD_BSHD */
   NVTE_THD_2BSHD = 5,

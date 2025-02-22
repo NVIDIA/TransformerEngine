@@ -37,6 +37,8 @@ NVTE_QKV_Layout_Group nvte_get_qkv_layout_group(NVTE_QKV_Layout qkv_layout) {
     case NVTE_QKV_Layout::NVTE_SBHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_BSHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
+    case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
+    case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:
       return NVTE_QKV_Layout_Group::NVTE_HD_HD_HD;
@@ -75,8 +77,10 @@ NVTE_QKV_Format nvte_get_qkv_format(NVTE_QKV_Layout qkv_layout) {
     case NVTE_QKV_Layout::NVTE_THD_TH2D:
     case NVTE_QKV_Layout::NVTE_THD_THD_THD:
       return NVTE_QKV_Format::NVTE_THD;
+    case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
       return NVTE_QKV_Format::NVTE_SBHD_2BSHD;
+    case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
       return NVTE_QKV_Format::NVTE_BSHD_2SBHD;
     case NVTE_QKV_Layout::NVTE_THD_BSHD_BSHD:

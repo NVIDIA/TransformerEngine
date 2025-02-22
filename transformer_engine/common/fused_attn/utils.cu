@@ -247,6 +247,7 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_transpose_dim_idx] = 1;
       }
       break;
+    case NVTE_QKV_Layout::NVTE_SBHD_BSHD_BSHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD:
       if ((matrix == NVTE_QKV_Matrix::NVTE_K_Matrix) ||
           (matrix == NVTE_QKV_Matrix::NVTE_V_Matrix)) {
@@ -268,6 +269,7 @@ void generateMatrixStrides(int64_t b, int64_t h, int64_t s_q, int64_t s_kv, int6
         strideA[hidden_dim_idx] = 1;
       }
       break;
+    case NVTE_QKV_Layout::NVTE_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_THD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_BSHD_SBHD_SBHD:
     case NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD:
