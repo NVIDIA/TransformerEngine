@@ -2611,6 +2611,9 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   transformer_engine::VectorizedStorer<half_dtype, nvec, true> storer(output_half, input_size);
 
   const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  if (tid >= num_aligned_elements_per_input) {
+    return;
+  }
   float accum_buf[nvec];
 
   loader.load(tid, tot_input_size);
@@ -2618,16 +2621,16 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   for (int i = 0; i < nvec; ++i) {
     accum_buf[i] = static_cast<float>(loader.separate()[i]) * (*scale);
   }
-#pragma unroll
   for (int input_id = 1; input_id < num_inputs; ++input_id) {
     loader.load(tid + num_aligned_elements_per_input * input_id, tot_input_size);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       accum_buf[i] += static_cast<float>(loader.separate()[i]) * (*scale);
-      if (input_id == num_inputs - 1) {
-        storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
-      }
     }
+  }
+#pragma unroll
+  for (int i = 0; i < nvec; ++i) {
+    storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
   }
   storer.store(tid, input_size);
 }
@@ -2635,7 +2638,7 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
 template <typename fp8type>
 void reduce_fp8_in_bf16_out(void *inputs, void *output, float *scale, int num_inputs,
                             int input_size, cudaStream_t stream) {
-  const int nvec = 32;
+  constexpr int nvec = 32;
   assert(input_size % nvec == 0);
   const int num_aligned_elements_per_input = input_size / nvec;
   const int tot_input_size = input_size * num_inputs;
@@ -2666,6 +2669,9 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   transformer_engine::VectorizedStorer<half_dtype, nvec, true> storer(output_half, input_size);
 
   const size_t tid = threadIdx.x + blockDim.x * blockIdx.x;
+  if (tid >= num_aligned_elements_per_input) {
+    return;
+  }
   float accum_buf[nvec];
 
   loader.load(tid, tot_input_size);
@@ -2673,22 +2679,22 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   for (int i = 0; i < nvec; ++i) {
     accum_buf[i] = static_cast<float>(loader.separate()[i]);
   }
-#pragma unroll
   for (int input_id = 1; input_id < num_inputs; ++input_id) {
     loader.load(tid + num_aligned_elements_per_input * input_id, tot_input_size);
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       accum_buf[i] += static_cast<float>(loader.separate()[i]);
-      if (input_id == num_inputs - 1) {
-        storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
-      }
     }
+  }
+#pragma unroll
+  for (int i = 0; i < nvec; ++i) {
+    storer.separate()[i] = static_cast<half_dtype>(accum_buf[i]);
   }
   storer.store(tid, input_size);
 }
 
 void reduce_bf16(void *inputs, void *output, int num_inputs, int input_size, cudaStream_t stream) {
-  const int nvec = 32;
+  constexpr int nvec = 32;
   assert(input_size % nvec == 0);
   const int num_aligned_elements_per_input = input_size / nvec;
   const int tot_input_size = input_size * num_inputs;
