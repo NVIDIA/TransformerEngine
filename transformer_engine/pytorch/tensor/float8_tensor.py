@@ -481,7 +481,10 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         casts to FP8.
 
         """
+
+        # Synchronize to avoid a race condition
         torch.cuda.synchronize()
+
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
 
