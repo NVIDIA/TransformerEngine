@@ -386,7 +386,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             output = output[:self.batch_size, :self.max_seqlen_q].transpose(0, 1).contiguous()
         if self.input_qkv_format == "thd":
             print('oooo ', output.shape)
-            print(output[:2, :4])
+            #print(output[:2, :4])
             #output_buffer = self.q_orig[layer_number]
             #step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
             #tex.reshape_o(output, output_buffer, step_lens,

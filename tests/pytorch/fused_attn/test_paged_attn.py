@@ -525,9 +525,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
-                print('i ', i, seq, cu_seqlens_q)
-                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(line_output[cu_seqlens_q[i + 1] - 1, :4])
+                #print('i ', i, seq, cu_seqlens_q)
+                #print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                #print(line_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
                     #full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     #line_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
