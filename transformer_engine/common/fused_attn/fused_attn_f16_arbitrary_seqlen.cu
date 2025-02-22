@@ -342,10 +342,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
       auto page_table_tuple = is_paged_kv ? std::make_tuple(page_table_k, page_table_v)
                                           : std::make_tuple(nullptr, nullptr);
-      auto offset_qo_tuple = is_ragged_q ? std::make_tuple(offset_q, offset_o)
-                                         : std::make_tuple(nullptr, nullptr);
-      auto offset_kv_tuple = is_ragged_kv ? std::make_tuple(offset_k, offset_v)
-                                         : std::make_tuple(nullptr, nullptr);
+      auto offset_qo_tuple =
+          is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+      auto offset_kv_tuple =
+          is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
       auto offset_s_tuple = (is_ragged_q && cudnn_runtime_version >= 90600)
                                 ? std::make_tuple(offset_stats)
                                 : std::make_tuple(nullptr);
@@ -358,9 +358,9 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       NVTE_CHECK_CUDNN_FE(mha_graph->check_support(handle));
       NVTE_CHECK_CUDNN_FE(mha_graph->build_plans(handle));
 
-      auto return_tuple = std::tuple_cat(std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple,
-                                         bias_tuple, padding_tuple, page_table_tuple,
-                                         offset_qo_tuple, offset_kv_tuple, offset_s_tuple, dropout_tuple);
+      auto return_tuple = std::tuple_cat(
+          std::make_tuple(mha_graph), key_tensors_tuple, Stats_tuple, bias_tuple, padding_tuple,
+          page_table_tuple, offset_qo_tuple, offset_kv_tuple, offset_s_tuple, dropout_tuple);
       cache.insert({descriptor, return_tuple});
 
       return return_tuple;
@@ -439,12 +439,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       void *devOffsetsK = nullptr;
       void *devOffsetsV = nullptr;
       if (is_ragged_kv) {
-        devOffsetsK = static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
+        devOffsetsK =
+            static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
-        devOffsetsS = static_cast<int8_t *>(devOffsets) + ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
+        devOffsetsS = static_cast<int8_t *>(devOffsets) +
+                      ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
       }
       const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
@@ -793,10 +795,10 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       auto bias_tuple = is_bias ? std::make_tuple(bias, dBias) : std::make_tuple(nullptr, nullptr);
       auto padding_tuple =
           is_padding ? std::make_tuple(seq_q, seq_kv) : std::make_tuple(nullptr, nullptr);
-      auto offset_qo_tuple = is_ragged_q ? std::make_tuple(offset_q, offset_o)
-                                         : std::make_tuple(nullptr, nullptr);
-      auto offset_kv_tuple = is_ragged_kv ? std::make_tuple(offset_k, offset_v)
-                                         : std::make_tuple(nullptr, nullptr);
+      auto offset_qo_tuple =
+          is_ragged_q ? std::make_tuple(offset_q, offset_o) : std::make_tuple(nullptr, nullptr);
+      auto offset_kv_tuple =
+          is_ragged_kv ? std::make_tuple(offset_k, offset_v) : std::make_tuple(nullptr, nullptr);
       auto offset_s_tuple = (is_ragged_q && cudnn_runtime_version >= 90600)
                                 ? std::make_tuple(offset_stats)
                                 : std::make_tuple(nullptr);
@@ -898,12 +900,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       void *devOffsetsK = nullptr;
       void *devOffsetsV = nullptr;
       if (is_ragged_kv) {
-        devOffsetsK = static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
+        devOffsetsK =
+            static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
-        devOffsetsS = static_cast<int8_t *>(devOffsets) + ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
+        devOffsetsS = static_cast<int8_t *>(devOffsets) +
+                      ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
       }
       const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
@@ -1148,16 +1152,15 @@ void fused_attn_arbitrary_seqlen_bwd_qkvpacked(
 void fused_attn_arbitrary_seqlen_fwd_kvpacked(
     size_t batch, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q,
     size_t max_seqlen_kv, size_t head_dim, size_t num_tokens_q, size_t num_tokens_kv,
-    size_t num_pages_k, size_t num_pages_v, size_t page_size_k,
-    size_t page_size_v, size_t max_pages_per_seq_k, size_t max_pages_per_seq_v,
-    bool is_training, float attn_scale, float p_dropout, NVTE_QKV_Layout qkv_layout,
-    NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type, int64_t window_size_left,
-    int64_t window_size_right, const Tensor *input_Q, const Tensor *input_KV,
-    const Tensor *input_Bias, Tensor *output_O, NVTETensorPack *Aux_CTX_Tensors,
-    const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv, const Tensor *cu_seqlens_q_padded,
-    const Tensor *cu_seqlens_kv_padded, const Tensor *page_table_k, const Tensor *page_table_v,
-    const Tensor *rng_state, Tensor *workspace,
-    cudaStream_t stream, cudnnHandle_t handle) {
+    size_t num_pages_k, size_t num_pages_v, size_t page_size_k, size_t page_size_v,
+    size_t max_pages_per_seq_k, size_t max_pages_per_seq_v, bool is_training, float attn_scale,
+    float p_dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    int64_t window_size_left, int64_t window_size_right, const Tensor *input_Q,
+    const Tensor *input_KV, const Tensor *input_Bias, Tensor *output_O,
+    NVTETensorPack *Aux_CTX_Tensors, const Tensor *cu_seqlens_q, const Tensor *cu_seqlens_kv,
+    const Tensor *cu_seqlens_q_padded, const Tensor *cu_seqlens_kv_padded,
+    const Tensor *page_table_k, const Tensor *page_table_v, const Tensor *rng_state,
+    Tensor *workspace, cudaStream_t stream, cudnnHandle_t handle) {
   using namespace transformer_engine;
 
   const auto QKV_type = input_Q->data.dtype;
@@ -1266,13 +1269,13 @@ void fused_attn_arbitrary_seqlen_fwd_kvpacked(
 
   fused_attn_arbitrary_seqlen_fwd_impl(
       batch, num_attn_heads, num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim, head_dim,
-      max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k, page_size_v,
-      max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
+      max_batch_size, max_tokens_q, max_tokens_kv, num_pages_k, num_pages_v, page_size_k,
+      page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h, is_training,
       attn_scale, p_dropout, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
       devPtrQ, devPtrK, devPtrV, devPtrBias, devPtrS, devPtrO, devPtrDropoutSeed,
-      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV, devPtrSeqOffsetsQ,
-      devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr, &workspace_size,
-      stream, handle);
+      devPtrDropoutOffset, devPtrCuSeqlensQ, devPtrCuSeqlensKV, devPtrPageTableK, devPtrPageTableV,
+      devPtrSeqOffsetsQ, devPtrSeqOffsetsKV, get_cudnn_fe_dtype(QKV_type), workspace->data.dptr,
+      &workspace_size, stream, handle);
 
   if (workspace_size > 0) {
     if (workspace->data.dptr == nullptr) {

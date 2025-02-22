@@ -276,7 +276,7 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    #print(max_seqlen_q,
+    # print(max_seqlen_q,
     #    max_seqlen_kv,
     #    is_training,
     #    attn_scale,
@@ -301,7 +301,7 @@ def fused_attn_fwd(
     #    attn_bias,
     #    rng_gen,
     #    rng_elts_per_thread,
-    #)
+    # )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,

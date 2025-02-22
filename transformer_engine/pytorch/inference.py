@@ -15,6 +15,7 @@ from transformer_engine.pytorch.kv_cache_manager import KVCacheManager
 from transformer_engine.pytorch.kv_cache_manager_paged import PagedKVCacheManager
 from transformer_engine.pytorch.kv_cache_manager_non_paged import NonPagedKVCacheManager
 
+
 class InferenceParams:  # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
@@ -69,7 +70,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         self.is_paged = is_paged
 
         if not self.is_paged:
-            cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager 
+            cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager
             self.cache_manager = cls(
                 max_batch_size=self.max_batch_size,
                 max_seqlen=self.max_seqlen_kv,
@@ -91,7 +92,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             self.max_seqlen_kv = max_seqlen_kv
             self.total_num_pages = total_num_pages
 
-            cls = cache_manager if cache_manager is not None else PagedKVCacheManager 
+            cls = cache_manager if cache_manager is not None else PagedKVCacheManager
             self.cache_manager = cls(
                 total_num_pages=self.total_num_pages,
                 page_size=self.page_size,
@@ -139,7 +140,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         """
         self.sequences = collections.OrderedDict()
         self.cache_manager.reset()
-        if self.input_qkv_format == 'thd':
+        if self.input_qkv_format == "thd":
             for layer_number in self.q_buffer:
                 self.q_buffer[layer_number].fill_(0)
 
@@ -181,7 +182,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         """
         self.cache_manager.allocate_memory(layer_number)
 
-        if qkv_format == 'thd':
+        if qkv_format == "thd":
             self.q_buffer[layer_number] = torch.zeros(
                 self.max_batch_size,
                 self.max_ctx_len,
@@ -218,16 +219,14 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         seqlens_q = list(step_dict.values())
         cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size + 1)]
         cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (self.max_batch_size - actual_batch_size)
-        self.cu_seqlens_q.copy_(
-            torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu")
-        )
+        self.cu_seqlens_q.copy_(torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu"))
         seq_lens = list(self.sequences.values())
-        #seq_lens = [self.max_seqlen_kv] * self.batch_size
+        # seq_lens = [self.max_seqlen_kv] * self.batch_size
         cu_seqlens_kv = [0] + [sum(seq_lens[:i]) for i in range(1, actual_batch_size + 1)]
-        cu_seqlens_kv = cu_seqlens_kv + [cu_seqlens_kv[-1]] * (self.max_batch_size - actual_batch_size)
-        self.cu_seqlens_kv.copy_(
-            torch.Tensor(cu_seqlens_kv).to(dtype=torch.int32, device="cpu")
+        cu_seqlens_kv = cu_seqlens_kv + [cu_seqlens_kv[-1]] * (
+            self.max_batch_size - actual_batch_size
         )
+        self.cu_seqlens_kv.copy_(torch.Tensor(cu_seqlens_kv).to(dtype=torch.int32, device="cpu"))
 
     def convert_paged_to_nonpaged(self, layer_number: int, qkv_format: str):
         """
@@ -367,32 +366,45 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
         #        self.max_batch_size, ctx_len, self.max_ctx_len)
 
         k_cache, v_cache, page_table = self.cache_manager.step(
-            layer_number, k, v, self.cu_seqlens_q, self.cu_seqlens_kv, qkv_format,
+            layer_number,
+            k,
+            v,
+            self.cu_seqlens_q,
+            self.cu_seqlens_kv,
+            qkv_format,
         )
 
-        return q_buffer, k_cache, v_cache, page_table, self.cu_seqlens_q, self.cu_seqlens_kv, self.max_seqlen_q, self.max_seqlen_kv, self.output_qkv_format
+        return (
+            q_buffer,
+            k_cache,
+            v_cache,
+            page_table,
+            self.cu_seqlens_q,
+            self.cu_seqlens_kv,
+            self.max_seqlen_q,
+            self.max_seqlen_kv,
+            self.output_qkv_format,
+        )
 
     def post_step(
         self,
         layer_number: int,
         output: torch.Tensor,
-        ):
+    ):
         """
         Process the attention output in order to return it in the original qkv_format.
         """
         if self.input_qkv_format == "bshd":
-            output = output[:self.batch_size, :self.max_seqlen_q].contiguous()
+            output = output[: self.batch_size, : self.max_seqlen_q].contiguous()
         if self.input_qkv_format == "sbhd":
-            output = output[:self.batch_size, :self.max_seqlen_q].transpose(0, 1).contiguous()
+            output = output[: self.batch_size, : self.max_seqlen_q].transpose(0, 1).contiguous()
         if self.input_qkv_format == "thd":
-            print('oooo ', output.shape)
-            #print(output[:2, :4])
-            #output_buffer = self.q_orig[layer_number]
-            #step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
-            #tex.reshape_o(output, output_buffer, step_lens,
+            print("oooo ", output.shape)
+            # print(output[:2, :4])
+            # output_buffer = self.q_orig[layer_number]
+            # step_lens = self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1]
+            # tex.reshape_o(output, output_buffer, step_lens,
             #    self.num_heads_q, self.head_dim_q, self.batch_size, self.max_ctx_len, self.is_output_right_aligned)
-            #output = output_buffer.view(output_buffer.shape[0], -1)
+            # output = output_buffer.view(output_buffer.shape[0], -1)
 
         return output
-
-

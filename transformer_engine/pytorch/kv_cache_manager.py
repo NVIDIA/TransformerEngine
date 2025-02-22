@@ -8,10 +8,12 @@ from typing import Dict, List
 
 import torch
 
+
 class KVCacheManager:
     """
     KV cache manager. The base class for custom cache managers.
     """
+
     def __init__(self, *args, **kwargs):
         """Initialize the cache manager."""
         self.cache = {}

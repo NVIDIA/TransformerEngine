@@ -257,7 +257,11 @@ def _make_graphed_callables(
                 if callables[0].training:
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in outputs if o.requires_grad),
-                        inputs=tuple(i for i in static_input_surface if isinstance(i, torch.Tensor) and i.requires_grad),
+                        inputs=tuple(
+                            i
+                            for i in static_input_surface
+                            if isinstance(i, torch.Tensor) and i.requires_grad
+                        ),
                         grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
                         only_inputs=True,
                         allow_unused=allow_unused_input,
@@ -372,7 +376,11 @@ def _make_graphed_callables(
                 with torch.cuda.graph(bwd_graph, pool=mempool):
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in static_outputs if o.requires_grad),
-                        inputs=tuple(i for i in static_input_surface if isinstance(i, torch.Tensor) and i.requires_grad),
+                        inputs=tuple(
+                            i
+                            for i in static_input_surface
+                            if isinstance(i, torch.Tensor) and i.requires_grad
+                        ),
                         grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                         only_inputs=True,
                         allow_unused=allow_unused_input,
@@ -425,7 +433,10 @@ def _make_graphed_callables(
 
                 # Copy values from new tensors into static tensors
                 for i in range(len_user_args):
-                    if isinstance(static_input_surface[i], torch.Tensor) and static_input_surface[i].data_ptr() != inputs[i].data_ptr():
+                    if (
+                        isinstance(static_input_surface[i], torch.Tensor)
+                        and static_input_surface[i].data_ptr() != inputs[i].data_ptr()
+                    ):
                         static_input_surface[i].copy_(inputs[i])
 
                 # Replay forward graph

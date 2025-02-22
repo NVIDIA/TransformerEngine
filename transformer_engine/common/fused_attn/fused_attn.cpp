@@ -290,8 +290,10 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (qkv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90 &&
           ((cudnn_runtime_version >= 90100 && num_attn_heads == num_gqa_groups) ||
            cudnn_runtime_version >= 90600)) ||
-         ((q_format == NVTE_QKV_Format::NVTE_SBHD || q_format == NVTE_QKV_Format::NVTE_BSHD || (q_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90) ||
-          kv_format == NVTE_QKV_Format::NVTE_SBHD || kv_format == NVTE_QKV_Format::NVTE_BSHD || (kv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90)) &&
+         ((q_format == NVTE_QKV_Format::NVTE_SBHD || q_format == NVTE_QKV_Format::NVTE_BSHD ||
+           (q_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90) ||
+           kv_format == NVTE_QKV_Format::NVTE_SBHD || kv_format == NVTE_QKV_Format::NVTE_BSHD ||
+           (kv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90)) &&
           cudnn_runtime_version >= 90700)) &&
         // sliding window
         // pre-9.2: full attn, causal
@@ -542,16 +544,15 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
   }
 }
 // NVTE fused attention FWD with packed KV
-void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias,
-                                  NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors,
-                                  const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
-                                  const NVTETensor cu_seqlens_q_padded,
-                                  const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
-                                  size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                                  float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                  NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-                                  int64_t window_size_left, int64_t window_size_right,
-                                  NVTETensor workspace, cudaStream_t stream) {
+void nvte_fused_attn_fwd_kvpacked(
+    const NVTETensor Q, const NVTETensor KV, const NVTETensor Bias, NVTETensor S, NVTETensor O,
+    NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    const NVTETensor page_table_k, const NVTETensor page_table_v, const NVTETensor rng_state,
+    size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+    cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
   const Tensor *input_cu_seqlens_q = reinterpret_cast<const Tensor *>(cu_seqlens_q);
@@ -641,10 +642,10 @@ void nvte_fused_attn_fwd_kvpacked(const NVTETensor Q, const NVTETensor KV, const
     fused_attn_arbitrary_seqlen_fwd_kvpacked(
         b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, t_q, t_kv, num_pages_k, num_pages_v,
         page_size_k, page_size_v, max_pages_per_seq_k, max_pages_per_seq_v, is_training, attn_scale,
-	dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right, input_Q,
-        input_KV, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q, input_cu_seqlens_kv,
-        input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded, input_page_table_k, input_page_table_v, input_rng_state, wkspace, stream,
-        handle);
+        dropout, qkv_layout, bias_type, attn_mask_type, window_size_left, window_size_right,
+        input_Q, input_KV, input_Bias, output_O, Aux_CTX_Tensors, input_cu_seqlens_q,
+        input_cu_seqlens_kv, input_cu_seqlens_q_padded, input_cu_seqlens_kv_padded,
+        input_page_table_k, input_page_table_v, input_rng_state, wkspace, stream, handle);
 #else
     NVTE_ERROR(
         "cuDNN 8.9.3 is required for BF16/FP16 fused attention with arbitrary sequence length. \n");

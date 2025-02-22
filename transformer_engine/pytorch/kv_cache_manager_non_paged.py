@@ -10,6 +10,7 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.kv_cache_manager import KVCacheManager
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
+
 class NonPagedKVCacheManager(KVCacheManager):
     """
     The non-paged KV cache manager.
@@ -72,11 +73,15 @@ class NonPagedKVCacheManager(KVCacheManager):
         finished_seqs = self.sequences.keys() - unfinished_seqs
         unfinished_indices = [i for i, j in enumerate(self.sequences) if j in unfinished_seqs]
         finished_indices = [i for i, j in enumerate(self.sequences) if j in finished_seqs]
-        self.batch_indices.copy_(torch.Tensor((
-            unfinished_indices
-            + finished_indices
-            + list(range(prev_batch_size, self.max_batch_size))
-        )).to(dtype=torch.int32, device="cpu"))
+        self.batch_indices.copy_(
+            torch.Tensor(
+                (
+                    unfinished_indices
+                    + finished_indices
+                    + list(range(prev_batch_size, self.max_batch_size))
+                )
+            ).to(dtype=torch.int32, device="cpu")
+        )
 
         # Advance unfinished sequences
         for i in unfinished_seqs:
@@ -98,7 +103,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         layer_number,
         k: torch.Tensor,
         v: torch.Tensor,
-        #step_dict: OrderedDict,
+        # step_dict: OrderedDict,
         cu_seqlens_q,
         cu_seqlens_kv,
         qkv_format: str,
@@ -131,19 +136,31 @@ class NonPagedKVCacheManager(KVCacheManager):
         step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
         batch_size = self.max_batch_size
-        ctx_len=1
+        ctx_len = 1
         if qkv_format == "bshd":
             batch_size = k.shape[0]
-            ctx_len=k.shape[1]
+            ctx_len = k.shape[1]
         if qkv_format == "sbhd":
             batch_size = k.shape[1]
-            ctx_len=k.shape[0]
+            ctx_len = k.shape[0]
         tex.copy_to_kv_cache(
-            k, v, k_cache, v_cache,
-            self.batch_indices, step_lens, seq_lens,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            self.batch_indices,
+            step_lens,
+            seq_lens,
             QKVFormat[qkv_format],
-            self.num_heads, self.head_dim_k, self.head_dim_v,
-            batch_size, ctx_len, self.max_seqlen, 1, True)
+            self.num_heads,
+            self.head_dim_k,
+            self.head_dim_v,
+            batch_size,
+            ctx_len,
+            self.max_seqlen,
+            1,
+            True,
+        )
         k_cache = k_cache[:batch_size]
         v_cache = v_cache[:batch_size]
         return k_cache, v_cache, None

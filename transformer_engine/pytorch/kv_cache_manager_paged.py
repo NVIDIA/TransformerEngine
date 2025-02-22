@@ -47,7 +47,7 @@ class PagedKVCacheManager(KVCacheManager):
         max_batch_size: int,
         max_seqlen: int,
         head_dim_v: Optional[int] = None,
-        #is_cuda_graph: bool = False,
+        # is_cuda_graph: bool = False,
     ):
         """Initialize the KV cache"""
         self.total_num_pages = total_num_pages
@@ -59,7 +59,7 @@ class PagedKVCacheManager(KVCacheManager):
         self.max_seqlen = max_seqlen
         self.max_pages_per_seq = max_seqlen // self.page_size
         self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
-        #self.is_cuda_graph = is_cuda_graph
+        # self.is_cuda_graph = is_cuda_graph
 
         # sequences contained in the kv cache, {seq_id: seq_len}
         self.sequences = OrderedDict()
@@ -192,7 +192,7 @@ class PagedKVCacheManager(KVCacheManager):
     def pre_step(
         self,
         step_dict: Dict[List, List],
-        ):
+    ):
         batch_size = len(step_dict)
         step_lens = list(step_dict.values())
         cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
@@ -224,7 +224,7 @@ class PagedKVCacheManager(KVCacheManager):
         layer_number: int,
         k: torch.Tensor,
         v: torch.Tensor,
-        #step_dict: OrderedDict,
+        # step_dict: OrderedDict,
         cu_seqlens_q: torch.Tensor,
         cu_seqlens_kv: torch.Tensor,
         qkv_format: str,
@@ -257,19 +257,31 @@ class PagedKVCacheManager(KVCacheManager):
         step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
         seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
         batch_size = self.max_batch_size
-        ctx_len=1
+        ctx_len = 1
         if qkv_format == "bshd":
             batch_size = k.shape[0]
-            ctx_len=k.shape[1]
+            ctx_len = k.shape[1]
         if qkv_format == "sbhd":
             batch_size = k.shape[1]
-            ctx_len=k.shape[0]
+            ctx_len = k.shape[0]
         tex.copy_to_kv_cache(
-            k, v, k_cache, v_cache,
-            self.page_table, step_lens, seq_lens,
+            k,
+            v,
+            k_cache,
+            v_cache,
+            self.page_table,
+            step_lens,
+            seq_lens,
             QKVFormat[qkv_format],
-            self.num_heads, self.head_dim_k, self.head_dim_v,
-            batch_size, ctx_len, self.max_seqlen, self.max_pages_per_seq, False)
+            self.num_heads,
+            self.head_dim_k,
+            self.head_dim_v,
+            batch_size,
+            ctx_len,
+            self.max_seqlen,
+            self.max_pages_per_seq,
+            False,
+        )
         page_table = self.page_table[:batch_size]
 
         return k_cache, v_cache, page_table
