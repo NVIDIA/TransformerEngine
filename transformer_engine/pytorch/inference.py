@@ -102,6 +102,7 @@ class InferenceParams:
         two transposes for qkv_format = 'sbhd', and one memory buffer (q_buffer) and two conversion
         kernels (reshape_q and reshape_o) for qkv_format = 'thd'.
     """
+
     def __init__(
         self,
         max_batch_size: int,
@@ -130,7 +131,9 @@ class InferenceParams:
         _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
         _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-        self.allow_query_conversion = allow_query_conversion and (_NVTE_FLASH_ATTN or _NVTE_UNFUSED_ATTN or not _NVTE_FUSED_ATTN)
+        self.allow_query_conversion = allow_query_conversion and (
+            _NVTE_FLASH_ATTN or _NVTE_UNFUSED_ATTN or not _NVTE_FUSED_ATTN
+        )
 
         if not self.is_paged:
             cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager
@@ -269,7 +272,7 @@ class InferenceParams:
         self.batch_size = len(step_dict)
 
         self.sequences = self.cache_manager.pre_step(step_dict)
-        for k,v in enumerate(self.sequences):
+        for k, v in enumerate(self.sequences):
             self.sequences_pre[k] = self.sequences[k] - self.step_dict[k]
 
         actual_batch_size = len(step_dict)
@@ -396,9 +399,14 @@ class InferenceParams:
             if self.allow_query_conversion:
                 q_buffer = self.q_buffer[layer_number]
                 tex.reshape_q(
-                    new_q, self.q_buffer[layer_number], self.cu_seqlens_q,
-                    self.num_heads_q, self.head_dim_q,
-                    self.max_batch_size, self.max_ctx_len)
+                    new_q,
+                    self.q_buffer[layer_number],
+                    self.cu_seqlens_q,
+                    self.num_heads_q,
+                    self.head_dim_q,
+                    self.max_batch_size,
+                    self.max_ctx_len,
+                )
                 self.q_orig[layer_number] = new_q
 
         k_cache, v_cache, page_table = self.cache_manager.step(
@@ -436,9 +444,16 @@ class InferenceParams:
             output = output[: self.batch_size, : self.max_seqlen_q].transpose(0, 1).contiguous()
         if self.input_qkv_format == "thd" and self.allow_query_conversion:
             output_buffer = self.q_orig[layer_number]
-            tex.reshape_o(output, output_buffer, self.cu_seqlens_q,
-                          self.num_heads_q, self.head_dim_q, self.batch_size,
-                          self.max_ctx_len, self.is_output_right_aligned)
+            tex.reshape_o(
+                output,
+                output_buffer,
+                self.cu_seqlens_q,
+                self.num_heads_q,
+                self.head_dim_q,
+                self.batch_size,
+                self.max_ctx_len,
+                self.is_output_right_aligned,
+            )
             output = output_buffer.view(output_buffer.shape[0], -1)
 
         return output

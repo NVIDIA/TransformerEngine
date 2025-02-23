@@ -549,9 +549,7 @@ def get_attention_backend(
                 )
             if use_fused_attention and pad_between_seqs:
                 use_fused_attention = False
-                logger.debug(
-                    "Disabling FusedAttention for pad_between_seqs = True and KV caching"
-                )
+                logger.debug("Disabling FusedAttention for pad_between_seqs = True and KV caching")
         if inference_params.is_paged:
             if use_fused_attention and cudnn_version < (9, 5, 0):
                 logger.debug("Disabling FusedAttention as paged attention requires cuDNN 9.5+")

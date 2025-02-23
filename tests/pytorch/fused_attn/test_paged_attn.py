@@ -319,7 +319,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         head_dim_q=config.head_dim_qk,
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
-        allow_query_conversion=backend!="FusedAttention",
+        allow_query_conversion=backend != "FusedAttention",
     )
     inference_params.allocate_memory(layer_number, qkv_format)
 

@@ -9,12 +9,12 @@
 namespace transformer_engine {
 namespace fused_attn {
 template <typename scalar_t>
-__global__ void reshape_q_kernel(scalar_t *new_q, scalar_t *q_buffer, int *cu_new_lens,
-                                 int h_q, int d_q, int b, int max_seq_len) {
+__global__ void reshape_q_kernel(scalar_t *new_q, scalar_t *q_buffer, int *cu_new_lens, int h_q,
+                                 int d_q, int b, int max_seq_len) {
   // new_q: thd; q_buffer: bshd;
   // cu_new_lens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-    int num_elts = (cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx]) * h_q * d_q;
+    int num_elts = (cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx]) * h_q * d_q;
     int new_token_offset = cu_new_lens[batch_idx] * h_q * d_q;
     int cache_offset = batch_idx * max_seq_len * h_q * d_q;
     scalar_t *new_q_token = new_q + new_token_offset;
@@ -26,12 +26,13 @@ __global__ void reshape_q_kernel(scalar_t *new_q, scalar_t *q_buffer, int *cu_ne
 }
 
 template <typename scalar_t>
-__global__ void reshape_o_kernel(scalar_t *output, scalar_t *output_buffer, int *cu_new_lens, int h_o,
-                                 int d_o, int b, int max_seq_len, bool is_output_right_aligned) {
+__global__ void reshape_o_kernel(scalar_t *output, scalar_t *output_buffer, int *cu_new_lens,
+                                 int h_o, int d_o, int b, int max_seq_len,
+                                 bool is_output_right_aligned) {
   // output: bshd; output_buffer: thd;
   // cu_new_lens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-    int new_len = cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx];
+    int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
     int num_elts = new_len * h_o * d_o;
     int output_offset = batch_idx * max_seq_len * h_o * d_o;
     if (is_output_right_aligned) {
@@ -48,8 +49,8 @@ __global__ void reshape_o_kernel(scalar_t *output, scalar_t *output_buffer, int 
 
 template <typename scalar_t>
 __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, int *batch_indices,
-                                        int *cu_new_lens, int *cu_cached_lens, int h_kv, int d_k, int d_v,
-                                        int b, int max_seq_len) {
+                                        int *cu_new_lens, int *cu_cached_lens, int h_kv, int d_k,
+                                        int d_v, int b, int max_seq_len) {
   // k_cache, v_cache: bshd
   // batch_indices: [b]; cu_new_lens, cu_cached_lens: [b + 1]
   int actual_b = b;
@@ -59,10 +60,9 @@ __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, in
     }
   }
   for (int batch_idx = 0; batch_idx < actual_b; batch_idx++) {
-    int cached_len = cu_cached_lens[batch_idx+1] - cu_cached_lens[batch_idx];
-    int new_len = cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx];
-    for (int token_idx = blockIdx.x; token_idx < cached_len - new_len;
-         token_idx += gridDim.x) {
+    int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+    int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
+    for (int token_idx = blockIdx.x; token_idx < cached_len - new_len; token_idx += gridDim.x) {
       int num_elts_k = h_kv * d_k;
       int num_elts_v = h_kv * d_v;
       int k_cache_src_offset = (batch_indices[batch_idx] * max_seq_len + token_idx) * h_kv * d_k;
@@ -98,12 +98,11 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
       int *page_list = page_table + batch_idx * max_pages_per_seq;
       int new_token_offset = batch_idx * max_ctx_len;
-      int cached_len = cu_cached_lens[batch_idx+1] - cu_cached_lens[batch_idx];
-      int new_len = cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx];
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
         int page_idx = page_list[(cached_len - new_len + i) / page_size];
-        int token_idx =
-            page_idx * page_size + (cached_len - new_len + i) % page_size;
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) =
               *(new_k + (new_token_offset + i) * h_kv * d_k + j);
@@ -117,12 +116,11 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
   } else if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
       int *page_list = page_table + batch_idx * max_pages_per_seq;
-      int cached_len = cu_cached_lens[batch_idx+1] - cu_cached_lens[batch_idx];
-      int new_len = cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx];
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
         int page_idx = page_list[(cached_len - new_len + i) / page_size];
-        int token_idx =
-            page_idx * page_size + (cached_len - new_len + i) % page_size;
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) = *(new_k + (i * b + batch_idx) * h_kv * d_k + j);
         }
@@ -134,12 +132,11 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
   } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
       int *page_list = page_table + batch_idx * max_pages_per_seq;
-      int cached_len = cu_cached_lens[batch_idx+1] - cu_cached_lens[batch_idx];
-      int new_len = cu_new_lens[batch_idx+1] - cu_new_lens[batch_idx];
+      int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
+      int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
         int page_idx = page_list[(cached_len - new_len + i) / page_size];
-        int token_idx =
-            page_idx * page_size + (cached_len - new_len + i) % page_size;
+        int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) =
               *(new_k + (cu_new_lens[batch_idx] + i) * h_kv * d_k + j);
