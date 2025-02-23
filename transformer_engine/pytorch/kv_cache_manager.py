@@ -2,36 +2,32 @@
 #
 # See LICENSE for license information.
 
-"""KV Cache Manager."""
+"""KV Cache Manager"""
 from collections import OrderedDict
-from typing import Dict, List
-
 import torch
 
 
 class KVCacheManager:
-    """
-    KV cache manager. The base class for custom cache managers.
-    """
+    """Base KV cache manager"""
 
     def __init__(self, *args, **kwargs):
-        """Initialize the cache manager."""
+        """Initialize cache manager"""
         self.cache = {}
         self.sequences = OrderedDict()
 
     def reset(self):
-        """Empty tracked sequences"""
+        """Reset cache manager state"""
         self.sequences = OrderedDict()
 
     def allocate_memory(self, layer_number: int):
-        """Allocate memory for the KV cache."""
+        """Allocate memory for the cache"""
         self.cache[layer_number] = (None, None)
 
     def pre_step(
         self,
-        step_dict: Dict[List, List],
+        step_dict: OrderedDict,
     ):
-        """Prepare for operations in step(). Update sequences with step_dict."""
+        """Update tracked sequences and prepare for step()"""
         return self.sequences
 
     def step(
@@ -39,9 +35,9 @@ class KVCacheManager:
         layer_number: int,
         new_k: torch.Tensor,
         new_v: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_kv: torch.Tensor,
+        cu_new_seqlens: torch.Tensor,
+        cu_cached_seqlens: torch.Tensor,
         qkv_format: str,
     ):
-        """Update the cache with new_k and new_v tokens"""
+        """Copy the new tokens to KV cache"""
         return *self.cache[layer_number], None

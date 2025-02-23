@@ -276,32 +276,6 @@ def fused_attn_fwd(
 
     # execute kernel
 
-    # print(max_seqlen_q,
-    #    max_seqlen_kv,
-    #    is_training,
-    #    attn_scale,
-    #    dropout,
-    #    fast_zero_fill,
-    #    QKVLayout[qkv_layout],
-    #    AttnBiasType[attn_bias_type],
-    #    AttnMaskType[attn_mask_type],
-    #    window_size,
-    #    cu_seqlens_q,
-    #    cu_seqlens_kv,
-    #    q.shape,
-    #    k.shape,
-    #    v.shape,
-    #    fake_dtype,
-    #    cu_seqlens_q_padded,
-    #    cu_seqlens_kv_padded,
-    #    page_table_k,
-    #    page_table_v,
-    #    s_quantizer,
-    #    o_quantizer,
-    #    attn_bias,
-    #    rng_gen,
-    #    rng_elts_per_thread,
-    # )
     output_tensors = tex.fused_attn_fwd(
         max_seqlen_q,
         max_seqlen_kv,

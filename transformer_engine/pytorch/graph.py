@@ -69,6 +69,7 @@ def _make_graphed_callables(
     """
     Helper method for `make_graphed_callables`
     """
+
     if torch.is_autocast_enabled() and torch.is_autocast_cache_enabled():
         raise RuntimeError(
             "make_graphed_callables does not support the autocast "
@@ -246,7 +247,7 @@ def _make_graphed_callables(
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
             static_input_surface = per_callable_static_input_surfaces[func_idx]
-            for ii in range(num_warmup_iters):
+            for _ in range(num_warmup_iters):
                 hooks = []
                 for module in func.modules():
                     hook = module.register_forward_hook(hook_fn)

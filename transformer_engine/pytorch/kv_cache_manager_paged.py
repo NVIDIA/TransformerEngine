@@ -2,9 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""Paged KV Cache Manager."""
+"""Paged KV Cache Manager"""
 from collections import defaultdict, OrderedDict
-from typing import List, Optional, Dict
+from typing import List, Optional
 import logging
 
 import torch
@@ -31,11 +31,7 @@ class Page:
 
 
 class PagedKVCacheManager(KVCacheManager):
-    """
-    Paged KV cache manager. It supports a set of utilities including adding and removing
-    sequences, and copying new key/value tokens to the cache. Users can overwrite this class
-    for more custom implementations.
-    """
+    """Paged KV cache manager"""
 
     def __init__(
         self,
@@ -47,9 +43,8 @@ class PagedKVCacheManager(KVCacheManager):
         max_batch_size: int,
         max_seqlen: int,
         head_dim_v: Optional[int] = None,
-        # is_cuda_graph: bool = False,
     ):
-        """Initialize the KV cache"""
+        """Initialize cache manager"""
         self.total_num_pages = total_num_pages
         self.page_size = page_size
         self.num_heads = num_heads
@@ -59,13 +54,12 @@ class PagedKVCacheManager(KVCacheManager):
         self.max_seqlen = max_seqlen
         self.max_pages_per_seq = max_seqlen // self.page_size
         self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
-        # self.is_cuda_graph = is_cuda_graph
 
-        # sequences contained in the kv cache, {seq_id: seq_len}
+        # track sequences in the cache, {seq_id: seq_len}
         self.sequences = OrderedDict()
-        # kv cache, cache[layer_number] = (k_cache, v_cache)
+        # cache tensors, cache[layer_number] = (k_cache, v_cache)
         self.cache = {}
-        # free pages allowed to allocate, [Page(),...]
+        # available pages, [Page(),...]
         self.free_pages = []
         for i in range(self.total_num_pages):
             self.free_pages.append(Page(i))
@@ -75,6 +69,7 @@ class PagedKVCacheManager(KVCacheManager):
         self.page_table = None
 
     def reset(self):
+        """Reset cache manager state"""
         self.sequences = OrderedDict()
         self.free_pages = []
         for i in range(self.total_num_pages):
@@ -83,7 +78,7 @@ class PagedKVCacheManager(KVCacheManager):
         self.page_table.fill_(0)
 
     def allocate_memory(self, layer_number):
-        """Allocate memory for the KV cache"""
+        """Allocate memory for the cache"""
         k_cache = torch.empty(
             self.total_num_pages,
             self.page_size,
@@ -109,8 +104,8 @@ class PagedKVCacheManager(KVCacheManager):
     def print_cache(self):
         """Print KV cache status"""
         used_pages = [self.get_page_count(seq) for seq in self.sequences]
-        logger = logging.getLogger("PagedAttention")
-        logger.debug("cache status:")
+        logger = logging.getLogger("PagedKVCacheManager")
+        logger.debug("Cache status:")
         logger.debug(
             "  total pages:     %s (used %s, free %s)",
             self.total_num_pages,
@@ -147,12 +142,6 @@ class PagedKVCacheManager(KVCacheManager):
     def get_page_list(self, seq: int):
         """Get the list of pages allocated to a sequence"""
         return [x.page_id for x in self.allocated_pages[seq]]
-
-    def get_page_token_offsets(self, seqlen: int):
-        """Get the relevant page index and token index for a given sequence length"""
-        page_offset = seqlen // self.page_size
-        token_offset = seqlen % self.page_size
-        return (page_offset, token_offset)
 
     def get_page_table(self, sequences: List[int]):
         """Get the page table, in shape [batch_size, max_pages_per_seq]"""
@@ -191,12 +180,9 @@ class PagedKVCacheManager(KVCacheManager):
 
     def pre_step(
         self,
-        step_dict: Dict[List, List],
+        step_dict: OrderedDict,
     ):
-        batch_size = len(step_dict)
-        step_lens = list(step_dict.values())
-        cu_seqlens = [0] + [sum(step_lens[:i]) for i in range(1, batch_size + 1)]
-
+        """Update tracked sequences and prepare for step()"""
         # Remove finished sequences and advance unfinished sequences
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs
@@ -222,56 +208,58 @@ class PagedKVCacheManager(KVCacheManager):
     def step(
         self,
         layer_number: int,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        # step_dict: OrderedDict,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_kv: torch.Tensor,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        cu_new_seqlens,
+        cu_cached_seqlens,
         qkv_format: str,
     ):
         """
-        Update the paged KV cache for a given inference iteration.
-        For more details, please refer to InferenceParams.update_cache().
+        Copy the new tokens to the paged KV cache.
 
         Parameters
         ----------
         layer_number: int
-            The layer number of kv cache to operate on
-        k: torch.Tensor
-            A batch of new key tokens for the current iteration
-        v: torch.Tensor
-            A batch of new value tokens for the current iteration
-        step_dict: OrderedDict
-            The {seq_id: step_len} information for the new inference step
+            Layer number of attention in the model
+        new_k: torch.Tensor
+            New key tokens for layer_number in current inference iteration
+        new_v: torch.Tensor
+            New value tokens for layer_number in current inference iteration
+        cu_new_seqlens: torch.Tensor
+            Cumulative sequence lengths for new_k and new_v, in shape [batch_size + 1]
+        cu_cached_seqlens: torch.Tensor
+            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), in shape [batch_size + 1]
         qkv_format: str
-            The format of the new key/value tensors, {'bshd', 'sbhd', 'thd'}
+            Format of new_k and new_v tensors, {'bshd', 'sbhd', 'thd'}
 
         Returns
         -------
         k_cache: torch.Tensor
-            The key cache tensor containing previous and the current tokens
+            Full key tensor containing both previous and current key tokens
         v_cache: torch.Tensor
-            The value cache tensor containing previous and the current tokens
+            Full value tensor containing both previous and current value tokens
+        page_table: torch.Tensor
+            Page table for current iteration, in shape [batch_size, max_pages_per_seq]
         """
         k_cache, v_cache = self.cache[layer_number]
-        step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+
         batch_size = self.max_batch_size
         ctx_len = 1
         if qkv_format == "bshd":
-            batch_size = k.shape[0]
-            ctx_len = k.shape[1]
+            batch_size = new_k.shape[0]
+            ctx_len = new_k.shape[1]
         if qkv_format == "sbhd":
-            batch_size = k.shape[1]
-            ctx_len = k.shape[0]
+            batch_size = new_k.shape[1]
+            ctx_len = new_k.shape[0]
+
         tex.copy_to_kv_cache(
-            k,
-            v,
+            new_k,
+            new_v,
             k_cache,
             v_cache,
             self.page_table,
-            step_lens,
-            seq_lens,
+            cu_new_seqlens,
+            cu_cached_seqlens,
             QKVFormat[qkv_format],
             self.num_heads,
             self.head_dim_k,
@@ -282,6 +270,7 @@ class PagedKVCacheManager(KVCacheManager):
             self.max_pages_per_seq,
             False,
         )
+
         page_table = self.page_table[:batch_size]
 
         return k_cache, v_cache, page_table

@@ -34,18 +34,6 @@ std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::T
 /***************************************************************************************************
  * Attention
  **************************************************************************************************/
-void reshape_q(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor step_lens,
-               NVTE_QKV_Format qkv_format, int h_q, int d_q, int b, int max_ctx_len,
-               int max_seq_len);
-
-void reshape_o(torch::Tensor output, torch::Tensor output_buffer, torch::Tensor step_lens, int h_o,
-               int d_o, int b, int max_seq_len, bool is_output_right_aligned);
-
-void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
-                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor step_lens,
-                      torch::Tensor seq_lens, NVTE_QKV_Format qkv_format, int h_kv, int d_k,
-                      int d_v, int b, int max_ctx_len, int max_seq_len, int max_pages_per_seq,
-                      bool is_non_paged);
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(const transformer_engine::DType q_dtype,
                                                const transformer_engine::DType kv_dtype,
@@ -81,6 +69,16 @@ std::vector<py::object> fused_attn_bwd(
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+void reshape_q(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor cu_new_lens,
+               int h_q, int d_q, int b, int max_ctx_len, int max_seq_len);
+void reshape_o(torch::Tensor output, torch::Tensor output_buffer, torch::Tensor cu_new_lens, int h_o,
+               int d_o, int b, int max_seq_len, bool is_output_right_aligned);
+void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
+                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
+                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int h_kv, int d_k,
+                      int d_v, int b, int max_ctx_len, int max_seq_len, int max_pages_per_seq,
+                      bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM

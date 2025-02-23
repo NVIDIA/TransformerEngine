@@ -2,9 +2,9 @@
 #
 # See LICENSE for license information.
 
-"""Non-Paged KV Cache Manager."""
+"""Non-Paged KV Cache Manager"""
 from collections import OrderedDict
-from typing import Optional, Dict, List
+from typing import Optional
 import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.kv_cache_manager import KVCacheManager
@@ -12,9 +12,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
 class NonPagedKVCacheManager(KVCacheManager):
-    """
-    The non-paged KV cache manager.
-    """
+    """Non-paged KV cache manager"""
 
     def __init__(
         self,
@@ -25,7 +23,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         dtype: torch.dtype,
         head_dim_v: Optional[int] = None,
     ):
-        """Initialize the KV cache"""
+        """Initialize cache manager"""
         self.max_batch_size = max_batch_size
         self.max_seqlen = max_seqlen
         self.num_heads = num_heads
@@ -33,12 +31,15 @@ class NonPagedKVCacheManager(KVCacheManager):
         self.dtype = dtype
         self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
 
-        self.cache = {}
+        # track sequences in the cache, {seq_id: seq_len}
         self.sequences = OrderedDict()
+        # cache tensors, cache[layer_number] = (k_cache, v_cache)
+        self.cache = {}
+        # track sequence indices in the batch in order to re-index k_cache and v_cache
         self.batch_indices = None
 
     def allocate_memory(self, layer_number):
-        """Allocate memory for the KV cache"""
+        """Allocate memory for the cache"""
         k_cache = torch.zeros(
             self.max_batch_size,
             self.max_seqlen,
@@ -65,9 +66,13 @@ class NonPagedKVCacheManager(KVCacheManager):
 
     def pre_step(
         self,
-        step_dict: Dict[List, List],
+        step_dict: OrderedDict,
     ):
-        # Reorder cache
+        """Update tracked sequences and prepare for step()"""
+        # Track unfinished sequences' indices in the batch, e.g.
+        # at t-1, seq_ids = [0, 1, 2, 3], and at t, seq_ids = [0, 2, 3], because seq_id 1 finished
+        # batch_indices = [0, 2, 3, 1] is used in step() to re-index k_cache and v_cache so that
+        # they are contiguous and match the sequence indexing in q.
         prev_batch_size = len(self.sequences)
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs
@@ -101,56 +106,58 @@ class NonPagedKVCacheManager(KVCacheManager):
     def step(
         self,
         layer_number,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        # step_dict: OrderedDict,
-        cu_seqlens_q,
-        cu_seqlens_kv,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        cu_new_seqlens,
+        cu_cached_seqlens,
         qkv_format: str,
     ):
         """
-        Update the non-paged KV cache for a given inference iteration.
-        For more details, please refer to InferenceParams.update_cache().
+        Copy the new tokens to the non-paged KV cache.
 
         Parameters
         ----------
         layer_number: int
-            The layer number of kv cache to operate on
-        k: torch.Tensor
-            The new key tokens for the current iteration
-        v: torch.Tensor
-            The new value tokens for the current iteration
-        step_dict: OrderedDict
-            The {seq_id: step_len} information for the new inference step
+            Layer number of attention in the model
+        new_k: torch.Tensor
+            New key tokens for layer_number in current inference iteration
+        new_v: torch.Tensor
+            New value tokens for layer_number in current inference iteration
+        cu_new_seqlens: torch.Tensor
+            Cumulative sequence lengths for new_k and new_v, in shape [batch_size + 1]
+        cu_cached_seqlens: torch.Tensor
+            Cumulative sequence lengths for k_cache and v_cache (after new tokens are copied in), in shape [batch_size + 1]
         qkv_format: str
-            The format of the new key/value tensors, {'bshd', 'sbhd', 'thd'}
+            Format of new_k and new_v tensors, {'bshd', 'sbhd', 'thd'}
 
         Returns
         -------
         k_cache: torch.Tensor
-            The key cache tensor containing previous and the current tokens
+            Full key tensor containing both previous and current key tokens
         v_cache: torch.Tensor
-            The value cache tensor containing previous and the current tokens
+            Full value tensor containing both previous and current value tokens
+        page_table: torch.Tensor
+            None for non-paged KV cache
         """
         k_cache, v_cache = self.cache[layer_number]
-        step_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        seq_lens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+
         batch_size = self.max_batch_size
         ctx_len = 1
         if qkv_format == "bshd":
-            batch_size = k.shape[0]
-            ctx_len = k.shape[1]
+            batch_size = new_k.shape[0]
+            ctx_len = new_k.shape[1]
         if qkv_format == "sbhd":
-            batch_size = k.shape[1]
-            ctx_len = k.shape[0]
+            batch_size = new_k.shape[1]
+            ctx_len = new_k.shape[0]
+
         tex.copy_to_kv_cache(
-            k,
-            v,
+            new_k,
+            new_v,
             k_cache,
             v_cache,
             self.batch_indices,
-            step_lens,
-            seq_lens,
+            cu_new_seqlens,
+            cu_cached_seqlens,
             QKVFormat[qkv_format],
             self.num_heads,
             self.head_dim_k,
@@ -161,6 +168,8 @@ class NonPagedKVCacheManager(KVCacheManager):
             1,
             True,
         )
+
         k_cache = k_cache[:batch_size]
         v_cache = v_cache[:batch_size]
+
         return k_cache, v_cache, None

@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 
-"""Attention."""
+"""Attention"""
 import collections
 from contextlib import nullcontext
 from importlib.metadata import version as get_pkg_version
@@ -363,7 +363,7 @@ _alibi_cache = {
 }
 
 
-__all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+__all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
