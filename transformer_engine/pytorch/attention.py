@@ -547,6 +547,11 @@ def get_attention_backend(
                     "Disabling FlashAttention as KV caching requires flash-attn 2.2+, or 3.0"
                     " (Hopper only)"
                 )
+            if use_fused_attention and pad_between_seqs:
+                use_fused_attention = False
+                logger.debug(
+                    "Disabling FusedAttention for pad_between_seqs = True and KV caching"
+                )
         if inference_params.is_paged:
             if use_fused_attention and cudnn_version < (9, 5, 0):
                 logger.debug("Disabling FusedAttention as paged attention requires cuDNN 9.5+")
@@ -5527,7 +5532,6 @@ def get_qkv_layout(
         q_format = qkv_format
         kv_format = qkv_format
         is_same_q_kv_format = True
-    print("qkv format", qkv_format, is_same_q_kv_format, q_format, kv_format)
 
     def run_iteratively(q, k, v):
         # check data pointers
@@ -5616,7 +5620,6 @@ def get_qkv_layout(
             # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
             # check_ptrs_qk=True or check_ptrs_kv=True
             qkv_layout = "_".join(list([qkv_format]) * 3)
-            print("xxxxx0")
         elif (
             check_strides_kv
             and check_shapes_kv
@@ -5628,7 +5631,6 @@ def get_qkv_layout(
             # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
             # check_ptrs_qk=True or check_ptrs_kv=True
             qkv_layout = q_format + "_" + kv_format + "_" + kv_format
-            print("xxxxx1")
         else:
             qkv_layout = "not_supported"
 
@@ -5932,9 +5934,8 @@ class FlashAttention(torch.nn.Module):
                 if inference_params is not None:
                     func = flash_attn_with_kvcache
                     fa_optional_forward_kwargs_kvcache = {}
-                    fa_optional_forward_kwargs_kvcache["cache_seqlens"] = (
-                        cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    )
+                    cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                    fa_optional_forward_kwargs_kvcache["cache_seqlens"] = cache_seqlens
                     fa_optional_forward_kwargs_kvcache["softmax_scale"] = self.softmax_scale
                     fa_optional_forward_kwargs_kvcache["causal"] = "causal" in attn_mask_type
                     if inference_params.is_paged:
@@ -7506,8 +7507,6 @@ class DotProductAttention(TransformerEngineBaseModule):
 
                 # convert causal to causal_bottom_right in inference when KV-caching is in use
                 # so users can run with the same attn_mask_type for training and inference
-                # if "padding" not in attn_mask_type:
-                #    attn_mask_type = "padding_" + attn_mask_type
                 if attn_mask_type in ["causal", "padding_causal"]:
                     attn_mask_type = attn_mask_type + "_bottom_right"
 
@@ -7523,19 +7522,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     for x in [query_layer, key_layer, value_layer]
                 ]
 
-                # reshape the query tensor
-                # cuDNN paged attention supports bshd_2bshd and sbhd_2bshd, but
-                # flash-attention and unfused attention will need q/k/v in the
-                # same qkv_format
-                # target_qkv_format = inference_params.qkv_format
-                # query_layer = inference_params.reshape_and_copy_q(
-                #    query_layer, qkv_format, target_qkv_format, self.layer_number
-                # )
-
                 # update KV cache and return the full key/value tensors
-                # full key/value tensors are in inference_params.qkv_format format
-                # print('query_layer',query_layer.shape, query_layer.dtype)
-                # print('query_layer', query_layer[8,0,:4])
                 (
                     query_layer,
                     key_layer,
@@ -7553,17 +7540,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     value_layer,
                     qkv_format,
                 )
-                # print('ssss0 ',query_layer.shape, key_layer.shape, value_layer.shape)
-                # print('cu_seqlens_q',cu_seqlens_q)
-                # print('cu_seqlens_kv',cu_seqlens_kv)
-                # print('maxxxxx ',max_seqlen_q, max_seqlen_kv)
-
-                # update cu_seqlens tensors
-                # if inference_params.is_cuda_graph:
-                #    cu_seqlens_q = inference_params.cu_seqlens_q_buffer
-                #    cu_seqlens_kv = inference_params.cu_seqlens_kv_buffer
-                #    max_seqlen_q = inference_params.max_seqlen_q
-                #    max_seqlen_kv = inference_params.max_seqlen_kv
+                cu_seqlens_q_padded = None
+                cu_seqlens_kv_padded = None
 
             if (
                 isinstance(query_layer, Float8Tensor)
@@ -7586,8 +7564,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 )
             # convert qkv layout to its corresponding paged attention layout
             if inference_params is not None and inference_params.is_paged:
-                # qkv_layout = "paged_kv_" + qkv_format + "_2" + qkv_format
-                # qkv_layout = "paged_kv_thd_2bshd"# + qkv_format + "_2" + qkv_format
                 qkv_layout = "paged_kv_" + qkv_layout
 
             cp_size = 1
@@ -7632,10 +7608,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                             max_seqlen_kv,
                             key_layer.device,
                         )
-            # print('max_seqlen_q ', max_seqlen_q)
-            # print('max_seqlen_kv ', max_seqlen_kv)
-            # print('cu_seqlens_q ', cu_seqlens_q)
-            # print('cu_seqlens_kv ', cu_seqlens_kv)
 
             global _alibi_cache
             if alibi_slopes is not None:
@@ -7860,9 +7832,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
                 )
-                # print('ooooooooooo ',output.shape)
-                # print(output[1,9,:4])
-                # print(output[1,10,:4])
 
             from .cpu_offload import CPUOffloadEnabled
 
@@ -8623,6 +8592,7 @@ class MultiheadAttention(torch.nn.Module):
 
                 # pylint: disable=fixme
                 # TODO: consider cases where sequences have different seqlens
+                # sequence_start = inference_params.get_seqlens_pre_step()
                 sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 

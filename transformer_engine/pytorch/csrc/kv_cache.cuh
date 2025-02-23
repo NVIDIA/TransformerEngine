@@ -10,8 +10,7 @@ namespace transformer_engine {
 namespace fused_attn {
 template <typename scalar_t>
 __global__ void reshape_q_kernel(scalar_t *new_q, scalar_t *q_buffer, int *cu_new_lens,
-                                 int h_q, int d_q, int b,
-                                 int max_ctx_len, int max_seq_len) {
+                                 int h_q, int d_q, int b, int max_seq_len) {
   // new_q: thd; q_buffer: bshd;
   // cu_new_lens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {

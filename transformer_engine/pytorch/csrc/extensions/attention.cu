@@ -1035,36 +1035,36 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
 
 template <typename scalar_t>
 void reshape_q_launcher(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor cu_new_lens,
-                        int h_q, int d_q, int b, int max_ctx_len, int max_seq_len) {
+                        int h_q, int d_q, int b, int max_seq_len) {
   transformer_engine::fused_attn::reshape_q_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<scalar_t *>(new_q.data_ptr<scalar_t>()),
       reinterpret_cast<scalar_t *>(q_buffer.data_ptr<scalar_t>()), cu_new_lens.data_ptr<int>(),
-      h_q, d_q, b, max_ctx_len, max_seq_len);
+      h_q, d_q, b, max_seq_len);
 }
 
 void reshape_q(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor cu_new_lens,
-               int h_q, int d_q, int b, int max_ctx_len, int max_seq_len) {
+               int h_q, int d_q, int b, int max_seq_len) {
   NVTE_CHECK(new_q.scalar_type() == q_buffer.scalar_type(),
              "new_q and q_buffer must be of the same data type.");
   if (q_buffer.scalar_type() == at::ScalarType::Half) {
     using dtype = at::Half;
-    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_ctx_len,
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b,
                               max_seq_len);
   } else if (q_buffer.scalar_type() == at::ScalarType::BFloat16) {
     using dtype = at::BFloat16;
-    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_ctx_len,
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b,
                               max_seq_len);
   } else if (q_buffer.scalar_type() == at::ScalarType::Float) {
     using dtype = float;
-    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_ctx_len,
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b,
                               max_seq_len);
   } else if (q_buffer.scalar_type() == at::ScalarType::Float8_e4m3fn) {
     using dtype = at::Float8_e4m3fn;
-    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_ctx_len,
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b,
                               max_seq_len);
   } else if (q_buffer.scalar_type() == at::ScalarType::Float8_e5m2) {
     using dtype = at::Float8_e5m2;
-    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_ctx_len,
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b,
                               max_seq_len);
   } else {
     NVTE_ERROR("Unsupported dtype for KV cache.\n");

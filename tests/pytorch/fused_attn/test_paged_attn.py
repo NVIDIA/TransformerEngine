@@ -200,9 +200,9 @@ class Simulation:
 
 @pytest.mark.parametrize("dtype", [torch.float16])  # param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
-@pytest.mark.parametrize("qkv_format", ["thd"])  # qkv_formats)
+@pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention", "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
     reset_rng_states()
@@ -319,6 +319,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, is_cuda_graph):
         head_dim_q=config.head_dim_qk,
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
+        allow_query_conversion=backend!="FusedAttention",
     )
     inference_params.allocate_memory(layer_number, qkv_format)
 
