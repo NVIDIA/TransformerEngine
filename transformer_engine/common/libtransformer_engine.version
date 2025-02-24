@@ -1,4 +1,15 @@
 {
-	global: *nvte*; *transformer_engine*;
+	global:
+		extern "C++" {
+			nvte_*;
+			transformer_engine::cuda::sm_count*;
+			transformer_engine::cuda::supports_multicast*;
+			transformer_engine::cuda::stream_priority_range*;
+			transformer_engine::ubuf_built_with_mpi*;
+			*transformer_engine::getenv*;
+			*transformer_engine::CommOverlapBase*;
+			*transformer_engine::CommOverlapP2PBase*;
+			*transformer_engine::CommOverlapCore*
+		};
 	local: *;
 };
