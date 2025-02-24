@@ -366,11 +366,10 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
         """
 
-        # Synchronize to avoid a race condition
-        torch.cuda.synchronize()
-
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
+        if not devices_match(new_device, tensor.device):
+            tensor = tensor.to(device=new_device)
 
         # Just copy FP8 data if other tensor is MXFP8Tensor
         if isinstance(tensor, MXFP8Tensor):
