@@ -189,7 +189,9 @@ class ReorderStrategy(Enum):
     - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
     GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
     mulitple of 2 * cp_size.
-      Examples: 8 GPUs, GPU0 swaps with GPU7; GPU1 swaps with GPU6; GPU2 swaps with GPU5 ...
+      Examples:
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+      - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
 
     - Striped: This strategy distributes the tokens in a striped (interleaved) manner across
       the sequence. This is currently used for THD load balance.
