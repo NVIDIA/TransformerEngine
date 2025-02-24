@@ -4,10 +4,10 @@
 
 """Inference."""
 import os
-from collections import OrderedDict, defaultdict
-from typing import Optional, Dict, List
-from einops import rearrange
 import logging
+from collections import OrderedDict, defaultdict
+from typing import Optional, List
+from einops import rearrange
 
 import torch
 
@@ -20,7 +20,7 @@ __all__ = ["InferenceParams", "KVCacheManager", "NonPagedKVCacheManager", "Paged
 class KVCacheManager:
     """Base KV cache manager"""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self):
         """Initialize cache manager"""
         self.cache = {}
         self.sequences = OrderedDict()
@@ -35,7 +35,7 @@ class KVCacheManager:
 
     def pre_step(
         self,
-        step_dict: OrderedDict,
+        step_dict: OrderedDict,  # pylint: disable=unused-argument
     ):
         """Update tracked sequences and prepare for step()"""
         return self.sequences
@@ -43,11 +43,11 @@ class KVCacheManager:
     def step(
         self,
         layer_number: int,
-        new_k: torch.Tensor,
-        new_v: torch.Tensor,
-        cu_new_seqlens: torch.Tensor,
-        cu_cached_seqlens: torch.Tensor,
-        qkv_format: str,
+        new_k: torch.Tensor,  # pylint: disable=unused-argument
+        new_v: torch.Tensor,  # pylint: disable=unused-argument
+        cu_new_seqlens: torch.Tensor,  # pylint: disable=unused-argument
+        cu_cached_seqlens: torch.Tensor,  # pylint: disable=unused-argument
+        qkv_format: str,  # pylint: disable=unused-argument
     ):
         """Copy the new tokens to KV cache"""
         return *self.cache[layer_number], None
@@ -206,8 +206,8 @@ class InferenceParams:
         self.sequences = OrderedDict()
         self.cache_manager.reset()
         if self.input_qkv_format == "thd" and self.allow_query_conversion:
-            for layer_number in self.q_buffer:
-                self.q_buffer[layer_number].fill_(0)
+            for _, q_buffer in self.q_buffer.items():
+                q_buffer.fill_(0)
 
     def __repr__(self) -> str:
         if self.is_paged:
@@ -273,7 +273,7 @@ class InferenceParams:
 
         self.sequences = self.cache_manager.pre_step(step_dict)
         for k, v in enumerate(self.sequences):
-            self.sequences_pre[k] = self.sequences[k] - self.step_dict[k]
+            self.sequences_pre[k] = v - self.step_dict[k]
 
         actual_batch_size = len(step_dict)
         seqlens_q = list(step_dict.values())
@@ -471,6 +471,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         dtype: torch.dtype,
         head_dim_v: Optional[int] = None,
     ):
+        super().__init__()
         """Initialize cache manager"""
         self.max_batch_size = max_batch_size
         self.max_seqlen = max_seqlen
@@ -654,6 +655,7 @@ class PagedKVCacheManager(KVCacheManager):
         max_seqlen: int,
         head_dim_v: Optional[int] = None,
     ):
+        super().__init__()
         """Initialize cache manager"""
         self.total_num_pages = total_num_pages
         self.page_size = page_size

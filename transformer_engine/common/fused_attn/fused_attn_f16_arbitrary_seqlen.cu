@@ -380,7 +380,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
         alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
-      size_t count = 2 * ((size_t)is_ragged_q + (size_t)is_ragged_kv);
+      size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         seqlen_offsets_workspace_size = (count + 1) * num_bytes_per_ragged_offset;
       } else {
@@ -440,13 +440,13 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
       void *devOffsetsV = nullptr;
       if (is_ragged_kv) {
         devOffsetsK =
-            static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
+            static_cast<int8_t *>(devOffsets) + static_cast<int>(is_ragged_q) * 2 * num_bytes_per_ragged_offset;
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         devOffsetsS = static_cast<int8_t *>(devOffsets) +
-                      ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
+                      (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 * num_bytes_per_ragged_offset;
       }
       const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(
@@ -833,7 +833,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
         alignTo<16>((b + 1) * typeToSize(ragged_offset_type));
     size_t seqlen_offsets_workspace_size = 0;
     if (is_ragged_q || is_ragged_kv) {
-      size_t count = 2 * ((size_t)is_ragged_q + (size_t)is_ragged_kv);
+      size_t count = 2 * (static_cast<size_t>(is_ragged_q) + static_cast<size_t>(is_ragged_kv));
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         seqlen_offsets_workspace_size = (count + 1) * num_bytes_per_ragged_offset;
       } else {
@@ -901,13 +901,13 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
       void *devOffsetsV = nullptr;
       if (is_ragged_kv) {
         devOffsetsK =
-            static_cast<int8_t *>(devOffsets) + (int)is_ragged_q * 2 * num_bytes_per_ragged_offset;
+            static_cast<int8_t *>(devOffsets) + static_cast<int>(is_ragged_q) * 2 * num_bytes_per_ragged_offset;
         devOffsetsV = static_cast<int8_t *>(devOffsetsK) + num_bytes_per_ragged_offset;
       }
       void *devOffsetsS = nullptr;
       if (is_ragged_q && cudnn_runtime_version >= 90600) {
         devOffsetsS = static_cast<int8_t *>(devOffsets) +
-                      ((int)is_ragged_q + (int)is_ragged_kv) * 2 * num_bytes_per_ragged_offset;
+                      (static_cast<int>(is_ragged_q) + static_cast<int>(is_ragged_kv)) * 2 * num_bytes_per_ragged_offset;
       }
       const NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
       cu_seqlens_padded_to_offsets<<<grid, nthreads_per_block, 0, stream>>>(

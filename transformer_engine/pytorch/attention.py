@@ -32,7 +32,6 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
     QKVLayout,
-    QKVFormat,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
@@ -1058,6 +1057,7 @@ def get_attention_backend(
 
 @torch.no_grad()
 def get_attn_mask(batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv):
+    """Convert cu_seqlens to attention_mask"""
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
     attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
@@ -5611,24 +5611,15 @@ def get_qkv_layout(
             check_strides_kv
             and check_shapes_kv
             and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
-            and is_same_q_kv_format
         ):
             # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
             # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
             # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
             # check_ptrs_qk=True or check_ptrs_kv=True
-            qkv_layout = "_".join(list([qkv_format]) * 3)
-        elif (
-            check_strides_kv
-            and check_shapes_kv
-            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
-            and not is_same_q_kv_format
-        ):
-            # sbhd_bshd_bshd, bshd_sbhd_sbhd, thd_bshd_bshd, thd_sbhd_sbhd
-            # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
-            # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
-            # check_ptrs_qk=True or check_ptrs_kv=True
-            qkv_layout = q_format + "_" + kv_format + "_" + kv_format
+            if is_same_q_kv_format:
+                qkv_layout = "_".join(list([qkv_format]) * 3)
+            else:
+                qkv_layout = q_format + "_" + kv_format + "_" + kv_format
         else:
             qkv_layout = "not_supported"
 
@@ -5930,7 +5921,10 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_kwargs["deterministic"] = self.deterministic
                 fa_optional_forward_args_thd = []
                 if inference_params is not None:
-                    func = flash_attn_with_kvcache
+                    if _flash_attn_2_2_plus:
+                        func = flash_attn_with_kvcache
+                    if _use_flash_attn_3:
+                        func = flash_attn_with_kvcache_v3
                     fa_optional_forward_kwargs_kvcache = {}
                     cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     fa_optional_forward_kwargs_kvcache["cache_seqlens"] = cache_seqlens
