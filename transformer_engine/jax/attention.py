@@ -334,9 +334,9 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
 def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if strategy == ReorderStrategy.DualChunkSwap:
-        return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
     if strategy == ReorderStrategy.Striped:
-        return _reorder_causal_striped(tensor, cp_size, seq_dim)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
     raise ValueError(f"Unsupported {strategy=}")
 
 
@@ -345,48 +345,10 @@ def inverse_reorder_causal_load_balancing(
 ):
     """Inverse operation of `reorder_causal_load_balancing`."""
     if strategy == ReorderStrategy.DualChunkSwap:
-        return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
     if strategy == ReorderStrategy.Striped:
-        return _inverse_reorder_causal_striped(tensor, cp_size, seq_dim)
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
     raise ValueError(f"Unsupported {strategy=}")
-
-
-def _reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
-    origin_shape = tensor.shape
-    if origin_shape[seq_dim] % cp_size != 0:
-        raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
-            f" {origin_shape[seq_dim]=} and {cp_size=}"
-        )
-
-    new_shape = [
-        *origin_shape[:seq_dim],
-        *[origin_shape[seq_dim] // cp_size, cp_size],
-        *origin_shape[seq_dim + 1 :],
-    ]
-
-    chunked_tensor = tensor.reshape(new_shape)
-    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
-    return reordered_chunked_tensor.reshape(origin_shape)
-
-
-def _inverse_reorder_causal_striped(tensor, cp_size: int, seq_dim: int):
-    origin_shape = tensor.shape
-    if origin_shape[seq_dim] % cp_size != 0:
-        raise ValueError(
-            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
-            f" {origin_shape[seq_dim]=} and {cp_size=}"
-        )
-
-    new_shape = [
-        *origin_shape[:seq_dim],
-        *[cp_size, origin_shape[seq_dim] // cp_size],
-        *origin_shape[seq_dim + 1 :],
-    ]
-
-    chunked_tensor = tensor.reshape(new_shape)
-    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
-    return reordered_chunked_tensor.reshape(origin_shape)
 
 
 def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):

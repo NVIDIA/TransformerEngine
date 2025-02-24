@@ -534,7 +534,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
                 q, k, v, config.qkv_layout
             )
-            assert len(batch) == 1
+            assert len(batch) == 1, f"Expected len(batch) == 1, but got {len(batch)=}"
             kv_batch = q_batch = batch[0]
 
             # Gather valid q_seqlen, which is greater than 0
@@ -1081,7 +1081,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 register_primitive(FusedAttnBwdPrimitive)
 
 
-def reorder_causal_load_balancing(tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
+def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
     """Reorders a tensor for load balancing the compute of causal attention."""
     if cp_size == 1:
         return tensor
@@ -1131,6 +1131,33 @@ def reorder_causal_load_balancing(tensor, cp_size: int, seq_dim: int, to_contigu
     combined = jnp.stack(parts, axis=seq_dim)
 
     return combined.reshape(ori_tensor_shape)
+
+
+def reorder_causal_striped(tensor, cp_size: int, seq_dim: int, is_inverse: bool):
+    """Reorders a tensor for load balancing with striped pattern"""
+    origin_shape = tensor.shape
+    if origin_shape[seq_dim] % cp_size != 0:
+        raise ValueError(
+            "Expected origin_shape[seq_dim] is multiple of cp_size but got"
+            f" {origin_shape[seq_dim]=} and {cp_size=}"
+        )
+
+    if not is_inverse:
+        new_shape = [
+            *origin_shape[:seq_dim],
+            *[origin_shape[seq_dim] // cp_size, cp_size],
+            *origin_shape[seq_dim + 1 :],
+        ]
+    else:
+        new_shape = [
+            *origin_shape[:seq_dim],
+            *[cp_size, origin_shape[seq_dim] // cp_size],
+            *origin_shape[seq_dim + 1 :],
+        ]
+
+    chunked_tensor = tensor.reshape(new_shape)
+    reordered_chunked_tensor = jnp.swapaxes(chunked_tensor, seq_dim, seq_dim + 1)
+    return reordered_chunked_tensor.reshape(origin_shape)
 
 
 @dataclass(frozen=True)
@@ -1200,7 +1227,7 @@ class _FusedAttnCPWithAllGatherHelper:
             )
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_load_balancing(x, cp_size, 1, to_contiguous=True)
+                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=True)
             return x
 
         if self.config.qkv_layout.is_kvpacked():
@@ -1216,7 +1243,7 @@ class _FusedAttnCPWithAllGatherHelper:
         def rs(x):
             if self.config.context_parallel_load_balanced:
                 cp_size = get_mesh_axis_size(self.config.cp_axis, self.mesh)
-                x = reorder_causal_load_balancing(x, cp_size, 1, to_contiguous=False)
+                x = reorder_causal_dual_chunk_swap(x, cp_size, 1, to_contiguous=False)
 
             return lax_paral_op(
                 x,
