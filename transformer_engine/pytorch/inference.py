@@ -59,6 +59,54 @@ class InferenceParams:
     to efficiently cache previous tokens and reuse them for the current
     inference iteration.
 
+    A typical KV caching workflow is as follows.::
+
+      modules = [TransformerLayer() for _ in range(num_layers)]
+      model = torch.nn.Sequential(*modules)
+      inference_params = InferenceParams(max_batch_size, max_seqlen_kv, ...)
+      for i in range(inference_iterations):
+          # seq_ids = [0, 2, 3]
+          # step_lens = [10, 1, 1]
+          # step_dict = OrderedDict(zip(seq_ids, step_lens))
+          inference_params.pre_step(step_dict)
+          output = model(
+                ...,
+                inference_params=inference_params,
+                attn_mask_type="padding_causal",
+                )
+          # assume qkv_format = "bshd"
+          if inference_params.is_output_right_aligned:
+              output = output[:,-1]
+          else:
+              output = output[:,step_dict.values()]
+
+
+    The memory allocation and copies of the new KV tokens to KV cache take place
+    in the following locations.::
+
+      class TransformerLayer:
+          class MultiHeadAttention:
+              if self.layer_number not in inference_params:
+                  inference_params.allocate_memory(self.layer_number)
+          class DotProductAttention:
+              if inference_params is not None:
+                  q, k_cache, v_cache, qkv_format = inference_params.step(
+                      new_q, new_k, new_v, qkv_format)
+              output = attention(q, k_cache, v_cache, new_qkv_format)
+              if inference_params is not None:
+                  output = inference_params.post_step(output)
+              return output
+
+    InferenceParams supports cache_qkv_format = "bshd" only, and the step() function may
+    change qkv_format depending on the attention backend.
+
+    Backend                    | Before step()     | After step()
+    ------------------------------------------------------------------------------------
+    FusedAttention             | {bshd, sbhd, thd} | {bshd_2bshd, sbhd_2bshd, thd_2bshd}
+    FlashAttention             | {bshd, sbhd, thd} | {bshd, sbhd, thd}
+    UnfusedDotProductAttention | {bshd, sbhd, thd} | {bshd, sbhd, bshd}
+
+
     Parameters
     ----------
     max_batch_size: int

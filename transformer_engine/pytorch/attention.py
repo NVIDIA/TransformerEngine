@@ -514,11 +514,11 @@ def get_attention_backend(
             use_unfused_attention = False
 
     # Filter: KV cache
-    #    backend                 | non-paged/paged | precision
-    # ---------------------------------------------------------------------------------
-    # FlashAttention             | non-paged/paged | FP16/BF16
-    # FusedAttention             | non-paged/paged | FP16/BF16 (non-paged/paged), FP8 (non-paged)
-    # UnfusedDotProductAttention | non-paged/paged | FP32/FP16/BF16
+    #    backend                 | precision
+    # -------------------------------------------------------------------------
+    # FlashAttention             | FP16/BF16 (non-paged/paged)
+    # FusedAttention             | FP16/BF16 (non-paged/paged), FP8 (non-paged)
+    # UnfusedDotProductAttention | FP32/FP16/BF16 (non-paged/paged)
     if inference_params is not None:
         if context_parallel:
             logger.debug(
