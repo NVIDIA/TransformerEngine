@@ -99,7 +99,7 @@ struct Tensor {
 
   int numel() const {
     size_t acc = 1;
-    for (const auto dim: shape()) {
+    for (const auto dim : shape()) {
       acc *= dim;
     }
     return acc;
@@ -123,30 +123,30 @@ struct Tensor {
      * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=109569).
      */
     switch (scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING:
-      if (!has_data() && has_columnwise_data()) {
-        std::vector<size_t> ret;
-        if (!columnwise_data.shape.empty()) {
-          for (size_t i=1; i < columnwise_data.shape.size(); i++) {
-            ret.push_back(columnwise_data.shape[i]);
+      case NVTE_DELAYED_TENSOR_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> ret;
+          if (!columnwise_data.shape.empty()) {
+            for (size_t i = 1; i < columnwise_data.shape.size(); i++) {
+              ret.push_back(columnwise_data.shape[i]);
+            }
+            ret.push_back(columnwise_data.shape.front());
           }
-          ret.push_back(columnwise_data.shape.front());
+          return ret;
+        } else {
+          return data.shape;
         }
-        return ret;
-      } else {
-        return data.shape;
-      }
-      break;
-    case NVTE_MXFP8_1D_SCALING:
-      if (!has_data() && has_columnwise_data()) {
-        return columnwise_data.shape;
-      } else {
-        return data.shape;
-      }
-      break;
-    default:
-      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
-      return {};
+        break;
+      case NVTE_MXFP8_1D_SCALING:
+        if (!has_data() && has_columnwise_data()) {
+          return columnwise_data.shape;
+        } else {
+          return data.shape;
+        }
+        break;
+      default:
+        NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
+        return {};
     }
   }
 
@@ -156,10 +156,10 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_first_dim() const {
-    const auto& full_shape = shape();
+    const auto &full_shape = shape();
     size_t ret = 1;
     if (!full_shape.empty()) {
-      for (size_t i=0; i < full_shape.size() - 1; i++) {
+      for (size_t i = 0; i < full_shape.size() - 1; i++) {
         ret *= full_shape[i];
       }
     }
@@ -172,7 +172,7 @@ struct Tensor {
    * as a (D1*D2*...*D(n-1), Dn) matrix.
    */
   size_t flat_last_dim() const {
-    const auto& full_shape = shape();
+    const auto &full_shape = shape();
     if (full_shape.empty()) {
       return 1;
     } else {

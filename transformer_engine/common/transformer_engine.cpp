@@ -220,17 +220,16 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   switch (t.scaling_mode) {
-  case NVTE_DELAYED_TENSOR_SCALING:
-    {
+    case NVTE_DELAYED_TENSOR_SCALING: {
       if (!t.has_data() && t.has_columnwise_data()) {
         // We can infer tensor shape if FP8 tensor only has FP8 data
         // transpose. However, NVTEShape only contains a pointer and
         // cannot store temporary data. We hack around this by caching
         // the tensor shape within the empty FP8 data.
-        auto &shape_cache = const_cast<std::vector<size_t>&>(t.data.shape);
+        auto &shape_cache = const_cast<std::vector<size_t> &>(t.data.shape);
         shape_cache.clear();
         if (!t.columnwise_data.shape.empty()) {
-          for (size_t i=1; i < t.columnwise_data.shape.size(); i++) {
+          for (size_t i = 1; i < t.columnwise_data.shape.size(); i++) {
             shape_cache.push_back(t.columnwise_data.shape[i]);
           }
           shape_cache.push_back(t.columnwise_data.shape.front());
@@ -243,8 +242,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
       }
       break;
     }
-  case NVTE_MXFP8_1D_SCALING:
-    {
+    case NVTE_MXFP8_1D_SCALING: {
       if (!t.has_data() && t.has_columnwise_data()) {
         ret.data = t.columnwise_data.shape.data();
         ret.ndim = t.columnwise_data.shape.size();
@@ -254,9 +252,9 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
       }
       break;
     }
-  default:
-    NVTE_ERROR("Cannot parse tensor shape with scaling mode \"",
-               transformer_engine::to_string(t.scaling_mode), "\"");
+    default:
+      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"",
+                 transformer_engine::to_string(t.scaling_mode), "\"");
   }
 
   return ret;
@@ -273,21 +271,19 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   return ret;
 }
 
-size_t nvte_tensor_ndims(const NVTETensor tensor) {
-  return nvte_tensor_shape(tensor).ndim;
-}
+size_t nvte_tensor_ndims(const NVTETensor tensor) { return nvte_tensor_shape(tensor).ndim; }
 
 size_t nvte_tensor_size(const NVTETensor tensor, const size_t dim) {
   const auto &shape = nvte_tensor_shape(tensor);
-  NVTE_CHECK(0 <= dim && dim < shape.ndim,
-             "Attempted to access index ", dim, " in a shape array with ", shape.ndim, " entries");
+  NVTE_CHECK(0 <= dim && dim < shape.ndim, "Attempted to access index ", dim,
+             " in a shape array with ", shape.ndim, " entries");
   return shape.data[dim];
 }
 
 size_t nvte_tensor_numel(const NVTETensor tensor) {
   const auto &shape = nvte_tensor_shape(tensor);
   size_t numel = 1;
-  for (size_t i=0; i < shape.ndim; i++) {
+  for (size_t i = 0; i < shape.ndim; i++) {
     numel *= shape.data[i];
   }
   return numel;

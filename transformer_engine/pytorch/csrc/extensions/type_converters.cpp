@@ -4,13 +4,12 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "pybind.h"
-
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include "common.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 namespace detail {
@@ -26,12 +25,9 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
   }
 
   // FP8 data transpose
-  if (!tensor.attr("_transpose_invalid").cast<bool>()
-      && !tensor.attr("_transpose").is_none()) {
+  if (!tensor.attr("_transpose_invalid").cast<bool>() && !tensor.attr("_transpose").is_none()) {
     const auto &data_transpose = tensor.attr("_transpose").cast<at::Tensor>();
-    ret.set_columnwise_data(data_transpose.data_ptr(),
-                            fp8_dtype,
-                            getTensorShape(data_transpose));
+    ret.set_columnwise_data(data_transpose.data_ptr(), fp8_dtype, getTensorShape(data_transpose));
   }
 
   // Scale-inverse
@@ -59,9 +55,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
     const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
     ret.set_rowwise_data(data.data_ptr(), fp8_dtype, getTensorShape(data));
-    ret.set_rowwise_scale_inv(scale_inv.data_ptr(),
-                              DType::kFloat8E8M0,
-                              getTensorShape(scale_inv));
+    ret.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0, getTensorShape(scale_inv));
   }
 
   // Column-scaled data
@@ -69,8 +63,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
     const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     ret.set_columnwise_data(data.data_ptr(), fp8_dtype, getTensorShape(data));
-    ret.set_columnwise_scale_inv(scale_inv.data_ptr(),
-                                 DType::kFloat8E8M0,
+    ret.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat8E8M0,
                                  getTensorShape(scale_inv));
   }
 

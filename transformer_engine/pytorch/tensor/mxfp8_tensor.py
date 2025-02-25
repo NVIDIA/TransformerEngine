@@ -227,13 +227,11 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         if rowwise_usage:
             if self._rowwise_data is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, "
-                    "but MXFP8Tensor is missing row-scaled FP8 data"
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
                 )
             if self._rowwise_scale_inv is None:
                 raise RuntimeError(
-                    "Requested row-wise usage, "
-                    "but MXFP8Tensor is missing row-scaled scale-inverses"
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
                 )
         else:
             self._rowwise_data = None
@@ -243,8 +241,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         if columnwise_usage:
             if self._columnwise_data is None:
                 raise RuntimeError(
-                    "Requested column-wise usage, "
-                    "but MXFP8Tensor is missing column-scaled FP8 data"
+                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
                 )
             if self._columnwise_scale_inv is None:
                 raise RuntimeError(
