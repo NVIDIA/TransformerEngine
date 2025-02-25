@@ -310,6 +310,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 clear_tensor_data(ln_out, ln_out_total)
 
         if is_grad_enabled:
+
+            # Input with column-wise usage is needed for dgrad GEMM
+            if backward_needs_input:
+                if isinstance(ln_out, QuantizedTensor):
+                    ln_out.update_usage(rowwise_usage=False)
+
             if cpu_offloading:
                 if fp8 and weightmat is not None:
                     set_offloading_param(weightmat, "weight_offloading", True)
