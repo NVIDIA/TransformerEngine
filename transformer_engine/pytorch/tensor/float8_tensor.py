@@ -484,6 +484,8 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
 
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
+        if not devices_match(new_device, tensor.device):
+            tensor = tensor.to(device=new_device)
 
         # Just copy FP8 data if other tensor is Float8Tensor
         if isinstance(tensor, Float8Tensor):
