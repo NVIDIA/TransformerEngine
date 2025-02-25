@@ -426,6 +426,18 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+// Alignment requirements for the Tensor Memory Accelerator (TMA)
+constexpr int TMA_gmem_alignment = 16;    // global memory address alignment
+
+inline bool is_aligned_ptr(const void *const ptr, const int alignment) {
+  const uint64_t ptr_as_uint = reinterpret_cast<uint64_t>(ptr);
+  return ptr_as_uint % alignment == 0;
+}
+
+inline bool is_aligned_tensor_data(const Tensor *const t, const int alignment) {
+  return is_aligned_ptr(reinterpret_cast<void *>(t->data.dptr), alignment);
+}
+
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
@@ -464,8 +476,6 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 void checkCuDriverContext(CUstream stream);
 
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
-
-inline bool isPointerAligned(const void *const ptr, const int alignment);
 
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
