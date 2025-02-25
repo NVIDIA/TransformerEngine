@@ -95,7 +95,6 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   void *dataPtr =
       reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
 
-  constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
   NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
              "Tensor data pointer must be 16B aligned");
 
