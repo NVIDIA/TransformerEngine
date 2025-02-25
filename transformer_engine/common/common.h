@@ -427,7 +427,7 @@ constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
 // Alignment requirements for the Tensor Memory Accelerator (TMA)
-constexpr int TMA_gmem_alignment = 16;    // global memory address alignment
+constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
 
 inline bool is_aligned_ptr(const void *const ptr, const int alignment) {
   const uint64_t ptr_as_uint = reinterpret_cast<uint64_t>(ptr);
