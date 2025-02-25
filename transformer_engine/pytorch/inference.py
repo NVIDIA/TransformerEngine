@@ -320,7 +320,8 @@ class InferenceParams:
         self.batch_size = len(step_dict)
 
         self.sequences = self.cache_manager.pre_step(step_dict)
-        for k, v in enumerate(self.sequences):
+        self.sequences_pre = OrderedDict()
+        for k, v in self.sequences.items():
             self.sequences_pre[k] = v - self.step_dict[k]
 
         actual_batch_size = len(step_dict)
