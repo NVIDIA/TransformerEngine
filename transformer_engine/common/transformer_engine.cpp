@@ -227,7 +227,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
         // transpose. However, NVTEShape only contains a pointer and
         // cannot store temporary data. We hack around this by caching
         // the tensor shape within the empty FP8 data.
-        auto& shape_cache = const_cast<std::vector<size_t>&>(t.data.shape);
+        auto &shape_cache = const_cast<std::vector<size_t>&>(t.data.shape);
         shape_cache.clear();
         if (!t.columnwise_data.shape.empty()) {
           for (size_t i=1; i < t.columnwise_data.shape.size(); i++) {
@@ -235,9 +235,12 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
           }
           shape_cache.push_back(t.columnwise_data.shape.front());
         }
+        ret.data = shape_cache.data();
+        ret.ndim = shape_cache.size();
+      } else {
+        ret.data = t.data.shape.data();
+        ret.ndim = t.data.shape.size();
       }
-      ret.data = t.data.shape.data();
-      ret.ndim = t.data.shape.size();
       break;
     }
   case NVTE_MXFP8_1D_SCALING:
@@ -270,7 +273,7 @@ NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   return ret;
 }
 
-size_t nvte_tensor_ndim(const NVTETensor tensor) {
+size_t nvte_tensor_ndims(const NVTETensor tensor) {
   return nvte_tensor_shape(tensor).ndim;
 }
 

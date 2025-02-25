@@ -12,6 +12,7 @@
 #include <cudnn.h>
 #include <nvrtc.h>
 
+#include <iostream>
 #include <stdexcept>
 
 #include "../util/string.h"
