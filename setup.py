@@ -103,7 +103,9 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch", "triton"])
+            install_reqs.extend(["torch"])
+            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
+            # install_reqs.append("triton")
             test_reqs.extend(["numpy", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
