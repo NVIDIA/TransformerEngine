@@ -480,7 +480,7 @@ class _GroupedLinear(torch.autograd.Function):
                 # if torch.distributed.get_rank()==0:
                 #     breakpoint()
                 # Deallocate input tensor
-                clear_tensor_data(*inputmats)
+                # clear_tensor_data(*inputmats)
                 clear_tensor_data(*inputmats_t)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
@@ -608,7 +608,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
-        split_bw: bool = False,
+        split_bw: bool = True,
     ) -> None:
         super().__init__()
 
@@ -846,8 +846,8 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     def wgrad_comp(self):
         # print(f"before wgrad_comp rank {torch.distributed.get_rank()} {self.inputmats}")
-        # self.wgrad_store.pop()
-        pass
+        self.wgrad_store.pop()
+        # pass
         # self.wgrad_store.clear()
         # clear_tensor_data(*inputmats)
         # m_splits = self.args[4]

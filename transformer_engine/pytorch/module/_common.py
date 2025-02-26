@@ -328,6 +328,7 @@ class WeightGradStore:
             stored_grads = cls.weight_grad_queue[chunk].get()
             for inp, grad_out, dW, func in stored_grads:
                 func(inp, grad_out, dW)
+                clear_tensor_data(*inp)
         else:
             # rank = parallel_state.get_pipeline_model_parallel_rank()
             rank = torch.distributed.get_rank()
