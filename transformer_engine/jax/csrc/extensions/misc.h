@@ -26,5 +26,13 @@ struct Shape {
 
 std::vector<size_t> MakeShapeVector(NVTEShape shape);
 
+inline size_t product(const std::vector<size_t> &shape) {
+  size_t ret = 1;
+  for (const auto &elem : shape) {
+    ret *= elem;
+  }
+  return ret;
+}
+
 }  // namespace jax
 }  // namespace transformer_engine
