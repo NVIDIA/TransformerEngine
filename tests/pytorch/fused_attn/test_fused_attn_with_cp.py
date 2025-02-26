@@ -62,7 +62,7 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus < torch.cuda.device_count():
+    if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
 
     config = model_configs_flash_attn[model]
@@ -123,7 +123,7 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("fp8_mha", [False, True])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha):
     num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus < torch.cuda.device_count():
+    if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
 
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
