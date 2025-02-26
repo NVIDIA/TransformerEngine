@@ -387,13 +387,6 @@ class _GroupedLinear(torch.autograd.Function):
             def pre_func():
                 pass
             def grouped_gemm_wgrad(inp, grad_out, dW):
-                # print("grouped_gemm_wgrad")
-                # print(f"exec rank {torch.distributed.get_rank()} A: {inp[0]}")
-                # print(f"exec rank {torch.distributed.get_rank()} A': {ctx.inputmats[0]}")
-                # print(f"exec rank {torch.distributed.get_rank()} B: {grad_out[0]}")
-                # print(f"exec rank {torch.distributed.get_rank()} C: {dW[0]}")
-                # print(f"exec rank {torch.distributed.get_rank()} D: {wgrad_list[0]}")
-                # print(f"rank {torch.distributed.get_rank()} act: {ctx.activation_dtype}")
                 _, grad_biases, _ = grouped_gemm(
                     inp,
                     grad_out,
@@ -455,14 +448,8 @@ class _GroupedLinear(torch.autograd.Function):
                             accumulate=accumulate_wgrad_into_param_main_grad,
                         )
                 elif ctx.split_bw:
-                    # print(f"put rank {torch.distributed.get_rank()} A: {inputmats[0]}")
                     ctx.wgrad_store.put(inputmats, grad_output_mats, wgrad_list, grouped_gemm_wgrad)
                     ctx.wgrad_store.flush()
-                    # ctx.wgrad_store.pop()
-                    # if torch.distributed.get_rank()==0:
-                        # from watchpoints import watch
-                        # watch(inputmats)
-                    # grad_biases = grouped_gemm_wgrad()
                 else:
                     # WGRAD
                     _, grad_biases, _ = grouped_gemm(
@@ -477,8 +464,6 @@ class _GroupedLinear(torch.autograd.Function):
                         accumulate=accumulate_wgrad_into_param_main_grad,
                     )
 
-                # if torch.distributed.get_rank()==0:
-                #     breakpoint()
                 # Deallocate input tensor
                 # clear_tensor_data(*inputmats)
                 clear_tensor_data(*inputmats_t)
@@ -826,7 +811,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 *weight_tensors,
                 *bias_tensors,
             )
-            # self.args = args
             out = linear_fn(*args)
 
         if self.gemm_bias_unfused_add:
@@ -845,52 +829,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         return out
 
     def wgrad_comp(self):
-        # print(f"before wgrad_comp rank {torch.distributed.get_rank()} {self.inputmats}")
         self.wgrad_store.pop()
         # pass
         # self.wgrad_store.clear()
-        # clear_tensor_data(*inputmats)
-        # m_splits = self.args[4]
-        # num_gemms = len(m_splits)
-        # weights   = self.args[-2]
-        # biases    = self.args[-1]
-        # inp       = self.args[3]
-
-        # # Make sure input dimensions are compatible
-        # in_features = weights[0].shape[-1]
-        # assert inp.shape[-1] == in_features, "GEMM not possible"
-        # inputmats = torch.split(inp.view(-1, in_features), m_splits)
-
-        # # Cast input to expected dtype
-        # inputmats_no_fp8 = [cast_if_needed(mat, self.activation_dtype) for mat in inputmats]
-
-        # grad_output = grad_output.contiguous()
-        # grad_output_mats = torch.split(
-        #     grad_output.view(-1, grad_output.shape[-1]), m_splits
-        # )
-
-        # if self.fuse_wgrad_accumulation:
-        #     wgrad_list = [w.main_grad for w in weights]
-        # else:
-        #     wgrad_list = [
-        #         torch.empty(w.size(), dtype=self.activation_dtype, device=w.device)
-        #         for w in weights
-        #     ]
-        # is_first_microbatch = self.args[6]
-        # if is_first_microbatch is not None:
-        #     accumulate_wgrad_into_param_main_grad = (
-        #         self.fuse_wgrad_accumulation and not is_first_microbatch
-        #     )
-        # else:
-        #     accumulate_wgrad_into_param_main_grad = self.fuse_wgrad_accumulation
-        # _, grad_biases, _ = grouped_gemm(
-        #     inputmats_no_fp8,
-        #     grad_output_mats,
-        #     wgrad_list,
-        #     self.activation_dtype,
-        #     get_multi_stream_cublas_workspace(),
-        #     layout="NT",
-        #     grad=True,
-        #     use_bias=self.apply_bias and not self.gemm_bias_unfused_add,
-        #     accumulate=accumulate_wgrad_into_param_main_grad,
-        # )
