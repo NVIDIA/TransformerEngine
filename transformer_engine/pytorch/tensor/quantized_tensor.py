@@ -173,6 +173,12 @@ class Quantizer(abc.ABC):
         """Create shallow copy"""
         return copy.copy(self)
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Symbolic function for ONNX export"""
+
+    def onnx_dequantize(self, tensors: List[torch.Tensor]) -> torch.Tensor:
+        """Symbolic function for ONNX export"""
+
 
 class _QuantizeFunc(torch.autograd.Function):
     """Cast to FP8 from other dtype"""
