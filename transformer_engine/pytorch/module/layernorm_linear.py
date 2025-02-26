@@ -582,89 +582,90 @@ class _LayerNormLinear(torch.autograd.Function):
             elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                 dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-            wgrad = None
-            if weight.requires_grad:
-                if ctx.fp8:
-                    # WGRAD
-                    extra_output_tensor = None
-                    if ctx.ub_bulk_wgrad:
-                        if ub_obj_dgrad.is_fp8_ubuf():
-                            dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size())  # RS output
-                            extra_output_tensor = torch.empty(
-                                dim_size, dtype=ctx.activation_dtype, device=dgrad.device
-                            )
-                            dgrad = extra_output_tensor
-                        else:
-                            dgrad = ub_obj_dgrad.get_ubuf_output(0)
-                    if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
-                        wgrad, _ = pytex.fp8_gemm(
-                            ln_out_total_t,
-                            ln_out_scale_inv,
-                            0,
-                            fp8_dtype_forward,
-                            (
-                                grad_output_t._data
-                                if isinstance(grad_output_t, Float8Tensor)
-                                else grad_output_t
-                            ),
-                            ctx.fp8_meta["scaling_bwd"].scale_inv,
-                            tex.FP8BwdTensors.GRAD_OUTPUT1,
-                            fp8_dtype_backward,
-                            ctx.activation_dtype,
-                            get_workspace(),
-                            accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            use_split_accumulator=_2X_ACC_WGRAD,
-                            ub_algo=(
-                                tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
-                            ),
-                            ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
-                            extra_output_tensor=extra_output_tensor,
-                        )
-                        clear_tensor_data(ln_out_total_t, grad_output_t)
-                    else:
-                        ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
-                            ln_out_total,
-                            ln_out_scale_inv,
-                            0,
-                            fp8_dtype_forward,
-                            TE_DType[ctx.activation_dtype],
-                        )
-                        wgrad, _, _ = pytex.gemm(
-                            ln_out_total_c,
-                            grad_output,
-                            ctx.activation_dtype,
-                            get_workspace(),
-                            layout="NT",
-                            grad=True,
-                            accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            ub_algo=(
-                                tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
-                            ),
-                            ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
-                            extra_output_tensor=extra_output_tensor,
-                        )
-                        clear_tensor_data(ln_out_total_c)
-                else:
-                    # WGRAD
-                    wgrad, grad_bias, _ = pytex.gemm(
-                        ln_out_total,
-                        grad_output,
-                        ctx.activation_dtype,
-                        get_workspace(),
-                        layout="NT",
-                        grad=True,
-                        use_bias=ctx.use_bias,
-                        accumulate=accumulate_wgrad_into_param_main_grad,
-                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        ub_algo=tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
-                        ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
-                    )
-                    clear_tensor_data(ln_out_total)
-                    if ctx.ub_bulk_wgrad:
-                        dgrad = ub_obj_dgrad.get_ubuf_output(0)  # Reduce-scatter output
+            # print(f"rank {torch.distributed.get_rank()} start wgrad computation")
+            # wgrad = None
+            # if weight.requires_grad:
+            #     if ctx.fp8:
+            #         # WGRAD
+            #         extra_output_tensor = None
+            #         if ctx.ub_bulk_wgrad:
+            #             if ub_obj_dgrad.is_fp8_ubuf():
+            #                 dim_size = list(ub_obj_dgrad.get_ubuf_output(0).size())  # RS output
+            #                 extra_output_tensor = torch.empty(
+            #                     dim_size, dtype=ctx.activation_dtype, device=dgrad.device
+            #                 )
+            #                 dgrad = extra_output_tensor
+            #             else:
+            #                 dgrad = ub_obj_dgrad.get_ubuf_output(0)
+            #         if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+            #             ln_out_total_t = tex.fp8_transpose(ln_out_total, fp8_dtype_forward)
+            #             wgrad, _ = pytex.fp8_gemm(
+            #                 ln_out_total_t,
+            #                 ln_out_scale_inv,
+            #                 0,
+            #                 fp8_dtype_forward,
+            #                 (
+            #                     grad_output_t._data
+            #                     if isinstance(grad_output_t, Float8Tensor)
+            #                     else grad_output_t
+            #                 ),
+            #                 ctx.fp8_meta["scaling_bwd"].scale_inv,
+            #                 tex.FP8BwdTensors.GRAD_OUTPUT1,
+            #                 fp8_dtype_backward,
+            #                 ctx.activation_dtype,
+            #                 get_workspace(),
+            #                 accumulate=accumulate_wgrad_into_param_main_grad,
+            #                 out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #                 use_split_accumulator=_2X_ACC_WGRAD,
+            #                 ub_algo=(
+            #                     tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
+            #                 ),
+            #                 ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
+            #                 extra_output_tensor=extra_output_tensor,
+            #             )
+            #             clear_tensor_data(ln_out_total_t, grad_output_t)
+            #         else:
+            #             ln_out_total_c = torch.ops.tex_ts.cast_from_fp8_ts(
+            #                 ln_out_total,
+            #                 ln_out_scale_inv,
+            #                 0,
+            #                 fp8_dtype_forward,
+            #                 TE_DType[ctx.activation_dtype],
+            #             )
+            #             wgrad, _, _ = pytex.gemm(
+            #                 ln_out_total_c,
+            #                 grad_output,
+            #                 ctx.activation_dtype,
+            #                 get_workspace(),
+            #                 layout="NT",
+            #                 grad=True,
+            #                 accumulate=accumulate_wgrad_into_param_main_grad,
+            #                 out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #                 ub_algo=(
+            #                     tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None
+            #                 ),
+            #                 ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
+            #                 extra_output_tensor=extra_output_tensor,
+            #             )
+            #             clear_tensor_data(ln_out_total_c)
+            #     else:
+            #         # WGRAD
+            #         wgrad, grad_bias, _ = pytex.gemm(
+            #             ln_out_total,
+            #             grad_output,
+            #             ctx.activation_dtype,
+            #             get_workspace(),
+            #             layout="NT",
+            #             grad=True,
+            #             use_bias=ctx.use_bias,
+            #             accumulate=accumulate_wgrad_into_param_main_grad,
+            #             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #             ub_algo=tex.CommOverlapAlgo.BULK_OVERLAP_RS if ctx.ub_bulk_wgrad else None,
+            #             ub=ub_obj_dgrad if ctx.ub_bulk_wgrad else None,
+            #         )
+            #         clear_tensor_data(ln_out_total)
+            #         if ctx.ub_bulk_wgrad:
+            #             dgrad = ub_obj_dgrad.get_ubuf_output(0)  # Reduce-scatter output
 
             # Column Parallel Linear
             if (
@@ -713,28 +714,28 @@ class _LayerNormLinear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_bias = None
 
-        if weight.requires_grad:
-            # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(weight, "grad_added_to_main_grad"):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
-                    wgrad = torch.zeros(
-                        weight.main_grad.shape,
-                        dtype=weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
-                else:
-                    wgrad = torch.empty(
-                        weight.main_grad.shape,
-                        dtype=weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
-            elif ctx.fuse_wgrad_accumulation:
-                wgrad = None
-        else:
-            wgrad = None
+        # if weight.requires_grad:
+        #     # Handle custom DDP from mcore.
+        #     if ctx.fuse_wgrad_accumulation and hasattr(weight, "grad_added_to_main_grad"):
+        #         weight.grad_added_to_main_grad = True
+        #         if getattr(weight, "zero_out_wgrad", False):
+        #             wgrad = torch.zeros(
+        #                 weight.main_grad.shape,
+        #                 dtype=weight.dtype,
+        #                 device=torch.cuda.current_device(),
+        #                 requires_grad=False,
+        #             )
+        #         else:
+        #             wgrad = torch.empty(
+        #                 weight.main_grad.shape,
+        #                 dtype=weight.dtype,
+        #                 device=torch.cuda.current_device(),
+        #                 requires_grad=False,
+        #             )
+        #     elif ctx.fuse_wgrad_accumulation:
+        #         wgrad = None
+        # else:
+        #     wgrad = None
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
@@ -747,7 +748,7 @@ class _LayerNormLinear(torch.autograd.Function):
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             dgamma,
             dbeta,
-            wgrad,
+            None, # wgrad,
             None,  # weight_fp8
             grad_bias,
             None,  # use_bias

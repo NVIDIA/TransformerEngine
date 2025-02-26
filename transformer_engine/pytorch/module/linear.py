@@ -513,70 +513,70 @@ class _Linear(torch.autograd.Function):
                 elif ctx.parallel_mode == "column" and ctx.tensor_parallel:
                     dgrad, handle = allreduce(dgrad, ctx.tp_group, async_op=True)
 
-            wgrad = None
-            if weight.requires_grad:
-                if ctx.fp8:
-                    # WGRAD
-                    if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
-                        if ctx.ub_overlap_ag:
-                            if isinstance(grad_output_c, Float8Tensor):
-                                grad_output_t = grad_output_c.transpose_2d()
-                            else:
-                                grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
-                        if inputmat_t_total is None:
-                            if isinstance(inputmat_total, Float8Tensor):
-                                inputmat_t_total = inputmat_total.transpose_2d()
-                            else:
-                                inputmat_t_total = tex.fp8_transpose(
-                                    inputmat_total, fp8_dtype_backward
-                                )
-                        wgrad, _ = fp8_gemm(
-                            (
-                                inputmat_t_total._data
-                                if isinstance(inputmat_t_total, Float8Tensor)
-                                else inputmat_t_total
-                            ),
-                            inputmat_scale_inv,
-                            0,
-                            fp8_dtype_forward,
-                            grad_output_t,
-                            ctx.fp8_meta["scaling_bwd"].scale_inv,
-                            tex.FP8BwdTensors.GRAD_OUTPUT1,
-                            fp8_dtype_backward,
-                            ctx.activation_dtype,
-                            get_workspace(),
-                            accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                            use_split_accumulator=_2X_ACC_WGRAD,
-                        )
-                    else:
-                        wgrad, _, _ = gemm(
-                            inputmat_total,
-                            grad_output,
-                            ctx.activation_dtype,
-                            get_workspace(),
-                            layout="NT",
-                            grad=True,
-                            accumulate=accumulate_wgrad_into_param_main_grad,
-                            out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                        )
-                else:
-                    # WGRAD
-                    wgrad, grad_bias, _ = gemm(
-                        inputmat_total,
-                        grad_output,
-                        ctx.activation_dtype,
-                        get_workspace(),
-                        layout="NT",
-                        grad=True,
-                        use_bias=ctx.use_bias,
-                        accumulate=accumulate_wgrad_into_param_main_grad,
-                        out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
-                    )
+            # wgrad = None
+            # if weight.requires_grad:
+            #     if ctx.fp8:
+            #         # WGRAD
+            #         if not ctx.fp8_meta["recipe"].override_linear_precision.wgrad:
+            #             if ctx.ub_overlap_ag:
+            #                 if isinstance(grad_output_c, Float8Tensor):
+            #                     grad_output_t = grad_output_c.transpose_2d()
+            #                 else:
+            #                     grad_output_t = tex.fp8_transpose(grad_output_c, fp8_dtype_backward)
+            #             if inputmat_t_total is None:
+            #                 if isinstance(inputmat_total, Float8Tensor):
+            #                     inputmat_t_total = inputmat_total.transpose_2d()
+            #                 else:
+            #                     inputmat_t_total = tex.fp8_transpose(
+            #                         inputmat_total, fp8_dtype_backward
+            #                     )
+            #             wgrad, _ = fp8_gemm(
+            #                 (
+            #                     inputmat_t_total._data
+            #                     if isinstance(inputmat_t_total, Float8Tensor)
+            #                     else inputmat_t_total
+            #                 ),
+            #                 inputmat_scale_inv,
+            #                 0,
+            #                 fp8_dtype_forward,
+            #                 grad_output_t,
+            #                 ctx.fp8_meta["scaling_bwd"].scale_inv,
+            #                 tex.FP8BwdTensors.GRAD_OUTPUT1,
+            #                 fp8_dtype_backward,
+            #                 ctx.activation_dtype,
+            #                 get_workspace(),
+            #                 accumulate=accumulate_wgrad_into_param_main_grad,
+            #                 out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #                 use_split_accumulator=_2X_ACC_WGRAD,
+            #             )
+            #         else:
+            #             wgrad, _, _ = gemm(
+            #                 inputmat_total,
+            #                 grad_output,
+            #                 ctx.activation_dtype,
+            #                 get_workspace(),
+            #                 layout="NT",
+            #                 grad=True,
+            #                 accumulate=accumulate_wgrad_into_param_main_grad,
+            #                 out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #             )
+            #     else:
+            #         # WGRAD
+            #         wgrad, grad_bias, _ = gemm(
+            #             inputmat_total,
+            #             grad_output,
+            #             ctx.activation_dtype,
+            #             get_workspace(),
+            #             layout="NT",
+            #             grad=True,
+            #             use_bias=ctx.use_bias,
+            #             accumulate=accumulate_wgrad_into_param_main_grad,
+            #             out=weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+            #         )
 
-                # Deallocate input tensor
-                clear_tensor_data(inputmat_total)
-                clear_tensor_data(inputmat_t_total)
+            #     # Deallocate input tensor
+            #     clear_tensor_data(inputmat_total)
+            #     clear_tensor_data(inputmat_t_total)
 
             # Column Parallel Linear
             if ctx.parallel_mode == "column" and ctx.tensor_parallel and handle is not None:
@@ -585,28 +585,28 @@ class _Linear(torch.autograd.Function):
             if not ctx.use_bias:
                 grad_bias = None
 
-        if weight.requires_grad:
-            # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(weight, "grad_added_to_main_grad"):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
-                    wgrad = torch.zeros(
-                        weight.main_grad.shape,
-                        dtype=weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
-                else:
-                    wgrad = torch.empty(
-                        weight.main_grad.shape,
-                        dtype=weight.dtype,
-                        device=torch.cuda.current_device(),
-                        requires_grad=False,
-                    )
-            elif ctx.fuse_wgrad_accumulation:
-                wgrad = None
-        else:
-            wgrad = None
+        # if weight.requires_grad:
+        #     # Handle custom DDP from mcore.
+        #     if ctx.fuse_wgrad_accumulation and hasattr(weight, "grad_added_to_main_grad"):
+        #         weight.grad_added_to_main_grad = True
+        #         if getattr(weight, "zero_out_wgrad", False):
+        #             wgrad = torch.zeros(
+        #                 weight.main_grad.shape,
+        #                 dtype=weight.dtype,
+        #                 device=torch.cuda.current_device(),
+        #                 requires_grad=False,
+        #             )
+        #         else:
+        #             wgrad = torch.empty(
+        #                 weight.main_grad.shape,
+        #                 dtype=weight.dtype,
+        #                 device=torch.cuda.current_device(),
+        #                 requires_grad=False,
+        #             )
+        #     elif ctx.fuse_wgrad_accumulation:
+        #         wgrad = None
+        # else:
+        #     wgrad = None
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
@@ -616,7 +616,7 @@ class _Linear(torch.autograd.Function):
             _fsdp_scatter_tensors(ctx.fsdp_group, weight_fp8)
 
         return (
-            wgrad,
+            None,  # wgrad,
             None,  # weight_fp8
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
             grad_bias,
