@@ -334,6 +334,14 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         """
         self._transpose_invalid = True
 
+    def remove_caches(self) -> None:
+        """
+        Remove transpose cache and mark it as invalid.
+        """
+        self._transpose_invalid = True
+        del self._transpose  # explicitly deletes the data for safety
+        self._transpose = None
+
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._data = torch.Tensor() if self._data is not None else None
