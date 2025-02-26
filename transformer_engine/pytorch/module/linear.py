@@ -27,6 +27,7 @@ from ..utils import (
     divide,
     init_method_constant,
     non_tn_fp8_gemm_supported,
+    assert_dim_for_fp8_exec,
     nvtx_range_pop,
     nvtx_range_push,
     requires_grad,
@@ -118,13 +119,14 @@ class _Linear(torch.autograd.Function):
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
         nvtx_range_push(f"{nvtx_label}.input_cast_comm")
-        inputmat = inp
+        inputmat = inp.view(-1, in_features)
         inputmat_total = None
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
         own_quantized_input = False
         if fp8:
+            assert_dim_for_fp8_exec(inputmat, weight)
             if (
                 any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
                 and not FP8GlobalStateManager.get_fp8_recipe().delayed()
@@ -606,7 +608,12 @@ class _Linear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    wgrad = None
+                    wgrad = torch.empty(
+                        weight.main_grad.shape,
+                        dtype=weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:

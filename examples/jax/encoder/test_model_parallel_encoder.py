@@ -56,7 +56,6 @@ class Net(nn.Module):
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
             enable_sequence_parallel=self.enable_seq_paral,
-            dtype=jnp.bfloat16,
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
@@ -72,17 +71,15 @@ class Net(nn.Module):
             features=256,
             kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
             bias_axes=(NAMED_TP_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
         x = te_flax.DenseGeneral(
             features=256,
             kernel_axes=(NAMED_TP_AXIS, NAMED_BROADCAST_AXIS),
             bias_axes=(NAMED_BROADCAST_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
-        x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
+        x = nn.Dense(features=2)(x)
         return x
 
 
@@ -91,7 +88,7 @@ def train_step(state, inputs, masks, labels, var_collect, rngs):
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
-        one_hot = jax.nn.one_hot(labels, 2)
+        one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
@@ -136,7 +133,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
-        one_hot = jax.nn.one_hot(labels, 2)
+        one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
