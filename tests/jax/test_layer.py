@@ -265,8 +265,8 @@ class BaseRunner:
         """Test only the forward"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
+        ref_layer_cls = partial(self.reference_layer, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, **self.attrs)
 
         ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
@@ -288,8 +288,8 @@ class BaseRunner:
         """Test forward and backward through value_and_grad()"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
+        ref_layer_cls = partial(self.reference_layer, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, **self.attrs)
 
         ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)

@@ -556,13 +556,16 @@ class FusedAttnRunner:
         else:
             match self.seq_desc_format:
                 case SeqDescFormat.Mask:
-                    self.sequence_desciptor = make_mask(
-                        self.segment_ids_q,
-                        self.segment_ids_kv,
-                        self.segment_pos_q,
-                        self.segment_pos_kv,
-                        self.attn_mask_type,
-                    )
+                    if self.attn_mask_type == AttnMaskType.NO_MASK:
+                        self.sequence_desciptor = None
+                    else:
+                        self.sequence_desciptor = make_mask(
+                            self.segment_ids_q,
+                            self.segment_ids_kv,
+                            self.segment_pos_q,
+                            self.segment_pos_kv,
+                            self.attn_mask_type,
+                        )
                 case SeqDescFormat.Seqlens:
                     self.sequence_desciptor = SequenceDescriptor.from_seqlens(
                         (

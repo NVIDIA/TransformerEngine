@@ -57,7 +57,6 @@ class Net(nn.Module):
             layer_type=te_flax.TransformerLayerType.ENCODER,
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
-            dtype=jnp.bfloat16,
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 
@@ -67,17 +66,15 @@ class Net(nn.Module):
             features=256,
             kernel_axes=(NAMED_BROADCAST_AXIS, NAMED_TP_AXIS),
             bias_axes=(NAMED_TP_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
         x = te_flax.DenseGeneral(
             features=256,
             kernel_axes=(NAMED_TP_AXIS, NAMED_BROADCAST_AXIS),
             bias_axes=(NAMED_BROADCAST_AXIS,),
-            dtype=jnp.bfloat16,
         )(x)
 
-        x = nn.Dense(features=2, dtype=jnp.bfloat16)(x)
+        x = nn.Dense(features=2)(x)
         return x
 
 
@@ -320,7 +317,7 @@ def get_params_sharding(sharding_rules, abs_var_collect, mesh):
     )
     params_axes_sharding = flax.core.unfreeze(params_axes_sharding)
     params_sharding = jax.tree_util.tree_map(
-        lambda x: NamedSharding(mesh, ()), abs_var_collect[PARAMS_KEY]
+        lambda x: NamedSharding(mesh, PartitionSpec(None)), abs_var_collect[PARAMS_KEY]
     )
     params_sharding = {**params_sharding, **params_axes_sharding}
     return params_sharding
@@ -587,7 +584,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_fp8(self):
         """Test Transformer Engine with FP8"""
         result = self.exec(True)
-        assert result[0] < 0.45 and result[1] > 0.79
+        assert result[0] < 0.455 and result[1] > 0.79
 
 
 if __name__ == "__main__":

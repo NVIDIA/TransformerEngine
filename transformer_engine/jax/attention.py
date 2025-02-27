@@ -950,7 +950,7 @@ def fused_attn(
                              AttnBiasType.NO_BIAS, AttnMaskType.PADDING_CAUSAL_MASK,
                              QKVLayout.T3HD, 0.125, 0, True, 3)
     """
-    if isinstance(sequence_descriptor, jnp.ndarray):
+    if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
         warnings.warn(
             "Pass mask to fused_attn is deprecated, please use SequenceDescriptor instead. "
             + "See help(transformer_engine.jax.attention.SequenceDescriptor) for details.",

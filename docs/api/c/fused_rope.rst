@@ -3,7 +3,8 @@
 
     See LICENSE for license information.
 
-rmsnorm.h
+fused_rope.h
 ============
 
-.. doxygenfile:: rmsnorm.h
+.. doxygenfile:: fused_rope.h
+

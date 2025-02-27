@@ -137,7 +137,9 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
         super().__init__()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
+        retrieve_identifier = self.offload_handler.tensor_push(
+            tensor.data, **self.handler_extra_kwargs
+        )
         return retrieve_identifier
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:

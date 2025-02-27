@@ -1400,7 +1400,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
 
-def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
+def _test_grouped_linear_accuracy(
+    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+):
     reset_rng_states()
     if fp8:
         FP8GlobalStateManager.reset()
@@ -1447,7 +1449,11 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, f
     outputs = [out, inp_hidden_states.grad]
     for p in block.parameters():
         if p.requires_grad:
-            outputs.append(p.grad)
+            if getattr(p, "main_grad", None) is not None:
+                outputs.append(p.main_grad)
+                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+            else:
+                outputs.append(p.grad)
     return outputs
 
 
@@ -1458,8 +1464,17 @@ def _test_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, f
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_grouped_linear_accuracy(
-    dtype, num_gemms, bs, model, fp8, recipe, fp8_model_params, parallel_mode=None
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    parallel_mode=None,
 ):
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -1481,6 +1496,7 @@ def test_grouped_linear_accuracy(
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
         ).eval()
         sequential_linear = torch.nn.ModuleList(
             [
@@ -1491,6 +1507,7 @@ def test_grouped_linear_accuracy(
                     params_dtype=dtype,
                     parallel_mode=parallel_mode,
                     device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
                 ).eval()
                 for _ in range(num_gemms)
             ]
@@ -1501,12 +1518,16 @@ def test_grouped_linear_accuracy(
         for i in range(num_gemms):
             sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
             sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if fuse_wgrad_accumulation:
+                weight_i = getattr(grouped_linear, f"weight{i}")
+                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
 
     outputs_ref = _test_grouped_linear_accuracy(
-        sequential_linear, num_gemms, bs, dtype, config, recipe, fp8
+        sequential_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
     )
     outputs = _test_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
     )
 
     # Shoule be bit-wise match
@@ -1527,6 +1548,7 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
         recipe=recipe,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
+        fuse_wgrad_accumulation=True,
     )
 
 
@@ -1541,6 +1563,7 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         fp8=True,
         recipe=recipe,
         fp8_model_params=True,
+        fuse_wgrad_accumulation=True,
     )
 
 
@@ -2131,21 +2154,30 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
 
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
-        B = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
-        out = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # output
+        B = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
+        out = [torch.randn(m, n, dtype=dtype, device="cuda")]  # output
+        out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = False
+        single_output = True
     elif layout == "NN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
-        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
-        out = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # dgrad
+        B = list(
+            torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
+        )  # grad_output
+        out = [torch.randn(m, k, dtype=dtype, device="cuda")]  # dgrad
+        out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = True
+        single_output = True
     else:  # layout == "NT"
-        A = torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits)  # input
-        B = torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)  # grad_output
+        A = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
+        B = list(
+            torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
+        )  # grad_output
         out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        out_ref = [o.clone() for o in out]
         grad = True
+        single_output = False
 
-    out_ref = [o.clone() for o in out]
     for i in range(z):
         general_gemm(
             A[i],
@@ -2157,17 +2189,20 @@ def test_grouped_gemm(shape, dtype, layout, accumulate):
             layout=layout,
             out=out_ref[i],
         )
+    if single_output:
+        out_ref = [torch.cat(out_ref)]
 
     general_grouped_gemm(
         A,
-        list(B),
-        list(out),
+        B,
+        out,
         dtype,
         get_multi_stream_cublas_workspace(),
-        m_splits=[k] * n,  # TODO, not sure
+        m_splits=m_splits,
         grad=grad,
         accumulate=accumulate,
         layout=layout,
+        single_output=single_output,
     )
 
     # should be bit-wise match
@@ -2190,7 +2225,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
         pytest.skip(reason_for_no_fp8)
 
     z, m, k, n = shape
-    m_splits = m // z
+    m_splits = [m // z] * z
 
     dtype = torch.bfloat16
     A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
@@ -2242,7 +2277,7 @@ def test_fp8_grouped_gemm(shape, fp8_dtype, accumulate):
         out,
         dtype,
         get_multi_stream_cublas_workspace(),
-        m_splits=[k] * m_splits,
+        m_splits=m_splits,
         accumulate=accumulate,
     )
 

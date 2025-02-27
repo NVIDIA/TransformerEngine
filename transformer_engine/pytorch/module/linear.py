@@ -22,12 +22,15 @@ from .base import (
 from ._common import noop_cat, _fix_gathered_fp8_transpose
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
-    divide,
     cast_if_needed,
     clear_tensor_data,
+    divide,
     init_method_constant,
-    requires_grad,
     non_tn_fp8_gemm_supported,
+    assert_dim_for_fp8_exec,
+    nvtx_range_pop,
+    nvtx_range_push,
+    requires_grad,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -101,6 +104,11 @@ class _Linear(torch.autograd.Function):
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
+        # NVTX label for profiling
+        nvtx_label = "transformer_engine._Linear.forward"
+        if ub_name is not None:
+            nvtx_label = f"{nvtx_label}.{ub_name}"
+
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
@@ -111,13 +119,15 @@ class _Linear(torch.autograd.Function):
 
         # Prepare input tensor
         # Note: Cast to expected dtype and perform tensor-parallel communication
-        inputmat = inp
+        nvtx_range_push(f"{nvtx_label}.input_cast_comm")
+        inputmat = inp.view(-1, in_features)
         inputmat_total = None
         with_input_all_gather_nccl = (
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
         own_quantized_input = False
         if fp8:
+            assert_dim_for_fp8_exec(inputmat, weight)
             if (
                 any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
                 and not FP8GlobalStateManager.get_fp8_recipe().delayed()
@@ -154,6 +164,7 @@ class _Linear(torch.autograd.Function):
                 inputmat_total, _ = gather_along_first_dim(inputmat, tp_group)
             else:
                 inputmat_total = inputmat
+        nvtx_range_pop(f"{nvtx_label}.input_cast_comm")
 
         # Cast weight to expected dtype
         weightmat = weight
@@ -223,6 +234,7 @@ class _Linear(torch.autograd.Function):
             if hasattr(recipe, 'fp8_gemm_fprop'):
                 fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
+        nvtx_range_push(f"{nvtx_label}.gemm")
         out, *_, rs_out = general_gemm(
             weightmat,
             inputmat_total,
@@ -235,6 +247,7 @@ class _Linear(torch.autograd.Function):
             ub_type=ub_type,
             extra_output=rs_out,
         )
+        nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if is_grad_enabled:
             saved_inputmat = None
@@ -251,12 +264,14 @@ class _Linear(torch.autograd.Function):
 
             # Scatter intermediate/activation tensors saved for the backward pass
             # NOTE: FSDP sharding is not valid for models initialized with primary Fp8 weights
+            nvtx_range_push(f"{nvtx_label}.fsdp_scatter")
             ctx.fsdp_group = fsdp_group
             ctx.fsdp_shapes = _fsdp_scatter_tensors(
                 fsdp_group,
                 saved_inputmat,
                 weightmat if fp8 and not isinstance(weight, QuantizedTensor) else None,
             )
+            nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
@@ -307,10 +322,12 @@ class _Linear(torch.autograd.Function):
         if ub_overlap_rs_fprop:
             out = rs_out
         elif parallel_mode == "row":
+            nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
             if sequence_parallel:
                 out, _ = reduce_scatter_along_first_dim(out, tp_group)
             elif tensor_parallel:
                 out, _ = allreduce(out, tp_group)
+            nvtx_range_pop(f"{nvtx_label}.row_parallel_comm")
 
         out = out.view(-1, *inp_shape[1:-1], out_features)
         return out
@@ -318,6 +335,11 @@ class _Linear(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         # pylint: disable=missing-function-docstring
+
+        # NVTX label for profiling
+        nvtx_label = "transformer_engine._Linear.backward"
+        if ctx.ub_name is not None:
+            nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
 
         with torch.cuda.nvtx.range("_Linear_backward"):
             if (
@@ -356,12 +378,14 @@ class _Linear(torch.autograd.Function):
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
             #       shards/unshards the base weights so we don't do it ourselves
+            nvtx_range_push(f"{nvtx_label}.fsdp_gather")
             _fsdp_gather_tensors(
                 ctx.fsdp_group,
                 ctx.fsdp_shapes,
                 inputmat,
                 weight_fp8,
             )
+            nvtx_range_pop(f"{nvtx_label}.fsdp_gather")
 
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
@@ -433,12 +457,14 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
                     quantizer.set_usage(rowwise=True, columnwise=True)
+                nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
                 inputmat_total, inputmat_total_work = gather_along_first_dim(
                     inputmat,
                     ctx.tp_group,
                     async_op=True,
                     quantizer=quantizer,
                 )
+                nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_input")
             else:
                 inputmat_total = inputmat
 
@@ -466,6 +492,7 @@ class _Linear(torch.autograd.Function):
                     if hasattr(recipe, 'fp8_gemm_dgrad'):
                         dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
 
+                nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
                 dgrad, *_, rs_out = general_gemm(
                     weight_fp8,
                     grad_output,
@@ -481,11 +508,13 @@ class _Linear(torch.autograd.Function):
                     extra_output=rs_out,
                     bulk_overlap=ctx.ub_bulk_dgrad,
                 )
+                nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
                 # Launch tensor-parallel communication
                 if ctx.ub_overlap_rs_dgrad:
                     dgrad = rs_out
                 elif ctx.parallel_mode == "column" and not ctx.ub_bulk_wgrad:
+                    nvtx_range_push(f"{nvtx_label}.column_parallel_comm_dgrad")
                     if ctx.sequence_parallel:
                         dgrad, dgrad_work = reduce_scatter_along_first_dim(
                             dgrad,
@@ -494,6 +523,7 @@ class _Linear(torch.autograd.Function):
                         )
                     else:
                         dgrad, dgrad_work = allreduce(dgrad, ctx.tp_group, async_op=True)
+                    nvtx_range_pop(f"{nvtx_label}.column_parallel_comm_dgrad")
 
             # Compute grad weight tensor
             wgrad = None
@@ -536,6 +566,7 @@ class _Linear(torch.autograd.Function):
                     if hasattr(recipe, 'fp8_gemm_wgrad'):
                         wgrad_gemm_use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
+                nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
                 wgrad, grad_bias_, _, rs_out = general_gemm(
                     inputmat_total,
                     grad_output,
@@ -554,6 +585,7 @@ class _Linear(torch.autograd.Function):
                     extra_output=rs_out,
                     bulk_overlap=ctx.ub_bulk_wgrad,
                 )
+                nvtx_range_pop(f"{nvtx_label}.wgrad_gemm")
 
                 if ctx.ub_bulk_wgrad:
                     if ub_obj_wgrad.is_fp8_ubuf():
@@ -597,7 +629,12 @@ class _Linear(torch.autograd.Function):
                         requires_grad=False,
                     )
                 else:
-                    wgrad = None
+                    wgrad = torch.empty(
+                        weight.main_grad.shape,
+                        dtype=weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:

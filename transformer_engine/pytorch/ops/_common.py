@@ -16,6 +16,7 @@ from ..utils import (
     canonicalize_device,
     canonicalize_dtype,
     devices_match,
+    torch_version,
 )
 
 
@@ -98,8 +99,13 @@ def maybe_autocast_dtype(
     default_dtype: Optional[torch.dtype] = None,
 ) -> torch.dtype:
     """Get autocast dtype if enabled"""
-    if torch.is_autocast_enabled(device_type):
-        return torch.get_autocast_dtype(device_type)
+
+    if torch_version() >= (2, 4, 3):
+        if torch.is_autocast_enabled(device_type):
+            return torch.get_autocast_dtype(device_type)
+    else:
+        if torch.is_autocast_enabled():
+            return torch.get_autocast_gpu_dtype()
     return canonicalize_dtype(default_dtype)
 
 

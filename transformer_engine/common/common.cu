@@ -67,11 +67,6 @@ CUtensorMapDataType get_CUtensorMapDataType(DType dtype) {
   return dtypeMapping.at(dtype);
 }
 
-inline bool isPointerAligned(const void *const ptr, const int alignment) {
-  const uint64_t ptr_as_uint = reinterpret_cast<uint64_t>(ptr);
-  return ptr_as_uint % alignment == 0;
-}
-
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
                           const uint64_t globalY, const uint64_t globalX, const uint32_t shmemY,
@@ -100,8 +95,7 @@ void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
   void *dataPtr =
       reinterpret_cast<void *>(reinterpret_cast<uint8_t *>(tensor.dptr) + offset_elems * type_size);
 
-  constexpr int TMA_gmem_alignment = 16;  // Alignment of the global memory address
-  NVTE_CHECK(isPointerAligned(dataPtr, TMA_gmem_alignment),
+  NVTE_CHECK(is_aligned_ptr(dataPtr, TMA_gmem_alignment),
              "Tensor data pointer must be 16B aligned");
 
   const int TMA_needed_size = TMA_gmem_alignment / type_size;

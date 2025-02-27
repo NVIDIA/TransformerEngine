@@ -153,7 +153,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         // TODO(cyang): replace with cudnn-frontend check_support for cleaner logic and better error messaging
         // special conditions for blackwell
         // TODO: enable THD max_t in f16_arbitrary_seqlen when support becomes available in 9.7
-        !(sm_arch_ == 100 && (head_dim_qk > 128 || head_dim_v > 128)) &&
+        !(sm_arch_ >= 100 && (head_dim_qk > 128 || head_dim_v > 128)) &&
         // architecture
         ((cudnn_runtime_version >= 8903 && sm_arch_ >= 80) ||
          (cudnn_runtime_version < 8903 && (sm_arch_ == 80 || sm_arch_ == 90))) &&
@@ -238,12 +238,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
            ((window_size_left >= 0 || window_size_left == -1) && window_size_right == 0 &&
             ((attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK &&
               // TODO(cyang): fix bug for BRCM + cross-attention on sm100
-              (sm_arch_ < 100 || (sm_arch_ == 100 && ((max_seqlen_q == max_seqlen_kv &&
+              (sm_arch_ < 100 || (sm_arch_ >= 100 && ((max_seqlen_q == max_seqlen_kv &&
                                                        cudnn_runtime_version <= 90700) ||
                                                       cudnn_runtime_version > 90700)))) ||
              attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
              (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
-              (sm_arch_ < 100 || (sm_arch_ == 100 && ((max_seqlen_q == max_seqlen_kv &&
+              (sm_arch_ < 100 || (sm_arch_ >= 100 && ((max_seqlen_q == max_seqlen_kv &&
                                                        cudnn_runtime_version <= 90700) ||
                                                       cudnn_runtime_version > 90700))))) &&
             max_seqlen_q <= max_seqlen_kv && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
