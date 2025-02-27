@@ -410,5 +410,4 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
     float zero = 0.0f;
     cudaMemcpyAsync(t.amax.dptr, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
   }
-  cudaStreamSynchronize(stream);
 }
