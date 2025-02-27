@@ -293,7 +293,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
 
         """
         return [self], None
-    
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
