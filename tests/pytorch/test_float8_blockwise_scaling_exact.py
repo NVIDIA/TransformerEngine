@@ -72,7 +72,7 @@ def initialize_for_many_scales(
         (1024, 256),
         # Padding required cases
         (256, 272),
-        (300, 300),
+        (303, 300),
         (305, 256),
         # Some larger tiles.
         (2000, 2000),
@@ -155,17 +155,15 @@ def test_quantization_block_tiling_versus_reference(
 
     # Check
     torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
-    if tile_size[0] != 1:
-        # Zero out values that are don't care values
-        # cuBLAS has padding of 2D tensors.
-        scale_mask = torch.ones(
-            (math.ceil(M / tile_size[0]), math.ceil(N / tile_size[1])), device=sx.device
-        )
-        scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
-            QuantizeResult(qx, scale_mask, None, None), tile_size
-        ).scale
-        sx = sx * scale_mask
-
+    # Zero out values that are don't care values
+    # Scale format has padding.
+    scale_mask = torch.ones(
+        (math.ceil(M / tile_size[0]), math.ceil(N / tile_size[1])), device=sx.device
+    )
+    scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
+        QuantizeResult(qx, scale_mask, None, None), tile_size
+    ).scale
+    sx = sx * scale_mask
     torch.testing.assert_close(sx, sx_ref, atol=0.0, rtol=0.0)
 
     if return_transpose:
@@ -174,15 +172,14 @@ def test_quantization_block_tiling_versus_reference(
         assert qx_t_ref is not None
         assert sx_t is not None
         assert sx_t_ref is not None
-        if tile_size[0] != 1:
-            scale_mask = torch.ones(
-                (math.ceil(N / tile_size[0]), math.ceil(M / tile_size[1])),
-                device=sx_t.device,
-            )
-            scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
-                QuantizeResult(qx_t, scale_mask, None, None), tile_size
-            ).scale
-            sx_t = sx_t * scale_mask
+        scale_mask = torch.ones(
+            (math.ceil(N / tile_size[0]), math.ceil(M / tile_size[1])),
+            device=sx_t.device,
+        )
+        scale_mask = ref_quantizer.scale_munger.munge_scale_shapes_for_backend(
+            QuantizeResult(qx_t, scale_mask, None, None), tile_size
+        ).scale
+        sx_t = sx_t * scale_mask
         torch.testing.assert_close(qx_t.float(), qx_t_ref.float(), atol=0.0, rtol=0.0)
         torch.testing.assert_close(sx_t, sx_t_ref, atol=0.0, rtol=0.0)
     else:
@@ -195,14 +192,14 @@ def test_quantization_block_tiling_versus_reference(
     "M, N",
     [
         # full tile cases
-        (1, 128),
+        (128, 128),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("eps", [0, math.pow(2, -125)], ids=["eps_0", "eps_small"])
 @pytest.mark.parametrize("pow_2_scales", [True, False], ids=["pow2scales", "f32scales"])
-@pytest.mark.parametrize("tile_size", [(1, 128)])
+@pytest.mark.parametrize("tile_size", [(128, 128)])
 @pytest.mark.parametrize("extrema_high", [False, True], ids=["zeros", "maxes"])
 def test_quantization_block_tiling_extrema_versus_reference(
     x_dtype: torch.dtype,
@@ -266,7 +263,7 @@ def test_quantization_block_tiling_extrema_versus_reference(
 
     # Check
     torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
-    torch.testing.assert_close(sx, sx_ref, atol=0.0, rtol=0.0)
+    torch.testing.assert_close(sx.flatten()[0], sx_ref.flatten()[0], atol=0.0, rtol=0.0)
 
     if extrema_high:
         expected_value = torch.finfo(quant_dtype).max / torch.finfo(x_dtype).max
@@ -284,8 +281,8 @@ def test_quantization_block_tiling_extrema_versus_reference(
         else:
             expected_value = 1 / torch.finfo(x_dtype).max
     torch.testing.assert_close(
-        sx,
-        torch.tensor([expected_value], device=sx.device).reshape(1, 1),
+        sx.flatten()[0],
+        torch.tensor(expected_value, device=sx.device),
         atol=0.0,
         rtol=0.0,
     )

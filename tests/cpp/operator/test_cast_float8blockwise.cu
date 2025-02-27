@@ -220,6 +220,10 @@ void ref_quantize_onedimensional_blocks(const ProcessingMethod processing_method
   }
 }
 
+inline size_t scale_align_stride(size_t inner_elements) {
+  return ((inner_elements + 4u - 1u) / 4u) * 4u;
+};
+
 void compare_scaling_factors(const std::string& name, const float* test, const float* ref,
                              const size_t row_blocks, const size_t col_blocks,
                              const size_t test_stride, const size_t ref_stride) {
@@ -238,9 +242,10 @@ void compare_scaling_factors(const std::string& name, const float* test, const f
 void compare_scaling_factors_one_dimensional_blocks(const std::string& name, const float* test,
                                                     const float* ref, const size_t rows,
                                                     const size_t col_blocks) {
+  const size_t test_stride = scale_align_stride(rows);
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
-      const int test_idx = i + rows * j;
+      const int test_idx = i + test_stride * j;
       const int ref_idx = i + rows * j;
       ASSERT_FALSE(test[test_idx] != ref[ref_idx])
           << "Error in " << name << std::endl
@@ -305,10 +310,6 @@ void runTestCase(const ProcessingMethod processing_method, const std::vector<siz
 
   float atol = 0.0;
   float rtol = 0.0;
-
-  auto scale_align_stride = [](size_t inner_elements) -> size_t {
-    return ((inner_elements + 4u - 1u) / 4u) * 4u;
-  };
 
   if (rowwise) {
     compareResults("output_c", output_c, ref_output.get(), true, atol, rtol);
