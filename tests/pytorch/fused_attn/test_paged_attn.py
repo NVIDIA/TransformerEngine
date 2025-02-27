@@ -17,7 +17,6 @@ from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
 from transformer_engine.pytorch.attention import (
-    MultiheadAttention,
     DotProductAttention,
     InferenceParams,
 )
@@ -206,74 +205,32 @@ class Simulation:
         self.t_batch_size = len(self.t_seq_ids)
         self.t_total_lens = self.t_ctx_lens + self.t_gen_lens
 
+def generate_args(num_tensors: int, shapes: List, dtype: torch.dtype, warmup: bool = False):
+    if len(shapes) == 1:
+        shapes = shapes * num_tensors
+    func = torch.ones if warmup else torch.randn
+    scale = 1 if warmup else 0.1
+    return [
+        scale * func(
+            *shapes[i],
+            device="cuda",
+            dtype=dtype,
+        )
+        for i in range(num_tensors)
+    ]
 
 @pytest.mark.parametrize("dtype", [torch.float16])  # param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FlashAttention"]) #, "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("module", ["TransformerLayer"])#, "MultiHeadAttention", "DotProductAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention"]) #, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("module", ["TransformerLayer"])#, "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
-    reset_rng_states()
-    #_DUMMY_CUDA_RNG_STATE_TRACKER = CudaRNGStatesTracker()
-    #_DUMMY_CUDA_RNG_STATE_TRACKER.add("model-parallel-rng", seed)
-    #def get_dummy_cuda_rng_tracker() -> CudaRNGStatesTracker:
-    #    """Get cuda rng tracker."""
-    #    return _DUMMY_CUDA_RNG_STATE_TRACKER
-
-    num_layers = 1 #2
-    sigma = 0.023
-    init_method = init_method_normal(sigma)
-    output_layer_init_method = scaled_init_method_normal(sigma, num_layers)
     logger = logging.getLogger("test_paged_attn")
-
+    sigma = 0.023
+    num_layers = 1 #2
     config = model_configs_infer[model]
-    hidden_size = config.head_dim_qk * config.num_heads
-    if module == "TransformerLayer":
-        model = [TransformerLayer(
-            hidden_size=hidden_size,
-            ffn_hidden_size=4*hidden_size,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            hidden_dropout=0.0,
-            attention_dropout=config.dropout_p,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            layer_number=layer_number,
-            kv_channels=config.head_dim_qk,
-            self_attn_mask_type="causal",
-            params_dtype=dtype,
-            #get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            attn_input_format="bshd",
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
-    if module == "MultiHeadAttention":
-        model = [MultiHeadAttention(
-            hidden_size=hidden_size,
-            num_attention_heads=config.num_heads,
-            kv_channels=config.head_dim_qk,
-            attention_dropout=config.dropout_p,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            layer_number=layer_number,
-            attn_mask_type="causal",
-            num_gqa_groups=config.num_gqa_groups,
-            #get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            params_dtype=dtype,
-            qkv_format="bshd",
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
-    if module == "DotProductAttention":
-        model = [DotProductAttention(
-            kv_channels=config.head_dim_qk,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            layer_number=layer_number,
-            attention_dropout=config.dropout_p,
-            qkv_format="bshd",
-            attn_mask_type="causal",
-            #get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
-    #model = torch.nn.Sequential(*model).cuda().eval()
 
     # figure out supported backends
     inference_params_qkv_format = "bshd"
@@ -304,65 +261,71 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         config.max_seqlen_q = 256
         config.max_seqlen_kv = 256
 
-    # create model
-    #model = (
-    #    DotProductAttention(
-    #        kv_channels=config.head_dim_qk,
-    #        num_attention_heads=config.num_heads,
-    #        num_gqa_groups=config.num_gqa_groups,
-    #        layer_number=layer_number,
-    #        attention_dropout=config.dropout_p,
-    #    )
-    #    .cuda()
-    #    .eval()
-    #)
+    # create full model
+    reset_rng_states()
+    init_method = init_method_normal(sigma)
+    output_layer_init_method = scaled_init_method_normal(sigma, num_layers)
+    hidden_size = config.head_dim_qk * config.num_heads
+    if module == "TransformerLayer":
+        model = [TransformerLayer(
+            hidden_size=hidden_size,
+            ffn_hidden_size=4*hidden_size,
+            num_attention_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            hidden_dropout=0.0,
+            attention_dropout=config.dropout_p,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            layer_number=layer_number,
+            kv_channels=config.head_dim_qk,
+            self_attn_mask_type="causal",
+            params_dtype=dtype,
+            attn_input_format="bshd",
+            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+    if module == "DotProductAttention":
+        model = [DotProductAttention(
+            kv_channels=config.head_dim_qk,
+            num_attention_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            layer_number=layer_number,
+            attention_dropout=config.dropout_p,
+            qkv_format="bshd",
+            attn_mask_type="causal",
+            ).cuda().eval() for layer_number in range(1, num_layers+1)]
 
     # generate data for all requests
     assert (
         config.max_seqlen_q == config.max_seqlen_kv
     ), "This test only simulates max_seqlen_q = max_seqlen_kv."
-    q = 0.1 * torch.randn(
-        (config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk),
-        dtype=dtype,
-        device="cuda",
-    )
-    k = 0.1 * torch.randn(
-        (config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk),
-        dtype=dtype,
-        device="cuda",
-    )
-    v = 0.1 * torch.randn(
-        (config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v),
-        dtype=dtype,
-        device="cuda",
-    )
+    shapes = []
+    if module == "TransformerLayer":
+        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_heads * config.head_dim_qk])
+        num_tensors = 1
+    if module == "DotProductAttention":
+        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk])
+        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk])
+        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v])
+        num_tensors = 3
+    full_inputs = generate_args(num_tensors, shapes, dtype, warmup=False)
 
     # generate reference results
     logger.info("=== Generating all tokens at once ===")
-    #full_output = model(
-    #    query_layer=q,
-    #    key_layer=k,
-    #    value_layer=v,
-    #    qkv_format="bshd",
-    #    attn_mask_type="causal",
-    #)
-    hidden_states = torch.randn(
-        (config.total_requests, config.max_seqlen_kv, config.num_heads * config.head_dim_qk),
-        dtype=dtype,
-        device="cuda",
-    )
-    #rotary_freqs = torch.randn((config.max_seqlen_kv, 1, 1, config.num_heads), dtype=torch.float, device="cuda")
-    h = hidden_states
-    for m in model:
-        h = m(
-            h,
-            self_attn_mask_type="causal",
-            #inference_params=inference_params,
-            #rotary_pos_emb=rotary_freqs,
+    if module == "DotProductAttention":
+        full_output = full_inputs
+        for m in model:
+            full_output = m(
+                *full_output if isinstance(full_output, List) else full_output,
             )
-        #print('full h', h[0,0,:4])
-        #print('full h', h[1,6,:4])
-    full_output = h
+    #rotary_freqs = torch.randn((config.max_seqlen_kv, 1, 1, config.num_heads), dtype=torch.float, device="cuda")
+    if module == "TransformerLayer":
+        full_output = full_inputs
+        for m in model:
+            full_output = m(
+                *full_output if isinstance(full_output, List) else full_output,
+                #rotary_pos_emb=rotary_freqs,
+            )
+            #print('full h', h[0,0,:4])
+            #print('full h', h[1,6,:4])
 
     # simulate real-life inference
     logger.info("=== Generating one token at a time ===")
@@ -401,33 +364,42 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         qkv_format=qkv_format,
         allow_query_conversion=backend != "FusedAttention",
     )
-    #print('inference_params.cache_manager', inference_params.cache_manager)
     for layer_number in range(1, num_layers+1):
         inference_params.allocate_memory(layer_number, qkv_format)
 
+    # create inference model
     reset_rng_states()
-    sigma = 0.023
     init_method = init_method_normal(sigma)
     output_layer_init_method = scaled_init_method_normal(sigma, num_layers)
     attn_mask_type = "padding_causal" if backend == "FlashAttention" else "padding"
-    model = [TransformerLayer(
-        hidden_size=hidden_size,
-        ffn_hidden_size=4*hidden_size,
-        num_attention_heads=config.num_heads,
-        num_gqa_groups=config.num_gqa_groups,
-        hidden_dropout=0.0,
-        attention_dropout=config.dropout_p,
-        init_method=init_method,
-        output_layer_init_method=output_layer_init_method,
-        layer_number=layer_number,
-        kv_channels=config.head_dim_qk,
-        self_attn_mask_type=attn_mask_type, #"padding", #_causal",
-        #enc_dec_attn_mask_type="padding", #_causal",
-        params_dtype=dtype,
-        #get_rng_state_tracker=get_dummy_cuda_rng_tracker,
-        attn_input_format=qkv_format,
-        ).cuda().eval() for layer_number in range(1, num_layers+1)]
-    #model = torch.nn.Sequential(*model).cuda().eval()
+    if module == "TransformerLayer":
+        model = [TransformerLayer(
+            hidden_size=hidden_size,
+            ffn_hidden_size=4*hidden_size,
+            num_attention_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            hidden_dropout=0.0,
+            attention_dropout=config.dropout_p,
+            init_method=init_method,
+            output_layer_init_method=output_layer_init_method,
+            layer_number=layer_number,
+            kv_channels=config.head_dim_qk,
+            self_attn_mask_type=attn_mask_type, #"padding", #_causal",
+            #enc_dec_attn_mask_type="padding", #_causal",
+            params_dtype=dtype,
+            attn_input_format=qkv_format,
+            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+    if module == "DotProductAttention":
+        model = [DotProductAttention(
+            kv_channels=config.head_dim_qk,
+            num_attention_heads=config.num_heads,
+            num_gqa_groups=config.num_gqa_groups,
+            layer_number=layer_number,
+            attention_dropout=config.dropout_p,
+            qkv_format=qkv_format,
+            attn_mask_type=attn_mask_type,
+            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+
     # graph the model if necessary
     if is_cuda_graph:
         t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
@@ -442,17 +414,14 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         if qkv_format == "thd":
             shape = [config.batch_size * config.max_ctx_len]
 
-        def gen_data():
-            return [
-                torch.ones(
-                    *shape,
-                    config.num_heads * config.head_dim_qk,
-                    device="cuda",
-                    dtype=dtype,
-                )
-                #for _ in range(3)
-                for _ in range(1)
-            ]
+        shapes = []
+        if module == "TransformerLayer":
+            shapes.append([*shape, config.num_heads * config.head_dim_qk])
+        if module == "DotProductAttention":
+            shapes.append([*shape, config.num_heads, config.head_dim_qk])
+            shapes.append([*shape, config.num_gqa_groups, config.head_dim_qk])
+            shapes.append([*shape, config.num_gqa_groups, config.head_dim_v])
+        sample_args = generate_args(num_tensors, shapes, dtype, warmup=True)
 
         sample_kwargs = {}
         sample_kwargs["cu_seqlens_q"] = torch.linspace(
@@ -470,16 +439,12 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             dtype=torch.int32,
         )
         sample_kwargs["inference_params"] = inference_params
-        #sample_kwargs["attn_mask_type"] = "padding"  # _causal"
-        #sample_kwargs["self_attn_mask_type"] = "padding"  # _causal"
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
-        #sample_kwargs["qkv_format"] = qkv_format
-        #sample_kwargs["attn_input_format"] = qkv_format
 
         model = make_graphed_callables(
             model[0],
-            gen_data(),
+            sample_args,
             num_warmup_iters=10,
             fp8_enabled=False,
             sample_kwargs=sample_kwargs,
@@ -488,7 +453,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sim.reset()
         inference_params.reset()
         step_dict = OrderedDict()
-    print('++++++++++++++== graphed ++++++++++')
 
     # simulate step by step
     # t-1: ...
@@ -522,140 +486,45 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
         max_seqlen_q = sim.max_ctx_len if is_cuda_graph else max(sim.step_lens).item()
         if qkv_format == "thd":
-            incremental_hidden_states = torch.Tensor().to(dtype=dtype, device="cuda")
-            for i, seq in enumerate(sim.t_seq_ids):
-                start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
-                end = sim.t_total_lens[i].item()
-                incremental_hidden_states = torch.cat([incremental_hidden_states, hidden_states[seq, start:end, :]], dim=0)
-            if is_cuda_graph:
-                incremental_hidden_states = torch.cat(
-                    [
-                        incremental_hidden_states,
-                        torch.zeros(
-                            [max_tokens - sum(sim.step_lens), config.num_heads * config.head_dim_qk],
-                            dtype=dtype,
-                            device=incremental_hidden_states.device,
-                        ),
-                    ],
-                    dim=0,
-                )
-            #incremental_q = torch.Tensor().to(dtype=dtype, device="cuda")
-            #incremental_k = torch.Tensor().to(dtype=dtype, device="cuda")
-            #incremental_v = torch.Tensor().to(dtype=dtype, device="cuda")
-            #for i, seq in enumerate(sim.t_seq_ids):
-            #    start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
-            #    end = sim.t_total_lens[i].item()
-            #    incremental_q = torch.cat([incremental_q, q[seq, start:end, :, :]], dim=0)
-            #    incremental_k = torch.cat(
-            #        [
-            #            incremental_k,
-            #            k[seq, start:end, :, :].view(-1, config.num_gqa_groups, config.head_dim_qk),
-            #        ],
-            #        dim=0,
-            #    )
-            #    incremental_v = torch.cat(
-            #        [
-            #            incremental_v,
-            #            v[seq, start:end, :, :].view(-1, config.num_gqa_groups, config.head_dim_v),
-            #        ],
-            #        dim=0,
-            #    )
-            #if is_cuda_graph:
-            #    incremental_q = torch.cat(
-            #        [
-            #            incremental_q,
-            #            torch.zeros(
-            #                [max_tokens - sum(sim.step_lens), config.num_heads, config.head_dim_qk],
-            #                dtype=dtype,
-            #                device=incremental_q.device,
-            #            ),
-            #        ],
-            #        dim=0,
-            #    )
-            #    incremental_k = torch.cat(
-            #        [
-            #            incremental_k,
-            #            torch.zeros(
-            #                [
-            #                    max_tokens - sum(sim.step_lens),
-            #                    config.num_gqa_groups,
-            #                    config.head_dim_v,
-            #                ],
-            #                dtype=dtype,
-            #                device=incremental_k.device,
-            #            ),
-            #        ],
-            #        dim=0,
-            #    )
-            #    incremental_v = torch.cat(
-            #        [
-            #            incremental_v,
-            #            torch.zeros(
-            #                [
-            #                    max_tokens - sum(sim.step_lens),
-            #                    config.num_gqa_groups,
-            #                    config.head_dim_v,
-            #                ],
-            #                dtype=dtype,
-            #                device=incremental_v.device,
-            #            ),
-            #        ],
-            #        dim=0,
-            #    )
+            incremental_inputs = []
+            for i in range(num_tensors):
+                inp = full_inputs[i]
+                inc_inp = torch.Tensor().to(dtype=dtype, device="cuda")
+                for i, seq in enumerate(sim.t_seq_ids):
+                    start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
+                    end = sim.t_total_lens[i].item()
+                    inc_inp = torch.cat([inc_inp, inp[seq, start:end]], dim=0)
+                if is_cuda_graph:
+                    inc_inp = torch.cat(
+                        [
+                            inc_inp,
+                            torch.zeros(
+                                max_tokens - sum(sim.step_lens), *inp.shape[2:],
+                                dtype=dtype,
+                                device=inc_inp.device,
+                            ),
+                        ],
+                        dim=0,
+                    )
+                incremental_inputs.append(inc_inp)
         else:
-            #incremental_q = torch.zeros(
-            #    batch_size,
-            #    max_seqlen_q,
-            #    config.num_heads,
-            #    config.head_dim_qk,
-            #    dtype=dtype,
-            #    device="cuda",
-            #)
-            #incremental_k = torch.zeros(
-            #    batch_size,
-            #    max_seqlen_q,
-            #    config.num_gqa_groups,
-            #    config.head_dim_qk,
-            #    dtype=dtype,
-            #    device="cuda",
-            #)
-            #incremental_v = torch.zeros(
-            #    batch_size,
-            #    max_seqlen_q,
-            #    config.num_gqa_groups,
-            #    config.head_dim_v,
-            #    dtype=dtype,
-            #    device="cuda",
-            #)
-            #for i, seq in enumerate(sim.t_seq_ids):
-            #    start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
-            #    end = sim.t_total_lens[i].item()
-            #    incremental_q[i, : sim.step_lens[i], :, :] = q[seq, start:end, :, :]
-            #    incremental_k[i, : sim.step_lens[i], :, :] = k[seq, start:end, :, :]
-            #    incremental_v[i, : sim.step_lens[i], :, :] = v[seq, start:end, :, :]
-            #if qkv_format == "sbhd":
-            #    incremental_q, incremental_k, incremental_v = [
-            #        x.transpose(0, 1) for x in [incremental_q, incremental_k, incremental_v]
-            #    ]
-            incremental_hidden_states = torch.zeros(
-                batch_size,
-                max_seqlen_q,
-                config.num_heads * config.head_dim_qk,
-                dtype=dtype,
-                device="cuda",
-            )
-            print('sim.t_seq_ids', sim.t_seq_ids)
-            print(sim.t_total_lens, sim.step_lens)
-            for i, seq in enumerate(sim.t_seq_ids):
-                start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
-                end = sim.t_total_lens[i].item()
-                incremental_hidden_states[i, : sim.step_lens[i], :] = hidden_states[seq, start:end, :]
-            #print(hidden_states[0,0,:4])
-            #print(incremental_hidden_states[0,0,:4])
-            #print(hidden_states[1,6,:4])
-            #print(incremental_hidden_states[1,6,:4])
-            if qkv_format == "sbhd":
-                incremental_hidden_states = incremental_hidden_states.transpose(0, 1).contiguous()
+            incremental_inputs = []
+            for i in range(num_tensors):
+                inp = full_inputs[i]
+                inc_inp = torch.zeros(
+                    batch_size,
+                    max_seqlen_q,
+                    *inp.shape[2:],
+                    dtype=dtype,
+                    device="cuda",
+                )
+                for i, seq in enumerate(sim.t_seq_ids):
+                    start = (sim.t_total_lens[i] - sim.step_lens[i]).item()
+                    end = sim.t_total_lens[i].item()
+                    inc_inp[i, : sim.step_lens[i], :] = inp[seq, start:end]
+                if qkv_format == "sbhd":
+                    inc_inp = inc_inp.transpose(0, 1).contiguous()
+                incremental_inputs.append(inc_inp)
 
         # run step
         batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
@@ -667,59 +536,28 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         inference_params.pre_step(step_dict)
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
-        #line_output = model(
-        #    incremental_q,
-        #    incremental_k,
-        #    incremental_v,
-        #    cu_seqlens_q=cu_seqlens_q,
-        #    cu_seqlens_kv=cu_seqlens_kv,
-        #    inference_params=inference_params,
-        #    attn_mask_type="padding",  # _causal",
-        #    max_seqlen_q=max_seqlen_q,
-        #    max_seqlen_kv=config.max_seqlen_kv,
-        #    qkv_format=qkv_format,
-        #)
-        h = incremental_hidden_states
         if not is_cuda_graph:
+            incremental_output = incremental_inputs
             for m in model:
-                h = m(
-                    h,
-                    #rotary_pos_emb=rotary_freqs,
+                incremental_output = m(
+                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
-                    #self_attn_mask_type="padding", #_causal",
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=config.max_seqlen_kv,
-                    )
-                #print('full h', h[0,0,:4])
-                #print('full h', h[1,6,:4])
+                )
         else:
+            incremental_output = incremental_inputs
             for _ in range(num_layers):
-                h = model(
-                    h,
-                    #rotary_pos_emb=rotary_freqs,
+                incremental_output = model(
+                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
-                    #self_attn_mask_type="padding", #_causal",
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=config.max_seqlen_kv,
-                    )
-        line_output = h
-        print('cu_seqlens_q', cu_seqlens_q)
-        print('cu_seqlens_kv', cu_seqlens_kv)
-        #line_output = model(
-        #    hidden_states=incremental_hidden_states,
-        #    cu_seqlens_q=cu_seqlens_q,
-        #    cu_seqlens_kv=cu_seqlens_kv,
-        #    inference_params=inference_params,
-        #    self_attn_mask_type="padding",  # _causal",
-        #    max_seqlen_q=max_seqlen_q,
-        #    max_seqlen_kv=config.max_seqlen_kv,
-        #    #qkv_format=qkv_format,
-        #    #rotary_pos_emb=rotary_freqs,
-        #    )
+                )
 
         # compare results
         if backend != "FlashAttention":
@@ -739,37 +577,37 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             if qkv_format == "bshd":
                 print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(line_output[i, token_index, :4])
-                print(line_output[i, sim.step_lens[i] - 1, :4])
+                print(incremental_output[i, token_index, :4])
+                print(incremental_output[i, sim.step_lens[i] - 1, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # line_output[:sim.step_lens[i] - 1, i, :],
+                    # incremental_output[:sim.step_lens[i] - 1, i, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
-                    line_output[i, token_index, :],
+                    incremental_output[i, token_index, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )
             if qkv_format == "sbhd":
                 print(i, seq, sim.t_total_lens, sim.step_lens)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(line_output[token_index, i, :4])
+                print(incremental_output[token_index, i, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # line_output[:sim.step_lens[i] - 1, i, :],
+                    # incremental_output[:sim.step_lens[i] - 1, i, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
-                    line_output[token_index, i, :],
+                    incremental_output[token_index, i, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )
             if qkv_format == "thd":
                 # print('i ', i, seq, cu_seqlens_q)
                 # print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                # print(line_output[cu_seqlens_q[i + 1] - 1, :4])
+                # print(incremental_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # line_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
+                    # incremental_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
-                    line_output[cu_seqlens_q[i + 1] - 1, :],
+                    incremental_output[cu_seqlens_q[i + 1] - 1, :],
                     atol=tols[dtype],
                     rtol=tols[dtype],
                 )
