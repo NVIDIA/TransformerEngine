@@ -1148,7 +1148,7 @@ void copy_to_kv_cache_launcher(torch::Tensor new_k, torch::Tensor new_v, torch::
             reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
             reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()), page_table.data_ptr<int>(),
             cu_new_lens.data_ptr<int>(), cu_cached_lens.data_ptr<int>(), qkv_format, h_kv, d_k, d_v,
-            b, max_ctx_len, max_seq_len, max_pages_per_seq);
+            b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
   }
 }
 

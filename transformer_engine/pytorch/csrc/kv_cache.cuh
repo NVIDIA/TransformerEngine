@@ -77,11 +77,6 @@ __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, in
       }
     }
   }
-  if (blockIdx.x == 0) {
-    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx++) {
-      batch_indices[batch_idx] = batch_idx;
-    }
-  }
 }
 
 template <typename scalar_t>
@@ -89,19 +84,19 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
                                         scalar_t *v_cache, int *page_table, int *cu_new_lens,
                                         int *cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
                                         int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
-                                        int max_pages_per_seq) {
+                                        int max_pages_per_seq, bool is_non_paged) {
   // new_k, new_v: qkv_format; k_cache, v_cache: bshd
   // cu_new_lens, cu_cached_lens: [b + 1]
   // page_table: [b, max_pages_per_seq]
   int page_size = max_seq_len / max_pages_per_seq;
   if (qkv_format == NVTE_QKV_Format::NVTE_BSHD) {
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-      int *page_list = page_table + batch_idx * max_pages_per_seq;
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
       int new_token_offset = batch_idx * max_ctx_len;
       int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
       int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
-        int page_idx = page_list[(cached_len - new_len + i) / page_size];
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) =
@@ -115,11 +110,11 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
     }
   } else if (qkv_format == NVTE_QKV_Format::NVTE_SBHD) {
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-      int *page_list = page_table + batch_idx * max_pages_per_seq;
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
       int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
       int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
-        int page_idx = page_list[(cached_len - new_len + i) / page_size];
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) = *(new_k + (i * b + batch_idx) * h_kv * d_k + j);
@@ -131,11 +126,11 @@ __global__ void copy_to_kv_cache_kernel(scalar_t *new_k, scalar_t *new_v, scalar
     }
   } else if (qkv_format == NVTE_QKV_Format::NVTE_THD) {
     for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-      int *page_list = page_table + batch_idx * max_pages_per_seq;
+      int *page_list = is_non_paged ? nullptr : page_table + batch_idx * max_pages_per_seq;
       int cached_len = cu_cached_lens[batch_idx + 1] - cu_cached_lens[batch_idx];
       int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
       for (int i = threadIdx.x; i < new_len; i += blockDim.x) {
-        int page_idx = page_list[(cached_len - new_len + i) / page_size];
+        int page_idx = is_non_paged ? batch_idx : page_list[(cached_len - new_len + i) / page_size];
         int token_idx = page_idx * page_size + (cached_len - new_len + i) % page_size;
         for (int j = 0; j < h_kv * d_k; j++) {
           *(k_cache + token_idx * h_kv * d_k + j) =

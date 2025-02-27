@@ -258,11 +258,7 @@ def _make_graphed_callables(
                 if callables[0].training:
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in outputs if o.requires_grad),
-                        inputs=tuple(
-                            i
-                            for i in static_input_surface
-                            if isinstance(i, torch.Tensor) and i.requires_grad
-                        ),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
                         grad_outputs=tuple(torch.empty_like(o) for o in outputs if o.requires_grad),
                         only_inputs=True,
                         allow_unused=allow_unused_input,
@@ -321,22 +317,23 @@ def _make_graphed_callables(
                     static_grad_outputs = tuple(
                         torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                     )
-                    with torch.cuda.graph(bwd_graph, pool=mempool):
-                        grad_inputs = torch.autograd.grad(
-                            outputs=tuple(o for o in static_outputs if o.requires_grad),
-                            inputs=tuple(i for i in static_input_surface if i.requires_grad),
-                            grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
-                            only_inputs=True,
-                            allow_unused=allow_unused_input,
-                            retain_graph=retain_graph_in_backward,
-                        )
+                    if callables[0].training:
+                        with torch.cuda.graph(bwd_graph, pool=mempool):
+                            grad_inputs = torch.autograd.grad(
+                                outputs=tuple(o for o in static_outputs if o.requires_grad),
+                                inputs=tuple(i for i in static_input_surface if i.requires_grad),
+                                grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
+                                only_inputs=True,
+                                allow_unused=allow_unused_input,
+                                retain_graph=retain_graph_in_backward,
+                            )
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
                     # that don't require grad. I couldn't think of a one-liner for this pattern.
                     static_grad_inputs = []
                     grad_idx = 0
                     for arg in static_input_surface:
-                        if arg.requires_grad:
+                        if callables[0].training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                             static_grad_inputs.append(grad_inputs[grad_idx])
                             grad_idx += 1
                         else:
@@ -377,11 +374,7 @@ def _make_graphed_callables(
                 with torch.cuda.graph(bwd_graph, pool=mempool):
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in static_outputs if o.requires_grad),
-                        inputs=tuple(
-                            i
-                            for i in static_input_surface
-                            if isinstance(i, torch.Tensor) and i.requires_grad
-                        ),
+                        inputs=tuple(i for i in static_input_surface if i.requires_grad),
                         grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                         only_inputs=True,
                         allow_unused=allow_unused_input,
@@ -393,7 +386,7 @@ def _make_graphed_callables(
             static_grad_inputs = []
             grad_idx = 0
             for arg in static_input_surface:
-                if isinstance(arg, torch.Tensor) and arg.requires_grad:
+                if callables[0].training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                     static_grad_inputs.append(grad_inputs[grad_idx])
                     grad_idx += 1
                 else:
