@@ -180,15 +180,22 @@ def _main(opts):
         LOCAL_SIZE = int(os.getenv("OMPI_COMM_WORLD_LOCAL_SIZE", "1"))
         opts.tcp_init = True
         opts.bootstrap_backend = "mpi"
-    elif "TORCHELASTIC_RUN_ID" in os.environ:
+    else:  # TORCHELASTIC, SLURM, etc...
         WORLD_RANK = int(os.getenv("RANK", "0"))
         WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
         LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-    else:
-        raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
-    assert WORLD_SIZE == LOCAL_SIZE  # this test supports only 1 node
-    assert LOCAL_SIZE <= torch.cuda.device_count()
+        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(torch.cuda.device_count())))
+
+    result = subprocess.run(
+        "nvidia-smi -q | grep -m1 CliqueId | awk '{printf $3}'",
+        capture_output=True,
+        text=True,
+        shell=True,
+    )
+
+    if result.stdout == "0":  # Extra checks for non-MNNVL platforms
+        assert WORLD_SIZE == LOCAL_SIZE
+        assert LOCAL_SIZE <= torch.cuda.device_count()
 
     # Fix clock speed
     torch.cuda.set_device(LOCAL_RANK)
