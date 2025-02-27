@@ -82,33 +82,26 @@ class CuBLASScaleMunger:
     ) -> QuantizeResult:
         """
         cuBLAS GEMMs requires 1x128 quantized tensors to be have scales transposed
-        so that for an (M, N) tensor, the scales are (RounUpDiv(N, 128), M)
+        so that for an (M, N) tensor, the scales are (RoundUpDiv(N, 128), RoundUp(M, 4))
 
         For 128x128 quantized tensors, the GEMM expects (M, PadToAlign(RoundUpDivide(N, 128), 4))
         format. If RoundUpDivide(N, 128) is not divisible by 4, a transformation is required
         """
-        if tile_shape[0] != 1:
-            # 2D block quantized tensor needs padding for cuBLAS GEMM.
-            def _munge_scale_tensor(s: torch.Tensor) -> torch.Tensor:
-                M, K = s.shape
-                if K % 4 == 0:
-                    return s
-                k_pad = 4 - (K % 4)
-                return torch.nn.functional.pad(s, (0, k_pad), mode="constant", value=0).contiguous()
 
-            s = _munge_scale_tensor(unmunged.scale)
-            if unmunged.scale_t is None:
-                s_t = None
-            else:
-                s_t = _munge_scale_tensor(unmunged.scale_t)
-            return QuantizeResult(unmunged.data, s, unmunged.data_t, s_t)
+        def _pad_inner_to_align(s: torch.Tensor, transpose: bool) -> torch.Tensor:
+            if transpose:
+                s = s.transpose(-1, -2).contiguous()
+            M, K = s.shape
+            if K % 4 == 0:
+                return s
+            k_pad = 4 - (K % 4)
+            return torch.nn.functional.pad(s, (0, k_pad), mode="constant", value=0).contiguous()
 
-        # 1D block quantized tensors needs transpose to prepare for the GEMM.
-        s = unmunged.scale.transpose(-1, -2).contiguous()
+        s = _pad_inner_to_align(unmunged.scale, transpose=tile_shape[0] == 1)
         if unmunged.scale_t is None:
             s_t = None
         else:
-            s_t = unmunged.scale_t.transpose(-1, -2).contiguous()
+            s_t = _pad_inner_to_align(unmunged.scale_t, transpose=tile_shape[0] == 1)
         return QuantizeResult(unmunged.data, s, unmunged.data_t, s_t)
 
     def demunge_scale_shape_from_backend(
@@ -123,12 +116,15 @@ class CuBLASScaleMunger:
         if tile_shape[0] != 1:
             # 2D block quantized tensor may need padding stripped off
             derived_scale_k_shape = math.ceil(qtensor_shape[1] / tile_shape[1])
-            M, K = scales.shape
-            if derived_scale_k_shape == K:
-                return scales
-            else:
-                return scales[:, :derived_scale_k_shape].contiguous()
-        return scales.transpose(-1, -2).contiguous()
+        else:
+            derived_scale_k_shape = qtensor_shape[0]
+        M, K = scales.shape
+        if derived_scale_k_shape != K:
+            scales = scales[:, :derived_scale_k_shape].contiguous()
+        if tile_shape[0] == 1:
+            return scales.transpose(-1, -2).contiguous()
+        else:
+            return scales
 
 
 @dataclasses.dataclass()
