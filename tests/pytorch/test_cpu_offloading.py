@@ -25,11 +25,17 @@ def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
 
     input_layer = model_cls(SIZE, SIZE)
     hidden_layer = model_cls(SIZE, SIZE)
-    output_layer = model_cls(SIZE,SIZE)
+    output_layer = model_cls(SIZE, SIZE)
 
     input = _get_input()
     if cpu_offload:
-        offload_context, sync_function = te.get_cpu_offload_context(enabled=True,num_layers=2,model_layers=3,offload_activations=True,offload_weights=False)
+        offload_context, sync_function = te.get_cpu_offload_context(
+            enabled=True,
+            num_layers=2,
+            model_layers=3,
+            offload_activations=True,
+            offload_weights=False,
+        )
     else:
         offload_context = nullcontext()
         sync_function = lambda x: x
@@ -44,7 +50,7 @@ def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
         out = output_layer(out)
     out = sync_function(out)
 
-    max_mem_used = torch.cuda.memory_allocated()/ 1024**2
+    max_mem_used = torch.cuda.memory_allocated() / 1024**2
 
     out.sum().backward()
 
@@ -67,5 +73,5 @@ def test_cpu_offload(fp8, model_key) -> None:
     without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False)
 
     with_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, True)
-    
+
     assert with_offloading < without_offloading
