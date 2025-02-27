@@ -96,7 +96,7 @@ class MXFP8TensorBase:
         """Prepare the tensor base for saving for backward
 
         After calling this, the tensor instance does not hold any
-        data.
+        data. Yes it does? TODO
 
         """
         tensors = [self._rowwise_data, self._columnwise_data]
