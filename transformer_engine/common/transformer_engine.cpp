@@ -442,4 +442,3 @@ float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   return t.amax_epsilon;
 }
-

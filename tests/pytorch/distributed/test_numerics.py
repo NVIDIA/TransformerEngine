@@ -47,6 +47,7 @@ def _run_test(quantization):
 
 all_boolean = [True, False]
 
+
 @pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "fp8_cs"])
 def test_distributed(quantization):
     if quantization == "fp8" and not fp8_available:

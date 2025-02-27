@@ -151,8 +151,10 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   // 3. amax_reduction_size: int
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
   const py::object amax_reduction_group_obj = quantizer.attr("amax_reduction_group");
-  const c10::intrusive_ptr<dist_group_type> amax_reduction_group = amax_reduction_group_obj.is_none() ? 
-    nullptr : amax_reduction_group_obj.cast<c10::intrusive_ptr<dist_group_type>>();
+  const c10::intrusive_ptr<dist_group_type> amax_reduction_group =
+      amax_reduction_group_obj.is_none()
+          ? nullptr
+          : amax_reduction_group_obj.cast<c10::intrusive_ptr<dist_group_type>>();
   const int amax_reduction_size = quantizer.attr("amax_reduction_size").cast<int>();
 
   this->amax = amax;

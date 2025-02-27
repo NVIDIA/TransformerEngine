@@ -440,12 +440,12 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
   }
 
   if constexpr (kPow2Scaling) {
-    uint32_t scale_bits = *reinterpret_cast<uint32_t*>(&scale);
+    uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&scale);
     scale_bits &= 0xFF800000;
     // If the exponent was zero, we have a logic error.
     __builtin_assume(scale_bits != 0);
     __builtin_assume(scale_bits != 0x80000000);
-    scale = *reinterpret_cast<float*>(&scale_bits);
+    scale = *reinterpret_cast<float *>(&scale_bits);
   }
 
   scale_inv = 1.0f / scale;

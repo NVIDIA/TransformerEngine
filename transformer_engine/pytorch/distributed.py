@@ -859,7 +859,9 @@ def _all_gather_fp8(
 
     # Quantize input tensor if needed
     if not isinstance(input_, Float8TensorBase):
-        assert isinstance(quantizer, Float8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer)
+        assert isinstance(quantizer, Float8Quantizer) or isinstance(
+            quantizer, Float8CurrentScalingQuantizer
+        )
         # we cannot directly gather the transposed fp8 tensor
         # so we need to disable columnwise usage for the quantizer
         # and then set it back to the original value after quantizing
@@ -870,7 +872,9 @@ def _all_gather_fp8(
 
     # Construct output tensor
     out: Float8TensorBase
-    if isinstance(quantizer, Float8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
+    if isinstance(quantizer, Float8Quantizer) or isinstance(
+        quantizer, Float8CurrentScalingQuantizer
+    ):
         dtype = torch.float32
         device = "cuda"
         if isinstance(input_, Float8Tensor):
@@ -889,7 +893,7 @@ def _all_gather_fp8(
     else:
         raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
     # For delayed scaling, scale_inv is from history, so we can pass it from input_ to out
-    # For current scaling, scale_inv is from doing amax reduction in C++ code, so each rank should have same scale_inv, 
+    # For current scaling, scale_inv is from doing amax reduction in C++ code, so each rank should have same scale_inv,
     #                      so we can just pass it from input_ to out
     out._scale_inv = input_._scale_inv
 
@@ -1006,7 +1010,11 @@ def gather_along_first_dim(
     out_shape[0] *= world_size
 
     # FP8 case: delayed scaling or current scaling
-    if isinstance(input_, Float8TensorBase) or isinstance(quantizer, Float8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
+    if (
+        isinstance(input_, Float8TensorBase)
+        or isinstance(quantizer, Float8Quantizer)
+        or isinstance(quantizer, Float8CurrentScalingQuantizer)
+    ):
         return _all_gather_fp8(
             input_,
             process_group,
