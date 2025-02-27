@@ -253,8 +253,10 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastCreate, &(*comm)->mc_handle, &mcProp);
 
     if (mnnvl_fabric) {
-      CUmemFabricHandle *exphndl = (CUmemFabricHandle *)malloc(sizeof(CUmemFabricHandle));
-      CUmemFabricHandle *tmphndl = (CUmemFabricHandle *)malloc(sizeof(CUmemFabricHandle));
+      CUmemFabricHandle *exphndl =
+          reinterpret_cast<CUmemFabricHandle *>(malloc(sizeof(CUmemFabricHandle)));
+      CUmemFabricHandle *tmphndl =
+          reinterpret_cast<CUmemFabricHandle *>(malloc(sizeof(CUmemFabricHandle)));
       CUmemFabricHandle *exphndls;
       NVTE_CHECK_CUDA(cudaMallocHost(&exphndls, (*comm)->nvsize * sizeof(CUmemFabricHandle)));
       if ((*comm)->ar2_nvrank == 0)
