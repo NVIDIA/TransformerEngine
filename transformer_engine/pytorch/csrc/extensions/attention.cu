@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 #include "extensions.h"
+#include "kv_cache.cuh"
 #include "thd_utils.cuh"
 
 constexpr int block_size = 512;
@@ -90,8 +91,9 @@ std::vector<py::object> fused_attn_fwd(
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
     const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread) {
   using namespace transformer_engine;
   using namespace transformer_engine::pytorch;
@@ -126,6 +128,7 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper te_Bias;
   TensorWrapper te_cu_seqlens_q, te_cu_seqlens_kv;
   TensorWrapper te_cu_seqlens_q_padded, te_cu_seqlens_kv_padded;
+  TensorWrapper te_page_table_k, te_page_table_v;
   if (qkv_type == DType::kFloat8E4M3 || qkv_type == DType::kFloat8E5M2) {
     // FP8
     auto h = q_shape[q_shape.size() - 2];
@@ -170,6 +173,19 @@ std::vector<py::object> fused_attn_fwd(
         cu_seqlens_kv_padded.value().data_ptr(), cu_seqlens_kv_padded_shape, DType::kInt32);
   }
 
+  if ((page_table_k.has_value()) && (page_table_v.has_value())) {
+    auto page_table_k_sizes = page_table_k.value().sizes().vec();
+    std::vector<size_t> page_table_k_shape{page_table_k_sizes.begin(), page_table_k_sizes.end()};
+    auto page_table_v_sizes = page_table_v.value().sizes().vec();
+    std::vector<size_t> page_table_v_shape{page_table_v_sizes.begin(), page_table_v_sizes.end()};
+    te_page_table_k =
+        makeTransformerEngineTensor(page_table_k.value().data_ptr(), page_table_k_shape,
+                                    DType::kInt32, nullptr, nullptr, nullptr);
+    te_page_table_v =
+        makeTransformerEngineTensor(page_table_v.value().data_ptr(), page_table_v_shape,
+                                    DType::kInt32, nullptr, nullptr, nullptr);
+  }
+
   // extract rng seed and offset
   auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
       rng_gen, at::cuda::detail::getDefaultCUDAGenerator());
@@ -187,13 +203,13 @@ std::vector<py::object> fused_attn_fwd(
   TensorWrapper workspace;
 
   // populate tensors with appropriate shapes and dtypes
-  nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
-                      te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                      te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
-                      attn_mask_type, window_size[0], window_size[1], workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  nvte_fused_attn_fwd(
+      te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
+      &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+      te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
+      te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1],
+      workspace.data(), at::cuda::getCurrentCUDAStream());
 
   // allocate memory for workspace and auxiliary output tensors
   auto workspace_data = allocateSpace(workspace.shape(), workspace.dtype());
@@ -241,13 +257,13 @@ std::vector<py::object> fused_attn_fwd(
   }
 
   // execute the kernel
-  nvte_fused_attn_fwd(te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(),
-                      te_O.data(), &nvte_aux_tensor_pack, te_cu_seqlens_q.data(),
-                      te_cu_seqlens_kv.data(), te_cu_seqlens_q_padded.data(),
-                      te_cu_seqlens_kv_padded.data(), te_rng_state.data(), max_seqlen_q,
-                      max_seqlen_kv, is_training, attn_scale, p_dropout, qkv_layout, bias_type,
-                      attn_mask_type, window_size[0], window_size[1], workspace.data(),
-                      at::cuda::getCurrentCUDAStream());
+  nvte_fused_attn_fwd(
+      te_Q.data(), te_K.data(), te_V.data(), te_Bias.data(), te_S.data(), te_O.data(),
+      &nvte_aux_tensor_pack, te_cu_seqlens_q.data(), te_cu_seqlens_kv.data(),
+      te_cu_seqlens_q_padded.data(), te_cu_seqlens_kv_padded.data(), te_page_table_k.data(),
+      te_page_table_v.data(), te_rng_state.data(), max_seqlen_q, max_seqlen_kv, is_training,
+      attn_scale, p_dropout, qkv_layout, bias_type, attn_mask_type, window_size[0], window_size[1],
+      workspace.data(), at::cuda::getCurrentCUDAStream());
 
   // destroy tensor wrappers, but not allocated memory
   nvte_tensor_pack_destroy(&nvte_aux_tensor_pack);
@@ -1011,4 +1027,170 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
       output.data_ptr<int>(), cu_seqlens.data_ptr<int>(), batch, total_tokens, world_size, rank);
 
   return output;
+}
+
+/***************************************************************************************************
+ * KV Cache: Reshape Q from qkv_format = thd to qkv_format = bshd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void reshape_q_launcher(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor cu_new_lens,
+                        int h_q, int d_q, int b, int max_seq_len) {
+  transformer_engine::fused_attn::
+      reshape_q_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<scalar_t *>(new_q.data_ptr<scalar_t>()),
+          reinterpret_cast<scalar_t *>(q_buffer.data_ptr<scalar_t>()), cu_new_lens.data_ptr<int>(),
+          h_q, d_q, b, max_seq_len);
+}
+
+void reshape_q(torch::Tensor new_q, torch::Tensor q_buffer, torch::Tensor cu_new_lens, int h_q,
+               int d_q, int b, int max_seq_len) {
+  NVTE_CHECK(new_q.scalar_type() == q_buffer.scalar_type(),
+             "new_q and q_buffer must be of the same data type.");
+  if (q_buffer.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_seq_len);
+  } else if (q_buffer.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_seq_len);
+  } else if (q_buffer.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_seq_len);
+  } else if (q_buffer.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_seq_len);
+  } else if (q_buffer.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    reshape_q_launcher<dtype>(new_q, q_buffer, cu_new_lens, h_q, d_q, b, max_seq_len);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
+}
+
+/***************************************************************************************************
+ * KV Cache: Reshape O from qkv_format = bshd to qkv_format = thd
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void reshape_o_launcher(torch::Tensor output, torch::Tensor output_buffer,
+                        torch::Tensor cu_new_lens, int h_o, int d_o, int b, int max_seq_len,
+                        bool is_output_right_aligned) {
+  transformer_engine::fused_attn::
+      reshape_o_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          reinterpret_cast<scalar_t *>(output.data_ptr<scalar_t>()),
+          reinterpret_cast<scalar_t *>(output_buffer.data_ptr<scalar_t>()),
+          cu_new_lens.data_ptr<int>(), h_o, d_o, b, max_seq_len, is_output_right_aligned);
+}
+
+void reshape_o(torch::Tensor output, torch::Tensor output_buffer, torch::Tensor cu_new_lens,
+               int h_o, int d_o, int b, int max_seq_len, bool is_output_right_aligned) {
+  NVTE_CHECK(output.scalar_type() == output_buffer.scalar_type(),
+             "output and output_buffer must be of the same data type.");
+  if (output.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    reshape_o_launcher<dtype>(output, output_buffer, cu_new_lens, h_o, d_o, b, max_seq_len,
+                              is_output_right_aligned);
+  } else if (output.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    reshape_o_launcher<dtype>(output, output_buffer, cu_new_lens, h_o, d_o, b, max_seq_len,
+                              is_output_right_aligned);
+  } else if (output.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    reshape_o_launcher<dtype>(output, output_buffer, cu_new_lens, h_o, d_o, b, max_seq_len,
+                              is_output_right_aligned);
+  } else if (output.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    reshape_o_launcher<dtype>(output, output_buffer, cu_new_lens, h_o, d_o, b, max_seq_len,
+                              is_output_right_aligned);
+  } else if (output.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    reshape_o_launcher<dtype>(output, output_buffer, cu_new_lens, h_o, d_o, b, max_seq_len,
+                              is_output_right_aligned);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
+}
+
+/***************************************************************************************************
+ * KV Cache: Copy new KV tokens to the KV cache
+ *   1. new_k and new_v are in qkv_format, and k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape, [b + 1], and cu_cached_lens are the lens after current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1],
+ *      max_pages_per_seq = 1. Set is_non_paged = True/False accordingly.
+ *   4. is_non_paged = True re-indexes the cache based on the page_table, i.e. page_table =
+ *      [[0], [3], [1], [2]] will rearrange the cache to be [[0], [1], [1], [2]].
+ *   5. k_cache and v_cache should have the same page_table
+ *   6. For qkv_format = thd, we assume there is no padding between sequences in new_k and new_v,
+ *      e.g. new_k = [a a a b b c], not new_k = [a a a 0..0 b b 0..0 c 0..0].
+ **************************************************************************************************/
+
+template <typename scalar_t>
+void copy_to_kv_cache_launcher(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
+                               torch::Tensor v_cache, torch::Tensor page_table,
+                               torch::Tensor cu_new_lens, torch::Tensor cu_cached_lens,
+                               NVTE_QKV_Format qkv_format, int h_kv, int d_k, int d_v, int b,
+                               int max_ctx_len, int max_seq_len, int max_pages_per_seq,
+                               bool is_non_paged) {
+  if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr && k_cache.data_ptr() != nullptr &&
+      v_cache.data_ptr() != nullptr) {
+    if (is_non_paged) {
+      transformer_engine::fused_attn::
+          reindex_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+              reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
+              reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()),
+              page_table.data_ptr<int>(), cu_new_lens.data_ptr<int>(),
+              cu_cached_lens.data_ptr<int>(), h_kv, d_k, d_v, b, max_seq_len);
+    }
+    transformer_engine::fused_attn::
+        copy_to_kv_cache_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+            reinterpret_cast<scalar_t *>(new_k.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(new_v.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(k_cache.data_ptr<scalar_t>()),
+            reinterpret_cast<scalar_t *>(v_cache.data_ptr<scalar_t>()), page_table.data_ptr<int>(),
+            cu_new_lens.data_ptr<int>(), cu_cached_lens.data_ptr<int>(), qkv_format, h_kv, d_k, d_v,
+            b, max_ctx_len, max_seq_len, max_pages_per_seq, is_non_paged);
+  }
+}
+
+void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
+                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
+                      torch::Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv, int d_k,
+                      int d_v, int b, int max_ctx_len, int max_seq_len, int max_pages_per_seq,
+                      bool is_non_paged) {
+  NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
+                 new_k.scalar_type() == new_v.scalar_type() &&
+                 new_k.scalar_type() == k_cache.scalar_type(),
+             "new_k, new_v, k_cache and v_cache must be of the same data type.");
+  NVTE_CHECK(qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD ||
+                 qkv_format == NVTE_QKV_Format::NVTE_THD,
+             "qkv_format must be {BSHD, SBHD, THD}.");
+  if (k_cache.scalar_type() == at::ScalarType::Half) {
+    using dtype = at::Half;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+
+  } else if (k_cache.scalar_type() == at::ScalarType::BFloat16) {
+    using dtype = at::BFloat16;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float) {
+    using dtype = float;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float8_e4m3fn) {
+    using dtype = at::Float8_e4m3fn;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else if (k_cache.scalar_type() == at::ScalarType::Float8_e5m2) {
+    using dtype = at::Float8_e5m2;
+    copy_to_kv_cache_launcher<dtype>(new_k, new_v, k_cache, v_cache, page_table, cu_new_lens,
+                                     cu_cached_lens, qkv_format, h_kv, d_k, d_v, b, max_ctx_len,
+                                     max_seq_len, max_pages_per_seq, is_non_paged);
+  } else {
+    NVTE_ERROR("Unsupported dtype for KV cache.\n");
+  }
 }
