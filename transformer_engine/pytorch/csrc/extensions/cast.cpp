@@ -45,6 +45,25 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   }
 
   if (te_output.numel() == 0) return out;
+
+  auto scaling_mode = my_quantizer->get_scaling_mode();
+  if (is_current_tensor_scaling(scaling_mode)) {
+    // my_quantizer here has to be a Float8CurrentScalingQuantizer
+    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+    nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    // check if we need to do amax reudction (depending on model parallel configs)
+    if (my_quantizer_cs->with_amax_reduction) {
+      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
+      // construct torch tesnor from NVTEBasicTensor without reallocating memory
+      at::Tensor amax_tensor_torch = makeATenTensor(te_output.get_amax());
+      std::vector<at::Tensor> tensors = {amax_tensor_torch};
+      // allreduce amax tensor
+      c10d::AllreduceOptions allreduce_opts;
+      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
+      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
+    }
+    nvte_compute_scale_from_amax(te_output.data(), at::cuda::getCurrentCUDAStream());
+  }
   nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),
                      at::cuda::getCurrentCUDAStream());
 

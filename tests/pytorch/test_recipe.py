@@ -23,6 +23,7 @@ import transformer_engine_torch as tex
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
+# FP8 per tensor delayed scaling
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFP8Recipe:
 

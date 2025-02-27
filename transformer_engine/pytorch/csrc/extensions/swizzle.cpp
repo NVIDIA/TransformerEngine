@@ -12,7 +12,8 @@ void swizzle_scaling_factors(transformer_engine::TensorWrapper& input, bool roww
 
   if (input.scaling_mode() == NVTE_INVALID_SCALING) {
     NVTE_ERROR("Invalid scaling mode for swizzle.");
-  } else if (input.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
+  } else if (input.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING ||
+             input.scaling_mode() == NVTE_CURRENT_TENSOR_SCALING) {
     return;
   }
 

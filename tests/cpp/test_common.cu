@@ -103,10 +103,6 @@ size_t DIVUP(const size_t &x, const size_t &y){
   return (((x) + ((y)-1)) / (y));
 }
 
-inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
-}
-
 struct scale_inv_meta {
   std::vector<size_t> shape;
   DType type;
@@ -119,7 +115,7 @@ NVTEShape convertShape(const std::vector<size_t>& shape) {
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
                                                      const NVTEScalingMode scaling_mode) {
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+  if (is_tensor_scaling(scaling_mode)) {
     scale_inv_meta ret;
     ret.shape = {1};
     ret.type = DType::kFloat32;
@@ -199,7 +195,7 @@ Tensor::Tensor(const std::string& name,
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
 
   std::vector<size_t> columnwise_shape_vec;
-  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+  if (is_tensor_scaling(scaling_mode)) {
     // Transpose when tensor scaling
     columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
     for (size_t i = 0; i < shape.ndim - 1; ++i) {

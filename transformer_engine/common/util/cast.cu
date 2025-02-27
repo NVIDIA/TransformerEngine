@@ -24,6 +24,29 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
 
+void nvte_compute_amax(const NVTETensor input, const NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_amax);
+  using namespace transformer_engine;
+  // suppose to hanlde per-tensor Current Scaling
+  // mxfp8 scaling like block-level, sub-channel level don't need this api because
+  // compute amax and quantization can be fused into one kernel because cache can fit
+
+  // For it to work for per-tensor CS, we need make sure amax is correctly reduced among tensor parallel GPUs
+  // Eg. Under SequenceParallel+ColumnParallel, we were supposed to allgather bf16 layer input tensor, then quantize it
+  // but now we quantize locally, reduce amax, and then do allgather in FP8, this amax function is only computing local amax
+  // amax reduction local should be either handled differently by each ML framework, eg. pytorch has torch.distributed
+  detail::compute_amax_helper(input, output, stream);
+}
+
+void nvte_compute_scale_from_amax(const NVTETensor output, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_compute_scale_from_amax);
+  using namespace transformer_engine;
+  // suppose to handle per-tensor current scaling
+  // mxfp8 scaling like block-level, sub-channel level don't need this api because
+  // compute amax and quantization can be fused into one kernel because cache can fit
+  detail::compute_scale_helper(output, stream);
+}
+
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
   using namespace transformer_engine;
