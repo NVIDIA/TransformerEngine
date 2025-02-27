@@ -89,7 +89,7 @@ class Simulation:
         self.context_lens = torch.randint(
             1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         )
-        #self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        # self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -205,13 +205,15 @@ class Simulation:
         self.t_batch_size = len(self.t_seq_ids)
         self.t_total_lens = self.t_ctx_lens + self.t_gen_lens
 
+
 def generate_args(num_tensors: int, shapes: List, dtype: torch.dtype, warmup: bool = False):
     if len(shapes) == 1:
         shapes = shapes * num_tensors
     func = torch.ones if warmup else torch.randn
     scale = 1 if warmup else 0.1
     return [
-        scale * func(
+        scale
+        * func(
             *shapes[i],
             device="cuda",
             dtype=dtype,
@@ -219,17 +221,18 @@ def generate_args(num_tensors: int, shapes: List, dtype: torch.dtype, warmup: bo
         for i in range(num_tensors)
     ]
 
+
 @pytest.mark.parametrize("dtype", [torch.float16])  # param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"]) #, "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("module", ["TransformerLayer"])#, "DotProductAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("module", ["TransformerLayer"])  # , "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
     logger = logging.getLogger("test_paged_attn")
     sigma = 0.023
-    num_layers = 1 #2
+    num_layers = 1  # 2
     config = model_configs_infer[model]
 
     # figure out supported backends
@@ -267,31 +270,41 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     output_layer_init_method = scaled_init_method_normal(sigma, num_layers)
     hidden_size = config.head_dim_qk * config.num_heads
     if module == "TransformerLayer":
-        model = [TransformerLayer(
-            hidden_size=hidden_size,
-            ffn_hidden_size=4*hidden_size,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            hidden_dropout=0.0,
-            attention_dropout=config.dropout_p,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            layer_number=layer_number,
-            kv_channels=config.head_dim_qk,
-            self_attn_mask_type="causal",
-            params_dtype=dtype,
-            attn_input_format="bshd",
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+        model = [
+            TransformerLayer(
+                hidden_size=hidden_size,
+                ffn_hidden_size=4 * hidden_size,
+                num_attention_heads=config.num_heads,
+                num_gqa_groups=config.num_gqa_groups,
+                hidden_dropout=0.0,
+                attention_dropout=config.dropout_p,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                layer_number=layer_number,
+                kv_channels=config.head_dim_qk,
+                self_attn_mask_type="causal",
+                params_dtype=dtype,
+                attn_input_format="bshd",
+            )
+            .cuda()
+            .eval()
+            for layer_number in range(1, num_layers + 1)
+        ]
     if module == "DotProductAttention":
-        model = [DotProductAttention(
-            kv_channels=config.head_dim_qk,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            layer_number=layer_number,
-            attention_dropout=config.dropout_p,
-            qkv_format="bshd",
-            attn_mask_type="causal",
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+        model = [
+            DotProductAttention(
+                kv_channels=config.head_dim_qk,
+                num_attention_heads=config.num_heads,
+                num_gqa_groups=config.num_gqa_groups,
+                layer_number=layer_number,
+                attention_dropout=config.dropout_p,
+                qkv_format="bshd",
+                attn_mask_type="causal",
+            )
+            .cuda()
+            .eval()
+            for layer_number in range(1, num_layers + 1)
+        ]
 
     # generate data for all requests
     assert (
@@ -299,12 +312,20 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     ), "This test only simulates max_seqlen_q = max_seqlen_kv."
     shapes = []
     if module == "TransformerLayer":
-        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_heads * config.head_dim_qk])
+        shapes.append(
+            [config.total_requests, config.max_seqlen_kv, config.num_heads * config.head_dim_qk]
+        )
         num_tensors = 1
     if module == "DotProductAttention":
-        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk])
-        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk])
-        shapes.append([config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v])
+        shapes.append(
+            [config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk]
+        )
+        shapes.append(
+            [config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk]
+        )
+        shapes.append(
+            [config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v]
+        )
         num_tensors = 3
     full_inputs = generate_args(num_tensors, shapes, dtype, warmup=False)
 
@@ -316,16 +337,16 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             full_output = m(
                 *full_output if isinstance(full_output, List) else full_output,
             )
-    #rotary_freqs = torch.randn((config.max_seqlen_kv, 1, 1, config.num_heads), dtype=torch.float, device="cuda")
+    # rotary_freqs = torch.randn((config.max_seqlen_kv, 1, 1, config.num_heads), dtype=torch.float, device="cuda")
     if module == "TransformerLayer":
         full_output = full_inputs
         for m in model:
             full_output = m(
                 *full_output if isinstance(full_output, List) else full_output,
-                #rotary_pos_emb=rotary_freqs,
+                # rotary_pos_emb=rotary_freqs,
             )
-            #print('full h', h[0,0,:4])
-            #print('full h', h[1,6,:4])
+            # print('full h', h[0,0,:4])
+            # print('full h', h[1,6,:4])
 
     # simulate real-life inference
     logger.info("=== Generating one token at a time ===")
@@ -364,7 +385,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         qkv_format=qkv_format,
         allow_query_conversion=backend != "FusedAttention",
     )
-    for layer_number in range(1, num_layers+1):
+    for layer_number in range(1, num_layers + 1):
         inference_params.allocate_memory(layer_number, qkv_format)
 
     # create inference model
@@ -373,32 +394,42 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     output_layer_init_method = scaled_init_method_normal(sigma, num_layers)
     attn_mask_type = "padding_causal" if backend == "FlashAttention" else "padding"
     if module == "TransformerLayer":
-        model = [TransformerLayer(
-            hidden_size=hidden_size,
-            ffn_hidden_size=4*hidden_size,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            hidden_dropout=0.0,
-            attention_dropout=config.dropout_p,
-            init_method=init_method,
-            output_layer_init_method=output_layer_init_method,
-            layer_number=layer_number,
-            kv_channels=config.head_dim_qk,
-            self_attn_mask_type=attn_mask_type, #"padding", #_causal",
-            #enc_dec_attn_mask_type="padding", #_causal",
-            params_dtype=dtype,
-            attn_input_format=qkv_format,
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+        model = [
+            TransformerLayer(
+                hidden_size=hidden_size,
+                ffn_hidden_size=4 * hidden_size,
+                num_attention_heads=config.num_heads,
+                num_gqa_groups=config.num_gqa_groups,
+                hidden_dropout=0.0,
+                attention_dropout=config.dropout_p,
+                init_method=init_method,
+                output_layer_init_method=output_layer_init_method,
+                layer_number=layer_number,
+                kv_channels=config.head_dim_qk,
+                self_attn_mask_type=attn_mask_type,  # "padding", #_causal",
+                # enc_dec_attn_mask_type="padding", #_causal",
+                params_dtype=dtype,
+                attn_input_format=qkv_format,
+            )
+            .cuda()
+            .eval()
+            for layer_number in range(1, num_layers + 1)
+        ]
     if module == "DotProductAttention":
-        model = [DotProductAttention(
-            kv_channels=config.head_dim_qk,
-            num_attention_heads=config.num_heads,
-            num_gqa_groups=config.num_gqa_groups,
-            layer_number=layer_number,
-            attention_dropout=config.dropout_p,
-            qkv_format=qkv_format,
-            attn_mask_type=attn_mask_type,
-            ).cuda().eval() for layer_number in range(1, num_layers+1)]
+        model = [
+            DotProductAttention(
+                kv_channels=config.head_dim_qk,
+                num_attention_heads=config.num_heads,
+                num_gqa_groups=config.num_gqa_groups,
+                layer_number=layer_number,
+                attention_dropout=config.dropout_p,
+                qkv_format=qkv_format,
+                attn_mask_type=attn_mask_type,
+            )
+            .cuda()
+            .eval()
+            for layer_number in range(1, num_layers + 1)
+        ]
 
     # graph the model if necessary
     if is_cuda_graph:
@@ -499,7 +530,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                         [
                             inc_inp,
                             torch.zeros(
-                                max_tokens - sum(sim.step_lens), *inp.shape[2:],
+                                max_tokens - sum(sim.step_lens),
+                                *inp.shape[2:],
                                 dtype=dtype,
                                 device=inc_inp.device,
                             ),
@@ -540,7 +572,11 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             incremental_output = incremental_inputs
             for m in model:
                 incremental_output = m(
-                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
+                    *(
+                        incremental_output
+                        if isinstance(incremental_output, List)
+                        else incremental_output
+                    ),
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
@@ -551,7 +587,11 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             incremental_output = incremental_inputs
             for _ in range(num_layers):
                 incremental_output = model(
-                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
+                    *(
+                        incremental_output
+                        if isinstance(incremental_output, List)
+                        else incremental_output
+                    ),
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,

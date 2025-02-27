@@ -8414,7 +8414,10 @@ class MultiheadAttention(torch.nn.Module):
         # Pre-allocate memory for key-values for inference
         # =================================================
 
-        if inference_params is not None and self.layer_number not in inference_params.cache_manager.cache:
+        if (
+            inference_params is not None
+            and self.layer_number not in inference_params.cache_manager.cache
+        ):
             inference_params.allocate_memory(self.layer_number, self.qkv_format)
 
         # ======================

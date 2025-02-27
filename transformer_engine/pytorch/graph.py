@@ -333,7 +333,11 @@ def _make_graphed_callables(
                     static_grad_inputs = []
                     grad_idx = 0
                     for arg in static_input_surface:
-                        if callables[0].training and isinstance(arg, torch.Tensor) and arg.requires_grad:
+                        if (
+                            callables[0].training
+                            and isinstance(arg, torch.Tensor)
+                            and arg.requires_grad
+                        ):
                             static_grad_inputs.append(grad_inputs[grad_idx])
                             grad_idx += 1
                         else:
