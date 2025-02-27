@@ -24,7 +24,7 @@ namespace {
 // clang-format off
 /*
 
-Step 1: Load input to shared memory        
+Step 1: Load input to shared memory
 * shard memory: 128x128 elements with type=InputType (below graph doesn't consider padding)
 * 8 warps
 * Loop 8 times
@@ -137,27 +137,16 @@ constexpr int kNumThreadsStore = kTileDim / kNVecOut;
 static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kThreadsPerWarp");
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 
-template <
-    bool kReturnTranspose,
-    bool kIsE8Scaling,
-    bool kPermuteScale,
-    bool kAligned,
-    typename CType,
-    typename IType,
-    typename OType>
-__global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
-    const IType* const input,
-    OType* const output_c,
-    OType* const output_t,
-    CType* const tile_scales_inv_c,
-    CType* const tile_scales_inv_t,
-    const size_t row_length,
-    const size_t num_rows,
-    const size_t scale_stride_x,
-    const size_t scale_stride_y,
-    const size_t scale_t_stride_x,
-    const size_t scale_t_stride_y,
-    const float epsilon) {
+template <bool kReturnTranspose, bool kIsE8Scaling, bool kPermuteScale, bool kAligned,
+          typename CType, typename IType, typename OType>
+__global__ void __launch_bounds__(kThreadsPerBlock)
+    block_scaled_1d_cast_transpose_kernel(const IType* const input, OType* const output_c,
+                                          OType* const output_t, CType* const tile_scales_inv_c,
+                                          CType* const tile_scales_inv_t, const size_t row_length,
+                                          const size_t num_rows, const size_t scale_stride_x,
+                                          const size_t scale_stride_y,
+                                          const size_t scale_t_stride_x,
+                                          const size_t scale_t_stride_y, const float epsilon) {
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecOut>;
   union IVec {
@@ -491,73 +480,49 @@ void nvte_quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleT
   const size_t num_blocks_y = DIVUP(num_rows, (size_t)kTileDim);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.dtype,
-      InputType,
+      input.dtype, InputType,
 
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output.dtype,
-          OutputType,
+          output.dtype, OutputType,
 
           dim3 grid(num_blocks_x, num_blocks_y, 1);
 
           const bool full_tile = row_length % kTileDim == 0 && num_rows % kTileDim == 0;
 
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
-              return_transpose,
-              kReturnTranspose,
+              return_transpose, kReturnTranspose,
 
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  pow2_scale,
-                  kPow2Scale,
+                  pow2_scale, kPow2Scale,
 
                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                      full_tile,
-                      kAligned,
+                      full_tile, kAligned,
 
                       size_t smem_bytes = kSMemSize * sizeof(InputType);
                       // shared memory must be requested up
                       if (smem_bytes >= 48 * 1024) {
                         cudaError_t err = cudaFuncSetAttribute(
-                            &block_scaled_1d_cast_transpose_kernel<
-                                kReturnTranspose,
-                                kPow2Scale,
-                                kPermuteScale,
-                                kAligned,
-                                float,
-                                InputType,
-                                OutputType>,
-                            cudaFuncAttributeMaxDynamicSharedMemorySize,
-                            smem_bytes);
-                        NVTE_CHECK(
-                            err == cudaSuccess, "Failed to set dynamic shared memory size.");
-                      }
-                      block_scaled_1d_cast_transpose_kernel<
-                          kReturnTranspose,
-                          kPow2Scale,
-                          kPermuteScale,
-                          kAligned,
-                          float,
-                          InputType,
-                          OutputType>
-                        <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
+                            &block_scaled_1d_cast_transpose_kernel<kReturnTranspose, kPow2Scale,
+                                                                   kPermuteScale, kAligned, float,
+                                                                   InputType, OutputType>,
+                            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+                        NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
+                      } block_scaled_1d_cast_transpose_kernel<kReturnTranspose, kPow2Scale,
+                                                              kPermuteScale, kAligned, float,
+                                                              InputType, OutputType>
+                      <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
                           reinterpret_cast<const InputType*>(input.dptr),
                           reinterpret_cast<OutputType*>(output.dptr),
                           reinterpret_cast<OutputType*>(output_t.dptr),
                           reinterpret_cast<float*>(scale_inv.dptr),
-                          reinterpret_cast<float*>(scale_inv_t.dptr),
-                          row_length,
-                          num_rows,
-                          scale_stride_x,
-                          scale_stride_y,
-                          scale_t_stride_x,
-                          scale_t_stride_y,
-                          epsilon);
-                      ) // kAligned
-                  ) // kPow2Scale
-              ) // kReturnTranspose
-          ) // OutputType
-      ) // InputType
+                          reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                          scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
+                          epsilon);)  // kAligned
+                  )                   // kPow2Scale
+              )                       // kReturnTranspose
+          )                           // OutputType
+      )                               // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
-} // namespace transformer_engine::detail
+}  // namespace transformer_engine::detail

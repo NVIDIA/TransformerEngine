@@ -74,9 +74,7 @@ class Float8BlockQuantizer(Quantizer):
         dst._fp8_dtype = self.dtype
         return dst
 
-    def get_scale_shape(
-        self, shape: Iterable[int], columnwise: bool
-    ) -> Tuple[int, int]:
+    def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         # cuBLAS kernel format (for NxN by NxN and 1xN by NxN GEMMs)
         # The scales for 2D block quantized tensors must have scales padded
         # to multiples of 4 on the inner dimension. TODO: Verify whether outer
@@ -87,16 +85,12 @@ class Float8BlockQuantizer(Quantizer):
                 logical_scale_shape[-2] *= shape[i]
             if len(shape) > 0:
                 logical_scale_shape[-1] = math.ceil(shape[-1] / self.block_len)
-            logical_scale_shape[-2] = math.ceil(
-                logical_scale_shape[-2] / self.block_len
-            )
+            logical_scale_shape[-2] = math.ceil(logical_scale_shape[-2] / self.block_len)
             if columnwise:
                 tmp = logical_scale_shape[-1]
                 logical_scale_shape[-1] = logical_scale_shape[-2]
                 logical_scale_shape[-2] = tmp
-            logical_scale_shape[-1] = round_up_to_nearest_multiple(
-                logical_scale_shape[-1], 4
-            )
+            logical_scale_shape[-1] = round_up_to_nearest_multiple(logical_scale_shape[-1], 4)
             return tuple(logical_scale_shape)
         else:
             assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
@@ -107,14 +101,10 @@ class Float8BlockQuantizer(Quantizer):
             if len(shape) > 0:
                 logical_scale_shape[-2] = shape[-1]
             if not columnwise:
-                logical_scale_shape[-2] = math.ceil(
-                    logical_scale_shape[-2] / self.block_len
-                )
+                logical_scale_shape[-2] = math.ceil(logical_scale_shape[-2] / self.block_len)
                 return tuple(logical_scale_shape)
             else:
-                logical_scale_shape[-1] = math.ceil(
-                    logical_scale_shape[-1] / self.block_len
-                )
+                logical_scale_shape[-1] = math.ceil(logical_scale_shape[-1] / self.block_len)
                 return (logical_scale_shape[1], logical_scale_shape[0])
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
@@ -205,7 +195,10 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
-        return f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return (
+            f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
+            f" data={self.dequantize(dtype=self.dtype)})"
+        )
 
     def _get_quantizer(self) -> Quantizer:
         """Get builder for quantized tensor
@@ -281,8 +274,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             return
         if columnwise_usage:
             assert (
-                self._columnwise_data is not None
-                and self._columnwise_scale_inv is not None
+                self._columnwise_data is not None and self._columnwise_scale_inv is not None
             ), "Cannot update to columnwise usage."
             self._rowwise_data = None
             self._rowwise_scale_inv = None
@@ -332,16 +324,12 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             )
         ):
             return self
-        raise ValueError(
-            "Float8BlockwiseQTensor does not support different memory formats!"
-        )
+        raise ValueError("Float8BlockwiseQTensor does not support different memory formats!")
 
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
-        self._columnwise_data = (
-            torch.Tensor() if self._columnwise_data is not None else None
-        )
+        self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -448,9 +436,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                     device=new_device,
                 )
                 # pylint: disable=unnecessary-dunder-call
-                super(Float8BlockwiseQTensor, type(self)).data.__set__(
-                    self, dummy_tensor
-                )
+                super(Float8BlockwiseQTensor, type(self)).data.__set__(self, dummy_tensor)
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer

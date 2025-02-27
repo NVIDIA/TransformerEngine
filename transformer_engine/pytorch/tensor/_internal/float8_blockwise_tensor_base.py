@@ -89,9 +89,7 @@ class Float8BlockwiseQTensorBase:
         """Get this Tensor's data."""
         return self._rowwise_data, self._columnwise_data
 
-    def _transpose_dq_columnwise_output(
-        self, columnwise_dq: torch.Tensor
-    ) -> torch.Tensor:
+    def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""
         if columnwise_dq.dim() < 2:
             return columnwise_dq
@@ -99,9 +97,7 @@ class Float8BlockwiseQTensorBase:
         permute_dims.append(0)
         return torch.permute(columnwise_dq, tuple(permute_dims)).contiguous()
 
-    def _dequantize_vectorwise(
-        self, *, dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:
+    def _dequantize_vectorwise(self, *, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         block_len = 128
 
         q_M, q_K = 1, 1

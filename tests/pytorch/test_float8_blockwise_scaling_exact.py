@@ -14,14 +14,14 @@ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
-from tests.pytorch.references.blockwise_quantizer_reference import BlockwiseQuantizerReference, QuantizeResult
+from tests.pytorch.references.blockwise_quantizer_reference import (
+    BlockwiseQuantizerReference,
+    QuantizeResult,
+)
+
 
 def initialize_for_many_scales(
-    x_shape_2d: Tuple[int, int],
-    tile_shape: Tuple[int, int],
-    *,
-    dtype: torch.dtype,
-    device: str
+    x_shape_2d: Tuple[int, int], tile_shape: Tuple[int, int], *, dtype: torch.dtype, device: str
 ) -> torch.Tensor:
     """
     Put separate distributions into each quantization tile
@@ -56,9 +56,9 @@ def initialize_for_many_scales(
                 max_dst_vals[0] - min_dst_vals[0],
                 max_dst_vals[1] - min_dst_vals[1],
             )
-            result[
-                min_dst_vals[0] : max_dst_vals[0], min_dst_vals[1] : max_dst_vals[1]
-            ] = tile[: max_src_vals[0], : max_src_vals[1]]
+            result[min_dst_vals[0] : max_dst_vals[0], min_dst_vals[1] : max_dst_vals[1]] = tile[
+                : max_src_vals[0], : max_src_vals[1]
+            ]
     return result
 
 
@@ -82,9 +82,7 @@ def initialize_for_many_scales(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str
-)
+@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("eps", [0, 1e-12], ids=["eps_0", "eps_1e-12"])
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "quantize_only"]
@@ -103,21 +101,23 @@ def test_quantization_block_tiling_versus_reference(
 ) -> None:
     te_dtype = TE_DType[quant_dtype]
     if tile_size == (1, 128):
-        block_scaling_dim=1
+        block_scaling_dim = 1
     elif tile_size == (128, 128):
-        block_scaling_dim=2
+        block_scaling_dim = 2
     else:
         raise ValueError("Non support tile size")
     # This test runs a comparison of the ref class versus the class using
     # CUDA kernels to quantize. They should quantize identically for pixels
     # that are not DC values in the scale factor shape.
     ref_quantizer = BlockwiseQuantizerReference()
-    sut_quantizer = Float8BlockQuantizer(fp8_dtype=te_dtype,
-                                         rowwise=True,
-                                         columnwise=return_transpose,
-                                         amax_epsilon=eps,
-                                         force_pow_2_scales=pow_2_scales,
-                                         block_scaling_dim=block_scaling_dim)
+    sut_quantizer = Float8BlockQuantizer(
+        fp8_dtype=te_dtype,
+        rowwise=True,
+        columnwise=return_transpose,
+        amax_epsilon=eps,
+        force_pow_2_scales=pow_2_scales,
+        block_scaling_dim=block_scaling_dim,
+    )
 
     # Setup device and random seed
     device = "cuda"
@@ -129,10 +129,7 @@ def test_quantization_block_tiling_versus_reference(
     x = initialize_for_many_scales((M, N), tile_size, dtype=x_dtype, device=device)
 
     x_fp8_sut = sut_quantizer.make_empty((M, N), dtype=x_dtype, device=device, requires_grad=False)
-    x_fp8_sut = sut_quantizer.update_quantized(
-        x,
-        x_fp8_sut
-    )
+    x_fp8_sut = sut_quantizer.update_quantized(x, x_fp8_sut)
 
     assert x_fp8_sut._rowwise_data is not None
     qx: torch.Tensor = x_fp8_sut._rowwise_data.view(dtype=quant_dtype)
@@ -142,8 +139,12 @@ def test_quantization_block_tiling_versus_reference(
     sx_t = x_fp8_sut._columnwise_scale_inv
 
     qresult_ref = ref_quantizer.quantize(
-        x, quant_dtype=quant_dtype, return_transpose=return_transpose,
-        eps=eps, pow_2_scales=pow_2_scales, quant_tile_shape=tile_size
+        x,
+        quant_dtype=quant_dtype,
+        return_transpose=return_transpose,
+        eps=eps,
+        pow_2_scales=pow_2_scales,
+        quant_tile_shape=tile_size,
     )
     qx_ref, sx_ref, qx_t_ref, sx_t_ref = (
         qresult_ref.data,
@@ -154,7 +155,7 @@ def test_quantization_block_tiling_versus_reference(
 
     # Check
     torch.testing.assert_close(qx.float(), qx_ref.float(), atol=0.0, rtol=0.0)
-    if (tile_size[0] != 1):
+    if tile_size[0] != 1:
         # Zero out values that are don't care values
         # cuBLAS has padding of 2D tensors.
         scale_mask = torch.ones(
@@ -173,7 +174,7 @@ def test_quantization_block_tiling_versus_reference(
         assert qx_t_ref is not None
         assert sx_t is not None
         assert sx_t_ref is not None
-        if (tile_size[0] != 1):
+        if tile_size[0] != 1:
             scale_mask = torch.ones(
                 (math.ceil(N / tile_size[0]), math.ceil(M / tile_size[1])),
                 device=sx_t.device,
@@ -189,6 +190,7 @@ def test_quantization_block_tiling_versus_reference(
         assert qx_t is None and qx_t_ref is None
         assert sx_t is None and sx_t_ref is None
 
+
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -197,9 +199,7 @@ def test_quantization_block_tiling_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str
-)
+@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("eps", [0, math.pow(2, -125)], ids=["eps_0", "eps_small"])
 @pytest.mark.parametrize("pow_2_scales", [True, False], ids=["pow2scales", "f32scales"])
 @pytest.mark.parametrize("tile_size", [(1, 128)])
@@ -218,18 +218,20 @@ def test_quantization_block_tiling_extrema_versus_reference(
     # branch coverage of scale computation.
     te_dtype = TE_DType[quant_dtype]
     if tile_size == (1, 128):
-        block_scaling_dim=1
+        block_scaling_dim = 1
     elif tile_size == (128, 128):
-        block_scaling_dim=2
+        block_scaling_dim = 2
     else:
         raise ValueError("Non support tile size")
     ref_quantizer = BlockwiseQuantizerReference()
-    sut_quantizer = Float8BlockQuantizer(fp8_dtype=te_dtype,
-                                         rowwise=True,
-                                         columnwise=False,
-                                         amax_epsilon=eps,
-                                         force_pow_2_scales=pow_2_scales,
-                                         block_scaling_dim=block_scaling_dim)
+    sut_quantizer = Float8BlockQuantizer(
+        fp8_dtype=te_dtype,
+        rowwise=True,
+        columnwise=False,
+        amax_epsilon=eps,
+        force_pow_2_scales=pow_2_scales,
+        block_scaling_dim=block_scaling_dim,
+    )
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -245,16 +247,17 @@ def test_quantization_block_tiling_extrema_versus_reference(
     # Run cast and transpose kernel
     # Internal call ops.quantize_tensorwise
     x_fp8_sut = sut_quantizer.make_empty((M, N), dtype=x_dtype, device=device, requires_grad=False)
-    x_fp8_sut = sut_quantizer.update_quantized(
-        x,
-        x_fp8_sut
-    )
+    x_fp8_sut = sut_quantizer.update_quantized(x, x_fp8_sut)
     qx = x_fp8_sut._rowwise_data.view(dtype=quant_dtype)
     sx = x_fp8_sut._rowwise_scale_inv
 
     qresult_ref = ref_quantizer.quantize(
-        x, quant_dtype=quant_dtype, return_transpose=return_transpose,
-        eps=eps, pow_2_scales=pow_2_scales, quant_tile_shape=tile_size
+        x,
+        quant_dtype=quant_dtype,
+        return_transpose=return_transpose,
+        eps=eps,
+        pow_2_scales=pow_2_scales,
+        quant_tile_shape=tile_size,
     )
     qx_ref, sx_ref = (
         qresult_ref.data,

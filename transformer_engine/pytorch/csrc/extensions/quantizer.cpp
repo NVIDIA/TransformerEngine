@@ -239,8 +239,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     data_colwise = at::empty(torch_columnwise_shape, opts);
     scale_inv_colwise = at::empty({sinv0, sinv1}, scale_opts);
 
-    tensor.set_columnwise_data(data_colwise.data_ptr(), this->dtype,
-                               columnwise_shape);
+    tensor.set_columnwise_data(data_colwise.data_ptr(), this->dtype, columnwise_shape);
     tensor.set_columnwise_scale_inv(scale_inv_colwise.data_ptr(), DType::kFloat32,
                                     std::vector<size_t>{sinv0, sinv1});
   }

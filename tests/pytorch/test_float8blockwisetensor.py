@@ -78,12 +78,8 @@ class TestFloat8BlockwiseTensor:
             shape=dims,
             dtype=dtype,
             rowwise_data=torch.zeros(dims, device="cuda", dtype=torch.uint8),
-            rowwise_scale_inv=torch.zeros(
-                scale_dims, device="cuda", dtype=torch.float32
-            ),
-            columnwise_data=torch.zeros(
-                columnwise_dims, device="cuda", dtype=torch.uint8
-            ),
+            rowwise_scale_inv=torch.zeros(scale_dims, device="cuda", dtype=torch.float32),
+            columnwise_data=torch.zeros(columnwise_dims, device="cuda", dtype=torch.uint8),
             columnwise_scale_inv=torch.zeros(
                 columnwise_scale_dims, device="cuda", dtype=torch.float32
             ),
@@ -146,9 +142,7 @@ class TestFloat8BlockwiseTensor:
             columnwise=False,
             block_scaling_dim=block_scaling_dim,
         )
-        self._test_quantize_dequantize(
-            quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol
-        )
+        self._test_quantize_dequantize(quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol)
 
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
@@ -181,7 +175,7 @@ class TestFloat8BlockwiseTensor:
     @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
     @pytest.mark.parametrize("dq_columnwise", [True, False])
     def test_quantize_dequantize_dims_cpp_allocate_output(
-            self, dims: DimsType, block_scaling_dim: int, fp8_dtype: tex.DType, dq_columnwise: bool
+        self, dims: DimsType, block_scaling_dim: int, fp8_dtype: tex.DType, dq_columnwise: bool
     ) -> None:
         atol = _tols[fp8_dtype]["atol"]
         rtol = _tols[fp8_dtype]["rtol"]

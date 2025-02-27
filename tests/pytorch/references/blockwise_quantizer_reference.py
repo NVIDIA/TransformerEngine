@@ -94,9 +94,7 @@ class CuBLASScaleMunger:
                 if K % 4 == 0:
                     return s
                 k_pad = 4 - (K % 4)
-                return torch.nn.functional.pad(
-                    s, (0, k_pad), mode="constant", value=0
-                ).contiguous()
+                return torch.nn.functional.pad(s, (0, k_pad), mode="constant", value=0).contiguous()
 
             s = _munge_scale_tensor(unmunged.scale)
             if unmunged.scale_t is None:
@@ -199,9 +197,7 @@ class BlockwiseQuantizerReference:
             qx_t = None
             scale_inv_t = None
 
-        return QuantizeResult(
-            data=qx, scale=scale_inv, data_t=qx_t, scale_t=scale_inv_t
-        )
+        return QuantizeResult(data=qx, scale=scale_inv, data_t=qx_t, scale_t=scale_inv_t)
 
     @classmethod
     def _quantize_vectorwise_reference(
@@ -284,9 +280,7 @@ class BlockwiseQuantizerReference:
         else:
             qout_t, scale_inv_t = None, None
 
-        return QuantizeResult(
-            data=qout, scale=scale_inv, data_t=qout_t, scale_t=scale_inv_t
-        )
+        return QuantizeResult(data=qout, scale=scale_inv, data_t=qout_t, scale_t=scale_inv_t)
 
     def ref_dequantize_rowwise(
         self,
@@ -297,20 +291,14 @@ class BlockwiseQuantizerReference:
     ) -> torch.Tensor:
         assert q.dim() == 2
         q_M, q_K = q.shape
-        s = self.scale_munger.demunge_scale_shape_from_backend(
-            (q_M, q_K), s, quant_tile_shape
-        )
+        s = self.scale_munger.demunge_scale_shape_from_backend((q_M, q_K), s, quant_tile_shape)
         assert len(s.shape) == 2
         m_tiles, k_tiles = s.shape
         M, K = q.shape
         unpadded_m, unpadded_k = M, K
         if M % quant_tile_shape[0] != 0 or K % quant_tile_shape[1] != 0:
-            m_pad_amount = (
-                quant_tile_shape[0] - (M % quant_tile_shape[0])
-            ) % quant_tile_shape[0]
-            k_pad_amount = (
-                quant_tile_shape[1] - (K % quant_tile_shape[1])
-            ) % quant_tile_shape[1]
+            m_pad_amount = (quant_tile_shape[0] - (M % quant_tile_shape[0])) % quant_tile_shape[0]
+            k_pad_amount = (quant_tile_shape[1] - (K % quant_tile_shape[1])) % quant_tile_shape[1]
             q = torch.nn.functional.pad(
                 q, (0, k_pad_amount, 0, m_pad_amount), mode="constant", value=0
             ).contiguous()
