@@ -195,13 +195,13 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
       scale_inv_meta ret_rowwise, ret_colwise;
 
       {
-        auto scale_dim_1 = first_dim;
         auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
+        auto scale_dim_1 = DIVUP(first_dim, 4) * 4;
         ret_rowwise.shape = {scale_dim_0, scale_dim_1};
       }
       {
-        auto scale_dim_1 = last_dim;
         auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
+        auto scale_dim_1 = DIVUP(last_dim, 4) * 4;
         ret_colwise.shape = {scale_dim_0, scale_dim_1};
       }
       ret_rowwise.type = DType::kFloat32;
