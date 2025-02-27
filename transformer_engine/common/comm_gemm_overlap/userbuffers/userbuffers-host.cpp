@@ -66,8 +66,7 @@ void ub_mpi_barrier(ExtComm comm) { UB_MPI_CHECK(MPI_Barrier(comm)); }
 // MNNVL: FABRIC handle support lifted from CUDA 12.3
 #define CU_MEM_HANDLE_TYPE_FABRIC ((CUmemAllocationHandleType)0x8ULL)
 #define CU_IPC_HANDLE_SIZE 64
-typedef struct CUmemFabricHandle_st
-{
+typedef struct CUmemFabricHandle_st {
   unsigned char data[CU_IPC_HANDLE_SIZE];
 } CUmemFabricHandle_v1;
 typedef CUmemFabricHandle_v1 CUmemFabricHandle;
@@ -95,43 +94,50 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
 #define NVMLCHECK(call)                                                                  \
   do {                                                                                   \
     nvmlReturn_t result = call;                                                          \
-    if (result != NVML_SUCCESS)                                                          \
-    {                                                                                    \
+    if (result != NVML_SUCCESS) {                                                        \
       printf("Failed, NVML error %s:%d '%s' (%d)\n", __FILE__, __LINE__, #call, result); \
       exit(EXIT_FAILURE);                                                                \
     }                                                                                    \
-} while (0);
+  } while (0);
 
 bool has_mnnvl_fabric(int device_id) {
+#if CUDA_VERSION < 12040
+  if (getenv("NVTE_UBDEBUG")) {
+    printf(
+        "TransformerEngine does not support multi-node NVLINK "
+        "since it was not built with CUDA version >= 12.4.\n");
+  }
+  return false;
+#else
+  bool mnnvl_fabric_support = false;
   CUdevice dev;
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &dev, device_id);
   int fabric_handle_supported = 0;
-  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute,
-                              &fabric_handle_supported,
-                              CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED,
-                              dev);
-  if (!fabric_handle_supported) {
-    return false;
+  NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &fabric_handle_supported,
+                              CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
+  if (fabric_handle_supported) {
+    NVMLCHECK(nvmlInit_v2());
+    nvmlDevice_t local_device;
+    NVMLCHECK(nvmlDeviceGetHandleByIndex_v2(device_id, &local_device));
+    nvmlGpuFabricInfoV_t fabricInfo = {};
+    fabricInfo.version = nvmlGpuFabricInfo_v2;
+    fabricInfo.clusterUuid[0] = '\0';
+    nvmlReturn_t nvml_status = nvmlDeviceGetGpuFabricInfoV(local_device, &fabricInfo);
+    NVMLCHECK(nvmlShutdown());
+    if (nvml_status == NVML_SUCCESS && fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED &&
+        fabricInfo.clusterUuid[0] != '\0') {
+      mnnvl_fabric_support = true;
+    }
   }
-
-  NVMLCHECK(nvmlInit_v2());
-  nvmlDevice_t local_device;
-  NVMLCHECK(nvmlDeviceGetHandleByIndex_v2(device_id, &local_device));
-  nvmlGpuFabricInfoV_t fabricInfo = {};
-  fabricInfo.version = nvmlGpuFabricInfo_v2;
-  fabricInfo.clusterUuid[0] = '\0';
-  nvmlReturn_t nvml_status = nvmlDeviceGetGpuFabricInfoV(local_device, &fabricInfo);
-  NVMLCHECK(nvmlShutdown());
-  if (nvml_status != NVML_SUCCESS ||
-      fabricInfo.state < NVML_GPU_FABRIC_STATE_COMPLETED ||
-      fabricInfo.clusterUuid[0] == '\0') {
-    return false;
-  }
-
   if (getenv("NVTE_UBDEBUG")) {
-    printf("MNNVL NVLINK is supported on this platform.\n");
+    if (mnnvl_fabric_support) {
+      printf("MNNVL NVLINK is supported on this platform.\n");
+    } else {
+      printf("MNNVL NVLINK is not supported on this platform.\n");
+    }
   }
-  return true;
+  return mnnvl_fabric_support;
+#endif
 }
 
 int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
@@ -160,10 +166,6 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->use_ce = 0;
   (*comm)->cga_size = 2;
   for (int i = 0; i < userbuffers_op_types; i++) (*comm)->basecounter[i] = 0;
-  (*comm)->head = 0;
-  (*comm)->tail = 0;
-  (*comm)->active_nreqs = 0;
-  for (int i = 0; i < userbuffers_op_types; i++) (*comm)->active_req[i].active = -1;
 
   int device_clock = 0;
   // 110 sec wait time by default
@@ -238,7 +240,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     CUmulticastObjectProp mcProp = {};
     mcProp.numDevices = (*comm)->ar2_nvsize;
     mcProp.size = (*comm)->mc_maxsize;
-    mcProp.handleTypes = mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    mcProp.handleTypes =
+        mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
     NVTE_CALL_CHECK_CUDA_DRIVER(
         cuMulticastGetGranularity, &gran, &mcProp,
@@ -255,21 +258,24 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       CUmemFabricHandle *exphndls;
       NVTE_CHECK_CUDA(cudaMallocHost(&exphndls, (*comm)->nvsize * sizeof(CUmemFabricHandle)));
       if ((*comm)->ar2_nvrank == 0)
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, static_cast<void *>(tmphndl), (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0);
-      for(int grp=0;grp<(*comm)->ar_nvsize;grp++) { // we do N broadcasts for N TP groups in NVL domain
-        int root = grp*(*comm)->ar2_nvsize;
+        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, static_cast<void *>(tmphndl),
+                                    (*comm)->mc_handle, CU_MEM_HANDLE_TYPE_FABRIC, 0);
+      for (int grp = 0; grp < (*comm)->ar_nvsize;
+           grp++) {  // we do N broadcasts for N TP groups in NVL domain
+        int root = grp * (*comm)->ar2_nvsize;
 
         // It just needs to be a bcast but reuse existing allgather comm
-        (*comm)->_allgather(reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
-                            reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle),
-                            (*comm)->comm_intra);
+        (*comm)->_allgather(
+            reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
+            reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle), (*comm)->comm_intra);
 
         //save data if brodcast was from rank 0 in our group
-        if((*comm)->ar2_firstgpu == root)
+        if ((*comm)->ar2_firstgpu == root)
           memcpy(exphndl, exphndls + root, sizeof(CUmemFabricHandle));
       }
       if ((*comm)->ar2_nvrank != 0)
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &(*comm)->mc_handle, reinterpret_cast<void *>(exphndl), CU_MEM_HANDLE_TYPE_FABRIC);
+        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &(*comm)->mc_handle,
+                                    reinterpret_cast<void *>(exphndl), CU_MEM_HANDLE_TYPE_FABRIC);
       free(exphndl);
       free(tmphndl);
       NVTE_CHECK_CUDA(cudaFreeHost(exphndls));
@@ -377,12 +383,11 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
   if (getenv("NVTE_UBDEBUG"))
     printf(
-        "%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP %dx%d TPGROUP "
-        "%dx%d PIPE_ID %d/%d\n",
+        "%d/%d:(%d x %d): DP %d x %d TP %d x %d, DPGROUP x%d TPGROUP "
+        "%dx%d\n",
         myrank, numranks, myrank / numlocal, myrank % numlocal, (*comm)->my_node,
-        (*comm)->ar_nvrank, (*comm)->my2_node, (*comm)->ar2_nvrank, (*comm)->num_nodes,
-        (*comm)->ar_nvsize, (*comm)->num2_nodes, (*comm)->ar2_nvsize, (*comm)->pipe_id,
-        pipegpus * pipenodes);
+        (*comm)->ar_nvrank, (*comm)->my_node, (*comm)->ar2_nvrank, (*comm)->ar_nvsize,
+        (*comm)->num_nodes, (*comm)->ar2_nvsize);
   fflush(NULL);
 
   return 0;
@@ -419,7 +424,6 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
   // find internode numbers and make internode communicator
   NVTE_CHECK_CUDA(cudaFree(0));
   int mynode, numnodes;
-
 
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
@@ -501,7 +505,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     prop.location.id = comm->mydev;
-    prop.requestedHandleTypes = mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    prop.requestedHandleTypes =
+        mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
 
     size_t granularity = 0;
     NVTE_CALL_CHECK_CUDA_DRIVER(
@@ -530,14 +535,17 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     if (mnnvl_fabric) {
       CUmemFabricHandle *exphndl;
       CUmemFabricHandle myhndl;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl, comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0);
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl,
+                                  comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0);
       NVTE_CHECK_CUDA(cudaMallocHost(&exphndl, comm->nvsize * sizeof(CUmemFabricHandle)));
       comm->_allgather(reinterpret_cast<void *>(exphndl), comm->nvsize * sizeof(CUmemFabricHandle),
-                      reinterpret_cast<void *>(&myhndl), sizeof(CUmemFabricHandle),
-                      comm->comm_intra);
+                       reinterpret_cast<void *>(&myhndl), sizeof(CUmemFabricHandle),
+                       comm->comm_intra);
       for (int p = 0; p < nranks; p++)
         if (p != myrank)
-          NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &comm->uchandles[hndl][p], reinterpret_cast<void *>(&exphndl[p]), CU_MEM_HANDLE_TYPE_FABRIC);
+          NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &comm->uchandles[hndl][p],
+                                      reinterpret_cast<void *>(&exphndl[p]),
+                                      CU_MEM_HANDLE_TYPE_FABRIC);
       NVTE_CHECK_CUDA(cudaFreeHost(exphndl));
     } else {
       int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
@@ -558,7 +566,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         int send_to = (myrank + p) % nranks;
         int recv_from = (myrank + nranks - p) % nranks;
         comm->_barrier(comm->comm_intra);
-        IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, peerfd[myrank], send_to, (uint64_t)opId), ret, error);
+        IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, peerfd[myrank], send_to, (uint64_t)opId), ret,
+                     error);
         IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &peerfd[recv_from]), ret, error);
       }
 

@@ -120,25 +120,14 @@ struct communicator {
       ar_nvrank;  // number of gpus(and first gpu in a group) of gpus per node in reduction subgroup
                   // (_splitar init used) would be equal to (nvsize,0) for regular comm_create
   int ar2_nvsize, ar2_firstgpu, ar2_nvrank;  // with ar_nvsize as a step
-  int pipe_id;  // which allreduce set of groups (pipeline rank in range of 0..pipeline_size)
   int sm_arch;
-  int num_nodes, my_node,
-      first_node;  // comm_inter communicator, per-rail allreduce (might have subset of nodes)
-  int num2_nodes, my2_node, first2_node;  // with num_nodes as a stride
+  int num_nodes, my_node;
   // max value for running block counters in hostflags
   int basecounter[userbuffers_op_types];  // NOLINT(*)
 
   int *flags, *map_flags;
 
   void *mem_mr[NVTE_MAX_REGIONS];
-
-  ub_request *fifo;
-  int nblocks, alignblock, minblock, asyncblocks, active_nreqs;
-  ub_request active_req[userbuffers_op_types];  // NOLINT(*)
-  int padding[7];
-  volatile int head;
-  int padding2[15];
-  volatile int tail;
 
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
   ExtAllgatherOp _allgather;

@@ -77,10 +77,16 @@ def _parse_args(argv=None, namespace=None):
         help="Disable the comm+GEMM overlap.",
     )
     parser.add_argument(
-        "--num-replicas", type=int, default=1, help="Number of data-parallel model replicas per node."
+        "--num-replicas",
+        type=int,
+        default=1,
+        help="Number of data-parallel model replicas per node.",
     )
     parser.add_argument(
-        "--use-global-replica-count", action="store_true", default=False, help="Treat '--num-replicas' as the total number of replicas."
+        "--use-global-replica-count",
+        action="store_true",
+        default=False,
+        help="Treat '--num-replicas' as the total number of replicas.",
     )
     parser.add_argument(
         "--tcp-init",
@@ -216,13 +222,15 @@ def _train(opts):
 
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
-    total_replicas = (opts.num_replicas if opts.use_global_replica_count
-                      else opts.num_replicas * NUM_NODES)
+    total_replicas = (
+        opts.num_replicas if opts.use_global_replica_count else opts.num_replicas * NUM_NODES
+    )
     tp_size = WORLD_SIZE // total_replicas
 
     if total_replicas > 1:
-        ranks_per_replica_list = [[ i * tp_size + t for t in range(tp_size)]
-                                  for i in range(total_replicas)]
+        ranks_per_replica_list = [
+            [i * tp_size + t for t in range(tp_size)] for i in range(total_replicas)
+        ]
 
         tp_group, _ = dist.new_subgroups_by_enumeration(ranks_per_replica_list, backend="nccl")
         ranks_per_replica_tensor = torch.tensor(ranks_per_replica_list, dtype=torch.int32)
