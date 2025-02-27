@@ -119,7 +119,7 @@ _flash_attn_is_installed = False
 _flash_attn_version = PkgVersion("0")
 _flash_attn_version_required = PkgVersion("2.1.1")
 _flash_attn_version_required_blackwell = PkgVersion("2.7.3")
-_flash_attn_max_version = PkgVersion("2.7.3")
+_flash_attn_max_version = PkgVersion("2.7.4.post1")
 _flash_attn_2_plus = False
 _flash_attn_2_1_plus = False
 _flash_attn_2_2_plus = False
@@ -568,13 +568,16 @@ def get_attention_backend(
     if use_flash_attention and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
-        or (head_dim_qk > 192 and device_compute_capability not in ((8, 0), (9, 0)))
+        or (
+            head_dim_qk > 192
+            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+        )
     ):
         if _flash_attn_is_installed:
             logger.debug(
                 "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
                 "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-                "head_dim_qk <= 256 (>192 requires sm80/90). "
+                "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
                 head_dim_qk,
                 head_dim_v,
