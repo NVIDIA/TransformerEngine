@@ -229,6 +229,10 @@ static void FusedAttnForwardImpl(
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * head_dim;
     cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
+
+    // Memset to 0xF0 for filling large negative numbers
+    auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
+    cudaMemsetAsync(softmax_aux, 0xF0, softmax_aux_size * sizeof(float), stream);
   }
 
   /* Output tensors */
