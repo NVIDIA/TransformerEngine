@@ -114,12 +114,13 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "srelu": (tex.srelu, tex.dsrelu, None),
         }
 
+
 def _act_func(activation: str, recipe: Optional[Recipe] = None):
     # based on each quantization mode, we have different kernel fusion supported:
     # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
     # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
     # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
-    # Per-tensor current scaling: [] 
+    # Per-tensor current scaling: []
     funcs = _get_act_func_supported_list(recipe)
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
@@ -198,7 +199,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling"
                 )
 
-        activation_func = _act_func(activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None)[0]
+        activation_func = _act_func(
+            activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        )[0]
         device = inp.device
 
         # Cast for native AMP
@@ -273,7 +276,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # ln_out in this has two possibilities:
             # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
             # 2. in high precision, then we need to cast it and then gather in FP8
-            # the output ln_out_total will be in FP8, and it's a full tensor 
+            # the output ln_out_total will be in FP8, and it's a full tensor
             # TODO: fuse current scaling quantize into layernorm kernel, so ln_out is also in FP8 => save more memory
             ln_out_total, _ = gather_along_first_dim(
                 ln_out,
@@ -288,7 +291,9 @@ class _LayerNormMLP(torch.autograd.Function):
             else:
                 if fp8:
                     if not isinstance(ln_out, QuantizedTensor):
-                        fc1_input_quantizer.set_usage(rowwise=True, columnwise=backwards_needs_fc1_input)
+                        fc1_input_quantizer.set_usage(
+                            rowwise=True, columnwise=backwards_needs_fc1_input
+                        )
                         ln_out = fc1_input_quantizer(ln_out)
                     elif backwards_needs_fc1_input:
                         ln_out.update_usage(rowwise_usage=True, columnwise_usage=True)
@@ -768,16 +773,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias_grad, dact = bgrad_dgelu_fused(fc2_dgrad, fc1_out_without_bias, fc1_bias)
                 if ctx.grad_fc1_output_quantizer is not None:
                     dact = ctx.grad_fc1_output_quantizer(dact)
-            elif _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None and ctx.fp8:
+            elif (
+                _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
+                and ctx.fp8
+            ):
                 # Fusion: gemm, bias + gelu + quantize
-                dbias_dact_quantize_func = _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2]
+                dbias_dact_quantize_func = _act_func(
+                    ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                )[2]
                 fc1_bias_grad, dact = dbias_dact_quantize_func(
                     fc2_dgrad, fc1_out.to(ctx.activation_dtype), ctx.grad_fc1_output_quantizer
                 )  # quantize bgrad gelu fused
             else:
                 # Fusion: gemm + gelu,
                 if not fc2_dgrad_gemm_gelu_fusion:
-                    activation_func_bwd = _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[1]
+                    activation_func_bwd = _act_func(
+                        ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                    )[1]
                     dact = activation_func_bwd(
                         fc2_dgrad, fc1_out.to(ctx.activation_dtype), None
                     )  # activation in high precision
@@ -788,7 +800,9 @@ class _LayerNormMLP(torch.autograd.Function):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                         dact = ctx.grad_fc1_output_quantizer(dact)
                     else:
-                        fc1_bias_grad, dact = tex.bgrad_quantize(dact, ctx.grad_fc1_output_quantizer)
+                        fc1_bias_grad, dact = tex.bgrad_quantize(
+                            dact, ctx.grad_fc1_output_quantizer
+                        )
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
                         True  # fc1_bias_grad is computed later, fused with wgrad gemm for the FC1
@@ -1335,7 +1349,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
         # elif for other recipes (mxfp8, etc.)
 
-
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1546,36 +1559,74 @@ class LayerNormMLP(TransformerEngineBaseModule):
         )
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
-        """Customize quantizers based on current scaling recipe + layernorm_mlp. """
-        assert recipe.float8_current_scaling(), "current scaling recipe quantizer customization here"
+        """Customize quantizers based on current scaling recipe + layernorm_mlp."""
+        assert (
+            recipe.float8_current_scaling()
+        ), "current scaling recipe quantizer customization here"
         if fwd:
             # fc1_input_quantizer: set configs about amax epsilon and power_2_scale
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
             # fc2_input_quantizer
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_INPUT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_INPUT
+            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
             # fc1_weight_quantizer: also set numerical configs about weight
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
             # fc2_weight_quantizer
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
-            self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_WEIGHT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_WEIGHT
+            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
             # parallel related
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].with_amax_reduction = True
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT].amax_reduction_size = self.tp_size
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_size = self.tp_size
         else:
             # grad_fc2_output_quantizer: set configs about amax epsilon and power_2_scale for grad_fc2_output_quantizer
-            self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-            # grad_fc1_output_quantizer: also set numerical configs for grad_fc1_output_quantizer 
-            self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
-            self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            # grad_fc1_output_quantizer: also set numerical configs for grad_fc1_output_quantizer
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_INPUT1
+            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_INPUT1
+            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             if self.sequence_parallel and self.set_parallel_mode:
                 # grad_fc2_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].with_amax_reduction = True
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1].amax_reduction_size = self.tp_size
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_size = self.tp_size

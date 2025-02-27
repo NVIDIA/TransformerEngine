@@ -165,7 +165,8 @@ at::Tensor makeATenTensor(NVTEBasicTensor tensor) {
   at::ScalarType at_dtype = GetATenDTypeFromNVTEDtype(tensor.dtype);
   at::TensorOptions tensor_opts;
   tensor_opts = tensor_opts.dtype(at_dtype).device(torch::kCUDA);
-  at::Tensor tensor_torch = at::from_blob(tensor.data_ptr, torch_shape, strides_ref, deleter, tensor_opts);
+  at::Tensor tensor_torch =
+      at::from_blob(tensor.data_ptr, torch_shape, strides_ref, deleter, tensor_opts);
   return tensor_torch;
 }
 

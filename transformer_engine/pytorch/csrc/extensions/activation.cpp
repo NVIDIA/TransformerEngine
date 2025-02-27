@@ -4,9 +4,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "common.h"
 #include "extensions.h"
 #include "pybind.h"
-#include "common.h"
 
 namespace transformer_engine::pytorch {
 
@@ -34,7 +34,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
     nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
     if (my_quantizer_cs->with_amax_reduction) {
-      NVTE_ERROR("per-tensor current scaling amax reduction is not supported in activation functions.");
+      NVTE_ERROR(
+          "per-tensor current scaling amax reduction is not supported in activation functions.");
     }
     nvte_compute_scale_from_amax(te_output.data(), at::cuda::getCurrentCUDAStream());
   }

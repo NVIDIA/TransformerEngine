@@ -1240,27 +1240,29 @@ inline void fp8_quantize_compute_amax(const Tensor &input, Tensor *output, cudaS
                                               stream););  // NOLINT(*)
 }
 
-
-inline void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsilon, const bool force_pow_2_scales, cudaStream_t stream) {
+inline void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsilon,
+                                                 const bool force_pow_2_scales,
+                                                 cudaStream_t stream) {
   CheckOutputTensor(*output, "output_compute_amax");
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-        output->data.dtype, OType, 
-        TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      output->data.dtype, OType,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
           force_pow_2_scales, kPow2Scale,
 
           const fp32 max_fp8 = Quantized_Limits<OType>::max_norm;
           ComputeScaleFromAmaxKernelLauncher<kPow2Scale>(
-            reinterpret_cast<fp32 *>(output->amax.dptr), reinterpret_cast<fp32 *>(output->scale.dptr),
-            reinterpret_cast<fp32 *>(output->scale_inv.dptr), max_fp8, epsilon,
-            stream);
-      );  // power of 2 scales
-  );  // output type
+              reinterpret_cast<fp32 *>(output->amax.dptr),
+              reinterpret_cast<fp32 *>(output->scale.dptr),
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), max_fp8, epsilon,
+              stream););  // power of 2 scales
+  );                      // output type
 }
 
 namespace detail {
 
-inline void compute_amax_helper(const NVTETensor input, const NVTETensor output, cudaStream_t stream) {
+inline void compute_amax_helper(const NVTETensor input, const NVTETensor output,
+                                cudaStream_t stream) {
   const auto &input_tensor = *(reinterpret_cast<const Tensor *>(input));
   auto output_tensor = reinterpret_cast<Tensor *>(output);
 
@@ -1293,7 +1295,9 @@ inline void compute_scale_helper(const NVTETensor output, cudaStream_t stream) {
   auto output_tensor = reinterpret_cast<Tensor *>(output);
   // assert scaling mode is current scaling, and then call fp8_quantize_compute_scale_from_amax
   if (output_tensor->scaling_mode != NVTE_CURRENT_TENSOR_SCALING) {
-    NVTE_ERROR("You shouldn't call compute_scale_helper for scaling mode: " + to_string(output_tensor->scaling_mode) + " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
+    NVTE_ERROR("You shouldn't call compute_scale_helper for scaling mode: " +
+               to_string(output_tensor->scaling_mode) +
+               " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
   }
   float amax_epsilon = output_tensor->amax_epsilon;
   bool force_pow_2_scales = output_tensor->force_pow_2_scales;

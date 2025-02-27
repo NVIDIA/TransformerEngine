@@ -20,6 +20,7 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
+
 class GetRecipes:
 
     @staticmethod
@@ -75,7 +76,7 @@ class TestFP8RecipeLinearBase:
 
     @staticmethod
     def _get_mean_abs_relative_error(a, b):
-        return torch.mean(torch.abs((a - b)/b))
+        return torch.mean(torch.abs((a - b) / b))
 
     @staticmethod
     def _load_golden_tensor_values(a, b):
@@ -390,11 +391,19 @@ class TestFP8RecipeLinearBase:
             y_q, dgrad, wgrad, bgrad = self.run_linear(x, w, bias, gradient)
 
         # Compare results (mean abs relative error)
-        assert self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error, "y and y_ref has too large mean abs relative error"
-        assert self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error, "dgrad and dgrad_ref has too large mean abs relative error"
-        assert self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error, "wgrad and wgrad_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error
+        ), "y and y_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error
+        ), "dgrad and dgrad_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error
+        ), "wgrad and wgrad_ref has too large mean abs relative error"
         if use_bias:
-            assert self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error, "bgrad and bgrad_ref has too large mean abs relative error"
+            assert (
+                self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error
+            ), "bgrad and bgrad_ref has too large mean abs relative error"
 
         # enforce zero tolerance check when we can find golden tensor value dump
         if recipe2_golden_tensors is not None:
@@ -408,10 +417,13 @@ class TestFP8RecipeLinearBase:
                     bgrad, recipe2_golden_tensors["bgrad"], atol=0.0, rtol=0.0
                 )
 
+
 class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
 
     @staticmethod
-    def _check_golden_tensor_dumps(dump_dir, get_recipe, dims, input_dtype, use_bias, normalization):
+    def _check_golden_tensor_dumps(
+        dump_dir, get_recipe, dims, input_dtype, use_bias, normalization
+    ):
         recipe = get_recipe()
         batch_size, hidden_size, out_size = dims
         fp8_type_x = get_fp8_torch_dtype(recipe, fprop_tensor=True)
@@ -465,21 +477,19 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         parameters = layer._parameters
 
         # bias and weight gradients
-        bgrad = (
-            parameters["bias"].grad
-            if parameters.get("bias", None) is not None
-            else None
-        )
+        bgrad = parameters["bias"].grad if parameters.get("bias", None) is not None else None
         assert "weight" in parameters
         wgrad = parameters["weight"].grad
 
         return y_q, ln_out, dgrad, wgrad, bgrad
-    
+
     @classmethod
-    def run_linear_multiple_steps(cls, layer, x, gradient, run_num_steps, enable_weight_cache, fuse_wgrad_accumulation=False):
+    def run_linear_multiple_steps(
+        cls, layer, x, gradient, run_num_steps, enable_weight_cache, fuse_wgrad_accumulation=False
+    ):
         # raise error, no test case for multiple steps for now
         raise NotImplementedError("LayerNormLinear does not support test multiple steps for now")
-    
+
     @classmethod
     def run_layernorm_linear(
         cls,
@@ -628,12 +638,22 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
             )
 
         # Compare results (mean abs relative error)
-        assert self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error, "y and y_ref has too large mean abs relative error"
-        assert self._get_mean_abs_relative_error(ln_out, ln_out_ref).item() < ln_out_error, "ln_out and ln_out_ref has too large mean abs relative error"
-        assert self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error, "dgrad and dgrad_ref has too large mean abs relative error"
-        assert self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error, "wgrad and wgrad_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(y_q, y_q_ref).item() < y_error
+        ), "y and y_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(ln_out, ln_out_ref).item() < ln_out_error
+        ), "ln_out and ln_out_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(dgrad, dgrad_ref) < dgrad_error
+        ), "dgrad and dgrad_ref has too large mean abs relative error"
+        assert (
+            self._get_mean_abs_relative_error(wgrad, wgrad_ref).item() < wgrad_error
+        ), "wgrad and wgrad_ref has too large mean abs relative error"
         if use_bias:
-            assert self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error, "bgrad and bgrad_ref has too large mean abs relative error"
+            assert (
+                self._get_mean_abs_relative_error(bgrad, bgrad_ref).item() < bgrad_error
+            ), "bgrad and bgrad_ref has too large mean abs relative error"
 
         # enforce zero tolerance check when we can find golden tensor value dump
         if recipe2_golden_tensors is not None:
@@ -709,6 +729,7 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
             recipe2_golden_tensors=fp8_zero_tolerance_tensor_dumps_recipe2,
         )
 
+
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase):
 
@@ -746,7 +767,12 @@ class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBas
         # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
         # if we cannot get all four tensors, then still set the tensor dump to None
         tensor_map = self._check_golden_tensor_dumps(
-            TENSOR_DUMP_DIR, recipe2, (batch_size, hidden_size, out_size), dtype, use_bias, "LayerNorm"
+            TENSOR_DUMP_DIR,
+            recipe2,
+            (batch_size, hidden_size, out_size),
+            dtype,
+            use_bias,
+            "LayerNorm",
         )
         if tensor_map is not None:
             fp8_zero_tolerance_tensor_dumps_recipe2 = tensor_map

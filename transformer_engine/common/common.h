@@ -85,7 +85,7 @@ struct Tensor {
   SimpleTensor columnwise_scale_inv;
 
   NVTEScalingMode scaling_mode;
-  
+
   // FP8 quantization options
   // Options about how to quantize the tensor
   // Quantization scales are rounded down to powers of 2.
@@ -428,14 +428,10 @@ struct TypeInfo {
 #define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
   if (CONDITION) {                                                \
     constexpr bool FLAG = true;                                   \
-    {                                                             \
-      __VA_ARGS__                                                 \
-    }                                                             \
+    { __VA_ARGS__ }                                               \
   } else {                                                        \
     constexpr bool FLAG = false;                                  \
-    {                                                             \
-      __VA_ARGS__                                                 \
-    }                                                             \
+    { __VA_ARGS__ }                                               \
   }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
