@@ -177,8 +177,9 @@ def initialize_ub(
         num_domains = world_size // tp_size
         mydomain_idx = world_rank // tp_size
         if num_domains > 1:
-            ranks_per_domain_list = [[ i * tp_size + t for t in range(tp_size)]
-                                     for i in range(num_domains)]
+            ranks_per_domain_list = [
+                [i * tp_size + t for t in range(tp_size)] for i in range(num_domains)
+            ]
             tp_domain_group, _ = torch.distributed.new_subgroups_by_enumeration(
                 ranks_per_domain_list, backend=bootstrap_backend
             )

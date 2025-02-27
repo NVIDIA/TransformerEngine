@@ -190,7 +190,7 @@ def _main(opts):
         "nvidia-smi -q | grep -m1 CliqueId | awk '{printf $3}'",
         capture_output=True,
         text=True,
-        shell=True
+        shell=True,
     )
 
     if result.stdout == "0":  # Extra checks for non-MNNVL platforms
