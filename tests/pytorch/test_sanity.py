@@ -546,6 +546,8 @@ def test_sanity_groupped_linear(
 ):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
+    # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
+    bs = bs * 16
     num_tokens = bs * config.seq_len * (num_gemms - 1)
 
     if fp8_recipe is not None:
@@ -558,7 +560,7 @@ def test_sanity_groupped_linear(
 
     use_fp8 = fp8_recipe is not None
     with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
-        te_linear = GroupedLinear(
+        te_groupped_linear = GroupedLinear(
             num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
 
@@ -574,7 +576,7 @@ def test_sanity_groupped_linear(
         m_splits[num_gemms // 2] = 0
 
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        out = te_linear(inp_hidden_states, m_splits)
+        out = te_groupped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
