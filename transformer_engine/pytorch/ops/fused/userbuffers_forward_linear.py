@@ -10,12 +10,19 @@ from typing import Any, Optional
 
 import torch
 
-from transformer_engine_torch import CommOverlapAlgo
+from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
-from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...module.base import get_ub, get_workspace
+from ...module.base import (
+    get_ub,
+    get_workspace,
+    _2X_ACC_FPROP,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+)
+from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.quantized_tensor import QuantizedTensor
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
@@ -212,10 +219,8 @@ class UserbuffersForwardLinear(FusedOperation):
                 raise ValueError(
                     "Invalid quantizer for weight tensor (Userbuffers only supports FP8)"
                 )
-            if output_quantizer is not None and not isinstance(output_quantizer, Float8Quantizer):
-                raise ValueError(
-                    "Invalid quantizer for output tensor (Userbuffers only supports FP8)"
-                )
+            if output_quantizer is not None:
+                raise ValueError("FP8 output is not supported")
         else:
             input_quantizer = None
             weight_quantizer = None
@@ -228,55 +233,38 @@ class UserbuffersForwardLinear(FusedOperation):
 
         # Get Userbuffers communicator
         ub_comm = get_ub(ub_comm_name + "_fprop")
-        ub_local_buffer = ub_comm.get_ubuf_output(0)
-        ub_global_buffer = ub_comm.get_ubuf_output(1)
         with_ub_all_gather = tensor_parallel_mode == "column"
         with_ub_reduce_scatter = tensor_parallel_mode == "row"
-        ub_type = (
-            tex.CommOverlapType.AG if with_ub_all_gather else tex.CommOverlapType.RS
-        )
+        ub_type = CommOverlapType.AG if with_ub_all_gather else CommOverlapType.RS
 
         # Cast input tensor to correct dtype
         x_local = input
         own_quantized_x_local = False
         if with_quantized_compute:
             if not isinstance(x_local, Float8Tensor):
-                if with_ub_all_gather:
-                    input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    x_local_fp8 = input_quantizer.create_tensor_from_data(
-                        ub_local_buffer,
-                        fake_dtype=dtype,
-                    )
-                    x_local_fp8.copy_(x_local)
-                    x_local = x_local_fp8
-                else:
-                    input_quantizer.set_usage(rowwise=True)
-                    x_local = input_quantizer(x_local)
+                input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=(not with_ub_all_gather),
+                )
+                x_local = input_quantizer(x_local)
                 own_quantized_x_local = True
         else:
             if isinstance(x_local, QuantizedTensor):
                 x_local = x_local.dequantize(dtype=dtype)
-            elif x_local.dtype != dtype:
+                own_quantized_x_local = True
+            if x_local.dtype != dtype:
                 x_local = x_local.to(dtype=dtype)
+                own_quantized_x_local = True
 
         # Initialize buffers for UB all-gather if needed
         x = x_local
         if with_ub_all_gather:
-            if with_quantized_compute:
-                x = input_quantizer.create_tensor_from_data(
-                    ub_global_buffer,
-                    fake_dtype=dtype,
+            if with_quantized_compute != ub_comm.is_fp8_ubuf():
+                raise RuntimeError(
+                    "All-gather overlap with FP8 GEMM inputs requires FP8 buffer"
                 )
-                if x_local._data.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(x_local._data)
-                else:
-                    x_local._data = torch.empty_like(x_local._data)
-            else:
-                x = ub_global_buffer
-                if x_local.data_ptr() != ub_local_buffer.data_ptr():
-                    ub_local_buffer.copy_(x_local)
-                else:
-                    x_local = torch.empty_like(x_local)
+            ub_comm.copy_into_buffer(x_local, input_quantizer, local_chunk=True)
+            x = ub_comm.get_buffer(input_quantizer)
 
         # Check weight tensor
         w = weight
@@ -290,19 +278,9 @@ class UserbuffersForwardLinear(FusedOperation):
             w = w.to(dtype=dtype)
 
         # Construct output tensor
-        y = None
         y_local = None
         if with_ub_reduce_scatter:
             y_local = torch.empty(y_local_size, dtype=dtype, device=device)
-            if with_quantized_output:
-                output_quantizer.set_usage(rowwise=True, columnwise=False)
-                y = output_quantizer.create_tensor_from_data(
-                    ub_global_buffer,
-                    fake_dtype=dtype,
-                )
-                ub_comm.set_ubuf_scale_inv(y._scale_inv)
-            else:
-                y = ub_global_buffer
 
         # Perform GEMM
         y, *_, rs_output = general_gemm(
@@ -311,10 +289,9 @@ class UserbuffersForwardLinear(FusedOperation):
             get_workspace(),
             out_dtype=dtype,
             quantization_params=output_quantizer,
-            out=y,
             bias=bias,
             use_split_accumulator=_2X_ACC_FPROP,
-            ub=ub,
+            ub=ub_comm,
             ub_type=ub_type,
             extra_output=y_local,
         )
