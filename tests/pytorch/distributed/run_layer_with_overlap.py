@@ -335,7 +335,7 @@ def _train(opts):
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
-        ub_cfgs=ub_cfgs if opts.ub_cfg is not None else opts.ub_cfg,
+        ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
     )
 
     with te.fp8_model_init(enabled=opts.fp8_init):
