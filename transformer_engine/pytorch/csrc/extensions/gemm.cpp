@@ -329,9 +329,13 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     at::Tensor out_tensor;
     auto size_t_shape =
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
+    bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
     for (size_t t : size_t_shape) {
       D_shape.push_back(t);
+      if (t == 0) {
+        D_numel_is_zero = true;
+      }
     }
     auto dtype = GetATenDType(D_type);
     auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
@@ -339,7 +343,12 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       if (output_data_ptr == nullptr) {
         out_tensor = at::empty(D_shape, opts);
       } else {
-        out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        // We need to check !D_numel_is_zero because if the final input portion has zero elements,
+        // output_data_ptr would point beyond the allocated memory of D. This would cause
+        // at::from_blob to fail as it would reference memory not allocated by CUDA.
+        if (!D_numel_is_zero) {
+          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        }
       }
       char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
       char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
@@ -373,6 +382,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
                                 : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
                                                       static_cast<size_t>(te_pre_gelu_out.size(1))};
 
+
     DType gelu_type = bias_type;
     te_pre_gelu_out =
         makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
@@ -389,11 +399,14 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_bias));
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
+
+
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }
+
   // For now, we only have multi-stream cublas backend.
   nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
                                 te_bias_vector.data(), te_pre_gelu_out_vector.data(),
