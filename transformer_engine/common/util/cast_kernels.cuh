@@ -1039,20 +1039,21 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
                                        cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input.data.shape);
+  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
-          if (!is_fp8_dtype(output->data.dtype) ||
-              is_delayed_tensor_scaling(output->scaling_mode)) {
+          if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
             VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(input.data.dptr),
                 reinterpret_cast<const fp32 *>(noop->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
+                {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1064,20 +1065,21 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
                                            cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input->data.shape);
+  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
-          if (!is_fp8_dtype(output->data.dtype) ||
-              is_delayed_tensor_scaling(output->scaling_mode)) {
+          if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
             VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(grad.data.dptr),
                 reinterpret_cast<const IType *>(input->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
+                {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1142,6 +1144,19 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                                                              workspace, stream);
       break;
     }
+    case NVTE_CURRENT_TENSOR_SCALING: {
+      if (IS_DBIAS) {
+        // zhongboz: should we just ignore IS_ACT here?
+        NVTE_ERROR("Not implemented scaling mode with DBIAS fusion: " +
+                   to_string(output->scaling_mode) + " on GPU with compute capability >= 10.0.");
+      }
+      if (!IS_DACT) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      } else {
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      }
+      break;
+    }
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
@@ -1153,14 +1168,30 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                              Tensor *output, Tensor *dbias, Tensor *workspace,
                              cudaStream_t stream) {
-  if (!is_delayed_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
-    NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) +
+  if (!is_tensor_scaling(output->scaling_mode) || IS_DBIAS) {
+    // zhongboz: should we just ignore IS_ACT here?
+    NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
                " on GPU with compute capability < 10.0.");
   }
-  if (!IS_DACT) {
-    CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
-  } else {
-    CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+  switch (output->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      if (!IS_DACT) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      } else {
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      }
+      break;
+    }
+    case NVTE_CURRENT_TENSOR_SCALING: {
+      if (!IS_DACT) {
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
+      } else {
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+      }
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
   }
 }
 
@@ -1197,7 +1228,84 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   }
 }
 
+inline void fp8_quantize_compute_amax(const Tensor &input, Tensor *output, cudaStream_t stream) {
+  CheckInputTensor(input, "input_compute_amax");
+  CheckOutputTensor(*output, "output_compute_amax");
+  NVTE_CHECK(output->amax.numel() == 1,
+             "comp_amax_scale input amax doesn't have a single fp32 space");
+
+  NVTE_CHECK(!is_fp8_dtype(input.data.dtype), "Input must be in higher precision.");
+  const size_t N = product(input.data.shape);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
+      VectorizedUnaryKernelAmaxLauncher<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
+                                              reinterpret_cast<fp32 *>(output->amax.dptr), N,
+                                              stream););  // NOLINT(*)
+}
+
+inline void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsilon,
+                                                 const bool force_pow_2_scales,
+                                                 cudaStream_t stream) {
+  CheckOutputTensor(*output, "output_compute_amax");
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+      output->data.dtype, OType,
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+          force_pow_2_scales, kPow2Scale,
+
+          const fp32 max_fp8 = Quantized_Limits<OType>::max_norm;
+          ComputeScaleFromAmaxKernelLauncher<kPow2Scale>(
+              reinterpret_cast<fp32 *>(output->amax.dptr),
+              reinterpret_cast<fp32 *>(output->scale.dptr),
+              reinterpret_cast<fp32 *>(output->scale_inv.dptr), max_fp8, epsilon,
+              stream););  // power of 2 scales
+  );                      // output type
+}
+
 namespace detail {
+
+inline void compute_amax_helper(const NVTETensor input, const NVTETensor output,
+                                cudaStream_t stream) {
+  const auto &input_tensor = *(reinterpret_cast<const Tensor *>(input));
+  auto output_tensor = reinterpret_cast<Tensor *>(output);
+
+  switch (output_tensor->scaling_mode) {
+    case NVTE_DELAYED_TENSOR_SCALING: {
+      NVTE_ERROR("Delayed scaling shouldn't call this kernel.");
+      break;
+    }
+    case NVTE_MXFP8_1D_SCALING: {
+      NVTE_ERROR("Don't need separate compute amax kernel for scaling mode: " +
+                 to_string(output_tensor->scaling_mode) + ".");
+      break;
+    }
+    case NVTE_CURRENT_TENSOR_SCALING: {
+      // for per tensor current scaling, rowwise/columnwise data are the same, just one tensor
+      fp8_quantize_compute_amax(input_tensor, output_tensor, stream);
+      // We cannot directly call fp8_quantize_compute_scale_from_amax here if we need amax reduction
+      // make sure the amax is already reduced, so we need to call fp8_quantize_compute_scale_from_amax
+      // this amax reduction should be done differently for different ML frameworks
+      // for pytorch, we need to reduce amax in its csrc quantize function
+      break;
+    }
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
+  }
+}
+
+inline void compute_scale_helper(const NVTETensor output, cudaStream_t stream) {
+  // this should only work for current scaling
+  auto output_tensor = reinterpret_cast<Tensor *>(output);
+  // assert scaling mode is current scaling, and then call fp8_quantize_compute_scale_from_amax
+  if (output_tensor->scaling_mode != NVTE_CURRENT_TENSOR_SCALING) {
+    NVTE_ERROR("You shouldn't call compute_scale_helper for scaling mode: " +
+               to_string(output_tensor->scaling_mode) +
+               " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
+  }
+  float amax_epsilon = output_tensor->amax_epsilon;
+  bool force_pow_2_scales = output_tensor->force_pow_2_scales;
+  fp8_quantize_compute_scale_from_amax(output_tensor, amax_epsilon, force_pow_2_scales, stream);
+}
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -1243,6 +1351,24 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
+      break;
+    }
+    case NVTE_CURRENT_TENSOR_SCALING: {
+      if (output_tensor->has_columnwise_data()) {
+        NVTE_CHECK(output_tensor->has_data(),
+                   "Quantizing in only the columnwise direction not supported yet!");
+        if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
+          cast_transpose(*input_tensor, noop_tensor, output_tensor, stream);
+        } else {
+          NVTE_ERROR(
+              "Pertensor current scaling Cast transpose dbias/gelu/relu fusion are not supported "
+              "yet!");
+        }
+      } else if (output_tensor->has_data()) {
+        fp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+            *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+            workspace_tensor, stream);
+      }
       break;
     }
     default:

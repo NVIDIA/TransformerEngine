@@ -42,6 +42,26 @@ extern "C" {
  *  of the output tensor should be set to 0.
  */
 
+/*! \brief Find amax value of input tensor for FP8 quantier.
+ *         Then it will use this amax to compute scale and scale_inv.
+ *
+ *  \param[in]     input            Input tensor to be cast.
+ *  \param[in,out] output           Output FP8 tensor.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t stream);
+
+/*! \brief Find scale value of input tensor for FP8 quantier from amax.
+ *         This function is only for per-tensor Current Scaling.
+ *         For subtensor scaling, find amax & quantize should be fused into one kernel.
+ *         This function is called after nvte_compute_amax. Amax reduction is optional
+ *         depending on model parallel configuration.
+ *
+ *  \param[in,out] output           Output FP8 tensor (just finished nvte_compute_amax).
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_compute_scale_from_amax(const NVTETensor output, cudaStream_t stream);
+
 /*! \brief Casts input tensor to FP8/MXFP8.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the block quantization (MXFP8) of the specified shape of the block will be used.
