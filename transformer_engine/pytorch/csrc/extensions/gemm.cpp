@@ -403,7 +403,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_workspace_vector.emplace_back(wsp.data());
     wrappers.emplace_back(std::move(wsp));
   }
-
   // For now, we only have multi-stream cublas backend.
   nvte_multi_stream_cublas_gemm(te_A_vector.data(), te_B_vector.data(), te_D_vector.data(),
                                 te_bias_vector.data(), te_pre_gelu_out_vector.data(),
