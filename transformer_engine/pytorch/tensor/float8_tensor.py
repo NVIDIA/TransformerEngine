@@ -402,7 +402,10 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
+            return [
+                Float8Tensor.make_like(tensor, data=split_tensor, shape=split_tensor.shape)
+                for split_tensor in func_out
+            ]
         if func == aten.new_zeros.default:
             tensor = args[0]
             data = tensor._data
@@ -412,7 +415,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out)
+            return Float8Tensor.make_like(tensor, data=func_out, shape=data.func_out.shape)
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
@@ -422,7 +425,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out)
+            return Float8Tensor.make_like(tensor, data=func_out, shape=data.func_out.shape)
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
         if func == torch.ops.aten.clone.default:
