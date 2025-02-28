@@ -26,8 +26,7 @@ CommOverlapHelper::CommOverlapHelper() {
 }  // empty constructor for NVTE_UB_WITH_MPI=1
 
 CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
-                                     std::optional<c10d::ProcessGroup *> intra_domain_group,
-                                     std::optional<c10d::ProcessGroup *> inter_domain_group) {
+                                     std::optional<c10d::ProcessGroup *> intra_domain_group) {
 #ifndef NVTE_UB_WITH_MPI
   pgs.insert({"world", world_group});
   myrank = pgs["world"]->getRank();
@@ -53,20 +52,9 @@ CommOverlapHelper::CommOverlapHelper(c10d::ProcessGroup *world_group,
       mynode = 0;
       numnodes = 1;
     } else {
-      // Intra-node group is different than the world group so there must be multiple nodes
-      NVTE_CHECK(
-          inter_domain_group.has_value(),
-          "Internal TE error: Inter-node group cannot be `None` when intra-node group is not ",
-          "identical to the world_group!");
-
       // Get node ID and number of nodes
-      NVTE_CHECK(
-          inter_domain_group.value()->getBackendType() == backend,
-          "Internal TE error: Inter-node group must be on the same backend (%s) as the world ",
-          "group!", pgs["world"]->getBackendName());
-      pgs.insert({"inter", inter_domain_group.value()});
-      mynode = pgs["inter"]->getRank();
-      numnodes = pgs["inter"]->getSize();
+      mynode = myrank / numlocal;
+      numnodes = numranks / numlocal;
     }
   } else {
     // Intra-node group is not set so we assume there is only 1 node
