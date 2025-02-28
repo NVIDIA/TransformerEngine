@@ -203,6 +203,9 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
+    original_scale_inverses_list = [
+        swizzle_inputs(A[i], B[i], layout) for i in range(num_gemms)
+    ]
     bias = tex.te_general_grouped_gemm(
         A,
         transa,
@@ -222,5 +225,7 @@ def general_grouped_gemm(
         use_split_accumulator,
         sm_count - int(os.getenv("NVTE_EXT_MARGIN_SM", str(sm_count))),
     )
+    for i in range(num_gemms):
+        reset_swizzled_inputs(A[i], B[i], original_scale_inverses_list[i])
 
     return out, bias, gelu_input
