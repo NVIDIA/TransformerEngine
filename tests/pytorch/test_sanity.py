@@ -533,8 +533,6 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     assert out.shape == (num_tokens, ffn_hidden_size)
 
 
-
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes_with_zero)
 @pytest.mark.parametrize("model", ["small", "weird"])
@@ -543,7 +541,9 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
 @pytest.mark.parametrize("num_gemms", [4])
-def test_sanity_groupped_linear(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split):
+def test_sanity_groupped_linear(
+    dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
+):
     config = model_configs[model]
     ffn_hidden_size = 4 * config.hidden_size
     num_tokens = bs * config.seq_len * (num_gemms - 1)
