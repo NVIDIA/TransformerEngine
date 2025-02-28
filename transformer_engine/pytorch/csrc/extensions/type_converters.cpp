@@ -132,6 +132,13 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
     const auto scale_inv_colwise_shape = getTensorShape(scale_inv_colwise);
     ret.set_columnwise_scale_inv(scale_inv_colwise_dptr, DType::kFloat32, scale_inv_colwise_shape);
   }
+  if (!tensor.attr("_quantizer").is_none()) {
+    // Some calls to makeTransformerEngineTensor pass a NoneQuantizer.
+    // The quantizer stores settings like block_scaling_dim that are important.
+    // and are stored indirectly via the quantizer.
+    auto tensor_meta_quantizer = CreateQuantizer<Float8BlockQuantizer>(tensor.attr("_quantizer"));
+    tensor_meta_quantizer->set_quantization_params(&ret);
+  }
   quantizer->set_quantization_params(&ret);
   return ret;
 }
