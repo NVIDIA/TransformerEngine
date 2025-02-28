@@ -1565,9 +1565,12 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
-        """Padding tensor shapes to multiples of 16."""
+        align_size = 16
+        if recipe.mxfp8():
+            align_size = 32
         padded_tokens_per_expert = [
-            (num_tokens + 15) // 16 * 16 for num_tokens in tokens_per_expert
+            (num_tokens + align_size - 1) // align_size * align_size
+            for num_tokens in tokens_per_expert
         ]
         hidden_states = torch.split(hidden_states, tokens_per_expert)
         padded_hidden_states = []
@@ -1668,8 +1671,6 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
-        pytest.skip("MXFP8 unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
