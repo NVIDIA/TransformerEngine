@@ -19,7 +19,6 @@ import torch
 import transformer_engine
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops._common import is_float8_tensor
@@ -27,6 +26,8 @@ from transformer_engine.pytorch.ops.fused import (
     UserbuffersBackwardLinear,
     UserbuffersForwardLinear,
 )
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
 
 # Import utility functions
@@ -36,6 +37,11 @@ from utils import dtype_tols, str_to_dtype
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+quantization_list: list[Optional[str]] = [None]
+if fp8_available:
+    quantization_list.append("fp8")
+
 
 # Check if there are multiple GPUs
 if torch.cuda.device_count() < 2:
@@ -51,7 +57,7 @@ class ModelConfig:
     num_heads: int
     head_dim: int
     dtype: torch.dtype
-    fp8: bool
+    quantization: Optional[str]
 
     @property
     def hidden_size(self):
@@ -130,7 +136,12 @@ def make_reference_and_test_tensors(
 
     # Make copy of tensor
     if test_is_fp8:
-        test = Float8Tensor.to_float8(ref)
+        quantizer = Float8Quantizer(
+            scale=torch.ones(1, dtype=torch.float32, device=test_device),
+            amax=torch.zeros(1, dtype=torch.float32, device=test_device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        test = quantizer(test)
     else:
         test = ref.to(device=test_device, dtype=test_dtype)
         if test.data_ptr() == ref.data_ptr():
@@ -145,6 +156,21 @@ def make_reference_and_test_tensors(
     return ref, test
 
 
+def make_recipe(name: Optional[str] = None) -> Optional[Recipe]:
+    """Make recipe for quantization scheme"""
+    if name is None:
+        return None
+    if name == "fp8":
+        return transformer_engine.common.recipe.DelayedScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    if name == "mxfp8":
+        return transformer_engine.common.recipe.MXFP8BlockScaling(
+            fp8_format=transformer_engine.common.recipe.Format.E4M3,
+        )
+    raise ValueError(f"Unsupported quantization scheme ({name})")
+
+
 def _test_linear(
     *,
     model_config: ModelConfig,
@@ -155,7 +181,8 @@ def _test_linear(
     weight_requires_grad: bool = True,
 ) -> None:
     dtype = model_config.dtype
-    fp8_compute = model_config.fp8
+    quantization = model_config.quantization
+    quantized_compute = quantization is not None
 
     # Distributed process group
     process_group = world_group()
@@ -175,14 +202,19 @@ def _test_linear(
         in_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(x_test, QuantizedTensor):
+        with torch.no_grad():
+            x_test = x_test.dequantize().requires_grad_()
     w_ref, w_test = make_reference_and_test_tensors(
         (out_features, in_features),
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
     )
+    if isinstance(w_test, QuantizedTensor):
+        w_test = w_test.dequantize()
     b_ref, b_test = None, None
     if bias:
         if tensor_parallel_mode == "row":
@@ -198,9 +230,11 @@ def _test_linear(
         out_shape,
         test_dtype=dtype,
         test_device=device,
-        test_is_fp8=fp8_compute,
+        test_is_fp8=quantized_compute,
         requires_grad=False,
     )
+    if isinstance(dy_test, QuantizedTensor):
+        dy_test = dy_test.dequantize()
 
     # Plain PyTorch implementation
     y_ref = torch.nn.functional.linear(x_ref, w_ref)
@@ -265,14 +299,15 @@ def _test_linear(
     x_test.requires_grad_()
 
     # Implementation with fusible operation
-    with te.fp8_model_init(enabled=fp8_compute):
+    recipe = make_recipe(quantization)
+    with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
         ops = []
         linear_op = None
         bias_op = None
         if tensor_parallel_mode == "column":
             userbuffers_options = {}
             if not weight_requires_grad:
-                if fp8_compute:
+                if quantized_compute:
                     userbuffers_options["comm_name"] = "fc1"
                 else:
                     # There is a correctness bug with overlapping
@@ -322,7 +357,7 @@ def _test_linear(
             bias_op.bias.copy_(b_test)
         del w_test
         del b_test
-    with te.fp8_autocast(enabled=fp8_compute):
+    with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
         y_test = model(x_test)
     y_test.backward(dy_test)
 
@@ -338,7 +373,7 @@ def _test_linear(
     tols = dtype_tols(dtype)
     if dtype == torch.float32:
         tols = dtype_tols(torch.float16)  # TF32 GEMM
-    if fp8_compute:
+    if quantized_compute:
         tols = dtype_tols(
             model[0].weight._fp8_dtype
             if is_float8_tensor(model[0].weight)
@@ -457,13 +492,16 @@ def main() -> None:
     if args.parallel:
 
         # Model config
+        quantization = None
+        if args.fp8:
+            quantization = "fp8"
         model_config = ModelConfig(
             sequence_length=args.sequence_length,
             batch_size=args.batch_size,
             num_heads=args.num_heads,
             head_dim=args.head_dim,
             dtype=str_to_dtype(args.dtype),
-            fp8=args.fp8,
+            quantization=quantization,
         )
 
         # Initialize Userbuffers
@@ -478,7 +516,7 @@ def main() -> None:
                 model_config.num_heads * model_config.head_dim,
             ],
             torch.distributed.get_world_size(group),
-            use_fp8=model_config.fp8,
+            use_fp8=model_config.quantization == "fp8",
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,
