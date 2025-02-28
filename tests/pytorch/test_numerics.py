@@ -100,6 +100,7 @@ mask_types = ["causal", "no_mask"]
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
+    recipe.Float8CurrentScaling(),
 ]
 
 
@@ -558,6 +559,8 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.float8_current_scaling():
+        pytest.skip("Float8 Current Scaling unsupported for selective recompute.")
 
     config = model_configs[model]
 
@@ -670,6 +673,8 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if fp8 and recipe.float8_current_scaling():
+        pytest.skip("Float8 Current Scaling unsupported for full recompute.")
 
     config = model_configs[model]
 
@@ -1456,7 +1461,6 @@ def _test_grouped_linear_accuracy(
                 outputs.append(p.grad)
     return outputs
 
-
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1482,6 +1486,8 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_mxfp8)
     if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
+    if fp8 and recipe.float8_current_scaling():
+        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1675,6 +1681,8 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_mxfp8)
     if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
         pytest.skip("MXFP8 unsupported for grouped linear.")
+    if fp8 and recipe.float8_current_scaling():
+        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
