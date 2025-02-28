@@ -25,6 +25,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch import (
     LayerNormLinear,
     Linear,
+    GroupedLinear,
     LayerNormMLP,
     TransformerLayer,
     RMSNorm,
@@ -527,6 +528,53 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     ).cuda()
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         out = te_linear(inp_hidden_states)
+    loss = out.sum()
+    loss.backward()
+    assert out.shape == (num_tokens, ffn_hidden_size)
+
+
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes_with_zero)
+@pytest.mark.parametrize("model", ["small", "weird"])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("use_bias", all_boolean)
+@pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
+@pytest.mark.parametrize("num_gemms", [4])
+def test_sanity_groupped_linear(dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split):
+    config = model_configs[model]
+    ffn_hidden_size = 4 * config.hidden_size
+    num_tokens = bs * config.seq_len * (num_gemms - 1)
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8() and not mxfp8_available:
+            pytest.skip("Groupped linear does not support MXFP8")
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+        te_linear = GroupedLinear(
+            num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
+        ).cuda()
+
+    inp_hidden_states = torch.randn(
+        num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    m_splits = [bs * config.seq_len] * num_gemms
+    if empty_split == "first":
+        m_splits[0] = 0
+    elif empty_split == "last":
+        m_splits[-1] = 0
+    elif empty_split == "middle":
+        m_splits[num_gemms // 2] = 0
+
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        out = te_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
