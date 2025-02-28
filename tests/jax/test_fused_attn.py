@@ -36,7 +36,7 @@ from transformer_engine.jax.attention import (
     CPStrategy,
 )
 from transformer_engine.jax.cpp_extensions import FusedAttnHelper
-from transformer_engine.transformer_engine_jax import (
+from transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     get_cudnn_version,
 )

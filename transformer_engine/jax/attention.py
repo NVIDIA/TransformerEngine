@@ -13,11 +13,11 @@ import jax
 import jax.numpy as jnp
 from flax.linen import make_attention_mask
 
-from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_QKV_Format
+from transformer_engine_jax import nvte_get_qkv_format
 
 from . import cpp_extensions as tex
 
