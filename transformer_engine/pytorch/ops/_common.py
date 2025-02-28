@@ -10,13 +10,13 @@ from typing import Any, Iterable, Optional
 import torch
 
 from transformer_engine_torch import FP8TensorMeta
+from .. import torch_version
 from ..fp8 import FP8GlobalStateManager
 from ..tensor.float8_tensor import Float8Tensor
 from ..utils import (
     canonicalize_device,
     canonicalize_dtype,
     devices_match,
-    torch_version,
 )
 
 
