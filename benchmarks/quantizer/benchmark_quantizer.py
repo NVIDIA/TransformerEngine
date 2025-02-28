@@ -16,6 +16,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 
 fp8_dtype_te = tex.DType.kFloat8E4M3
 
+
 def run_kernel(quantizer, shape, dtype):
     device = "cuda"
     seed = 0
@@ -82,15 +83,16 @@ if __name__ == "__main__":
         quantizer_class_name = quantizer.__class__.__name__
         for dtype in dtypes:
             for shape in shapes:
-                print(f"Running {quantizer} with dtype {dtype}  shape {shape} and rowwise {quantizer.rowwise_usage} and columnwise {quantizer.columnwise_usage}")
+                print(
+                    f"Running {quantizer} with dtype {dtype}  shape {shape} and rowwise"
+                    f" {quantizer.rowwise_usage} and columnwise {quantizer.columnwise_usage}"
+                )
                 timing_us = run_kernel(quantizer, shape, dtype)
                 data.append([quantizer_class_name, shape, dtype, timing_us])
 
     df = pd.DataFrame(data=data, columns=["kernel", "shape", "dtype", "timing_us"])
     print(df)
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    report_file = (
-        pathlib.Path(args.output_dir) / f"{pathlib.Path(__file__).stem}_report.csv"
-    )
+    report_file = pathlib.Path(args.output_dir) / f"{pathlib.Path(__file__).stem}_report.csv"
     # df.to_csv(report_file, index=False)
     print(f"Report saved to {report_file}")
