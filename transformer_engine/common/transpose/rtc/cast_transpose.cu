@@ -18,7 +18,6 @@ constexpr size_t load_size = __LOAD_SIZE__;
 constexpr size_t store_size = __STORE_SIZE__;
 constexpr size_t warps_per_tile = __WARPS_PER_TILE__;
 constexpr size_t block_size = __BLOCK_SIZE__;
-constexpr bool IS_CURRENT_SCALING = __IS_CURRENT_SCALING__;
 
 }  // namespace
 
@@ -85,9 +84,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
         const CType in = static_cast<CType>(local_input.data.elt[j2]);
         const OType out = OType(in * scale);
         __builtin_assume(amax >= 0);
-        if constexpr (!IS_CURRENT_SCALING) {
-          amax = fmaxf(fabsf(in), amax);
-        }
+        amax = fmaxf(fabsf(in), amax);
         local_output_c.data.elt[j2] = out;
         local_output_t[j2][iter].data.elt[i2] = out;
       }
@@ -118,17 +115,15 @@ __global__ void __launch_bounds__(block_size) cast_transpose_optimized_kernel(
   }
 
   // Reduce amax over block
-  if constexpr (!IS_CURRENT_SCALING) {
-    if (amax_ptr != nullptr) {
-      amax = reduce_max<warps_per_tile>(amax, tidy);
-      if (threadIdx.x == 0) {
-        atomicMaxFloat(amax_ptr, amax);
-      }
+  if (amax_ptr != nullptr) {
+    amax = reduce_max<warps_per_tile>(amax, tidy);
+    if (threadIdx.x == 0) {
+      atomicMaxFloat(amax_ptr, amax);
     }
+  }
 
-    // Update scale-inverse
-    if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
-      reciprocal<CType>(scale_inv_ptr, scale);
-    }
+  // Update scale-inverse
+  if (blockIdx.x == 0 && threadIdx.x == 0 && scale_inv_ptr != nullptr) {
+    reciprocal<CType>(scale_inv_ptr, scale);
   }
 }

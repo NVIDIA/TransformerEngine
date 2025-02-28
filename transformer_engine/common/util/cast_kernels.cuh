@@ -1034,48 +1034,52 @@ __device__ inline float dequantize_func(float value, const DequantizeParam &para
 
 }  // namespace detail
 
-template <typename ParamOP, float (*OP)(float, const ParamOP &), bool IS_CURRENT_SCALING>
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, Tensor *output,
                                        cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input.data.shape);
+  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
           if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
-            VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP, IS_CURRENT_SCALING>(
+            VectorizedUnaryKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(input.data.dptr),
                 reinterpret_cast<const fp32 *>(noop->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr),
+                N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
   );           // NOLINT(*)
 }
 
-template <typename ParamOP, float (*OP)(float, const ParamOP &), bool IS_CURRENT_SCALING>
+template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input->data.shape);
+  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output->data.dtype, OType,
           if (!is_fp8_dtype(output->data.dtype) || is_tensor_scaling(output->scaling_mode)) {
             constexpr int nvec = 32 / sizeof(IType);
-            VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP, IS_CURRENT_SCALING>(
+            VectorizedUnaryGradKernelLauncher<nvec, ParamOP, UnaryOP>(
                 reinterpret_cast<const IType *>(grad.data.dptr),
                 reinterpret_cast<const IType *>(input->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr),
+                N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1115,7 +1119,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
           cast_fp8_1D<IS_ACT, ParamOP, OP>(input, output, stream);
         } else {
           // Unaligned
-          CastVectorizedUnaryKernelLauncher<ParamOP, OP, false>(input, noop, output, stream);
+          CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
         }
       } else if (!IS_DBIAS && IS_DACT) {
         if (dimensions_supported_by_TMA(output) && is_fp8_dtype(output->dtype()) &&
@@ -1127,7 +1131,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                                                       stream);
         } else {
           // Unaligned
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP, false>(input, act_input, output,
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output,
                                                                     stream);
         }
       } else {
@@ -1148,9 +1152,9 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                    to_string(output->scaling_mode) + " on GPU with compute capability >= 10.0.");
       }
       if (!IS_DACT) {
-        CastVectorizedUnaryKernelLauncher<ParamOP, OP, true>(input, noop, output, stream);
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP, true>(input, act_input, output, stream);
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
       }
       break;
     }
@@ -1173,17 +1177,17 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       if (!IS_DACT) {
-        CastVectorizedUnaryKernelLauncher<ParamOP, OP, false>(input, noop, output, stream);
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP, false>(input, act_input, output, stream);
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
       }
       break;
     }
     case NVTE_CURRENT_TENSOR_SCALING: {
       if (!IS_DACT) {
-        CastVectorizedUnaryKernelLauncher<ParamOP, OP, true>(input, noop, output, stream);
+        CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP, true>(input, act_input, output, stream);
+        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
       }
       break;
     }

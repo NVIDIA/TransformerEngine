@@ -15,7 +15,13 @@ from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.common.recipe import Float8CurrentScaling
 from transformer_engine.pytorch.fp8 import fp8_autocast, get_fp8_torch_dtype
 
+
+# read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
 TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"
+tensor_dump_dir_env = os.getenv("NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
+if tensor_dump_dir_env is not None:
+    TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
+
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

@@ -172,7 +172,7 @@ class VectorizedStorer : public VectorizedAccessor<DType, nvec, aligned> {
 constexpr int unary_kernel_threads = 512;
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
-          ComputeType (*OP)(ComputeType, const Param &), bool IS_CURRENT_SCALING,
+          ComputeType (*OP)(ComputeType, const Param &),
           typename InputType, typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
     void unary_kernel(const InputType *input, const ComputeType *noop, OutputType *output,
@@ -199,9 +199,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       ComputeType temp = OP(val, p);
       if constexpr (is_fp8<OutputType>::value) {
         __builtin_assume(max >= 0);
-        if constexpr (!IS_CURRENT_SCALING) {
-          max = fmaxf(fabsf(temp), max);
-        }
+        max = fmaxf(fabsf(temp), max);
 
         temp = temp * s;
       }
@@ -210,7 +208,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     }
     storer.store(tid, N);
   }
-  if constexpr (is_fp8<OutputType>::value && !IS_CURRENT_SCALING) {
+  if constexpr (is_fp8<OutputType>::value) {
     // only fp8 delayed scaling needs atomic update of amax and scale_inv
     // Reduce amax over block
     if (amax != nullptr) {
@@ -229,7 +227,7 @@ __launch_bounds__(unary_kernel_threads) __global__
 }
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
-          ComputeType (*OP)(ComputeType, const Param &), bool IS_CURRENT_SCALING,
+          ComputeType (*OP)(ComputeType, const Param &),
           typename InputType, typename InputTypeGrad, typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
     void unary_grad_kernel(const InputTypeGrad *grad, const InputType *input, OutputType *output,
@@ -257,9 +255,7 @@ __launch_bounds__(unary_kernel_threads) __global__
       ComputeType temp = OP(val, p) * g;
       if constexpr (is_fp8<OutputType>::value) {
         __builtin_assume(max >= 0);
-        if constexpr (!IS_CURRENT_SCALING) {
-          max = fmaxf(fabsf(temp), max);
-        }
+        max = fmaxf(fabsf(temp), max);
 
         temp = temp * s;
       }
@@ -268,7 +264,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     }
     storer.store(tid, N);
   }
-  if constexpr (is_fp8<OutputType>::value && !IS_CURRENT_SCALING) {
+  if constexpr (is_fp8<OutputType>::value) {
     // only fp8 delayed scaling needs atomic update of amax and scale_inv
     // Reduce amax over block
     if (amax != nullptr) {
@@ -336,7 +332,7 @@ Alignment CheckAlignment(const size_t lead_dim, const int nvec, const T... ptrs)
 
 }  // namespace
 
-template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), bool IS_CURRENT_SCALING,
+template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), 
           typename InputType, typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
                                    const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
@@ -352,18 +348,18 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_kernel<nvec, true, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_kernel<nvec, true, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
                                                  params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_kernel<nvec, false, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_kernel<nvec, false, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
                                                  params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_kernel<1, true, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_kernel<1, true, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
                                                  params, N, N);
         break;
@@ -372,7 +368,7 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
   }
 }
 
-template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), bool IS_CURRENT_SCALING,
+template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &),
           typename InputType, typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
@@ -389,18 +385,18 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_grad_kernel<nvec, true, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_grad_kernel<nvec, true, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
                                                  params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_grad_kernel<nvec, false, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_grad_kernel<nvec, false, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
                                                  params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_grad_kernel<1, true, fp32, Param, OP, IS_CURRENT_SCALING>
+        unary_grad_kernel<1, true, fp32, Param, OP>
             <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
                                                  params, N, N);
         break;
@@ -432,7 +428,8 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
   // The amax is too small that the scale becoming infinite in FP32. In other word,
   // the scale is not representable in FP32.
   if (isinf(scale)) {
-    scale = 1.f;
+    // use fp32 max to represent the scale
+    scale = std::numeric_limits<fp32>::max();
   }
 
   if (isnan(scale)) {
