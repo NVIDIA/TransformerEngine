@@ -17,8 +17,8 @@ def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
     scale = torch.div(fp8_max, amax)
     # Note frexp doesn't give back inf for exponent with an inf input
     # We take care of inf before pow_2_scales
-    # option1: set scale to inp max when scale is inf
-    # scale = torch.where(scale == torch.inf, torch.finfo(x.dtype).max, scale)
+    # option1: set scale to fp32 max when scale is inf
+    scale = torch.where(scale == torch.inf, torch.finfo(torch.float32).max, scale)
     # option2: when scale is inf, set scale to 1
     scale = torch.where(scale == torch.inf, 1.0, scale)
     if pow_2_scales:
