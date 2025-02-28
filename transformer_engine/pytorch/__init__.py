@@ -19,6 +19,8 @@ import torch
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
 
+_logger = logging.getLogger(__name__)
+
 
 @functools.lru_cache(maxsize=None)
 def torch_version() -> tuple[int, ...]:
@@ -49,7 +51,7 @@ def _load_library():
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
+            _logger.info(
                 "Could not find package %s. Install transformer-engine using 'pip"
                 " install transformer-engine[pytorch]==VERSION'",
                 module_name,
