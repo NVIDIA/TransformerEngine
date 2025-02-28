@@ -100,8 +100,7 @@ struct KernelConfig {
   }
 };
 
-template <size_t load_size, size_t store_size, typename IType,
-          typename OType>
+template <size_t load_size, size_t store_size, typename IType, typename OType>
 __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
     const IType *__restrict__ const input, const CType *__restrict__ const noop,
     OType *__restrict__ const output_c, OType *__restrict__ const output_t,
@@ -312,15 +311,16 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                 rtc_manager.compile(kernel_label, "cast_transpose_optimized_kernel", code,
                                     "transformer_engine/common/transpose/rtc/cast_transpose.cu");
               }
-              rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
-                                 static_cast<const InputType *>(input.data.dptr),
-                                 reinterpret_cast<const CType *>(noop.data.dptr),
-                                 static_cast<OutputType *>(output.data.dptr),
-                                 static_cast<OutputType *>(output.columnwise_data.dptr),
-                                 static_cast<const CType *>(output.scale.dptr),
-                                 is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
-                                 is_current_scaling ? nullptr : static_cast<CType *>(output.scale_inv.dptr), 
-                                 row_length, num_rows);
+              rtc_manager.launch(
+                  kernel_label, num_blocks, block_size, 0, stream,
+                  static_cast<const InputType *>(input.data.dptr),
+                  reinterpret_cast<const CType *>(noop.data.dptr),
+                  static_cast<OutputType *>(output.data.dptr),
+                  static_cast<OutputType *>(output.columnwise_data.dptr),
+                  static_cast<const CType *>(output.scale.dptr),
+                  is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
+                  is_current_scaling ? nullptr : static_cast<CType *>(output.scale_inv.dptr),
+                  row_length, num_rows);
             } else {  // Statically-compiled general kernel
               constexpr size_t load_size = 4;
               constexpr size_t store_size = 4;
@@ -329,17 +329,16 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               const int num_blocks =
                   (DIVUP(row_length, row_tile_size) * DIVUP(num_rows, col_tile_size));
 
-                                                                                      
-              cast_transpose_general_kernel<load_size, store_size, InputType,       
-                                            OutputType><<<num_blocks, block_size, 0, stream>>>(          
-                  static_cast<const InputType *>(input.data.dptr),                                      
-                  reinterpret_cast<const CType *>(noop.data.dptr),                                       
-                  static_cast<OutputType *>(output.data.dptr),                                           
-                  static_cast<OutputType *>(output.columnwise_data.dptr),                                
-                  static_cast<const CType *>(output.scale.dptr), 
-                  is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr), 
-                  is_current_scaling ? nullptr : static_cast<CType *>(output.scale_inv.dptr), 
-                  row_length, num_rows);                    
+              cast_transpose_general_kernel<load_size, store_size, InputType, OutputType>
+                  <<<num_blocks, block_size, 0, stream>>>(
+                      static_cast<const InputType *>(input.data.dptr),
+                      reinterpret_cast<const CType *>(noop.data.dptr),
+                      static_cast<OutputType *>(output.data.dptr),
+                      static_cast<OutputType *>(output.columnwise_data.dptr),
+                      static_cast<const CType *>(output.scale.dptr),
+                      is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
+                      is_current_scaling ? nullptr : static_cast<CType *>(output.scale_inv.dptr),
+                      row_length, num_rows);
             }
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));

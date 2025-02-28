@@ -1052,8 +1052,8 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
-                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr),
-                N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
+                {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1078,8 +1078,8 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
-                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr),
-                N, {}, stream);
+                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
+                {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1131,8 +1131,7 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
                                                       stream);
         } else {
           // Unaligned
-          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output,
-                                                                    stream);
+          CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
         }
       } else {
         cast_fp8_2D<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,

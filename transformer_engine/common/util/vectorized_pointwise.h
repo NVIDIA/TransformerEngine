@@ -172,8 +172,7 @@ class VectorizedStorer : public VectorizedAccessor<DType, nvec, aligned> {
 constexpr int unary_kernel_threads = 512;
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
-          ComputeType (*OP)(ComputeType, const Param &),
-          typename InputType, typename OutputType>
+          ComputeType (*OP)(ComputeType, const Param &), typename InputType, typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
     void unary_kernel(const InputType *input, const ComputeType *noop, OutputType *output,
                       const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv, Param p,
@@ -227,8 +226,8 @@ __launch_bounds__(unary_kernel_threads) __global__
 }
 
 template <int nvec, bool aligned, typename ComputeType, typename Param,
-          ComputeType (*OP)(ComputeType, const Param &),
-          typename InputType, typename InputTypeGrad, typename OutputType>
+          ComputeType (*OP)(ComputeType, const Param &), typename InputType, typename InputTypeGrad,
+          typename OutputType>
 __launch_bounds__(unary_kernel_threads) __global__
     void unary_grad_kernel(const InputTypeGrad *grad, const InputType *input, OutputType *output,
                            const ComputeType *scale, ComputeType *amax, ComputeType *scale_inv,
@@ -332,8 +331,8 @@ Alignment CheckAlignment(const size_t lead_dim, const int nvec, const T... ptrs)
 
 }  // namespace
 
-template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), 
-          typename InputType, typename OutputType>
+template <int nvec, typename Param, fp32 (*OP)(const fp32, const Param &), typename InputType,
+          typename OutputType>
 void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, OutputType *output,
                                    const fp32 *scale, fp32 *amax, fp32 *scale_inv, const size_t N,
                                    const Param params, cudaStream_t stream) {
@@ -348,28 +347,25 @@ void VectorizedUnaryKernelLauncher(const InputType *input, const fp32 *noop, Out
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_kernel<nvec, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
-                                                 params, N, num_aligned_elements);
+        unary_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_kernel<nvec, false, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
-                                                 params, N, num_aligned_elements);
+        unary_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, noop, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_kernel<1, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(input, noop, output, scale, amax, scale_inv,
-                                                 params, N, N);
+        unary_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            input, noop, output, scale, amax, scale_inv, params, N, N);
         break;
       }
     }
   }
 }
 
-template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &),
-          typename InputType, typename InputTypeGrad, typename OutputType>
+template <int nvec, typename Param, fp32 (*OP)(fp32, const Param &), typename InputType,
+          typename InputTypeGrad, typename OutputType>
 void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputType *input,
                                        OutputType *output, const fp32 *scale, fp32 *amax,
                                        fp32 *scale_inv, const size_t N, const Param params,
@@ -385,20 +381,17 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
 
     switch (align) {
       case Alignment::SAME_ALIGNED:
-        unary_grad_kernel<nvec, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
-                                                 params, N, num_aligned_elements);
+        unary_grad_kernel<nvec, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::SAME_UNALIGNED:
-        unary_grad_kernel<nvec, false, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
-                                                 params, N, num_aligned_elements);
+        unary_grad_kernel<nvec, false, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, scale_inv, params, N, num_aligned_elements);
         break;
       case Alignment::DIFFERENT: {
         // If the pointers are aligned differently we cannot vectorize
-        unary_grad_kernel<1, true, fp32, Param, OP>
-            <<<num_blocks, threads, 0, stream>>>(grad, input, output, scale, amax, scale_inv,
-                                                 params, N, N);
+        unary_grad_kernel<1, true, fp32, Param, OP><<<num_blocks, threads, 0, stream>>>(
+            grad, input, output, scale, amax, scale_inv, params, N, N);
         break;
       }
     }
