@@ -94,7 +94,7 @@ class CMakeExtension(setuptools.Extension):
         print(f"Time for build_ext: {total_time:.2f} seconds")
 
 
-def get_build_ext(extension_cls: Type[setuptools.Extension]):
+def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel_lib: bool = False):
     class _CMakeBuildExtension(extension_cls):
         """Setuptools command with support for CMake extension modules"""
 
@@ -130,7 +130,12 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
             self.extensions = all_extensions
 
             # Ensure that binaries are not in global package space.
-            target_dir = install_dir / "transformer_engine"
+            lib_dir = (
+                "wheel_lib"
+                if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or install_so_in_wheel_lib
+                else "src_lib"
+            )
+            target_dir = install_dir / "transformer_engine" / lib_dir
             target_dir.mkdir(exist_ok=True, parents=True)
 
             for ext in Path(self.build_lib).glob("*.so"):
