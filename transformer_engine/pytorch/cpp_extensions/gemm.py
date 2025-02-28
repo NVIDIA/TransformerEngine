@@ -14,6 +14,7 @@ from ..utils import assert_dim_for_fp8_exec, get_sm_count
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ...debug.pytorch.debug_quantization import DebugQuantizer
 
 __all__ = [
     "general_gemm",
@@ -109,6 +110,21 @@ def general_gemm(
         if not out.is_contiguous():
             raise ValueError("Output tensor is not contiguous.")
 
+    debug_quantizer = None
+    if isinstance(quantization_params, DebugQuantizer):
+        debug_quantizer = quantization_params
+        quantization_params = quantization_params.parent_quantizer
+        A = A.get_tensor(not transa)
+        B = B.get_tensor(transb)
+
+    assert (type(A) in [torch.Tensor, torch.nn.parameter.Parameter]) == (
+        type(B) in [torch.Tensor, torch.nn.parameter.Parameter]
+    ), (
+        "[Debug tools] Processed tensors should both be FP8 tensors or both be torch tensors  "
+        f"            but type(A) = {type(A)},             "
+        f"  type(B) = {type(B)}"
+    )
+
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
@@ -140,6 +156,9 @@ def general_gemm(
     original_scale_inverses = swizzle_inputs(A, B, layout)
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     reset_swizzled_inputs(A, B, original_scale_inverses)
+
+    if debug_quantizer is not None:
+        out = debug_quantizer.process_gemm_output(out)
 
     return out, bias_grad, gelu_input, extra_output
 
