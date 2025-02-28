@@ -1461,6 +1461,7 @@ def _test_grouped_linear_accuracy(
                 outputs.append(p.grad)
     return outputs
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
