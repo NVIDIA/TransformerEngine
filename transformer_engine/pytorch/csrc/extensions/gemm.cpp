@@ -382,7 +382,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
                                 : std::vector<size_t>{static_cast<size_t>(te_pre_gelu_out.size(0)),
                                                       static_cast<size_t>(te_pre_gelu_out.size(1))};
 
-
     DType gelu_type = bias_type;
     te_pre_gelu_out =
         makeTransformerEngineTensor(get_data_ptr(pre_gelu_out[i]), gelu_shape, gelu_type);
@@ -399,7 +398,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_bias));
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
-
 
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
