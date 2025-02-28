@@ -14,7 +14,6 @@
 #include <sstream>
 #include <string>
 
-//#include "../common.h"
 #include "logging.h"
 
 namespace transformer_engine {
