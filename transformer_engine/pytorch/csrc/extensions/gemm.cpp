@@ -398,7 +398,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     wrappers.emplace_back(std::move(te_bias));
     wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
-
   for (size_t i = 0; i < workspace.size(); i++) {
     auto wsp = makeTransformerEngineTensor(workspace[i].data_ptr(), {workspaceSize}, DType::kByte);
     te_workspace_vector.emplace_back(wsp.data());
