@@ -261,7 +261,7 @@ void multi_fp8_quantize(const std::vector<Tensor*> input_list, std::vector<Tenso
   kernel_args_unaligned.num_tensors = 0;
   kernel_args_unaligned.block_range[0] = 0;
 
-#define LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args, aligned, return_transpose)               \
+#define LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args, aligned, return_transpose)              \
   do {                                                                                        \
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(                                                     \
         itype, InputType,                                                                     \
