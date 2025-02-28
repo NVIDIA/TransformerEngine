@@ -98,8 +98,8 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
             import yaml
         except ImportError:
             raise RuntimeError("'yaml' package not found!")
-        with open(config.ub_cfg,"r") as stream:
-           config.ub_cfg = yaml.safe_load(stream)
+        with open(config.ub_cfg, "r") as stream:
+            config.ub_cfg = yaml.safe_load(stream)
     return args, kwargs, input_shape
 
 
@@ -117,16 +117,28 @@ def _parse_args(argv=None, namespace=None):
         "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
     parser.add_argument(
-        "--in-features", type=int, default=None, help="Optional input feature size for weight. Only used for Linear layer."
+        "--in-features",
+        type=int,
+        default=None,
+        help="Optional input feature size for weight. Only used for Linear layer.",
     )
     parser.add_argument(
-        "--out-features", type=int, default=None, help="Optional output feature size for weight. Only used for LayerNormLinear layer."
+        "--out-features",
+        type=int,
+        default=None,
+        help="Optional output feature size for weight. Only used for LayerNormLinear layer.",
     )
     parser.add_argument(
-        "--tp", type=int, default=None, help="Optional tensor_model_parallel_size used to initialize UB."
+        "--tp",
+        type=int,
+        default=None,
+        help="Optional tensor_model_parallel_size used to initialize UB.",
     )
     parser.add_argument(
-        "--use-bf16-params", action="store_true", default=False, help="Use BF16 params instead of FP32."
+        "--use-bf16-params",
+        action="store_true",
+        default=False,
+        help="Use BF16 params instead of FP32.",
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
@@ -160,9 +172,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
     )
-    parser.add_argument(
-        "--ub-name", type=str, default=None, help="Optional TP layer name."
-    )
+    parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
     parser.add_argument(
         "--skip-verify",
         action="store_true",
@@ -268,7 +278,7 @@ def _train(opts):
         WORLD_RANK = (int)(os.environ["SLURM_PROCID"])
         LOCAL_RANK = (int)(os.environ["SLURM_LOCALID"])
         WORLD_SIZE = (int)(os.environ["SLURM_NTASKS"])
-        assert opts.tp is not None, 'SLURM runs should provide --tp argument.'
+        assert opts.tp is not None, "SLURM runs should provide --tp argument."
         LOCAL_SIZE = WORLD_SIZE
     else:
         raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
@@ -441,7 +451,7 @@ def _train(opts):
                     break
 
     if opts.benchmark:
-        #Warmup to not profile CPU overhead
+        # Warmup to not profile CPU overhead
         for _ in range(100):
             if opts.use_cuda_graphs:
                 test_graph.replay()
@@ -456,7 +466,6 @@ def _train(opts):
         torch.cuda.cudart().cudaProfilerStop()
         if opts.use_cuda_graphs:
             del test_graph
-
 
     te.module.base.destroy_ub()
     dist_print("Destroying Userbuffers objects...", debug=True)
