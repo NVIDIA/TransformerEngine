@@ -2614,7 +2614,7 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   if (tid >= num_aligned_elements_per_input) {
     return;
   }
-  float accum_buf[nvec];
+  float accum_buf[nvec];  // NOLINT(*)
 
   loader.load(tid, tot_input_size);
 #pragma unroll
@@ -2672,7 +2672,7 @@ __global__ void __launch_bounds__(MAX_THREADS / 4)
   if (tid >= num_aligned_elements_per_input) {
     return;
   }
-  float accum_buf[nvec];
+  float accum_buf[nvec];  // NOLINT(*)
 
   loader.load(tid, tot_input_size);
 #pragma unroll
