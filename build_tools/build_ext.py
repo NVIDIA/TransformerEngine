@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -129,63 +129,6 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
             super().run()
             self.extensions = all_extensions
 
-            paddle_ext = None
-            if "paddle" in get_frameworks():
-                for ext in self.extensions:
-                    if "paddle" in ext.name:
-                        paddle_ext = ext
-                        break
-
-            # Manually write stub file for Paddle extension
-            if paddle_ext is not None:
-                # Load libtransformer_engine.so to avoid linker errors
-                if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-                    # Source compilation from top-level (--editable)
-                    search_paths = list(Path(__file__).resolve().parent.parent.iterdir())
-                    # Source compilation from top-level
-                    search_paths.extend(list(Path(self.build_lib).iterdir()))
-
-                    # Dynamically load required_libs.
-                    from transformer_engine.common import _load_cudnn, _load_nvrtc
-
-                    _load_cudnn()
-                    _load_nvrtc()
-                else:
-                    # Only during release bdist build for paddlepaddle.
-                    import transformer_engine
-
-                    search_paths = list(Path(transformer_engine.__path__[0]).iterdir())
-                    del transformer_engine
-
-                common_so_path = ""
-                for path in search_paths:
-                    if path.name.startswith("libtransformer_engine."):
-                        common_so_path = str(path)
-                assert common_so_path, "Could not find libtransformer_engine"
-                ctypes.CDLL(common_so_path, mode=ctypes.RTLD_GLOBAL)
-
-                # Figure out stub file path
-                module_name = paddle_ext.name
-                assert module_name.endswith(
-                    "_pd_"
-                ), "Expected Paddle extension module to end with '_pd_'"
-                stub_name = module_name[:-4]  # remove '_pd_'
-                stub_path = os.path.join(self.build_lib, "transformer_engine", stub_name + ".py")
-                Path(stub_path).parent.mkdir(exist_ok=True, parents=True)
-
-                # Figure out library name
-                # Note: This library doesn't actually exist. Paddle
-                # internally reinserts the '_pd_' suffix.
-                so_path = self.get_ext_fullpath(module_name)
-                _, so_ext = os.path.splitext(so_path)
-                lib_name = stub_name + so_ext
-
-                # Write stub file
-                print(f"Writing Paddle stub for {lib_name} into file {stub_path}")
-                from paddle.utils.cpp_extension.extension_utils import custom_write_stub
-
-                custom_write_stub(lib_name, stub_path)
-
             # Ensure that binaries are not in global package space.
             target_dir = install_dir / "transformer_engine"
             target_dir.mkdir(exist_ok=True, parents=True)
@@ -194,16 +137,10 @@ def get_build_ext(extension_cls: Type[setuptools.Extension]):
                 self.copy_file(ext, target_dir)
                 os.remove(ext)
 
-            # For paddle, the stub file needs to be copied to the install location.
-            if paddle_ext is not None:
-                stub_path = Path(self.build_lib) / "transformer_engine"
-                for stub in stub_path.glob("transformer_engine_paddle.py"):
-                    self.copy_file(stub, target_dir)
-
         def build_extensions(self):
-            # BuildExtensions from PyTorch and PaddlePaddle already handle CUDA files correctly
+            # BuildExtensions from PyTorch already handle CUDA files correctly
             # so we don't need to modify their compiler. Only the pybind11 build_ext needs to be fixed.
-            if "pytorch" not in get_frameworks() and "paddle" not in get_frameworks():
+            if "pytorch" not in get_frameworks():
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:

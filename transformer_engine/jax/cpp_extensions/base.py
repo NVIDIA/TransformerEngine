@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE base custom ops"""
@@ -7,7 +7,7 @@ import re
 from abc import ABCMeta, abstractmethod
 from functools import partial
 
-from jax import core
+from jax.extend import core
 from jax.interpreters import xla, mlir
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching

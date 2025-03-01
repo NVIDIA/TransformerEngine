@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from jax import ffi
 
 from transformer_engine import transformer_engine_jax
 from transformer_engine.transformer_engine_jax import DType as TEDType

@@ -1,11 +1,12 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 #include "transformer_engine/activation.h"
 
 #include "extensions.h"
+#include "transformer_engine/cast.h"
 #include "transformer_engine/transpose.h"
 #include "xla/ffi/api/c_api.h"
 
@@ -332,18 +333,27 @@ pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_
   auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
   auto dbias_shape = std::vector<size_t>{hidden_size};
 
-  auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-  auto dact_input_tensor = TensorWrapper(nullptr, dact_input_shape, in_dtype);
-  auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
-  auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
-  auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+  // Evil hack to specify TE impl
+  // Note: nvte_quantize_dbias_dgelu chooses its internal impl based
+  // on what pointers are allocated, e.g. whether to output with
+  // column-wise data. However, we don't have access to any allocated
+  // buffers in this function. We pass a dummy pointer as a
+  // workaround.
+  int temp = 0;
+
+  auto input_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), input_shape, in_dtype);
+  auto dact_input_tensor =
+      TensorWrapper(reinterpret_cast<void *>(&temp), dact_input_shape, in_dtype);
+  auto output_tensor = TensorWrapper();
+  output_tensor.set_rowwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_shape);
+  output_tensor.set_columnwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_trans_shape);
+  auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
 
   TensorWrapper dummy_workspace;
 
   // For now, all dbias_dact(-s) have the same workspace size
-  nvte_cast_transpose_dbias_dgelu(input_tensor.data(), dact_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(),
-                                  dbias_tensor.data(), dummy_workspace.data(), nullptr);
+  nvte_quantize_dbias_dgelu(input_tensor.data(), dact_input_tensor.data(), output_tensor.data(),
+                            dbias_tensor.data(), dummy_workspace.data(), nullptr);
 
   auto work_shape = MakeShapeVector(dummy_workspace.shape());
   return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
@@ -384,37 +394,32 @@ void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *o
   auto act_input_tensor = TensorWrapper(act_input, act_input_shape, desc.in_dtype);
   auto output_tensor =
       TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, desc.out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
 
   auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
 
   switch (act_enum) {
     case NVTE_Activation_Type::GELU:
-      nvte_cast_transpose_dbias_dgelu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace.data(), stream);
+      nvte_quantize_dbias_dgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace.data(), stream);
       break;
     case NVTE_Activation_Type::SILU:
-      nvte_cast_transpose_dbias_dsilu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace.data(), stream);
+      nvte_quantize_dbias_dsilu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace.data(), stream);
       break;
     case NVTE_Activation_Type::RELU:
-      nvte_cast_transpose_dbias_drelu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace.data(), stream);
+      nvte_quantize_dbias_drelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace.data(), stream);
       break;
     case NVTE_Activation_Type::QGELU:
-      nvte_cast_transpose_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(),
-                                       output_tensor.data(), output_trans_tensor.data(),
-                                       dbias_tensor.data(), workspace.data(), stream);
+      nvte_quantize_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                 dbias_tensor.data(), workspace.data(), stream);
       break;
     case NVTE_Activation_Type::SRELU:
-      nvte_cast_transpose_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(),
-                                       output_tensor.data(), output_trans_tensor.data(),
-                                       dbias_tensor.data(), workspace.data(), stream);
+      nvte_quantize_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                 dbias_tensor.data(), workspace.data(), stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -468,37 +473,32 @@ Error_Type DActLuDBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_bu
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto act_input_tensor = TensorWrapper(act_input, input_shape, in_dtype);
   auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, workspace_dtype);
 
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   switch (act_type) {
     case NVTE_Activation_Type::GELU:
-      nvte_cast_transpose_dbias_dgelu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace_tensor.data(), stream);
+      nvte_quantize_dbias_dgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::SILU:
-      nvte_cast_transpose_dbias_dsilu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace_tensor.data(), stream);
+      nvte_quantize_dbias_dsilu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::RELU:
-      nvte_cast_transpose_dbias_drelu(input_tensor.data(), act_input_tensor.data(),
-                                      output_tensor.data(), output_trans_tensor.data(),
-                                      dbias_tensor.data(), workspace_tensor.data(), stream);
+      nvte_quantize_dbias_drelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                dbias_tensor.data(), workspace_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::QGELU:
-      nvte_cast_transpose_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(),
-                                       output_tensor.data(), output_trans_tensor.data(),
-                                       dbias_tensor.data(), workspace_tensor.data(), stream);
+      nvte_quantize_dbias_dqgelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                 dbias_tensor.data(), workspace_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::SRELU:
-      nvte_cast_transpose_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(),
-                                       output_tensor.data(), output_trans_tensor.data(),
-                                       dbias_tensor.data(), workspace_tensor.data(), stream);
+      nvte_quantize_dbias_dsrelu(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
+                                 dbias_tensor.data(), workspace_tensor.data(), stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -555,29 +555,29 @@ void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *o
   auto act_input_tensor = TensorWrapper(act_input, act_input_shape, desc.in_dtype);
   auto output_tensor =
       TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, desc.out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
 
   switch (act_enum) {
     case NVTE_Activation_Type::GEGLU:
       nvte_dgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                                 output_trans_tensor.data(), stream);
+                                 stream);
       break;
     case NVTE_Activation_Type::SWIGLU:
       nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::REGLU:
       nvte_dreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                                 output_trans_tensor.data(), stream);
+                                 stream);
       break;
     case NVTE_Activation_Type::QGEGLU:
       nvte_dqgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::SREGLU:
       nvte_dsreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");
@@ -622,30 +622,30 @@ Error_Type DGatedActLuCastTransposeFFI(cudaStream_t stream, Buffer_Type input_bu
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto act_input_tensor = TensorWrapper(act_input, act_input_shape, in_dtype);
   auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
 
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   switch (act_type) {
     case NVTE_Activation_Type::GEGLU:
       nvte_dgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                                 output_trans_tensor.data(), stream);
+                                 stream);
       break;
     case NVTE_Activation_Type::SWIGLU:
       nvte_dswiglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::REGLU:
       nvte_dreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(), output_tensor.data(),
-                                 output_trans_tensor.data(), stream);
+                                 stream);
       break;
     case NVTE_Activation_Type::QGEGLU:
       nvte_dqgeglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     case NVTE_Activation_Type::SREGLU:
       nvte_dsreglu_cast_transpose(input_tensor.data(), act_input_tensor.data(),
-                                  output_tensor.data(), output_trans_tensor.data(), stream);
+                                  output_tensor.data(), stream);
       break;
     default:
       NVTE_ERROR("Unsupported ActivationEnum");

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -16,13 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4.1.7
+        uses: actions/download-artifact@v4
         with:
             name: "te_docs"
             path: "html"
       - name: Prepare for pages
         uses: actions/upload-pages-artifact@v1.0.7
         with:
+          name: github-pages
           path: "html"
   deploy:
     needs: prepare

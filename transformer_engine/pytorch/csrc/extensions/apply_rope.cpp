@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,7 +8,7 @@
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
                               const bool transpose_output_memory) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   TORCH_CHECK(input.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(input.size(0) <= freqs.size(0),
@@ -66,7 +66,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
                                const bool transpose_output_memory) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   TORCH_CHECK(output_grads.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
   TORCH_CHECK(output_grads.size(0) <= freqs.size(0),
@@ -122,7 +122,7 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
 
 at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
                                   const at::Tensor &freqs, const int cp_size, const int cp_rank) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   TORCH_CHECK(input.dim() == 3, "expected 3D tensor");
   TORCH_CHECK(cu_seqlens.dim() == 1, "expected 1D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");
@@ -174,7 +174,7 @@ at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_
 
 at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
                                    const at::Tensor &freqs, const int cp_size, const int cp_rank) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   TORCH_CHECK(output_grads.dim() == 3, "expected 3D tensor");
   TORCH_CHECK(cu_seqlens.dim() == 1, "expected 1D tensor");
   TORCH_CHECK(freqs.dim() == 4, "expected 4D tensor");

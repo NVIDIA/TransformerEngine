@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 import operator
@@ -18,14 +18,22 @@ from utils import assert_allclose, is_devices_enough
 def generate_configs():
     configs = []
     if is_devices_enough(2):
-        configs.append([2, (2,), "dp", MeshResource(dp_resource="dp")])
-        configs.append([2, (2,), "tp", MeshResource(tp_resource="tp")])
+        configs.append(
+            pytest.param(2, (2,), ("dp",), MeshResource(dp_resource="dp"), id="n2_dp2_tp1")
+        )
+        configs.append(
+            pytest.param(2, (2,), ("tp",), MeshResource(tp_resource="tp"), id="n2_dp1_tp2")
+        )
 
     if is_devices_enough(4):
-        TP_size = 2
-        DP_size = 2
         configs.append(
-            [4, (DP_size, TP_size), ("dp", "tp"), MeshResource(dp_resource="dp", tp_resource="tp")]
+            pytest.param(
+                4,
+                (2, 2),
+                ("dp", "tp"),
+                MeshResource(dp_resource="dp", tp_resource="tp"),
+                id=f"n4_dp2_tp2",
+            )
         )
 
     return configs
@@ -33,7 +41,8 @@ def generate_configs():
 
 def generate_context_parallel_configs():
     configs = []
-
+    mr = MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp")
+    axes = ("dp", "cp", "tp")
     DP_sizes = (1, 2)
     CP_sizes = (1, 2, 4, 8)
     TP_sizes = (1, 2)
@@ -41,13 +50,7 @@ def generate_context_parallel_configs():
         ndev = cp * tp * dp
         if is_devices_enough(ndev):
             configs.append(
-                pytest.param(
-                    ndev,
-                    (dp, cp, tp),
-                    ("dp", "cp", "tp"),
-                    MeshResource(dp_resource="dp", cp_resource="cp", tp_resource="tp"),
-                    id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}",
-                )
+                pytest.param(ndev, (dp, cp, tp), axes, mr, id=f"n{ndev}_dp{dp}_cp{cp}_tp{tp}")
             )
 
     return configs

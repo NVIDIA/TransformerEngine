@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -81,25 +81,18 @@ struct CustomCallNormDescriptor {
   size_t batch_size;
   size_t hidden_size;
   size_t wkspace_size;
-  size_t barrier_size;
-  Shape dgamma_part_shape;
-  Shape dbeta_part_shape;
   DType x_dtype;
   DType w_dtype;
   DType wkspace_dtype;
-  DType barrier_dtype;
-  DType dgamma_part_dtype;
-  DType dbeta_part_dtype;
   bool zero_centered_gamma;
   float eps;
   int sm_margin;
 };
 
-pybind11::bytes PackCustomCallNormDescriptor(
-    size_t batch_size, size_t hidden_size, size_t wkspace_size, size_t barrier_size,
-    const std::vector<size_t> &dgamma_part_shape, const std::vector<size_t> &dbeta_part_shape,
-    DType x_dtype, DType w_dtype, DType wkspace_dtype, DType barrier_dtype, DType dgamma_part_dtype,
-    DType dbeta_part_dtype, bool zero_centered_gamma, float eps, int sm_margin);
+pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
+                                             size_t wkspace_size, DType x_dtype, DType w_dtype,
+                                             DType wkspace_dtype, bool zero_centered_gamma,
+                                             float eps, int sm_margin);
 
 struct SoftmaxDescriptor {
   size_t batch_size;

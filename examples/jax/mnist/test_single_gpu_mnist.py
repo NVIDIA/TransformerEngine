@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """MNIST training on single GPU"""
@@ -36,6 +36,8 @@ class Net(nn.Module):
             nn_Dense = te_flax.DenseGeneral
         else:
             nn_Dense = nn.Dense
+        # dtype is used for param init in TE but computation in Linen.nn
+        dtype = jnp.float32 if self.use_te else jnp.bfloat16
 
         x = nn.Conv(features=32, kernel_size=(3, 3), strides=1, dtype=jnp.bfloat16)(x)
         x = nn.relu(x)
@@ -44,11 +46,13 @@ class Net(nn.Module):
         x = nn.max_pool(x, window_shape=(2, 2), strides=(2, 2))
         x = nn.Dropout(rate=0.25)(x, deterministic=disable_dropout)
         x = x.reshape(x.shape[0], -1)
-        x = nn_Dense(features=128, dtype=jnp.bfloat16)(x)
+        assert x.dtype == jnp.bfloat16
+        x = nn_Dense(features=128, dtype=dtype)(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=0.5)(x, deterministic=disable_dropout)
-        x = nn_Dense(features=16, dtype=jnp.bfloat16)(x)
-        x = nn.Dense(features=10, dtype=jnp.bfloat16)(x)
+        x = nn_Dense(features=16, dtype=dtype)(x)
+        x = nn_Dense(features=10, dtype=dtype)(x)
+        assert x.dtype == jnp.bfloat16
         return x
 
 

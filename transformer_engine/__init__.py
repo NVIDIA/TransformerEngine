@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -20,17 +20,7 @@ except (ImportError, StopIteration) as e:
     pass
 
 try:
-    from . import paddle
-except (ImportError, StopIteration) as e:
-    pass
-
-try:
     import transformer_engine_jax
-except ImportError:
-    pass
-
-try:
-    import transformer_engine_paddle
 except ImportError:
     pass
 

@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -74,24 +74,22 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
 
-  Tensor grad({N, H}, itype);
-  Tensor input({N, H * 2}, itype);
-  Tensor output_c({N, H * 2}, otype);
-  Tensor output_t({H * 2, N}, otype);
+  Tensor grad("grad", {N, H}, itype);
+  Tensor input("input", {N, H * 2}, itype);
+  Tensor output("output", {N, H * 2}, otype, true, true);
 
   fillUniform(&grad);
   fillUniform(&input);
-  setRandomScale(&output_c);
-  output_t.shareFP8Meta(output_c);
+  setRandomScale(&output);
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N * H * 2);
   std::unique_ptr<OType[]> ref_output_t = std::make_unique<OType[]>(N * H * 2);
 
-  nvte_dgeglu_cast_transpose(grad.data(), input.data(), output_c.data(), output_t.data(), 0);
+  nvte_dgeglu_cast_transpose(grad.data(), input.data(), output.data(), 0);
 
   CType ref_amax;
-  compute_ref_cast_transpose_dgated_gelu(grad.cpu_dptr<IType>(), input.cpu_dptr<IType>(),
-                                         output_c.scale(), ref_output_c.get(), ref_output_t.get(),
+  compute_ref_cast_transpose_dgated_gelu(grad.rowwise_cpu_dptr<IType>(), input.rowwise_cpu_dptr<IType>(),
+                                         output.scale(), ref_output_c.get(), ref_output_t.get(),
                                          &ref_amax, N, H);
 
   cudaDeviceSynchronize();
@@ -100,14 +98,14 @@ void performTest(const size_t N, const size_t H) {
 
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output_c.scale();
-    compareResults("scale_inv", output_c.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
+    compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+    float ref_scale_inv = 1.f / output.scale();
+    compareResults("scale_inv", output.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 
   auto [atol, rtol] = getTolerances(otype);
-  compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);
-  compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
+  compareResults("output_c", output, ref_output_c.get(), true, atol, rtol);
+  compareResults("output_t", output, ref_output_t.get(), false, atol, rtol);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},   {4096, 2048}, {768, 2816},

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -10,28 +10,20 @@ import torch
 
 # pylint: disable=unnecessary-lambda-assignment
 
-jit_fuser = torch.jit.script
+jit_fuser = lambda func: func
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
+
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
 if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = torch.compile
 
+
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda func: func
-if torch.__version__ >= "2":
-    import torch._dynamo
-
-    if torch.__version__ >= "2.1":
-        no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(
-            f, recursive=recursive
-        )
-    else:
-        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
-        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
+no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
 
 
 def set_jit_fusion_options() -> None:

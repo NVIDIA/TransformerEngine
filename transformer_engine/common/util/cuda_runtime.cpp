@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -79,6 +79,26 @@ int sm_count(int device_id) {
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
+}
+
+void stream_priority_range(int *low_priority, int *high_priority, int device_id) {
+  static std::vector<std::pair<int, int>> cache(num_devices());
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    int ori_dev = current_device();
+    if (device_id != ori_dev) NVTE_CHECK_CUDA(cudaSetDevice(device_id));
+    int min_pri, max_pri;
+    NVTE_CHECK_CUDA(cudaDeviceGetStreamPriorityRange(&min_pri, &max_pri));
+    if (device_id != ori_dev) NVTE_CHECK_CUDA(cudaSetDevice(ori_dev));
+    cache[device_id] = std::make_pair(min_pri, max_pri);
+  };
+  std::call_once(flags[device_id], init);
+  *low_priority = cache[device_id].first;
+  *high_priority = cache[device_id].second;
 }
 
 bool supports_multicast(int device_id) {

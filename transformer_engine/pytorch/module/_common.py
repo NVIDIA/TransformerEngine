@@ -1,32 +1,30 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Internal function used by multiple modules."""
 
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+import os
+from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
+from functools import reduce
+from operator import mul as multiply_op
 
 import torch
 
 from .. import cpp_extensions as tex
-from ..export import is_in_onnx_export_mode
-from ..fp8 import get_fp8_te_dtype
+from ..constants import TE_DType
 from ..utils import get_default_init_method
+from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
+
+_use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 
-def _get_normalization_func(
-    normalization: str, fp8_output: bool, is_grad_enabled: bool, forward: bool
-):
+def _get_normalization_func(normalization: str, forward: bool):
     fwd_normalization_funcs = {
-        ("LayerNorm", True, True): tex.layernorm_fwd_fp8,
-        ("LayerNorm", True, False): tex.layernorm_fwd_fp8_inf,
-        ("LayerNorm", False, True): tex.layernorm_fwd_noalloc,
-        ("LayerNorm", False, False): tex.layernorm_fwd_inf,
-        ("RMSNorm", True, True): tex.rmsnorm_fwd_fp8,
-        ("RMSNorm", True, False): tex.rmsnorm_fwd_fp8_inf,
-        ("RMSNorm", False, True): tex.rmsnorm_fwd_noalloc,
-        ("RMSNorm", False, False): tex.rmsnorm_fwd_inf,
+        "LayerNorm": tex.layernorm_fwd,
+        "RMSNorm": tex.rmsnorm_fwd,
     }
     bwd_normalization_funcs = {
         "LayerNorm": tex.layernorm_bwd,
@@ -34,81 +32,79 @@ def _get_normalization_func(
     }
 
     if forward:
-        return fwd_normalization_funcs[(normalization, fp8_output, is_grad_enabled)]
-    assert not fp8_output, "FP8 output is not supported in backward normalization!"
-    assert is_grad_enabled, "Gradient has to be enabled to call backward normalization!"
+        return fwd_normalization_funcs[normalization]
     return bwd_normalization_funcs[normalization]
 
 
-def _apply_normalization(
+def _fix_gathered_fp8_transpose(fp8_tensor: Float8Tensor, tp_size: int) -> Float8Tensor:
+    """Reorder FP8 transposes after Userbuffers gather.
+
+    The all-gather is performed in-place in the Float8Tensor's
+    row-wise data, and afterwards we need to do a transpose to get the
+    correct ordering. This misuses data fields in Float8Tensor and
+    should be considered an evil hack. It would be best to move
+    transpose logic into CommOverlap::get_buffer.
+
+    Responsibility for fixing: adener, tmoon
+
+    """
+    assert isinstance(fp8_tensor, Float8Tensor), "Tensor is not a Float8Tensor"
+    assert tp_size > 1, "The tensor transpose cannot be interleaved when TP size is 1"
+    assert fp8_tensor._data is not None, "The tensor does not hold any rowwise data"
+    assert (
+        fp8_tensor._data.shape[0] % tp_size == 0
+    ), "Leading dimension of data is not divisble by TP size"
+
+    data = fp8_tensor._data
+    batched_size = reduce(multiply_op, data.shape[1:])
+    interleaved_shape = [tp_size, data.shape[0] // tp_size, batched_size]
+    transposed_shape = [data.shape[0] // tp_size, batched_size * tp_size]
+    fp8_tensor._transpose = (
+        data.view(interleaved_shape).transpose(0, 1).contiguous().view(transposed_shape)
+    )
+
+    fp8_tensor._transpose_invalid = False
+    fp8_tensor._data = None
+
+    return fp8_tensor
+
+
+def apply_normalization(
     inputmat: torch.Tensor,
     ln_out: torch.Tensor,
     ln_weight: torch.Tensor,
     ln_bias: Union[torch.Tensor, None],
     eps: float,
-    fp8_out: bool,
-    fp8_meta: Dict[str, Any],
+    output_quantizer,
+    output_dtype,
     normalization: str,
     fwd_ln_sm_margin: int,
     zero_centered_gamma: bool,
-    is_grad_enabled: bool,
-    fp8_scale: Optional[torch.Tensor] = None,
-    fp8_amax: Optional[torch.Tensor] = None,
-    fp8_scale_inv: Optional[torch.Tensor] = None,
 ):
-    normalization_func = _get_normalization_func(normalization, fp8_out, is_grad_enabled, True)
+    """Apply normalization to input."""
+    normalization_func = _get_normalization_func(normalization, True)
 
     inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
-    if fp8_out:
-        fp8_dtype_forward = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
 
-        if is_grad_enabled:
-            output_key = "ln_out" if normalization == "LayerNorm" else "rmsnorm_out"
-            output_kwarg = {output_key: ln_out}
-            output = normalization_func(
-                *inputs,
-                eps,
-                fp8_meta["scaling_fwd"],
-                tex.FP8FwdTensors.GEMM1_INPUT,
-                fp8_dtype_forward,
-                fwd_ln_sm_margin,
-                zero_centered_gamma,
-                scale=fp8_scale,
-                amax=fp8_amax,
-                scale_inv=fp8_scale_inv,
-                **output_kwarg,
-            )
-        else:
-            return (
-                normalization_func(
-                    *inputs,
-                    eps,
-                    fp8_meta["scaling_fwd"],
-                    tex.FP8FwdTensors.GEMM1_INPUT,
-                    fp8_dtype_forward,
-                    fwd_ln_sm_margin,
-                    zero_centered_gamma,
-                    scale=fp8_scale,
-                    amax=fp8_amax,
-                    scale_inv=fp8_scale_inv,
-                ),
-                None,
-                None,
-            )
-    else:
-        if is_grad_enabled:
-            output = normalization_func(*inputs, ln_out, eps, fwd_ln_sm_margin, zero_centered_gamma)
-        else:
-            return (
-                normalization_func(*inputs, eps, fwd_ln_sm_margin, zero_centered_gamma),
-                None,
-                None,
-            )
-    if normalization == "RMSNorm":
-        output = (ln_out, None, output[1])
-    elif normalization == "LayerNorm":
-        output = (ln_out, output[1], output[2])
-    return output
+    split_mxfp8_cast = False
+    if not _use_cudnn_mxfp8_norm and isinstance(output_quantizer, MXFP8Quantizer):
+        split_mxfp8_cast = True
+
+    output = normalization_func(
+        *inputs,
+        eps,
+        None if split_mxfp8_cast else ln_out,
+        None if split_mxfp8_cast else output_quantizer,
+        TE_DType[output_dtype] if output_dtype in TE_DType else output_dtype,
+        fwd_ln_sm_margin,
+        zero_centered_gamma,
+    )
+
+    return (
+        (output_quantizer.quantize(output[0], out=ln_out), *output[1:])
+        if split_mxfp8_cast
+        else output
+    )
 
 
 class _NoopCatFunc(torch.autograd.Function):
@@ -202,7 +198,7 @@ class _NoopCatFunc(torch.autograd.Function):
         return None, *grad_inputs
 
 
-def _noop_cat(
+def noop_cat(
     tensors: List[torch.Tensor],
     dim: int = 0,
 ) -> torch.Tensor:
@@ -217,8 +213,6 @@ def _noop_cat(
         raise ValueError("Attempted to concatenate 0 tensors")
     if len(tensors) == 1:
         return tensors[0]
-    if is_in_onnx_export_mode():
-        return torch.cat(tensors, dim=dim)
     return _NoopCatFunc.apply(dim, *tensors)
 
 

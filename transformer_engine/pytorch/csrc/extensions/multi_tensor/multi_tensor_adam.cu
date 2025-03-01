@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -173,6 +173,122 @@ struct AdamFunctorMaster {
         }
         if (fp8_data.scale_inv_ptr != nullptr) {
           *fp8_data.scale_inv_ptr = __frcp_rn(fp8_data.scale);
+        }
+      }
+    }
+  }
+};
+
+template <typename GRAD_T, typename FULL_T, typename index_t>
+struct AdamFunctorMasterParamRemainder {
+  __device__ __forceinline__ void operator()(index_t chunk_size, volatile int *noop_gmem,
+                                             TensorListMetadata<5> &tl,  // NOLINT(*)
+                                             const float beta1, const float beta2,
+                                             const float beta1_correction,
+                                             const float beta2_correction, const float epsilon,
+                                             const float lr, adamMode_t mode, const float decay) {
+    index_t tensor_loc = tl.block_to_tensor[blockIdx.x];
+
+    index_t chunk_idx = tl.block_to_chunk[blockIdx.x];
+    index_t n = tl.sizes[tensor_loc];
+
+    GRAD_T *g = reinterpret_cast<GRAD_T *>(tl.addresses[0][tensor_loc]);
+    g += chunk_idx * chunk_size;
+
+    int16_t *p = reinterpret_cast<int16_t *>(tl.addresses[1][tensor_loc]);
+    p += chunk_idx * chunk_size;
+
+    FULL_T *m = reinterpret_cast<FULL_T *>(tl.addresses[2][tensor_loc]);
+    m += chunk_idx * chunk_size;
+
+    FULL_T *v = reinterpret_cast<FULL_T *>(tl.addresses[3][tensor_loc]);
+    v += chunk_idx * chunk_size;
+
+    int16_t *p_remainder = reinterpret_cast<int16_t *>(tl.addresses[4][tensor_loc]);
+    p_remainder += chunk_idx * chunk_size;
+
+    n -= chunk_idx * chunk_size;
+
+    // see note in multi_tensor_scale_kernel.cu
+    for (index_t i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
+      union fp32_or_int162 {
+        float fp32;
+        int16_t int16[2];
+      };
+      fp32_or_int162 local_master_param[ILP];
+      int16_t local_p[ILP];
+      int16_t local_p_rem[ILP];
+      MATH_T r_g[ILP];
+      MATH_T r_m[ILP];
+      MATH_T r_v[ILP];
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        int i = i_start + threadIdx.x + ii * blockDim.x;
+        if (i < n && i < chunk_size) {
+          r_g[ii] = static_cast<MATH_T>(g[i]);
+          r_m[ii] = static_cast<MATH_T>(m[i]);
+          r_v[ii] = static_cast<MATH_T>(v[i]);
+
+          local_p[ii] = static_cast<int16_t>(p[i]);
+          local_p_rem[ii] = static_cast<int16_t>(p_remainder[i]);
+        } else {
+          r_g[ii] = MATH_T(0);
+          r_m[ii] = MATH_T(0);
+          r_v[ii] = MATH_T(0);
+
+          local_p[ii] = int16_t(0);
+          local_p_rem[ii] = int16_t(0);
+        }
+      }
+// Reconstruct FP32 params
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        if (local_p_rem[ii] < 0) local_p[ii]--;  // Undo rounding
+        local_master_param[ii].int16[1] = local_p[ii];
+        local_master_param[ii].int16[0] = local_p_rem[ii];
+      }
+
+      MATH_T *r_p = reinterpret_cast<MATH_T *>(local_master_param);
+
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        if (mode == ADAM_MODE_0) {  // L2
+          r_g[ii] = r_g[ii] + (decay * r_p[ii]);
+          r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
+          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
+          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
+          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          MATH_T update = next_m_unbiased / denom;
+          r_p[ii] = r_p[ii] - (lr * update);
+        } else {  // weight decay
+          r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
+          r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
+          MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
+          MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
+          MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+          MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
+          r_p[ii] = r_p[ii] - (lr * update);
+        }
+      }
+
+// Split into BF16 params (rounded-to-nearest) and remainders
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        local_p[ii] = local_master_param[ii].int16[1];
+        local_p_rem[ii] = local_master_param[ii].int16[0];
+        if (local_p_rem[ii] < 0) local_p[ii]++;  // Round up
+      }
+
+#pragma unroll
+      for (int ii = 0; ii < ILP; ii++) {
+        int i = i_start + threadIdx.x + ii * blockDim.x;
+        if (i < n && i < chunk_size) {
+          p_remainder[i] = static_cast<int16_t>(local_p_rem[ii]);
+          p[i] = static_cast<int16_t>(local_p[ii]);
+
+          m[i] = static_cast<FULL_T>(r_m[ii]);
+          v[i] = static_cast<FULL_T>(r_v[ii]);
         }
       }
     }
@@ -545,6 +661,42 @@ void multi_tensor_adam_cuda(int chunk_size, at::Tensor noop_flag,
                                     (adamMode_t)mode, weight_decay);));
     }
   }
+  AT_CUDA_CHECK(cudaGetLastError());
+}
+
+void multi_tensor_adam_param_remainder_cuda(int chunk_size, at::Tensor noop_flag,
+                                            std::vector<std::vector<at::Tensor>> tensor_lists,
+                                            const float lr, const float beta1, const float beta2,
+                                            const float epsilon, const int step, const int mode,
+                                            const int bias_correction, const float weight_decay) {
+  using namespace at;
+
+  // Handle bias correction mode
+  float bias_correction1 = 1.0f, bias_correction2 = 1.0f;
+  if (bias_correction == 1) {
+    bias_correction1 = 1 - std::pow(beta1, step);
+    bias_correction2 = 1 - std::pow(beta2, step);
+  }
+
+  const auto g_in_type = tensor_lists[0][0].scalar_type();
+  const auto p_in_type = tensor_lists[1][0].scalar_type();
+  auto tl_size = tensor_lists.size();
+
+  // case 5:  g, p, m, v, p_master
+  TORCH_CHECK(tl_size == 5, "tensor list must contain 5");
+  TORCH_CHECK(p_in_type == at::ScalarType::BFloat16,
+              "Adam with BF16 param remainders requires BF16 params");
+
+  // g, p, m, v, p_master
+  DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+      p_in_type, 0, "adam",
+      DISPATCH_DOUBLE_FLOAT_HALF_AND_BFLOAT(
+          g_in_type, 1, "adam",
+          multi_tensor_apply<5>((int64_t)BLOCK_SIZE, (int64_t)chunk_size, noop_flag, tensor_lists,
+                                AdamFunctorMasterParamRemainder<scalar_t_1, float, int64_t>(),
+                                beta1, beta2, bias_correction1, bias_correction2, epsilon, lr,
+                                (adamMode_t)mode, weight_decay);));
+
   AT_CUDA_CHECK(cudaGetLastError());
 }
 

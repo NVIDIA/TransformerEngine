@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -108,6 +108,8 @@ class RMSNorm(_RMSNormOp):
 
         # Flag for sequence parallelism (custom Megatron-LM integration)
         self.sequence_parallel: Optional[bool] = sequence_parallel
+        if sequence_parallel is not None:
+            self.weight.sequence_parallel = sequence_parallel
 
     def reset_rms_norm_parameters(self) -> None:
         """Deprecated"""

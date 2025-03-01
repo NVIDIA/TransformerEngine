@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -267,11 +267,11 @@ class TransformerLayer(torch.nn.Module):
         zero_centered_gamma: bool = False,
         qkv_weight_interleaved: bool = True,
         ub_tp_comm_overlap: bool = False,
-        ub_bulk_wgrad: bool = True,
-        ub_bulk_dgrad: bool = True,
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
         ub_overlap_rs_dgrad: bool = False,
+        ub_bulk_dgrad: bool = True,
+        ub_bulk_wgrad: bool = True,
         bias: bool = True,
         activation: str = "gelu",
         normalization: str = "LayerNorm",

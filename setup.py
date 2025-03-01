@@ -1,10 +1,11 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Installation script."""
 
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -35,14 +36,13 @@ os.environ["NVTE_PROJECT_BUILDING"] = "1"
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
-elif "paddle" in frameworks:
-    from paddle.utils.cpp_extension import BuildExtension
 elif "jax" in frameworks:
     install_and_import("pybind11[global]")
     from pybind11.setup_helpers import build_ext as BuildExtension
 
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
+archs = cuda_archs()
 
 
 class TimedBdist(bdist_wheel):
@@ -57,12 +57,15 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
-    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(cuda_archs())]
+    cmake_flags = ["-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)]
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
         assert (
             os.getenv("MPI_HOME") is not None
         ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
         cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
+
+    if bool(int(os.getenv("NVTE_BUILD_ACTIVATION_WITH_FAST_MATH", "0"))):
+        cmake_flags.append("-DNVTE_BUILD_ACTIVATION_WITH_FAST_MATH=ON")
 
     # Project directory root
     root_path = Path(__file__).resolve().parent
@@ -100,14 +103,14 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
-            install_reqs.extend(["torch"])
-            test_reqs.extend(["numpy", "onnxruntime", "torchvision", "prettytable"])
+            install_reqs.extend(["torch>=2.1"])
+            # Blackwell is not supported as of Triton 3.2.0, need custom internal build
+            # install_reqs.append("triton")
+            test_reqs.extend(["numpy", "torchvision", "prettytable"])
         if "jax" in frameworks:
             install_reqs.extend(["jax", "flax>=0.7.1"])
-            test_reqs.extend(["numpy", "praxis"])
-        if "paddle" in frameworks:
-            install_reqs.append("paddlepaddle-gpu")
-            test_reqs.append("numpy")
+            # test_reqs.extend(["numpy", "praxis"])
+            test_reqs.extend(["numpy"])
 
     return [remove_dups(reqs) for reqs in [setup_reqs, install_reqs, test_reqs]]
 
@@ -132,7 +135,6 @@ if __name__ == "__main__":
         extras_require = {
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
-            "paddle": [f"transformer_engine_paddle=={__version__}"],
         }
     else:
         setup_requires, install_requires, test_requires = setup_requirements()
@@ -163,16 +165,6 @@ if __name__ == "__main__":
                     setup_jax_extension(
                         "transformer_engine/jax/csrc",
                         current_file_path / "transformer_engine" / "jax" / "csrc",
-                        current_file_path / "transformer_engine",
-                    )
-                )
-            if "paddle" in frameworks:
-                from build_tools.paddle import setup_paddle_extension
-
-                ext_modules.append(
-                    setup_paddle_extension(
-                        "transformer_engine/paddle/csrc",
-                        current_file_path / "transformer_engine" / "paddle" / "csrc",
                         current_file_path / "transformer_engine",
                     )
                 )

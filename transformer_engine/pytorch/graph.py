@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -11,7 +11,7 @@ from torch.utils._pytree import tree_flatten as _tree_flatten
 from torch.utils._pytree import tree_unflatten as _tree_unflatten
 from torch._C import _graph_pool_handle
 
-from transformer_engine.common.recipe import DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Recipe
 from transformer_engine.pytorch.constants import dist_group_type
 from .fp8 import (
     fp8_autocast,
@@ -64,6 +64,7 @@ def _make_graphed_callables(
     sample_kwargs: Optional[SingleOrTuple[Dict[str, Any]]] = None,
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
+    retain_graph_in_backward: bool = False,
 ) -> SingleOrTuple[Callable]:
     """
     Helper method for `make_graphed_callables`
@@ -320,6 +321,7 @@ def _make_graphed_callables(
                             grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                             only_inputs=True,
                             allow_unused=allow_unused_input,
+                            retain_graph=retain_graph_in_backward,
                         )
                     # Constructs a tuple suitable for returning from Graphed.backward:
                     # Pads out the actually-needed grads with Nones in gradient slots for inputs
@@ -371,6 +373,7 @@ def _make_graphed_callables(
                     grad_outputs=tuple(o for o in static_grad_outputs if o is not None),
                     only_inputs=True,
                     allow_unused=allow_unused_input,
+                    retain_graph=retain_graph_in_backward,
                 )
             # Constructs a tuple suitable for returning from Graphed.backward:
             # Pads out the actually-needed grads with Nones in gradient slots for inputs that
@@ -553,12 +556,16 @@ def _make_graphed_callables(
 
 def save_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_recipe: DelayedScaling,
-) -> List[Any]:
+    fp8_recipe: Recipe,
+) -> Optional[List[Any]]:
     """
     Returns the FP8 tensors for all modules
     with adjusted amax history sizes.
     """
+
+    if not isinstance(fp8_recipe, DelayedScaling):
+        return None
+
     fp8_tensors = []
     for module in modules:
         for m in module.modules():
@@ -576,9 +583,13 @@ def save_fp8_tensors(
 
 def restore_fp8_tensors(
     modules: Iterable[torch.nn.Module],
-    fp8_tensors: List[Any],
+    fp8_tensors: Optional[List[Any]],
 ) -> None:
     """Restore FP8 tensors."""
+
+    if fp8_tensors is None:
+        return
+
     for module in modules:
         for m in module.modules():
             module_tensors = fp8_tensors.pop(0)
@@ -606,6 +617,7 @@ def make_graphed_callables(
     fp8_weight_caching: bool = False,
     _order: Optional[List[int]] = None,
     pool: Optional[Tuple[int, ...]] = None,
+    retain_graph_in_backward: bool = False,
 ) -> Union[Callable, Tuple[Callable, ...]]:
     """
     Make CUDA graph version of Transformer Engine modules
@@ -632,6 +644,8 @@ def make_graphed_callables(
     pool: (tuple of) int, default = `None`, optional
           An instance returned from function `torch.cuda.graph_pool_handle` that hints
           this graph may share memory with the indicated pool.
+    retain_graph_in_backward: bool, default = `False`
+                              Whether to set retain_graph=True in backward graph capture.
 
     FP8-related parameters
     ----------------------
@@ -716,6 +730,7 @@ def make_graphed_callables(
         sample_kwargs=sample_kwargs,
         _order=_order,
         pool=pool,
+        retain_graph_in_backward=retain_graph_in_backward,
     )
 
     # Ensures warmup does not affect numerics for ops such as dropout.

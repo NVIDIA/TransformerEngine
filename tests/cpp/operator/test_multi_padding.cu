@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <string>
 #include <vector>
 #include <cstdio>
 
@@ -84,8 +85,8 @@ void performTest() {
     const size_t height = tensor_dims[tensor_id].first;
     const size_t width = tensor_dims[tensor_id].second;
     const size_t padded_height = (height + align - 1) / align * align;
-    input_list.emplace_back(Tensor({ height, width }, itype));
-    output_list.emplace_back(Tensor({ padded_height, width }, otype));
+    input_list.emplace_back(Tensor("input_" + std::to_string(tensor_id), { height, width }, itype));
+    output_list.emplace_back(Tensor("output_" + std::to_string(tensor_id), { padded_height, width }, otype));
 
     auto& input = input_list.back();
     auto& output = output_list.back();
@@ -95,8 +96,8 @@ void performTest() {
     ref_input_list.emplace_back(height*width);
     ref_output_list.emplace_back(padded_height*width);
 
-    std::copy(input.cpu_dptr<InputType>(),
-              input.cpu_dptr<InputType>() + height * width,
+    std::copy(input.rowwise_cpu_dptr<InputType>(),
+              input.rowwise_cpu_dptr<InputType>() + height * width,
               ref_input_list.back().begin());
     ref_height_list[tensor_id] = height;
     ref_width_list[tensor_id] = width;
@@ -134,6 +135,7 @@ void performTest() {
     compareResults("output",
                    output_list[tensor_id],
                    ref_output_list[tensor_id].data(),
+                   true,
                    atol, rtol);
   }
 }

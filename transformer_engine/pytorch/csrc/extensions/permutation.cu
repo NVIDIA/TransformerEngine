@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -11,6 +11,7 @@
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
     int64_t num_out_tokens, std::vector<at::Tensor> workspace, int64_t max_expanded_token_num) {
+  using namespace transformer_engine::pytorch;
   const int num_tokens = input.size(0);
   int num_cols = input.size(1);
   const int topK = indices.size(1);
@@ -96,6 +97,7 @@ at::Tensor moe_permute_bwd(at::Tensor input, const transformer_engine::DType dty
 at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType dtype,
                              at::Tensor row_id_map, at::Tensor prob, int64_t num_tokens,
                              int64_t topK) {
+  using namespace transformer_engine::pytorch;
   int num_cols = input.size(1);
 
   // Activations type
@@ -129,6 +131,7 @@ at::Tensor moe_unpermute_fwd(at::Tensor input, const transformer_engine::DType d
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
                                                      const transformer_engine::DType dtype,
                                                      at::Tensor row_id_map, at::Tensor prob) {
+  using namespace transformer_engine::pytorch;
   const int topK = (prob.numel() > 0) ? prob.size(1) : 1;
   const int num_tokens = (prob.numel() > 0) ? prob.size(0) : row_id_map.size(0);
   int num_cols = input_bwd.size(1);

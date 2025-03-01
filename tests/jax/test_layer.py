@@ -1,17 +1,22 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Test transformer_engine.jax.flax.TransformerLayer"""
 import os
 from functools import partial
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import flax
 import jax
 import jax.numpy as jnp
 import pytest
 
-from utils import assert_allclose, assert_tree_like_allclose, sync_params_values
+from utils import (
+    assert_allclose,
+    assert_tree_like_allclose,
+    dtype_tols,
+    sync_params_values,
+)
 from utils import DecoderLayer as RefDecoderLayer
 from utils import EncoderLayer as RefEncoderLayer
 
@@ -250,12 +255,18 @@ class BaseRunner:
         target = sync_params_values(target, ref, self.transformations)
         return ref, target
 
-    def test_forward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+    def test_forward(
+        self,
+        data_shape: Tuple[int],
+        dtype: jnp.dtype,
+        rtol: Optional[float] = None,
+        atol: Optional[float] = None,
+    ) -> None:
         """Test only the forward"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
+        ref_layer_cls = partial(self.reference_layer, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, **self.attrs)
 
         ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
@@ -264,14 +275,21 @@ class BaseRunner:
         ref_out = self._loss_fn(inputs, ref_masks, ref_params, ref_others, ref_layer)
         test_out = self._loss_fn(inputs, test_masks, test_params, test_others, test_layer)
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
+        tols = dtype_tols(dtype, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, **tols)
 
-    def test_backward(self, data_shape, dtype, rtol=1e-05, atol=1e-08):
+    def test_backward(
+        self,
+        data_shape: Tuple[int],
+        dtype: jnp.dtype,
+        rtol: Optional[float] = None,
+        atol: Optional[float] = None,
+    ) -> None:
         """Test forward and backward through value_and_grad()"""
         inputs, (ref_masks, test_masks) = self.generate_inputs(data_shape, dtype)
 
-        ref_layer_cls = partial(self.reference_layer, dtype=dtype, **self.attrs)
-        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, dtype=dtype, **self.attrs)
+        ref_layer_cls = partial(self.reference_layer, **self.attrs)
+        layer_cls = partial(TransformerLayer, layer_type=self.layer_type, **self.attrs)
 
         ref_layer, ref_params, ref_others = self._generate_layer(ref_layer_cls, inputs, ref_masks)
         test_layer, test_params, test_others = self._generate_layer(layer_cls, inputs, test_masks)
@@ -302,11 +320,12 @@ class BaseRunner:
             inputs, test_masks, test_params, test_others, test_layer
         )
 
-        assert_allclose(ref_out, test_out, rtol=rtol, atol=atol)
-        assert_tree_like_allclose(ref_dgrads, test_dgrads, rtol=rtol, atol=atol)
+        tols = dtype_tols(dtype, rtol=rtol, atol=atol)
+        assert_allclose(ref_out, test_out, **tols)
+        assert_tree_like_allclose(ref_dgrads, test_dgrads, **tols)
 
         _, restructed_ref_wgrads = self._sync_params(ref_wgrads, test_wgrads)
-        assert_tree_like_allclose(restructed_ref_wgrads, test_wgrads, rtol=rtol, atol=atol)
+        assert_tree_like_allclose(restructed_ref_wgrads, test_wgrads, **tols)
 
 
 class EncoderRunner(BaseRunner):
@@ -418,12 +437,12 @@ class BaseTester:
     def test_forward(self, data_shape, dtype, attrs):
         """Test normal datatype forward"""
         FP8Helper.finalize()  # Ensure FP8 disabled.
-        self.runner(attrs).test_forward(data_shape, dtype, rtol=1e-5, atol=7e-5)
+        self.runner(attrs).test_forward(data_shape, dtype)
 
     def test_backward(self, data_shape, dtype, attrs):
         """Test normal datatype backward"""
         FP8Helper.finalize()  # Ensure FP8 disabled.
-        self.runner(attrs).test_backward(data_shape, dtype, rtol=1e-5, atol=7e-5)
+        self.runner(attrs).test_backward(data_shape, dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fp8_format", FP8_FORMATS)
