@@ -351,16 +351,16 @@ def get_tols(module, backend, dtype):
         }
     return tols[dtype]
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16])  # param_types)
+@pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["UnfusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("module", ["TransformerLayer"])  # , "DotProductAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention", "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
     logger = logging.getLogger("test_paged_attn")
-    num_layers = 2 if module == "TransformerLayer" else 1
+    num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     config = model_configs_infer[model]
 
     # figure out supported backends
