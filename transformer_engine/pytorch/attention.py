@@ -594,9 +594,6 @@ def get_attention_backend(
 
     # Filter: QKV layout
     qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
-    #qkv_format = "".join(
-    #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-    #)
     if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
@@ -5271,27 +5268,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
 
-        #qkv_format = "".join(
-        #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #)
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
-        #if inference_params is not None: #"_2" in qkv_layout:
-        #    #qkv_format = qkv_layout.replace("paged_kv_", "")
-        #    #q_format, kv_format = qkv_format.split("_2")
-        #    q_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #    )
-        #    kv_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
-        #    )
-        #    qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
-        #else:
-        #    qkv_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #    )
-        #    q_format = qkv_format
-        #    kv_format = qkv_format
 
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(
@@ -5865,24 +5843,7 @@ class FlashAttention(torch.nn.Module):
 
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
-        #if inference_params is not None: #"_2" in qkv_layout:
-        #    #qkv_format = qkv_layout.replace("paged_kv_", "")
-        #    #q_format, kv_format = qkv_format.split("_2")
-        #    q_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #    )
-        #    kv_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
-        #    )
-        #    qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
-        #else:
-        #    qkv_format = "".join(
-        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #    )
-        #    q_format = qkv_format
-        #    kv_format = qkv_format
 
-        print('FA 0', [x.shape for x in [query_layer, key_layer, value_layer]], qkv_format, qkv_layout)
         # convert q, k, v to bshd if they are in sbhd
         # qkv_format is unchanged
         if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
@@ -6836,9 +6797,6 @@ class FusedAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        #qkv_format = "".join(
-        #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        #)
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 

@@ -388,7 +388,10 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
+    # flash-attn requires page size >= 256
     if backend == "FlashAttention":
+        config_max_seqlen_q = config.max_seqlen_q
+        config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
         config.max_seqlen_kv = 256
 
@@ -654,3 +657,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.serving_times = sim.arrival_times + sim.request_delays
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
+
+    if backend == "FlashAttention":
+        config.max_seqlen_q = config_max_seqlen_q
+        config.max_seqlen_kv = config_max_seqlen_kv
