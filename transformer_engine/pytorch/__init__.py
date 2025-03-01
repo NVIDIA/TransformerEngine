@@ -7,14 +7,23 @@
 # pylint: disable=wrong-import-position,wrong-import-order
 
 import logging
+import functools
+import sys
 import importlib
 import importlib.util
-import sys
-import torch
 from importlib.metadata import version
+from packaging.version import Version as PkgVersion
+
+import torch
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
 
 
 def _load_library():
@@ -58,6 +67,9 @@ def _load_library():
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
+
+
+assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 
 _load_library()
