@@ -130,6 +130,7 @@ _flash_attn_2_5_plus = False
 _flash_attn_2_5_7_plus = False
 _flash_attn_2_6_plus = False
 _flash_attn_2_7_plus = False
+_flash_attn_3_plus = False
 
 flash_attn_cuda_bwd = None
 flash_attn_func = None
@@ -178,6 +179,7 @@ else:
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
         _flash_attn_2_6_plus = _flash_attn_version >= PkgVersion("2.6.0")
         _flash_attn_2_7_plus = _flash_attn_version >= PkgVersion("2.7.0")
+        _flash_attn_3_plus = _flash_attn_version >= PkgVersion("3.0")
     elif (
         torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
     ):
@@ -6064,6 +6066,7 @@ class FlashAttention(torch.nn.Module):
                     fa_optional_forward_args_thd.append(max_seqlen_q)
                     fa_optional_forward_args_thd.append(max_seqlen_kv)
                     if inference_params is not None:
+                        # use page_table to support thd_2bshd format when is_paged=False
                         fa_optional_forward_kwargs["block_table"] = (
                             inference_params.cache_manager.page_table[:batch_size]
                             if inference_params.is_paged
@@ -6076,6 +6079,11 @@ class FlashAttention(torch.nn.Module):
                     fa_3_optional_forward_kwargs["window_size"] = window_size
                     fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     if inference_params is not None:
+                        # use page_table to support thd_2bshd format when is_paged=False
+                        # 2.7.3+ -> page_table
+                        # git clone --recursive -b v2.7.3 https://github.com/Dao-AILab/flash-attention.git
+                        # MAX_JOBS=6 FLASH_ATTN_CUDA_ARCHS=90 pip install -v -e .
+                        assert _flash_attn_3_plus, "Please install flash-attn from v3"
                         fa_3_optional_forward_kwargs["page_table"] = (
                             inference_params.cache_manager.page_table[:batch_size]
                             if inference_params.is_paged
