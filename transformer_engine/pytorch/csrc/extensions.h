@@ -70,8 +70,10 @@ std::vector<py::object> fused_attn_bwd(
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 
-at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d);
-at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d, int t);
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
+                               int h, int d);
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
+                               int h, int d, int t);
 void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
                       torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
                       torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int h_kv, int d_k,

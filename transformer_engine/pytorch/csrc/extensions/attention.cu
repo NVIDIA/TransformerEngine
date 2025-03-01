@@ -1034,7 +1034,8 @@ at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_t
  **************************************************************************************************/
 
 template <typename scalar_t>
-void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d) {
+void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
+                                  int b, int max_seq_len, int h, int d) {
   transformer_engine::fused_attn::
       convert_thd_to_bshd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
           reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
@@ -1042,7 +1043,8 @@ void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::
           b, max_seq_len, h, d);
 }
 
-at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d) {
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
+                               int h, int d) {
   std::vector<int64_t> shape = {b, max_seq_len, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
   if (new_tensor.scalar_type() == at::ScalarType::Half) {
@@ -1071,16 +1073,17 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
  **************************************************************************************************/
 
 template <typename scalar_t>
-void convert_bshd_to_thd_launcher(at::Tensor tensor, at::Tensor new_tensor,
-                        at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d) {
+void convert_bshd_to_thd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::Tensor cu_seqlens,
+                                  int b, int max_seq_len, int h, int d) {
   transformer_engine::fused_attn::
       convert_bshd_to_thd_kernel<<<16, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
           reinterpret_cast<scalar_t *>(tensor.data_ptr<scalar_t>()),
-          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()),
-          cu_seqlens.data_ptr<int>(), b, max_seq_len, h, d);
+          reinterpret_cast<scalar_t *>(new_tensor.data_ptr<scalar_t>()), cu_seqlens.data_ptr<int>(),
+          b, max_seq_len, h, d);
 }
 
-at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len, int h, int d, int t) {
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
+                               int h, int d, int t) {
   std::vector<int64_t> shape = {t, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
   if (tensor.scalar_type() == at::ScalarType::Half) {
@@ -1119,11 +1122,10 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
 
 template <typename scalar_t>
 void copy_to_kv_cache_launcher(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache,
-                               at::Tensor v_cache, at::Tensor page_table,
-                               at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
-                               NVTE_QKV_Format qkv_format, int h_kv, int d_k, int d_v, int b,
-                               int max_ctx_len, int max_seq_len, int max_pages_per_seq,
-                               bool is_non_paged) {
+                               at::Tensor v_cache, at::Tensor page_table, at::Tensor cu_new_lens,
+                               at::Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv,
+                               int d_k, int d_v, int b, int max_ctx_len, int max_seq_len,
+                               int max_pages_per_seq, bool is_non_paged) {
   if (new_k.data_ptr() != nullptr && new_v.data_ptr() != nullptr && k_cache.data_ptr() != nullptr &&
       v_cache.data_ptr() != nullptr) {
     if (is_non_paged) {
@@ -1145,11 +1147,10 @@ void copy_to_kv_cache_launcher(at::Tensor new_k, at::Tensor new_v, at::Tensor k_
   }
 }
 
-void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache,
-                      at::Tensor v_cache, at::Tensor page_table, at::Tensor cu_new_lens,
-                      at::Tensor cu_cached_lens, NVTE_QKV_Format qkv_format, int h_kv, int d_k,
-                      int d_v, int b, int max_ctx_len, int max_seq_len, int max_pages_per_seq,
-                      bool is_non_paged) {
+void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
+                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                      NVTE_QKV_Format qkv_format, int h_kv, int d_k, int d_v, int b,
+                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged) {
   NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
                  new_k.scalar_type() == new_v.scalar_type() &&
                  new_k.scalar_type() == k_cache.scalar_type(),

@@ -152,7 +152,7 @@ class InferenceParams:
         max_ctx_len: int = None,
         qkv_format: str = "bshd",
         cache_manager: KVCacheManager = None,
-        #allow_query_conversion: bool = True,
+        # allow_query_conversion: bool = True,
     ):
         self.max_batch_size = max_batch_size
         self.max_seqlen_kv = max_seqlen_kv
@@ -164,9 +164,9 @@ class InferenceParams:
         _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
         _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
         _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-        #self.allow_query_conversion = allow_query_conversion and (
+        # self.allow_query_conversion = allow_query_conversion and (
         #    _NVTE_FLASH_ATTN or _NVTE_UNFUSED_ATTN or not _NVTE_FUSED_ATTN
-        #)
+        # )
 
         if not self.is_paged:
             cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager
@@ -206,7 +206,7 @@ class InferenceParams:
         if qkv_format == "thd":
             assert max_ctx_len is not None, "max_ctx_len is required when qkv_format=thd!"
             self.max_ctx_len = max_ctx_len
-            #if self.allow_query_conversion:
+            # if self.allow_query_conversion:
             #    # query is converted to 'bshd' for certain backends
             #    assert num_heads_q is not None, "num_heads_q is required when qkv_format=thd!"
             #    assert head_dim_q is not None, "head_dim_q is required when qkv_format=thd!"
@@ -217,7 +217,7 @@ class InferenceParams:
         # NonPagedKVCacheManager and PagedKVCacheManager only support 'bshd' cache
         self.cache_qkv_format = "bshd"
         self.input_qkv_format = qkv_format
-        if self.input_qkv_format == self.cache_qkv_format: # or self.allow_query_conversion:
+        if self.input_qkv_format == self.cache_qkv_format:  # or self.allow_query_conversion:
             self.output_qkv_format = self.cache_qkv_format
         else:
             self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
@@ -234,7 +234,7 @@ class InferenceParams:
         """Reset InferenceParams state"""
         self.sequences = OrderedDict()
         self.cache_manager.reset()
-        #if self.input_qkv_format == "thd" and self.allow_query_conversion:
+        # if self.input_qkv_format == "thd" and self.allow_query_conversion:
         #    for _, q_buffer in self.q_buffer.items():
         #        q_buffer.fill_(0)
 
@@ -282,15 +282,15 @@ class InferenceParams:
             device=torch.cuda.current_device(),
         )
 
-#        if qkv_format == "thd" and self.allow_query_conversion:
-#            self.q_buffer[layer_number] = torch.zeros(
-#                self.max_batch_size,
-#                self.max_ctx_len,
-#                self.num_heads_q,
-#                self.head_dim_q,
-#                dtype=self.dtype,
-#                device=torch.cuda.current_device(),
-#            )
+    #        if qkv_format == "thd" and self.allow_query_conversion:
+    #            self.q_buffer[layer_number] = torch.zeros(
+    #                self.max_batch_size,
+    #                self.max_ctx_len,
+    #                self.num_heads_q,
+    #                self.head_dim_q,
+    #                dtype=self.dtype,
+    #                device=torch.cuda.current_device(),
+    #            )
 
     def pre_step(
         self,
@@ -323,7 +323,7 @@ class InferenceParams:
         """Get cached sequence lengths for current iteration before adding step_dict.values"""
         return self.sequences_pre
 
-    def convert_paged_to_nonpaged(self, layer_number: int): #, qkv_format: str):
+    def convert_paged_to_nonpaged(self, layer_number: int):  # , qkv_format: str):
         """
         Convert k_cache and v_cache from paged to non-paged format. This is used by the
         UnfusedDotProductAttention backend. Both k_cache and v_cache are assumed to be
@@ -364,7 +364,7 @@ class InferenceParams:
     def step(
         self,
         layer_number: int,
-        #new_q: torch.Tensor,
+        # new_q: torch.Tensor,
         new_k: torch.Tensor,
         new_v: torch.Tensor,
         qkv_format: str,
@@ -402,22 +402,22 @@ class InferenceParams:
         qkv_format: str
             Updated qkv_format, e.g. the input 'thd' format may become 'thd_2bshd' after step()
         """
-        print('self.sequences', self.sequences)
+        print("self.sequences", self.sequences)
         self.input_qkv_format = qkv_format
-        if self.input_qkv_format == self.cache_qkv_format: # or self.allow_query_conversion:
+        if self.input_qkv_format == self.cache_qkv_format:  # or self.allow_query_conversion:
             self.output_qkv_format = self.cache_qkv_format
         else:
             self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
 
-        #q_buffer = new_q
-        #if qkv_format == "bshd":
+        # q_buffer = new_q
+        # if qkv_format == "bshd":
         #    self.max_seqlen_q = new_q.shape[1]
         #    q_buffer = new_q.contiguous()
-        #if qkv_format == "sbhd":
+        # if qkv_format == "sbhd":
         #    self.max_seqlen_q = new_q.shape[0]
         #    if self.allow_query_conversion:
         #        q_buffer = new_q.transpose(0, 1).contiguous()
-        #if qkv_format == "thd":
+        # if qkv_format == "thd":
         #    self.max_seqlen_q = self.max_ctx_len
         #    if self.allow_query_conversion:
         #        q_buffer = self.q_buffer[layer_number]
@@ -442,13 +442,13 @@ class InferenceParams:
         )
 
         return (
-            #q_buffer,
+            # q_buffer,
             k_cache,
             v_cache,
             page_table,
             self.cu_seqlens_q,
             self.cu_seqlens_kv,
-            #self.max_seqlen_q,
+            # self.max_seqlen_q,
             self.max_seqlen_kv,
             self.output_qkv_format,
         )
@@ -461,12 +461,12 @@ class InferenceParams:
         """
         Process the attention output in order to return it to the original qkv_format.
         """
-        print('post step ',self.input_qkv_format) 
-        #if self.input_qkv_format == "bshd":
+        print("post step ", self.input_qkv_format)
+        # if self.input_qkv_format == "bshd":
         #    output = output[: self.batch_size, : self.max_seqlen_q].contiguous()
-        #if self.input_qkv_format == "sbhd": # and self.allow_query_conversion:
+        # if self.input_qkv_format == "sbhd": # and self.allow_query_conversion:
         #    output = output[: self.batch_size, : self.max_seqlen_q].transpose(0, 1).contiguous()
-        #if self.input_qkv_format == "thd": # and self.allow_query_conversion:
+        # if self.input_qkv_format == "thd": # and self.allow_query_conversion:
         #    output_buffer = self.q_orig[layer_number]
         #    tex.convert_bshd_to_thd(
         #        output,
@@ -539,7 +539,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         )
         self.batch_indices_post = torch.range(
             0,
-            self.max_batch_size-1,
+            self.max_batch_size - 1,
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
@@ -567,7 +567,7 @@ class NonPagedKVCacheManager(KVCacheManager):
                 )
             ).to(dtype=torch.int32, device="cpu")
         )
-        print('self.batch_indices', self.batch_indices)
+        print("self.batch_indices", self.batch_indices)
 
         # Advance unfinished sequences
         for i in unfinished_seqs:
@@ -631,7 +631,7 @@ class NonPagedKVCacheManager(KVCacheManager):
             batch_size = new_k.shape[1]
             ctx_len = new_k.shape[0]
 
-        #print('non-paged self.batch_indices', self.batch_indices)
+        # print('non-paged self.batch_indices', self.batch_indices)
         tex.copy_to_kv_cache(
             new_k,
             new_v,

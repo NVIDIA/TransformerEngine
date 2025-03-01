@@ -90,8 +90,8 @@ class Simulation:
             1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         )
         # self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
-        #self.context_lens[0] = 2
-        #self.context_lens[2] = 3
+        # self.context_lens[0] = 2
+        # self.context_lens[2] = 3
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -110,7 +110,7 @@ class Simulation:
         self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(
             dtype=torch.int32, device="cpu"
         )
-        #self.arrival_times[2] = 0
+        # self.arrival_times[2] = 0
         # self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
         self.last_arrival = self.arrival_times.max().item()
 
@@ -208,6 +208,7 @@ class Simulation:
         self.t_batch_size = len(self.t_seq_ids)
         self.t_total_lens = self.t_ctx_lens + self.t_gen_lens
 
+
 def get_model(
     module: torch.nn.Module,
     config: ModelConfig,
@@ -216,7 +217,7 @@ def get_model(
     qkv_format: str = "bshd",
     num_layers: int = 1,
     mode: str = "reference",
-    ):
+):
     reset_rng_states()
     sigma = 0.023
     init_method = init_method_normal(sigma)
@@ -268,13 +269,14 @@ def get_model(
         ]
     return model
 
+
 def generate_args(
     module: torch.nn.Module,
     config: ModelConfig,
     dtype: torch.dtype,
     qkv_format: str = "bshd",
     mode: str = "full_inputs",
-    ):
+):
     if mode == "full_inputs":
         warmup = False
         shapes = []
@@ -287,10 +289,20 @@ def generate_args(
                 [config.total_requests, config.max_seqlen_kv, config.num_heads, config.head_dim_qk]
             )
             shapes.append(
-                [config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_qk]
+                [
+                    config.total_requests,
+                    config.max_seqlen_kv,
+                    config.num_gqa_groups,
+                    config.head_dim_qk,
+                ]
             )
             shapes.append(
-                [config.total_requests, config.max_seqlen_kv, config.num_gqa_groups, config.head_dim_v]
+                [
+                    config.total_requests,
+                    config.max_seqlen_kv,
+                    config.num_gqa_groups,
+                    config.head_dim_v,
+                ]
             )
     elif mode == "sample_args":
         warmup = True
@@ -320,8 +332,10 @@ def generate_args(
         ]
     elif module == "TransformerLayer":
         return [
-            0.01 * torch.randint(
-                -100, 100,
+            0.01
+            * torch.randint(
+                -100,
+                100,
                 shapes[i],
                 device="cuda",
                 dtype=dtype,
@@ -330,13 +344,15 @@ def generate_args(
         ]
     elif module == "DotProductAttention":
         return [
-            0.1 * torch.randn(
+            0.1
+            * torch.randn(
                 *shapes[i],
                 device="cuda",
                 dtype=dtype,
             )
             for i in range(num_tensors)
         ]
+
 
 def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
@@ -350,6 +366,7 @@ def get_tols(module, backend, dtype):
             torch.bfloat16: 1e-2,
         }
     return tols[dtype]
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
@@ -416,14 +433,14 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     if module == "TransformerLayer":
         full_output = full_inputs
         for m in model:
-            print('xxxxxxxxxxxxxxxxxxxxxxxx ', type(full_output))
+            print("xxxxxxxxxxxxxxxxxxxxxxxx ", type(full_output))
             full_output = m(
                 full_output[0] if isinstance(full_output, List) else full_output,
                 # rotary_pos_emb=rotary_freqs,
             )
-    print("full", full_output[0,:2,:8])
-    print("full", full_output[1,:7,:8])
-    print("full", full_output[2,:3,:8])
+    print("full", full_output[0, :2, :8])
+    print("full", full_output[1, :7, :8])
+    print("full", full_output[2, :3, :8])
 
     # simulate real-life inference
     logger.info("=== Generating one token at a time ===")
@@ -460,7 +477,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         head_dim_q=config.head_dim_qk,
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
-        #allow_query_conversion=backend != "FusedAttention",
+        # allow_query_conversion=backend != "FusedAttention",
     )
     for layer_number in range(1, num_layers + 1):
         inference_params.allocate_memory(layer_number, qkv_format)
@@ -475,7 +492,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         step_dict = OrderedDict(zip(t_seq_ids.tolist(), step_lens.tolist()))
         inference_params.pre_step(step_dict)
 
-        sample_args = generate_args(module, config, dtype, qkv_format=qkv_format, mode="sample_args")
+        sample_args = generate_args(
+            module, config, dtype, qkv_format=qkv_format, mode="sample_args"
+        )
         sample_kwargs = {}
         sample_kwargs["cu_seqlens_q"] = torch.linspace(
             0,
@@ -495,13 +514,16 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        model = [make_graphed_callables(
-            model[i],
-            sample_args,
-            num_warmup_iters=10,
-            fp8_enabled=False,
-            sample_kwargs=sample_kwargs,
-        ) for i in range(num_layers)]
+        model = [
+            make_graphed_callables(
+                model[i],
+                sample_args,
+                num_warmup_iters=10,
+                fp8_enabled=False,
+                sample_kwargs=sample_kwargs,
+            )
+            for i in range(num_layers)
+        ]
 
         sim.reset()
         inference_params.reset()
@@ -593,11 +615,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
             inference_params.cache_manager.print_cache()
         incremental_output = incremental_inputs
         for m in model:
-            print('xxxxdgdg ', type(incremental_output))
+            print("xxxxdgdg ", type(incremental_output))
             incremental_output = m(
-                *incremental_output
-                if isinstance(incremental_output, List)
-                else incremental_output,
+                *incremental_output if isinstance(incremental_output, List) else incremental_output,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_kv=cu_seqlens_kv,
                 inference_params=inference_params,
@@ -610,13 +630,13 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         # compare results
         tol = get_tols(module, backend, dtype)
         for i, seq in enumerate(sim.t_seq_ids):
-            #token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
+            # token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":
                 print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(incremental_output[i, token_index, :4])
-                #print(incremental_output[i, sim.step_lens[i] - 1, :4])
+                # print(incremental_output[i, sim.step_lens[i] - 1, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     # incremental_output[:sim.step_lens[i] - 1, i, :],
@@ -651,7 +671,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                 )
         sim.t += 1
         sim.t_gen_lens = sim.t_gen_lens + 1
-        #if sim.t == 1:
+        # if sim.t == 1:
         #    break
 
     sim.serving_times = sim.arrival_times + sim.request_delays
