@@ -18,11 +18,14 @@ pd.set_option("display.precision", 4)
 
 #  -------------- Quantization Recipes --------------
 
+
 def recipe_bf16():
     return None
 
+
 def recipe_fp8_per_tensor_delayed():
     return recipe.DelayedScaling()
+
 
 def recipe_fp8_per_tensor_cs():
     return recipe.Float8CurrentScaling()
@@ -35,10 +38,11 @@ def is_fp8_recipe(get_recipe):
 
 #  -------------- Benchmark Linear --------------
 
-def run_linear(layer, x, mode, gradient):
-    assert mode in ['fwd_only', 'fwd_bwd']
 
-    if mode == 'fwd_only':
+def run_linear(layer, x, mode, gradient):
+    assert mode in ["fwd_only", "fwd_bwd"]
+
+    if mode == "fwd_only":
         with torch.no_grad():
             y_q = layer.forward(x, is_first_microbatch=True)
         return y_q
@@ -62,18 +66,20 @@ def run_linear(layer, x, mode, gradient):
 
 def benchmark_linear(x, w, bias, mode):
     # params_dtype=torch.float32
-    params_dtype=torch.bfloat16
-    activation_dtype=torch.bfloat16
+    params_dtype = torch.bfloat16
+    activation_dtype = torch.bfloat16
 
     in_features = x.shape[1]
     out_features = w.shape[0]
     gradient = torch.ones((x.shape[0], out_features), dtype=torch.bfloat16, device=x.device)
-    layer = linear.Linear(in_features, out_features, bias=bias is not None, params_dtype=params_dtype)
+    layer = linear.Linear(
+        in_features, out_features, bias=bias is not None, params_dtype=params_dtype
+    )
 
     if activation_dtype is not None:
         layer.activation_dtype = activation_dtype
 
-    layer = layer.to('cuda')
+    layer = layer.to("cuda")
     with torch.no_grad():
         layer.weight.copy_(w)
         if bias is not None:
@@ -93,7 +99,9 @@ def benchmark_linear(x, w, bias, mode):
     timing_ms = timing.median * 1000
     return timing_ms
 
+
 # -------------- Run Benchmark cases --------------
+
 
 def run_benchmark_linear(x_size_list, w_size_list, recipe_list, use_bias):
     print("========== Benchmark Linear ==========")
@@ -111,14 +119,33 @@ def run_benchmark_linear(x_size_list, w_size_list, recipe_list, use_bias):
             if is_fp8_recipe(get_recipe):
                 fp8_recipe = get_recipe()
                 with fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
-                    fwd_timing_ms = benchmark_linear(x, w, bias, mode='fwd_only')
-                    fwd_bwd_timing_ms = benchmark_linear(x, w, bias, mode='fwd_bwd')
+                    fwd_timing_ms = benchmark_linear(x, w, bias, mode="fwd_only")
+                    fwd_bwd_timing_ms = benchmark_linear(x, w, bias, mode="fwd_bwd")
             else:
-                fwd_timing_ms = benchmark_linear(x, w, bias, mode='fwd_only')
-                fwd_bwd_timing_ms = benchmark_linear(x, w, bias, mode='fwd_bwd')
-            data.append([x_size, w_size, get_recipe.__name__.removeprefix("recipe_"), "No", fwd_timing_ms, fwd_bwd_timing_ms])
+                fwd_timing_ms = benchmark_linear(x, w, bias, mode="fwd_only")
+                fwd_bwd_timing_ms = benchmark_linear(x, w, bias, mode="fwd_bwd")
+            data.append(
+                [
+                    x_size,
+                    w_size,
+                    get_recipe.__name__.removeprefix("recipe_"),
+                    "No",
+                    fwd_timing_ms,
+                    fwd_bwd_timing_ms,
+                ]
+            )
 
-    df = pd.DataFrame(data=data, columns=["x_size", "w_size", "recipe", "weight_cached", "linear_fwd_time_ms", "linear_fwd_bwd_time_ms"])
+    df = pd.DataFrame(
+        data=data,
+        columns=[
+            "x_size",
+            "w_size",
+            "recipe",
+            "weight_cached",
+            "linear_fwd_time_ms",
+            "linear_fwd_bwd_time_ms",
+        ],
+    )
 
     print(df)
     return df
@@ -134,7 +161,10 @@ def print_device_info():
         f"{device_properties.total_memory/1024**3:.1f}GB memory"
     )
     print("Current GPU clocks:")
-    subprocess.run(["nvidia-smi", "--query-gpu=clocks.current.graphics,clocks.current.sm", "--format=csv"], check=True)
+    subprocess.run(
+        ["nvidia-smi", "--query-gpu=clocks.current.graphics,clocks.current.sm", "--format=csv"],
+        check=True,
+    )
 
 
 if __name__ == "__main__":
@@ -142,7 +172,7 @@ if __name__ == "__main__":
     device = "cuda"
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--profile', action='store_true', help="Enable profiling mode")
+    parser.add_argument("--profile", action="store_true", help="Enable profiling mode")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -151,9 +181,26 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-
-    x_size_list = [(4096, 1024), (4096, 4096), (4096, 8192), (4096, 16384), (16384, 1024), (16384, 4096), (16384, 8192), (16384, 16384)]
-    w_size_list = [(4096, 1024), (4096, 4096), (8192, 8192), (16384, 16384), (4096, 1024), (4096, 4096), (8192, 8192), (16384, 16384)]
+    x_size_list = [
+        (4096, 1024),
+        (4096, 4096),
+        (4096, 8192),
+        (4096, 16384),
+        (16384, 1024),
+        (16384, 4096),
+        (16384, 8192),
+        (16384, 16384),
+    ]
+    w_size_list = [
+        (4096, 1024),
+        (4096, 4096),
+        (8192, 8192),
+        (16384, 16384),
+        (4096, 1024),
+        (4096, 4096),
+        (8192, 8192),
+        (16384, 16384),
+    ]
 
     recipe_list = [recipe_bf16, recipe_fp8_per_tensor_delayed, recipe_fp8_per_tensor_cs]
     use_bias = False
