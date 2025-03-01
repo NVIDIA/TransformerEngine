@@ -68,11 +68,11 @@ __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, in
       }
     }
   }
-  if (blockIdx.x == 0) {
-    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx++) {
-      batch_indices[batch_idx] = batch_idx;
-    }
-  }
+//  if (blockIdx.x == 0) {
+//    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx++) {
+//      batch_indices[batch_idx] = batch_idx;
+//    }
+//  }
 }
 
 template <typename scalar_t>

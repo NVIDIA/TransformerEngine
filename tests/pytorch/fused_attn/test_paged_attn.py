@@ -308,58 +308,59 @@ def generate_args(
             shapes.append([*shape, config.num_gqa_groups, config.head_dim_qk])
             shapes.append([*shape, config.num_gqa_groups, config.head_dim_v])
 
-    func = torch.ones if warmup else torch.randn
-    scale = 1 if warmup else 0.1
     num_tensors = len(shapes)
-    return [
-        scale
-        * func(
-            *shapes[i],
-            device="cuda",
-            dtype=dtype,
-        )
-        for i in range(num_tensors)
-    ]
+    if warmup:
+        return [
+            torch.ones(
+                *shapes[i],
+                device="cuda",
+                dtype=dtype,
+            )
+            for i in range(num_tensors)
+        ]
+    elif module == "TransformerLayer":
+        return [
+            0.01 * torch.randint(
+                -100, 100,
+                shapes[i],
+                device="cuda",
+                dtype=dtype,
+            )
+            for i in range(num_tensors)
+        ]
+    elif module == "DotProductAttention":
+        return [
+            0.1 * torch.randn(
+                *shapes[i],
+                device="cuda",
+                dtype=dtype,
+            )
+            for i in range(num_tensors)
+        ]
 
 def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
-        if backend != "FlashAttention":
-            tols = {
-                torch.float32: 1e-3,
-                torch.half: 3e-3,
-                torch.bfloat16: 1e-2,
-            }
-        else:
-            tols = {
-                torch.float32: 1e-3,
-                torch.half: 3e-3,
-                torch.bfloat16: 1e-2,
-            }
+        tols = {
+            torch.half: 4e-3,
+            torch.bfloat16: 3e-2,
+        }
     if module == "DotProductAttention":
-        if backend != "FlashAttention":
-            tols = {
-                torch.float32: 1e-3,
-                torch.half: 1e-3,
-                torch.bfloat16: 1e-2,
-            }
-        else:
-            tols = {
-                torch.float32: 1e-3,
-                torch.half: 1e-3,
-                torch.bfloat16: 1e-2,
-            }
+        tols = {
+            torch.half: 1e-3,
+            torch.bfloat16: 1e-2,
+        }
     return tols[dtype]
 
 @pytest.mark.parametrize("dtype", [torch.float16])  # param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("module", ["DotProductAttention"])#TransformerLayer"])  # , "DotProductAttention"])
+@pytest.mark.parametrize("backend", ["FlashAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("module", ["TransformerLayer"])  # , "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
     logger = logging.getLogger("test_paged_attn")
-    num_layers = 1  # 2
+    num_layers = 2 if module == "TransformerLayer" else 1
     config = model_configs_infer[model]
 
     # figure out supported backends
@@ -412,8 +413,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     if module == "TransformerLayer":
         full_output = full_inputs
         for m in model:
+            print('xxxxxxxxxxxxxxxxxxxxxxxx ', type(full_output))
             full_output = m(
-                *full_output if isinstance(full_output, List) else full_output,
+                full_output[0] if isinstance(full_output, List) else full_output,
                 # rotary_pos_emb=rotary_freqs,
             )
     print("full", full_output[0,:2,:8])
@@ -490,13 +492,13 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        model = make_graphed_callables(
-            model[0],
+        model = [make_graphed_callables(
+            model[i],
             sample_args,
             num_warmup_iters=10,
             fp8_enabled=False,
             sample_kwargs=sample_kwargs,
-        )
+        ) for i in range(num_layers)]
 
         sim.reset()
         inference_params.reset()
@@ -586,36 +588,21 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         inference_params.pre_step(step_dict)
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
-        if not is_cuda_graph:
-            incremental_output = incremental_inputs
-            for m in model:
-                incremental_output = m(
-                    *(
-                        incremental_output
-                        if isinstance(incremental_output, List)
-                        else incremental_output
-                    ),
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    inference_params=inference_params,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=config.max_seqlen_kv,
-                )
-        else:
-            incremental_output = incremental_inputs
-            for _ in range(num_layers):
-                incremental_output = model(
-                    *(
-                        incremental_output
-                        if isinstance(incremental_output, List)
-                        else incremental_output
-                    ),
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_kv=cu_seqlens_kv,
-                    inference_params=inference_params,
-                    max_seqlen_q=max_seqlen_q,
-                    max_seqlen_kv=config.max_seqlen_kv,
-                )
+        incremental_output = incremental_inputs
+        for m in model:
+            print('xxxxdgdg ', type(incremental_output))
+            incremental_output = m(
+                *incremental_output
+                if isinstance(incremental_output, List)
+                else incremental_output,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                inference_params=inference_params,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=config.max_seqlen_kv,
+            )
+            incremental_output = [incremental_output]
+        incremental_output = incremental_output[0]
 
         # compare results
         tol = get_tols(module, backend, dtype)

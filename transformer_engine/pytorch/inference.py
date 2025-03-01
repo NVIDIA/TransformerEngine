@@ -462,23 +462,23 @@ class InferenceParams:
         Process the attention output in order to return it to the original qkv_format.
         """
         print('post step ',self.input_qkv_format) 
-        if self.input_qkv_format == "bshd":
-            output = output[: self.batch_size, : self.max_seqlen_q].contiguous()
-        if self.input_qkv_format == "sbhd": # and self.allow_query_conversion:
-            output = output[: self.batch_size, : self.max_seqlen_q].transpose(0, 1).contiguous()
-        if self.input_qkv_format == "thd": # and self.allow_query_conversion:
-            output_buffer = self.q_orig[layer_number]
-            tex.convert_bshd_to_thd(
-                output,
-                output_buffer,
-                self.cu_seqlens_q,
-                self.batch_size,
-                self.max_ctx_len,
-                self.num_heads_q,
-                self.head_dim_q,
-                self.total_tokens,
-            )
-            output = output_buffer.view(output_buffer.shape[0], -1)
+        #if self.input_qkv_format == "bshd":
+        #    output = output[: self.batch_size, : self.max_seqlen_q].contiguous()
+        #if self.input_qkv_format == "sbhd": # and self.allow_query_conversion:
+        #    output = output[: self.batch_size, : self.max_seqlen_q].transpose(0, 1).contiguous()
+        #if self.input_qkv_format == "thd": # and self.allow_query_conversion:
+        #    output_buffer = self.q_orig[layer_number]
+        #    tex.convert_bshd_to_thd(
+        #        output,
+        #        output_buffer,
+        #        self.cu_seqlens_q,
+        #        self.batch_size,
+        #        self.max_ctx_len,
+        #        self.num_heads_q,
+        #        self.head_dim_q,
+        #        self.total_tokens,
+        #    )
+        #    output = output_buffer.view(output_buffer.shape[0], -1)
 
         return output
 
@@ -510,6 +510,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         self.cache = {}
         # track sequence indices in the batch in order to re-index k_cache and v_cache
         self.batch_indices = None
+        self.batch_indices_post = None
 
     def allocate_memory(self, layer_number):
         """Allocate memory for the cache"""
@@ -533,6 +534,12 @@ class NonPagedKVCacheManager(KVCacheManager):
 
         self.batch_indices = torch.zeros(
             self.max_batch_size,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+        self.batch_indices_post = torch.range(
+            0,
+            self.max_batch_size-1,
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )

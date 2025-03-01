@@ -6092,7 +6092,7 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["block_table"] = (
                             inference_params.cache_manager.page_table[:batch_size]
                             if inference_params.is_paged
-                            else inference_params.cache_manager.batch_indices.unsqueeze(1)[:batch_size]
+                            else inference_params.cache_manager.batch_indices_post.unsqueeze(1)[:batch_size]
                         )
                 if _use_flash_attn_3:
                     fa_3_optional_forward_kwargs = {}
@@ -6102,7 +6102,7 @@ class FlashAttention(torch.nn.Module):
                         fa_3_optional_forward_kwargs["page_table"] = (
                             inference_params.cache_manager.page_table[:batch_size]
                             if inference_params.is_paged
-                            else inference_params.cache_manager.batch_indices
+                            else inference_params.cache_manager.batch_indices_post.unsqueeze(1)[:batch_size]
                         )
                     if fp8:
                         QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
