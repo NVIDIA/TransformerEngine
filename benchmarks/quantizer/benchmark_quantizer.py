@@ -94,5 +94,6 @@ if __name__ == "__main__":
     print(df)
     pathlib.Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     report_file = pathlib.Path(args.output_dir) / f"{pathlib.Path(__file__).stem}_report.csv"
+    # optional: save to csv
     # df.to_csv(report_file, index=False)
     print(f"Report saved to {report_file}")
