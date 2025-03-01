@@ -47,7 +47,7 @@ def _load_library():
 
     extension = _get_sys_extension()
     try:
-        so_dir = get_te_path() / "transformer_engine" / "src_lib"
+        so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
         try:

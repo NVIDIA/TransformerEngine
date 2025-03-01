@@ -133,7 +133,7 @@ def get_build_ext(extension_cls: Type[setuptools.Extension], install_so_in_wheel
             lib_dir = (
                 "wheel_lib"
                 if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or install_so_in_wheel_lib
-                else "src_lib"
+                else ""
             )
             target_dir = install_dir / "transformer_engine" / lib_dir
             target_dir.mkdir(exist_ok=True, parents=True)
