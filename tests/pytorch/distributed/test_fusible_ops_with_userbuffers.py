@@ -135,6 +135,7 @@ def make_reference_and_test_tensors(
     ref = torch.rand(shape, dtype=ref_dtype, device=ref_device)
 
     # Make copy of tensor
+    test = ref.to(device=test_device, dtype=test_dtype)
     if test_is_fp8:
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device),
@@ -142,10 +143,8 @@ def make_reference_and_test_tensors(
             fp8_dtype=tex.DType.kFloat8E4M3,
         )
         test = quantizer(test)
-    else:
-        test = ref.to(device=test_device, dtype=test_dtype)
-        if test.data_ptr() == ref.data_ptr():
-            test = test.clone()
+    elif test.data_ptr() == ref.data_ptr():
+        test = test.clone()
 
     # Make sure reference and test tensors represent exact same values
     ref.copy_(test)

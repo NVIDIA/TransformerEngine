@@ -21,7 +21,7 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...tensor.float8_tensor import Float8Quantizer
+from ...tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from ...tensor.quantized_tensor import QuantizedTensor
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter

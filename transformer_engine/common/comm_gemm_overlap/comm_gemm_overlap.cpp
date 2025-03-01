@@ -429,19 +429,21 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   if (_rs_overlap_first_gemm) {
     auto input_a_chunk = get_tensor_chunk(A, 0, {m_chunk, k});
     auto output_chunk = get_buffer_chunk_like(D, 0, {m, m_chunk});
+    auto bias_chunk = get_tensor_chunk(bias, 0, {m_chunk});
     auto workspace_chunk = get_tensor_chunk(workspace, 0, {workspace_size_chunk});
 
-    nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+    nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(), accumulate,
                      use_split_accumulator, _math_sms, _stream_compute[0]);
 
     for (int i = 1; i < _num_splits; i++) {
       input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
       output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
+      bias_chunk = get_tensor_chunk(bias, i * m_chunk, {m_chunk});
       workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
-      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                        pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
                        accumulate, use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
@@ -486,10 +488,11 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     for (int i = 0; i < _num_splits; i++) {
       auto input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
       auto output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
+      auto bias_chunk = get_tensor_chunk(bias, i * m_chunk, {m_chunk});
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
-      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias.data(),
+      nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
                        pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
                        accumulate, use_split_accumulator, _math_sms,
                        _stream_compute[i % _stream_compute.size()]);
@@ -983,6 +986,7 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
 
     auto input_b_chunk = get_tensor_chunk(B, input_b_chunk_id * input_chunk_size, {n_chunk, k});
     auto output_chunk = get_buffer_chunk_by_id(D, i);
+
     auto workspace_chunk =
         get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
 
