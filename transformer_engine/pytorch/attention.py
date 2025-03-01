@@ -6811,6 +6811,7 @@ class FusedAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -6835,58 +6836,62 @@ class FusedAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        qkv_format = "".join(
-            [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        )
+        #qkv_format = "".join(
+        #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #)
+        # get q_format and kv_format for training and inference
+        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
-        if qkv_format in ["sbhd", "bshd"]:
-            if qkv_format == "sbhd":
-                batch_size = query_layer.shape[1]
-                max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
-                max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
-            if qkv_format == "bshd":
-                batch_size = query_layer.shape[0]
-                max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
-                max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
-            max_seqlen_q *= cp_size
-            max_seqlen_kv *= cp_size
-            if "padding" in attn_mask_type:
-                assert not context_parallel, "Padding mask not supported with context parallelism!"
+        if inference_params is None:
+            if qkv_format in ["sbhd", "bshd"]:
+                if qkv_format == "sbhd":
+                    batch_size = query_layer.shape[1]
+                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
+                if qkv_format == "bshd":
+                    batch_size = query_layer.shape[0]
+                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
+                max_seqlen_q *= cp_size
+                max_seqlen_kv *= cp_size
+                if "padding" in attn_mask_type:
+                    assert not context_parallel, "Padding mask not supported with context parallelism!"
 
-                if cu_seqlens_q is None or cu_seqlens_kv is None:
-                    if attention_mask is None:
-                        raise RuntimeError(
-                            "Please provide attention_mask or cu_seqlens for padding!"
+                    if cu_seqlens_q is None or cu_seqlens_kv is None:
+                        if attention_mask is None:
+                            raise RuntimeError(
+                                "Please provide attention_mask or cu_seqlens for padding!"
+                            )
+                        if self.attention_type == "self":
+                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_kv = cu_seqlens_q
+                        else:
+                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                else:
+                    if cu_seqlens_q is None:
+                        cu_seqlens_q = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_q,
+                            query_layer.device,
                         )
-                    if self.attention_type == "self":
-                        cu_seqlens_q = get_cu_seqlens(attention_mask)
-                        cu_seqlens_kv = cu_seqlens_q
-                    else:
-                        cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                        cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
-            else:
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_q,
-                        query_layer.device,
-                    )
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_kv,
-                        key_layer.device,
-                    )
-        if qkv_format == "thd":
-            assert (
-                max_seqlen_q is not None
-                and max_seqlen_kv is not None
-                and cu_seqlens_q is not None
-                and cu_seqlens_kv is not None
-            ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
+                    if cu_seqlens_kv is None:
+                        cu_seqlens_kv = _get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_kv,
+                            key_layer.device,
+                        )
+            if qkv_format == "thd":
+                assert (
+                    max_seqlen_q is not None
+                    and max_seqlen_kv is not None
+                    and cu_seqlens_q is not None
+                    and cu_seqlens_kv is not None
+                ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
 
-        if qkv_format == "thd" and (cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None):
+        if (q_format == "thd" or "padding" in attn_mask_type) and cu_seqlens_q_padded is None:
             cu_seqlens_q_padded = cu_seqlens_q
+        if (kv_format == "thd" or "padding" in attn_mask_type) and cu_seqlens_kv_padded is None:
             cu_seqlens_kv_padded = cu_seqlens_kv
 
         qkv_dtype = TE_DType[query_layer.dtype]
@@ -7977,6 +7982,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_comm_type=self.cp_comm_type,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
+                        inference_params=inference_params,
                     )
                 output = self.fused_attention(
                     query_layer,
@@ -8005,6 +8011,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
+                    inference_params=inference_params,
                 )
 
             from .cpu_offload import CPUOffloadEnabled
