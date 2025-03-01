@@ -100,8 +100,8 @@ class MXFP8TensorBase:
 
         """
         tensors = [self._rowwise_data, self._columnwise_data]
-        # self._rowwise_data = None
-        # self._columnwise_data = None
+        self._rowwise_data = None
+        self._columnwise_data = None
         return tensors, self
 
     def restore_from_saved(

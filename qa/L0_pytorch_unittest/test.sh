@@ -24,7 +24,7 @@ pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_permutation.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_parallel_cross_entropy.py || FAIL=1
-NVTE_TORCH_COMPILE=0 NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || FAIL=1
+NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || FAIL=1
 pytest -v -s ${LIGHTNING_THUNDER_PATH}/thunder/tests/test_transformer_engine_executor.py
 
 exit $FAIL
