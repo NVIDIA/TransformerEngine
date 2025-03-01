@@ -90,6 +90,8 @@ class Simulation:
             1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         )
         # self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
+        #self.context_lens[0] = 2
+        #self.context_lens[2] = 3
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -108,6 +110,7 @@ class Simulation:
         self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(
             dtype=torch.int32, device="cpu"
         )
+        #self.arrival_times[2] = 0
         # self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
         self.last_arrival = self.arrival_times.max().item()
 
@@ -207,9 +210,9 @@ class Simulation:
 
 def get_model(
     module: torch.nn.Module,
-    backend: str = "FusedAttention",
     config: ModelConfig,
     dtype: torch.dtype,
+    backend: str = "FusedAttention",
     qkv_format: str = "bshd",
     num_layers: int = 1,
     mode: str = "reference",
@@ -318,7 +321,7 @@ def generate_args(
         for i in range(num_tensors)
     ]
 
-def get_tols(module, backend, dtype)
+def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
         if backend != "FlashAttention":
             tols = {
@@ -329,7 +332,7 @@ def get_tols(module, backend, dtype)
         else:
             tols = {
                 torch.float32: 1e-3,
-                torch.half: 4e-3,
+                torch.half: 3e-3,
                 torch.bfloat16: 1e-2,
             }
     if module == "DotProductAttention":
@@ -342,7 +345,7 @@ def get_tols(module, backend, dtype)
         else:
             tols = {
                 torch.float32: 1e-3,
-                torch.half: 4e-3,
+                torch.half: 1e-3,
                 torch.bfloat16: 1e-2,
             }
     return tols[dtype]
@@ -351,8 +354,8 @@ def get_tols(module, backend, dtype)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
-@pytest.mark.parametrize("module", ["TransformerLayer"])  # , "DotProductAttention"])
+@pytest.mark.parametrize("backend", ["FlashAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("module", ["DotProductAttention"])#TransformerLayer"])  # , "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
     logger = logging.getLogger("test_paged_attn")
@@ -389,7 +392,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         config.max_seqlen_kv = 256
 
     # create full model
-    model = get_model(module, backend, config, dtype, qkv_format, num_layers, mode="reference")
+    model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="reference")
 
     # generate data for all requests
     assert (
@@ -413,6 +416,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                 *full_output if isinstance(full_output, List) else full_output,
                 # rotary_pos_emb=rotary_freqs,
             )
+    print("full", full_output[0,:2,:8])
+    print("full", full_output[1,:7,:8])
+    print("full", full_output[2,:3,:8])
 
     # simulate real-life inference
     logger.info("=== Generating one token at a time ===")
@@ -449,13 +455,13 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         head_dim_q=config.head_dim_qk,
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
-        allow_query_conversion=backend != "FusedAttention",
+        #allow_query_conversion=backend != "FusedAttention",
     )
     for layer_number in range(1, num_layers + 1):
         inference_params.allocate_memory(layer_number, qkv_format)
 
     # create inference model
-    model = get_model(module, backend, config, dtype, qkv_format, num_layers, mode="inference")
+    model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="inference")
 
     # graph the model if necessary
     if is_cuda_graph:
@@ -527,6 +533,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         # create incremental input
         batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
         max_seqlen_q = sim.max_ctx_len if is_cuda_graph else max(sim.step_lens).item()
+        num_tensors = len(full_inputs)
         if qkv_format == "thd":
             incremental_inputs = []
             for i in range(num_tensors):
@@ -613,12 +620,13 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         # compare results
         tol = get_tols(module, backend, dtype)
         for i, seq in enumerate(sim.t_seq_ids):
-            token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
+            #token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
+            token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":
                 print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(incremental_output[i, token_index, :4])
-                print(incremental_output[i, sim.step_lens[i] - 1, :4])
+                #print(incremental_output[i, sim.step_lens[i] - 1, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     # incremental_output[:sim.step_lens[i] - 1, i, :],
@@ -628,7 +636,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                     rtol=tol,
                 )
             if qkv_format == "sbhd":
-                print(i, seq, sim.t_total_lens, sim.step_lens)
+                print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(incremental_output[token_index, i, :4])
                 torch.testing.assert_close(
@@ -653,6 +661,8 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                 )
         sim.t += 1
         sim.t_gen_lens = sim.t_gen_lens + 1
+        #if sim.t == 1:
+        #    break
 
     sim.serving_times = sim.arrival_times + sim.request_delays
     sim.complete_times = sim.serving_times + sim.gen_lens

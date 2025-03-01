@@ -9,40 +9,31 @@
 namespace transformer_engine {
 namespace fused_attn {
 template <typename scalar_t>
-__global__ void reshape_q_kernel(scalar_t *new_q, scalar_t *q_buffer, int *cu_new_lens, int h_q,
-                                 int d_q, int b, int max_seq_len) {
-  // new_q: thd; q_buffer: bshd;
-  // cu_new_lens: [b + 1]
+__global__ void convert_thd_to_bshd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens, int b, int max_seq_len, int h, int d) {
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-    int num_elts = (cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx]) * h_q * d_q;
-    int new_token_offset = cu_new_lens[batch_idx] * h_q * d_q;
-    int cache_offset = batch_idx * max_seq_len * h_q * d_q;
-    scalar_t *new_q_token = new_q + new_token_offset;
-    scalar_t *q_buffer_token = q_buffer + cache_offset;
+    int num_elts = (cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]) * h * d;
+    int thd_offset = cu_seqlens[batch_idx] * h * d;
+    int bshd_offset = batch_idx * max_seq_len * h * d;
+    scalar_t *thd_token = tensor + thd_offset;
+    scalar_t *bshd_token = new_tensor + bshd_offset;
     for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
-      *(q_buffer_token + i) = *(new_q_token + i);
+      *(bshd_token + i) = *(thd_token + i);
     }
   }
 }
 
 template <typename scalar_t>
-__global__ void reshape_o_kernel(scalar_t *output, scalar_t *output_buffer, int *cu_new_lens,
-                                 int h_o, int d_o, int b, int max_seq_len,
-                                 bool is_output_right_aligned) {
-  // output: bshd; output_buffer: thd;
-  // cu_new_lens: [b + 1]
+__global__ void convert_bshd_to_thd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
+                                 int b, int max_seq_len, int h, int d) {
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
-    int new_len = cu_new_lens[batch_idx + 1] - cu_new_lens[batch_idx];
-    int num_elts = new_len * h_o * d_o;
-    int output_offset = batch_idx * max_seq_len * h_o * d_o;
-    if (is_output_right_aligned) {
-      output_offset = ((batch_idx + 1) * max_seq_len - new_len) * h_o * d_o;
-    }
-    int output_buffer_offset = cu_new_lens[batch_idx] * h_o * d_o;
-    scalar_t *output_token = output + output_offset;
-    scalar_t *output_buffer_token = output_buffer + output_buffer_offset;
+    int seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
+    int num_elts = seqlen * h * d;
+    int bshd_offset = batch_idx * max_seq_len * h * d;
+    int thd_offset = cu_seqlens[batch_idx] * h * d;
+    scalar_t *bshd_token = tensor + bshd_offset;
+    scalar_t *thd_token = new_tensor + thd_offset;
     for (int i = threadIdx.x; i < num_elts; i += blockDim.x) {
-      *(output_buffer_token + i) = *(output_token + i);
+      *(thd_token + i) = *(bshd_token + i);
     }
   }
 }
@@ -75,6 +66,11 @@ __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, in
       for (int i = threadIdx.x; i < num_elts_v; i += blockDim.x) {
         *(v_cache + v_cache_des_offset + i) = *(v_cache + v_cache_src_offset + i);
       }
+    }
+  }
+  if (blockIdx.x == 0) {
+    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx++) {
+      batch_indices[batch_idx] = batch_idx;
     }
   }
 }

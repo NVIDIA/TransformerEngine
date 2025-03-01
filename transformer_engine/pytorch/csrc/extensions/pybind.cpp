@@ -191,8 +191,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fused_attn_bwd", &fused_attn_bwd,
         "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
   m.def("copy_to_kv_cache", &copy_to_kv_cache, "Copy new KV tokens to KV cache");
-  m.def("reshape_q", &reshape_q, "Reshape Q for THD before attention");
-  m.def("reshape_o", &reshape_o, "Reshape O for THD after attention");
+  m.def("convert_thd_to_bshd", &convert_thd_to_bshd, "Convert a tensor from THD to BSHD");
+  m.def("convert_bshd_to_thd", &convert_bshd_to_thd, "Convert a tesnor from BSHD to THD");
 
   // fused apply rope
   m.def("fused_rope_forward", &fused_rope_forward, "Fused Apply RoPE FWD",
