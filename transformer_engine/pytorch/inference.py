@@ -356,8 +356,8 @@ class InferenceParams:
             b=batch_size,
         )
 
-        new_k_cache = new_k_cache.contiguous()[:actual_batch_size]
-        new_v_cache = new_v_cache.contiguous()[:actual_batch_size]
+        new_k_cache = new_k_cache[:actual_batch_size].contiguous()
+        new_v_cache = new_v_cache[:actual_batch_size].contiguous()
 
         return new_k_cache, new_v_cache
 
@@ -724,7 +724,7 @@ class PagedKVCacheManager(KVCacheManager):
 
     def allocate_memory(self, layer_number):
         """Allocate memory for the cache"""
-        k_cache = torch.empty(
+        k_cache = torch.zeros(
             self.total_num_pages,
             self.page_size,
             self.num_heads,
@@ -732,7 +732,7 @@ class PagedKVCacheManager(KVCacheManager):
             dtype=self.dtype,
             device=torch.cuda.current_device(),
         )
-        v_cache = torch.empty(
+        v_cache = torch.zeros(
             self.total_num_pages,
             self.page_size,
             self.num_heads,

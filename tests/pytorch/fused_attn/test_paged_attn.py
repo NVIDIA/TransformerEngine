@@ -226,7 +226,7 @@ def get_model(
         attn_mask_type = "causal"
         qkv_format = "bshd"
     if mode == "inference":
-        attn_mask_type = "padding_causal" if backend == "FlashAttention" else "padding"
+        attn_mask_type = "padding_causal" if backend != "FusedAttention" else "padding"
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
@@ -351,11 +351,11 @@ def get_tols(module, backend, dtype):
         }
     return tols[dtype]
 
-@pytest.mark.parametrize("dtype", [torch.float16])  # param_types)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])  # param_types)
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FlashAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["UnfusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("module", ["TransformerLayer"])  # , "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
