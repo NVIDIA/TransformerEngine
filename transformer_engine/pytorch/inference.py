@@ -323,7 +323,7 @@ class InferenceParams:
         """Get cached sequence lengths for current iteration before adding step_dict.values"""
         return self.sequences_pre
 
-    def convert_paged_to_nonpaged(self, layer_number: int, qkv_format: str):
+    def convert_paged_to_nonpaged(self, layer_number: int): #, qkv_format: str):
         """
         Convert k_cache and v_cache from paged to non-paged format. This is used by the
         UnfusedDotProductAttention backend. Both k_cache and v_cache are assumed to be
@@ -333,8 +333,6 @@ class InferenceParams:
         ----------
         layer_number: int
             Layer number of attention in the model
-        qkv_format: str
-            Format of new_q, new_k and new_v tensors, {'bshd', 'sbhd', 'thd'}
 
         Returns
         -------
@@ -358,11 +356,8 @@ class InferenceParams:
             b=batch_size,
         )
 
-        new_k_cache = new_k_cache.contiguous()
-        new_v_cache = new_v_cache.contiguous()
-        if qkv_format != "thd":
-            new_k_cache = new_k_cache[:actual_batch_size]
-            new_v_cache = new_v_cache[:actual_batch_size]
+        new_k_cache = new_k_cache.contiguous()[:actual_batch_size]
+        new_v_cache = new_v_cache.contiguous()[:actual_batch_size]
 
         return new_k_cache, new_v_cache
 

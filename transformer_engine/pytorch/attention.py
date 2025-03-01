@@ -593,9 +593,10 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: QKV layout
-    qkv_format = "".join(
-        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-    )
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+    #qkv_format = "".join(
+    #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+    #)
     if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
@@ -5270,16 +5271,53 @@ class UnfusedDotProductAttention(torch.nn.Module):
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
 
-        qkv_format = "".join(
-            [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-        )
+        #qkv_format = "".join(
+        #    [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #)
+        # get q_format and kv_format for training and inference
+        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+        #if inference_params is not None: #"_2" in qkv_layout:
+        #    #qkv_format = qkv_layout.replace("paged_kv_", "")
+        #    #q_format, kv_format = qkv_format.split("_2")
+        #    q_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #    )
+        #    kv_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
+        #    )
+        #    qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
+        #else:
+        #    qkv_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #    )
+        #    q_format = qkv_format
+        #    kv_format = qkv_format
+
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(
-                self.layer_number, inference_params.input_qkv_format
-            )
+                self.layer_number) #, inference_params.input_qkv_format
 
         if qkv_format == "bshd":
             # convert to sbhd and use sbhd implementation for now
+            query_layer, key_layer, value_layer = [
+                x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
+            ]
+        if qkv_format == "sbhd_2bshd":
+            key_layer, value_layer = [
+                x.transpose(0, 1) for x in [key_layer, value_layer]
+            ]
+
+        total_tokens, batch_size = None, None
+        if qkv_format == "thd_2bshd":
+            total_tokens, batch_size = query_layer.shape[0], key_layer.shape[0]
+            query_layer = tex.convert_thd_to_bshd(
+                query_layer,
+                cu_seqlens_q,
+                batch_size,
+                inference_params.max_ctx_len,
+                query_layer.shape[-2],
+                query_layer.shape[-1],
+                )
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
@@ -5289,7 +5327,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.shape[0],
         )
 
-        if "padding" in attn_mask_type and qkv_format in ["bshd", "sbhd"]:
+        if "padding" in attn_mask_type: # and qkv_format in ["bshd", "sbhd"]:
             attention_mask = get_attn_mask(
                 batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
             )
@@ -5422,19 +5460,37 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # change view [b, np, sq, hn]
         context_layer = context_layer.view(*output_size)
 
-        if qkv_format == "sbhd":
+        if q_format == "sbhd":
             # [b, np, sq, hn] --> [sq, b, np, hn]
             context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
             # [sq, b, np, hn] --> [sq, b, hp]
             context_layer = context_layer.view(seqlen, batch_size, -1)
 
-        if qkv_format == "bshd":
+        if q_format == "bshd":
             # [b, np, sq, hn] --> [b, sq, np, hn]
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
             # [b, sq, np, hn] --> [b, sq, hp]
             context_layer = context_layer.view(batch_size, seqlen, -1)
+
+        if qkv_format == "thd_2bshd":
+            # [b, np, sq, hn] --> [b, sq, np, hn]
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+
+            # [b, sq, np, hn] --> [tq, np, hn]
+            context_layer = tex.convert_bshd_to_thd(
+                context_layer,
+                cu_seqlens_q,
+                batch_size,
+                inference_params.max_ctx_len,
+                context_layer.shape[-2],
+                context_layer.shape[-1],
+                total_tokens,
+                )
+
+            # [tq, np, hn] --> [tq, hp]
+            context_layer = context_layer.view(total_tokens, -1)
 
         return context_layer
 
@@ -5473,6 +5529,45 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
 
+def get_qkv_format(
+    qkv_layout: str = "bshd_bshd_bshd",
+    inference_params: InferenceParams = None,
+) -> str:
+    """Get qkv layout.
+
+    Parameters
+    ----------
+    qkv_layout: str
+       Memory layout of `q`, `k` and `v`. See get_qkv_layout() for more details.
+    inference_params: InferenceParams, default = `None`
+        InferenceParams related to KV caching.
+
+    Returns
+    ----------
+    qkv_format: str, default = `sbhd`
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}.
+    q_format: str
+        Format of the query tensor, {`bshd`, `sbhd`, `thd`}.
+    kv_format: str
+        Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
+    """
+    if inference_params is not None: #"_2" in qkv_layout:
+        #qkv_format = qkv_layout.replace("paged_kv_", "")
+        #q_format, kv_format = qkv_format.split("_2")
+        q_format = "".join(
+            [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        )
+        kv_format = "".join(
+            [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
+        )
+        qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
+    else:
+        qkv_format = "".join(
+            [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        )
+        q_format = qkv_format
+        kv_format = qkv_format
+    return qkv_format, q_format, kv_format
 
 def get_qkv_layout(
     q: torch.Tensor,
@@ -5769,22 +5864,23 @@ class FlashAttention(torch.nn.Module):
         context_parallel = cp_size > 1
 
         # get q_format and kv_format for training and inference
-        if inference_params is not None: #"_2" in qkv_layout:
-            #qkv_format = qkv_layout.replace("paged_kv_", "")
-            #q_format, kv_format = qkv_format.split("_2")
-            q_format = "".join(
-                [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-            )
-            kv_format = "".join(
-                [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
-            )
-            qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
-        else:
-            qkv_format = "".join(
-                [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
-            )
-            q_format = qkv_format
-            kv_format = qkv_format
+        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+        #if inference_params is not None: #"_2" in qkv_layout:
+        #    #qkv_format = qkv_layout.replace("paged_kv_", "")
+        #    #q_format, kv_format = qkv_format.split("_2")
+        #    q_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #    )
+        #    kv_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[1] if i.isalpha()]
+        #    )
+        #    qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
+        #else:
+        #    qkv_format = "".join(
+        #        [i for i in qkv_layout.replace("paged_kv_", "").split("_")[0] if i.isalpha()]
+        #    )
+        #    q_format = qkv_format
+        #    kv_format = qkv_format
 
         print('FA 0', [x.shape for x in [query_layer, key_layer, value_layer]], qkv_format, qkv_layout)
         # convert q, k, v to bshd if they are in sbhd

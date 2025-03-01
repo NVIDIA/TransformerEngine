@@ -354,7 +354,7 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FlashAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["UnfusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("module", ["DotProductAttention"])#TransformerLayer"])  # , "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
