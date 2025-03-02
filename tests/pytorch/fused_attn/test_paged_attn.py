@@ -13,6 +13,8 @@ import torch
 
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
+from transformer_engine.common import recipe
+from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
@@ -230,6 +232,16 @@ def get_model(
     if mode == "inference":
         attn_mask_type = "padding_causal" if backend != "FusedAttention" else "padding"
 
+    fp8_mha = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=fp8_mha,
+        fp8_mha=fp8_mha,
+    )
+
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
         model = [
@@ -254,20 +266,21 @@ def get_model(
             for layer_number in range(1, num_layers + 1)
         ]
     if module == "DotProductAttention":
-        model = [
-            DotProductAttention(
-                kv_channels=config.head_dim_qk,
-                num_attention_heads=config.num_heads,
-                num_gqa_groups=config.num_gqa_groups,
-                layer_number=layer_number,
-                attention_dropout=config.dropout_p,
-                qkv_format=qkv_format,
-                attn_mask_type=attn_mask_type,
-            )
-            .cuda()
-            .eval()
-            for layer_number in range(1, num_layers + 1)
-        ]
+        with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+            model = [
+                DotProductAttention(
+                    kv_channels=config.head_dim_qk,
+                    num_attention_heads=config.num_heads,
+                    num_gqa_groups=config.num_gqa_groups,
+                    layer_number=layer_number,
+                    attention_dropout=config.dropout_p,
+                    qkv_format=qkv_format,
+                    attn_mask_type=attn_mask_type,
+                )
+                .cuda()
+                .eval()
+                for layer_number in range(1, num_layers + 1)
+            ]
     return model
 
 
@@ -365,6 +378,7 @@ def get_tols(module, backend, dtype):
         tols = {
             torch.half: 1e-3,
             torch.bfloat16: 1e-2,
+            torch.float8_e4m3fn: 3e-2,
         }
     return tols[dtype]
 
@@ -381,6 +395,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     config = model_configs_infer[model]
 
+    #dtype = torch.float8_e4m3fn
+    is_fp8 = True
+
     # figure out supported backends
     inference_params_qkv_format = "bshd"
     if is_paged:
@@ -395,6 +412,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         pad_between_seqs=False,
     )
     flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    print('available_backends', available_backends)
     if backend == "FlashAttention" and not flash_attn_supported:
         pytest.skip("FlashAttention backend is not supported")
     if backend == "FusedAttention" and not fused_attn_supported:
@@ -412,6 +430,10 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
         config.max_seqlen_kv = 256
+    print('qkv format', qkv_format)
+    #if dtype == torch.float8_e4m3fn and qkv_format != "thd":
+    if is_fp8 and (qkv_format != "thd" or module != "DotProductAttention"):# or dtype != torch.float16):
+        pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
 
     # create full model
     model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="reference")
@@ -486,6 +508,15 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     # create inference model
     model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="inference")
 
+    fp8_mha = True
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=fp8_mha,
+        fp8_mha=fp8_mha,
+    )
     # graph the model if necessary
     if is_cuda_graph:
         t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
@@ -515,16 +546,18 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        model = [
-            make_graphed_callables(
-                model[i],
-                sample_args,
-                num_warmup_iters=10,
-                fp8_enabled=False,
-                sample_kwargs=sample_kwargs,
-            )
-            for i in range(num_layers)
-        ]
+        with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
+            model = [
+                make_graphed_callables(
+                    model[i],
+                    sample_args,
+                    num_warmup_iters=10,
+                    fp8_enabled=fp8_mha, #False,
+                    sample_kwargs=sample_kwargs,
+                    fp8_recipe=fp8_recipe,
+                )
+                for i in range(num_layers)
+            ]
 
         sim.reset()
         inference_params.reset()
@@ -615,22 +648,23 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         if inference_params.is_paged:
             inference_params.cache_manager.print_cache()
         incremental_output = incremental_inputs
-        for m in model:
-            print("xxxxdgdg ", type(incremental_output))
-            incremental_output = m(
-                *incremental_output if isinstance(incremental_output, List) else incremental_output,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_kv=cu_seqlens_kv,
-                inference_params=inference_params,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=config.max_seqlen_kv,
-            )
-            print('ddddddddddd ', len(incremental_output), type(incremental_output))
-            incremental_output = [incremental_output]
+        with fp8_autocast(enabled=fp8_mha, fp8_recipe=fp8_recipe):
+            for m in model:
+                print("xxxxdgdg ", type(incremental_output))
+                incremental_output = m(
+                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_kv=cu_seqlens_kv,
+                    inference_params=inference_params,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=config.max_seqlen_kv,
+                )
+                print('ddddddddddd ', len(incremental_output), type(incremental_output))
+                incremental_output = [incremental_output]
         incremental_output = incremental_output[0]
 
         # compare results
-        tol = get_tols(module, backend, dtype)
+        tol = get_tols(module, backend, dtype=torch.float8_e4m3fn)
         for i, seq in enumerate(sim.t_seq_ids):
             # token_index = -1 if inference_params.is_output_right_aligned else sim.step_lens[i] - 1
             token_index = sim.step_lens[i] - 1
@@ -660,9 +694,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                     rtol=tol,
                 )
             if qkv_format == "thd":
-                # print('i ', i, seq, cu_seqlens_q)
-                # print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                # print(incremental_output[cu_seqlens_q[i + 1] - 1, :4])
+                print('i ', i, seq, cu_seqlens_q)
+                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
+                print(incremental_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
                     # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
                     # incremental_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],

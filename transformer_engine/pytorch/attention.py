@@ -452,6 +452,8 @@ def get_attention_backend(
     # install an appropriate FA version.
     global _flash_attn_version_required, _flash_attn_max_version, _use_flash_attn_3
 
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
@@ -481,14 +483,14 @@ def get_attention_backend(
         torch.Tensor,
         Float8Tensor,
     ]:
-        if use_flash_attention and _flash_attn_is_installed:
-            logger.debug(
-                "Disabling FlashAttention due to unsupported QKV data type. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-                "Found: qkv_dtype = %s.",
-                qkv_dtype,
-            )
-        use_flash_attention = False
+        #if use_flash_attention and _flash_attn_is_installed:
+        #    logger.debug(
+        #        "Disabling FlashAttention due to unsupported QKV data type. "
+        #        "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
+        #        "Found: qkv_dtype = %s.",
+        #        qkv_dtype,
+        #    )
+        #use_flash_attention = False
         if use_fused_attention:
             logger.debug(
                 "Disabling FusedAttention due to unsupported QKV data type. "
@@ -528,9 +530,9 @@ def get_attention_backend(
             use_fused_attention = False
             use_unfused_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            if use_flash_attention:
+            if use_flash_attention and q_format != "thd":
                 use_flash_attention = False
-                logger.debug("Disabling FlashAttention for FP8 KV caching")
+                logger.debug("Disabling FlashAttention for FP8 KV caching (only THD is supported)")
             if use_fused_attention and inference_params.is_paged:
                 use_fused_attention = False
                 logger.debug(
@@ -593,7 +595,6 @@ def get_attention_backend(
         use_fused_attention = False
 
     # Filter: QKV layout
-    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
     if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
@@ -762,15 +763,15 @@ def get_attention_backend(
                 "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
             )
             use_flash_attention = False
-    if (
-        use_flash_attention
-        and _use_flash_attn_3
-        and fp8
-        and fp8_meta["recipe"].fp8_dpa
-        and "padding" in attn_mask_type
-    ):
-        logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
-        _use_flash_attn_3 = False
+    #if (
+    #    use_flash_attention
+    #    and _use_flash_attn_3
+    #    and fp8
+    #    and fp8_meta["recipe"].fp8_dpa
+    #    and "padding" in attn_mask_type
+    #):
+    #    logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
+    #    _use_flash_attn_3 = False
 
     # Filter: Sliding window attention
     #    backend                 |      window_size       | diagonal alignment
@@ -6125,6 +6126,7 @@ class FlashAttention(torch.nn.Module):
                         #        :batch_size
                         #    ]
                         #)
+                    print('fp88888888888', fp8)
                     if fp8:
                         QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -6149,14 +6151,17 @@ class FlashAttention(torch.nn.Module):
                             query_layer, key_layer, value_layer = (
                                 QKV_quantizer(x) for x in [query_layer, key_layer, value_layer]
                             )
-                        fa_3_optional_forward_kwargs["descale_q"] = (
-                            query_layer._scale_inv.unsqueeze(0)
+                        batch_size = cu_seqlens_q.shape[0] - 1
+                        num_heads_q = query_layer.shape[-2]
+                        num_heads_k = key_layer.shape[-2]
+                        fa_3_optional_forward_kwargs["q_descale"] = (
+                            query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_q)
                         )
-                        fa_3_optional_forward_kwargs["descale_k"] = key_layer._scale_inv.unsqueeze(
+                        fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
                             0
-                        )
-                        fa_3_optional_forward_kwargs["descale_v"] = (
-                            value_layer._scale_inv.unsqueeze(0)
+                        ).repeat(batch_size, num_heads_k)
+                        fa_3_optional_forward_kwargs["v_descale"] = (
+                            value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
                         query_layer, key_layer, value_layer = (
                             convert_to_torch_float8(x, torch_dtype)
