@@ -516,11 +516,14 @@ def get_attention_backend(
             use_unfused_attention = False
 
     # Filter: KV cache
-    #    backend                 | precision
-    # -------------------------------------------------------------------------
-    # FlashAttention             | FP16/BF16 (non-paged/paged)
-    # FusedAttention             | FP16/BF16 (non-paged/paged), FP8 (non-paged)
-    # UnfusedDotProductAttention | FP32/FP16/BF16 (non-paged/paged)
+    #    backend                 | precision      |    KV cache     | architecture | qkv_format
+    # --------------------------------------------------------------------------------------------
+    # FusedAttention             | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd
+    #                            | FP8            | non-paged       | sm89+        | bshd,sbhd,thd
+    # FlashAttention v2          | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd
+    # FlashAttention v3          | FP16/BF16      | non-paged/paged | sm80         | bshd,sbhd,thd
+    #                            | FP8            | non-paged/paged | sm80         | thd
+    # UnfusedDotProductAttention | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd
     if inference_params is not None:
         if context_parallel:
             logger.debug(
@@ -6088,6 +6091,18 @@ class FlashAttention(torch.nn.Module):
                 ):
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
+                    # version | API                     | use cases
+                    # ------------------------------------------------------------------------
+                    # FA v2   | flash_attn_func         | bshd/sbhd + not padding
+                    #         | flash_attn_varlen_func  | bshd/sbhd + padding
+                    #         |                         | thd + padding + not pad_between_seqs
+                    #         |                         | KV cache (not-paged/paged), i.e.
+                    #         |                         |     bshd/sbhd/thd + padding
+                    # FA v3   | flash_attn_func         | bshd/sbhd + not padding
+                    #         | flash_attn_varlen_func  | bshd/sbhd + padding
+                    #         |                         | thd + padding + not pad_between_seqs
+                    #         | flash_attn_with_kvcache | KV cache (not-paged/paged), i.e.
+                    #         |                         |     bshd/sbhd/thd + padding
                     if not _use_flash_attn_3:
                         func = flash_attn_varlen_func
                     elif inference_params is None:
