@@ -85,7 +85,7 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
   if (is_paged_kv) {
-    NVTE_CHECK(is_padding, "Paged attention requires padding masks!");
+    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
   // keep original batch size because cu_seqlens are created with [b+1] shape
@@ -108,10 +108,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
                                s_kv,
                                d_qk,
                                d_v,
-                               num_pages_k,
-                               num_pages_v,
-                               page_size_k,
-                               page_size_v,
+                               //num_pages_k,
+                               //num_pages_v,
+                               //page_size_k,
+                               //page_size_v,
                                max_pages_per_seq_k,
                                max_pages_per_seq_v,
                                bias_b,
@@ -516,7 +516,7 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
   bool is_paged_kv = (layout_group == NVTE_QKV_Layout_Group::NVTE_Paged_KV_HD_HD_HD);
   if (is_paged_kv) {
-    NVTE_CHECK(is_padding, "Paged attention requires padding masks!");
+    NVTE_CHECK(is_padding, "Paged attention requires padding mask!");
   }
 
   // keep original batch size because cu_seqlens are created with [b+1] shape
@@ -542,12 +542,12 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
                                s_kv,
                                d_qk,
                                d_v,
-                               0,
-                               0,
-                               0,
-                               0,
-                               0,
-                               0,
+                               //0,
+                               //0,
+                               //0,
+                               //0,
+                               1,
+                               1,
                                bias_b,
                                bias_h,
                                scaling_factor,

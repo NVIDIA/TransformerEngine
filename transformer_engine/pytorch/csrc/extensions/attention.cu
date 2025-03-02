@@ -1043,8 +1043,9 @@ void convert_thd_to_bshd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::
           b, max_seq_len, h, d);
 }
 
-at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
-                               int h, int d) {
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len) {
+  int h = tensor.size(1);
+  int d = tensor.size(2);
   std::vector<int64_t> shape = {b, max_seq_len, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
   if (new_tensor.scalar_type() == at::ScalarType::Half) {
@@ -1082,8 +1083,11 @@ void convert_bshd_to_thd_launcher(at::Tensor tensor, at::Tensor new_tensor, at::
           b, max_seq_len, h, d);
 }
 
-at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len,
-                               int h, int d, int t) {
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) {
+  int b = tensor.size(0);
+  int max_seq_len = tensor.size(1);
+  int h = tensor.size(2);
+  int d = tensor.size(3);
   std::vector<int64_t> shape = {t, h, d};
   at::Tensor new_tensor = at::zeros(shape, at::CUDA(tensor.scalar_type()));
   if (tensor.scalar_type() == at::ScalarType::Half) {
@@ -1149,8 +1153,11 @@ void copy_to_kv_cache_launcher(at::Tensor new_k, at::Tensor new_v, at::Tensor k_
 
 void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
                       at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
-                      NVTE_QKV_Format qkv_format, int h_kv, int d_k, int d_v, int b,
-                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged) {
+                      NVTE_QKV_Format qkv_format, int b, int max_ctx_len, int max_seq_len,
+                      int max_pages_per_seq, bool is_non_paged) {
+  int h_kv = new_k.size(-2);
+  int d_k = new_k.size(-1);
+  int d_v = new_v.size(-1);
   NVTE_CHECK(k_cache.scalar_type() == v_cache.scalar_type() &&
                  new_k.scalar_type() == new_v.scalar_type() &&
                  new_k.scalar_type() == k_cache.scalar_type(),

@@ -204,13 +204,13 @@ def _get_attention_backends(
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
-    #with logging_context():
-    for i in range(3):
-        os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
-        _attention_backends["backend_selection_requires_update"] = True
-        available_backends, fused_attention_backend = test()
-        if fused_attention_backend == FusedAttnBackend[backends[i]]:
-            fused_attn_backends.append(fused_attention_backend)
+    with logging_context():
+        for i in range(3):
+            os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
+            _attention_backends["backend_selection_requires_update"] = True
+            available_backends, fused_attention_backend = test()
+            if fused_attention_backend == FusedAttnBackend[backends[i]]:
+                fused_attn_backends.append(fused_attention_backend)
     return available_backends, fused_attn_backends
 
 
