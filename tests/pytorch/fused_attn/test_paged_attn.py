@@ -19,7 +19,7 @@ from transformer_engine.pytorch.transformer import (
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     InferenceParams,
-    _flash_attn_3_plus,
+    _use_flash_attn_3,
 )
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -407,7 +407,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
     # flash-attn requires page size >= 256
-    if backend == "FlashAttention" and not _flash_attn_3_plus:
+    if backend == "FlashAttention" and not _use_flash_attn_3:
         config_max_seqlen_q = config.max_seqlen_q
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
@@ -449,7 +449,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     page_size = None
     total_num_pages = None
     if is_paged:
-        page_size = 256 if backend == "FlashAttention" and not _flash_attn_3_plus else 16
+        page_size = 256 if backend == "FlashAttention" and not _use_flash_attn_3 else 16
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
     else:
@@ -680,6 +680,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
 
-    if backend == "FlashAttention" and not _flash_attn_3_plus:
+    if backend == "FlashAttention" and not _use_flash_attn_3:
         config.max_seqlen_q = config_max_seqlen_q
         config.max_seqlen_kv = config_max_seqlen_kv

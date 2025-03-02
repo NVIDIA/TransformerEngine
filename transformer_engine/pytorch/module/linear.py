@@ -111,6 +111,7 @@ class _Linear(torch.autograd.Function):
         # Make sure input dimensions are compatible
         out_features, in_features = weight.shape
         inp_shape = inp.shape
+        print('inp_shape', inp_shape, weight.shape)
         assert inp_shape[-1] == in_features, "GEMM not possible"
 
         tp_world_size = get_distributed_world_size(tp_group)

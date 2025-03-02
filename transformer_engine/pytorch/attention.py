@@ -130,7 +130,6 @@ _flash_attn_2_5_plus = False
 _flash_attn_2_5_7_plus = False
 _flash_attn_2_6_plus = False
 _flash_attn_2_7_plus = False
-_flash_attn_3_plus = False
 
 flash_attn_cuda_bwd = None
 flash_attn_func = None
@@ -179,7 +178,6 @@ else:
         _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
         _flash_attn_2_6_plus = _flash_attn_version >= PkgVersion("2.6.0")
         _flash_attn_2_7_plus = _flash_attn_version >= PkgVersion("2.7.0")
-        _flash_attn_3_plus = _flash_attn_version >= PkgVersion("3.0")
     elif (
         torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
     ):
@@ -196,22 +194,22 @@ else:
             _flash_attn_version,
         )
 
-# Detect flash-attn v3 in the environment
-# This section will be removed when FA3 is released as a regular FA package,
-# i.e. flashattn-hopper 3.0.0 as flash-attn 3.0.0
+# Detect flash_attn_3 in the environment
 _flash_attn_3_is_installed = False
 _flash_attn_3_version = PkgVersion("0")
 _flash_attn_3_0_0_beta = False
 _use_flash_attn_3 = False
-# TODO(cyang): update FA to 2.7.3 when its FA3 compilation issue is resolved
-# https://github.com/Dao-AILab/flash-attention/issues/1452
 _flash_attn_3_installation_steps = """\
-(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
-(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-(3) mkdir -p $python_path/flashattn_hopper
-(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
+    git clone https://github.com/Dao-AILab/flash-attention.git
+    cd flash-attention/
+    git checkout 39e7197
+    cd hopper/
+    python setup.py install
+    python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+    mkdir -p $python_path/flash_attn_3
+    wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/refs/heads/main/hopper/flash_attn_interface.py"""
 try:
-    _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
+    _flash_attn_3_version = PkgVersion(get_pkg_version("flash-attn-3"))
 except PackageNotFoundError:
     if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
@@ -219,26 +217,26 @@ except PackageNotFoundError:
             _flash_attn_3_installation_steps,
         )
 else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flashattn_hopper.flash_attn_interface import (
+    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flash_attn_3.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import (
+    from flash_attn_3.flash_attn_interface import (
         flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
     )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-    from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
-    )
-    from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
-    )
+    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    #from flash_attn_3.flash_attn_interface import (
+    #    _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
+    #)
+    #from flash_attn_3.flash_attn_interface import (
+    #    _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
+    #)
 
     _flash_attn_3_is_installed = True
     _flash_attn_3_0_0_beta = PkgVersion("3.0.0b") < _flash_attn_3_version < PkgVersion("3.0.0")
     _use_flash_attn_3 = True
-
+ 
 _attention_backends = {
     "attention_params": None,
     "use_flash_attention": None,
@@ -986,7 +984,7 @@ def get_attention_backend(
                 _flash_attn_max_version,
             ),
         )
-    if use_flash_attention and not _flash_attn_is_installed:
+    if use_flash_attention and not _flash_attn_is_installed and not _flash_attn_3_is_installed:
         use_flash_attention = False
         available_backends[0] = False
 
@@ -2055,10 +2053,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+                #if qkv_format == "thd":
+                #    flash_attn_fwd = _flash_attn_varlen_fwd_v3
+                #else:
+                #    flash_attn_fwd = _flash_attn_fwd_v3
+                flash_attn_fwd = _flash_attn_fwd_v3
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
             else:
                 if qkv_format == "thd":
@@ -3822,10 +3821,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+                #if qkv_format == "thd":
+                #    flash_attn_fwd = _flash_attn_varlen_fwd_v3
+                #else:
+                #    flash_attn_fwd = _flash_attn_fwd_v3
+                flash_attn_fwd = _flash_attn_fwd_v3
             else:
                 if qkv_format == "thd":
                     flash_attn_fwd = _flash_attn_varlen_fwd
@@ -4286,10 +4286,11 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
             if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+                #if qkv_format == "thd":
+                #    flash_attn_fwd = _flash_attn_varlen_fwd_v3
+                #else:
+                #    flash_attn_fwd = _flash_attn_fwd_v3
+                flash_attn_fwd = _flash_attn_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
             else:
                 if qkv_format == "thd":
@@ -5895,7 +5896,7 @@ class FlashAttention(torch.nn.Module):
             "FA 1", [x.shape for x in [query_layer, key_layer, value_layer]], qkv_format, qkv_layout
         )
         # get accurate batch_size, max_seqlen and cu_seqlens
-        batch_size = None
+        batch_size, context_len, total_tokens = None, None, None
         if inference_params is None:
             if qkv_format in ["sbhd", "bshd"]:
                 batch_size = query_layer.shape[0]
@@ -5999,7 +6000,37 @@ class FlashAttention(torch.nn.Module):
                         head_dim,
                         batch_size * context_len,
                     )
+            #if _use_flash_attn_3 and qkv_format in ["thd_2bshd"]:
+            #    total_tokens, num_heads, head_dim = query_layer.shape
+            #    batch_size = key_layer.shape[0]
+            #    cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+            #    cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
+            #    # convert to bshd_2bshd for flash_attn_with_kvcache_v3
+            #    if isinstance(query_layer, Float8Tensor):
+            #        query_layer._data = tex.convert_thd_to_bshd(
+            #            query_layer._data,
+            #            cu_seqlens_q,
+            #            batch_size,
+            #            inference_params.max_ctx_len,
+            #            num_heads,
+            #            head_dim,
+            #        )
+            #        query_layer = Float8Tensor.make_like(
+            #            query_layer, data=query_layer._data, shape=query_layer._data.shape
+            #        )
+            #    else:
+            #        query_layer = tex.convert_thd_to_bshd(
+            #            query_layer,
+            #            cu_seqlens_q,
+            #            batch_size,
+            #            inference_params.max_ctx_len,
+            #            num_heads,
+            #            head_dim,
+            #        )
 
+        print(
+            "FA 1", [x.shape for x in [query_layer, key_layer, value_layer]], qkv_format, qkv_layout
+        )
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -6056,15 +6087,17 @@ class FlashAttention(torch.nn.Module):
                 ):
                     func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
                 else:
-                    func = (
-                        flash_attn_varlen_func
-                        if not _use_flash_attn_3
-                        else flash_attn_varlen_func_v3
-                    )
-                    fa_optional_forward_args_thd.append(cu_seqlens_q)
-                    fa_optional_forward_args_thd.append(cu_seqlens_kv)
-                    fa_optional_forward_args_thd.append(max_seqlen_q)
-                    fa_optional_forward_args_thd.append(max_seqlen_kv)
+                    if not _use_flash_attn_3:
+                        func = flash_attn_varlen_func
+                    elif inference_params is None:
+                        func = flash_attn_varlen_func_v3
+                    else:
+                        func = flash_attn_with_kvcache_v3
+                    if not _use_flash_attn_3 or inference_params is None:
+                        fa_optional_forward_args_thd.append(cu_seqlens_q)
+                        fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                        fa_optional_forward_args_thd.append(max_seqlen_q)
+                        fa_optional_forward_args_thd.append(max_seqlen_kv)
                     if inference_params is not None:
                         # use page_table to support thd_2bshd format when is_paged=False
                         fa_optional_forward_kwargs["block_table"] = (
@@ -6077,20 +6110,21 @@ class FlashAttention(torch.nn.Module):
                 if _use_flash_attn_3:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
-                    fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
-                    if inference_params is not None:
-                        # use page_table to support thd_2bshd format when is_paged=False
-                        # 2.7.3+ -> page_table
-                        # git clone --recursive -b v2.7.3 https://github.com/Dao-AILab/flash-attention.git
-                        # MAX_JOBS=6 FLASH_ATTN_CUDA_ARCHS=90 pip install -v -e .
-                        assert _flash_attn_3_plus, "Please install flash-attn from v3"
-                        fa_3_optional_forward_kwargs["page_table"] = (
-                            inference_params.cache_manager.page_table[:batch_size]
-                            if inference_params.is_paged
-                            else inference_params.cache_manager.batch_indices_post.unsqueeze(1)[
-                                :batch_size
-                            ]
-                        )
+                    if inference_params is None:
+                        fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
+                    else:
+                        fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
+                        fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
+                        cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                        fa_3_optional_forward_kwargs["cache_seqlens"] = cache_seqlens
+                        if inference_params.is_paged:
+                            fa_3_optional_forward_kwargs["page_table"] = inference_params.cache_manager.page_table[:batch_size]
+                        #fa_3_optional_forward_kwargs["page_table"] = (
+                        #    inference_params.cache_manager.page_table[:batch_size]
+                        #    else inference_params.cache_manager.batch_indices_post.unsqueeze(1)[
+                        #        :batch_size
+                        #    ]
+                        #)
                     if fp8:
                         QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -6129,7 +6163,7 @@ class FlashAttention(torch.nn.Module):
                             for x in [query_layer, key_layer, value_layer]
                         )
                     try:
-                        output, _ = func(
+                        output = func(
                             query_layer,
                             key_layer,
                             value_layer,
@@ -6138,6 +6172,8 @@ class FlashAttention(torch.nn.Module):
                             causal="causal" in attn_mask_type,
                             **fa_3_optional_forward_kwargs,
                         )
+                        if isinstance(output, List) or isinstance(output, Tuple):
+                            output = output[0]
                     except TypeError as e:
                         if _flash_attn_3_0_0_beta:
                             e.args = (
@@ -6190,6 +6226,33 @@ class FlashAttention(torch.nn.Module):
                     num_heads,
                     head_dim,
                 )
+        #elif _use_flash_attn_3 and qkv_format in ["thd_2bshd"]:
+        #    # if flash_attn_2, use flash_attn_varlen_func_v3 and thd_2bshd 
+        #    # if flash_attn_3, use flash_attn_with_kvcache_v3 and bshd 
+        #    #batch_size = cu_seqlens_q.shape[0] - 1
+        #    #total_tokens, num_heads, head_dim = query_layer.shape
+        #    # convert back to thd_2bshd from bshd
+        #    if isinstance(query_layer, Float8Tensor):
+        #        output._data = tex.convert_bshd_to_thd(
+        #            output._data,
+        #            cu_seqlens_q,
+        #            batch_size,
+        #            inference_params.max_ctx_len,
+        #            num_heads,
+        #            head_dim,
+        #            total_tokens,
+        #        )
+        #        output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
+        #    else:
+        #        output = tex.convert_bshd_to_thd(
+        #            output,
+        #            cu_seqlens_q,
+        #            batch_size,
+        #            inference_params.max_ctx_len,
+        #            num_heads,
+        #            head_dim,
+        #            total_tokens,
+        #        )
 
         if q_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
