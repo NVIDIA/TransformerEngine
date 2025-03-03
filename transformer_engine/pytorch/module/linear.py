@@ -1012,7 +1012,7 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        
+
         if TEDebugState.debug_enabled:
             self._validate_name()
 

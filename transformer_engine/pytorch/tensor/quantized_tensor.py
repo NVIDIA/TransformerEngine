@@ -25,6 +25,7 @@ all_tensor_types = [
     MXFP8TensorBase,
 ]
 
+
 def prepare_for_saving(
     *tensors,
 ) -> Tuple[list[Optional[Union[torch.Tensor, torch.nn.Parameter]]], Optional[Any]]:

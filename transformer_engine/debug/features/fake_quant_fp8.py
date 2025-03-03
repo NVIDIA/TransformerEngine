@@ -36,7 +36,10 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, margin=0, out=Non
         "FP8E5M2",
         "MXFP8E4M3",
         "MXFP8E5M2",
-    }, "[NVTORCH INSPECT ERROR] Only 4 FP8 types: FP8E4M3, FP8E5M2, MXFP8E4M3, MXFP8E5M2 are supported in TE."
+    }, (
+        "[NVTORCH INSPECT ERROR] Only 4 FP8 types: FP8E4M3, FP8E5M2, MXFP8E4M3, MXFP8E5M2 are"
+        " supported in TE."
+    )
     if fp8_format in ["FP8E4M3", "FP8E5M2"]:
         if fp8_format == "FP8E4M3":
             fp8_max = Format.E4M3.value.max_fwd
