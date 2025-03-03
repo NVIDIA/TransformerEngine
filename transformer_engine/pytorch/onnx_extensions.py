@@ -21,7 +21,7 @@ The primary goal of ONNX export is to enable inference compatibility with Tensor
 
 """
 
-from typing import  Tuple
+from typing import Tuple
 import torch
 import onnxscript
 from onnxscript import opset18 as op
@@ -103,7 +103,8 @@ def onnx_quantize_fp8_symbolic(
 # This is a dummy function that is used to create a TRT FP8 Quantize Linear node.
 @onnxscript.script(trt_opset, default_opset=op)
 def TRT_FP8QuantizeLinear(
-    tensor: onnxscript.onnx_types.TensorType, scale: onnxscript.onnx_types.TensorType # pylint: disable=unused-argument
+    tensor: onnxscript.onnx_types.TensorType,
+    scale: onnxscript.onnx_types.TensorType,  # pylint: disable=unused-argument
 ) -> onnxscript.onnx_types.TensorType:
     """TRT FP8 Quantize Linear used for inference."""
     return tensor
@@ -140,7 +141,8 @@ def onnx_dequantize_fp8_symbolic(
 # This is a dummy function that is used to create a TRT FP8 Dequantize Linear node.
 @onnxscript.script(trt_opset, default_opset=op)
 def TRT_FP8DequantizeLinear(
-    tensor: onnxscript.onnx_types.TensorType, scale: onnxscript.onnx_types.TensorType # pylint: disable=unused-argument
+    tensor: onnxscript.onnx_types.TensorType,
+    scale: onnxscript.onnx_types.TensorType,  # pylint: disable=unused-argument
 ) -> onnxscript.onnx_types.TensorType:
     """TRT FP8 Dequantize Linear from Float8Tensor used for inference."""
     return tensor
@@ -167,7 +169,7 @@ def _(tensor: torch.Tensor):
 
 
 def onnx_quantize_mxfp8_symbolic(
-    tensor: onnxscript.onnx_types.TensorType
+    tensor: onnxscript.onnx_types.TensorType,
 ) -> onnxscript.onnx_types.TensorType:
     """Symbolic quantize to MXFP8Tensor used for inference."""
     return TRT_MXFP8QuantizeLinear(tensor)
@@ -189,7 +191,9 @@ def TRT_MXFP8QuantizeLinear(
 def onnx_dequantize_mxfp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
     """Dequantize from MXFP8Tensor used for inference."""
     quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
-    quantizer_tensor = quantizer.create_tensor_from_data(tensor, scale_inv, fake_dtype=torch.float32)
+    quantizer_tensor = quantizer.create_tensor_from_data(
+        tensor, scale_inv, fake_dtype=torch.float32
+    )
     return quantizer_tensor.dequantize()
 
 
@@ -209,7 +213,8 @@ def onnx_dequantize_mxfp8_symbolic(
 # This is a dummy function that is used to create a TRT MXFP8 Dequantize Linear node.
 @onnxscript.script(trt_opset, default_opset=op)
 def TRT_MXFP8DequantizeLinear(
-    tensor: onnxscript.onnx_types.TensorType, scale_inv: onnxscript.onnx_types.TensorType # pylint: disable=unused-argument
+    tensor: onnxscript.onnx_types.TensorType,
+    scale_inv: onnxscript.onnx_types.TensorType,  # pylint: disable=unused-argument
 ) -> onnxscript.onnx_types.TensorType:
     """TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference."""
     return tensor

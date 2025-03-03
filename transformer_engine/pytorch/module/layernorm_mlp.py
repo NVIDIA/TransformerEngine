@@ -1500,9 +1500,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
-            ONNX-compatible version of the forward function that provides numerical equivalence
-            while only using operations that have defined ONNX symbolic translations.
-            This simplified implementation is designed specifically for inference scenarios.
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
         """
         assert_warmed_up(self)
         (

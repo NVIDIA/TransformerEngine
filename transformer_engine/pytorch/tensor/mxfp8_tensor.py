@@ -126,9 +126,13 @@ class MXFP8Quantizer(Quantizer):
         pass
 
     def create_tensor_from_data(
-        self, data: torch.Tensor, scale_inv: torch.Tensor, fake_dtype: torch.dtype, fp8_dtype: TE_DType = tex.DType.kFloat8E4M3
+        self,
+        data: torch.Tensor,
+        scale_inv: torch.Tensor,
+        fake_dtype: torch.dtype,
+        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
-        """Create a new MXFP8Tensor from data and scale_inv. """
+        """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(
             shape=data.shape,
             dtype=fake_dtype,

@@ -176,9 +176,7 @@ class Float8Quantizer(Quantizer):
 
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
-        out = torch.ops.tex.fp8_dequantize(
-            tensor._data, self.scale.item()
-        )
+        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item())
         out = out.to(tensor.dtype)
         return out
 

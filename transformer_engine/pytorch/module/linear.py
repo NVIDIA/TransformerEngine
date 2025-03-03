@@ -1130,9 +1130,9 @@ class Linear(TransformerEngineBaseModule):
         fp8_output: bool,
     ) -> torch.Tensor:
         """
-            ONNX-compatible version of the forward function that provides numerical equivalence
-            while only using operations that have defined ONNX symbolic translations.
-            This simplified implementation is designed specifically for inference scenarios.
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
         """
         assert_warmed_up(self)
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
