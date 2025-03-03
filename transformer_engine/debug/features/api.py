@@ -18,7 +18,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
 class TEConfigAPIMapper(BaseConfigAPIMapper):
-    """Class responsible for determining which API should be run for each tensors and gemms."""
+    """Class responsible for determining which NV DLFW Inspect API should be run for each tensor and gemm."""
 
     def parse_config_and_api(self, config, **kwargs):
         """Process the config and returns True if the config and api args match, along with processed config."""

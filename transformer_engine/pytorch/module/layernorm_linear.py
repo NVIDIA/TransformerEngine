@@ -1199,7 +1199,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
-        overwrite_name: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a linear transformation.
@@ -1223,7 +1222,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                produced)
         """
         if self.debug:
-            self._validate_name(overwrite_name)
+            self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()

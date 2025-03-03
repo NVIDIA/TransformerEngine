@@ -8198,7 +8198,6 @@ class MultiheadAttention(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
-        overwrite_name: str = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
         Forward propagation for MultiheadAttention layer.
@@ -8295,7 +8294,7 @@ class MultiheadAttention(torch.nn.Module):
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         if self.debug:
-            TransformerEngineBaseModule._validate_name(self, overwrite_name)
+            TransformerEngineBaseModule._validate_name(self)
 
         # =================================================
         # Pre-allocate memory for key-values for inference
@@ -8340,10 +8339,7 @@ class MultiheadAttention(torch.nn.Module):
                 layernorm_qkv_outputs = self.layernorm_qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_name=(
-                        overwrite_name + ".layernorm_qkv" if overwrite_name is not None else None
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None
                 )
                 if self.return_layernorm_output:
                     mixed_x_layer, layernorm_output = layernorm_qkv_outputs
@@ -8353,10 +8349,7 @@ class MultiheadAttention(torch.nn.Module):
                 mixed_x_layer = self.qkv(
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
-                    fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_name=(
-                        overwrite_name + ".qkv" if overwrite_name is not None else None
-                    ),
+                    fp8_output=fp8_mha and rotary_pos_emb is None
                 )
 
             num_queries_per_key_value = (
@@ -8411,9 +8404,6 @@ class MultiheadAttention(torch.nn.Module):
                 encoder_output,
                 is_first_microbatch=is_first_microbatch,
                 fp8_output=fp8_mha and rotary_pos_emb is None,
-                overwrite_name=(
-                    overwrite_name + ".key_value" if overwrite_name is not None else None
-                ),
             )
 
             if self.qkv_weight_interleaved:
@@ -8457,9 +8447,6 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_name=(
-                        overwrite_name + ".layernorm_query" if overwrite_name is not None else None
-                    ),
                 )
                 if self.return_layernorm_output:
                     query_layer, layernorm_output = layernorm_query_outputs
@@ -8470,9 +8457,6 @@ class MultiheadAttention(torch.nn.Module):
                     hidden_states,
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
-                    overwrite_name=(
-                        overwrite_name + ".query_layer" if overwrite_name is not None else None
-                    ),
                 )
 
             # [sq, b, hp] --> [sq, b, np, hn]

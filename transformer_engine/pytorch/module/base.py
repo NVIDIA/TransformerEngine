@@ -1112,23 +1112,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _validate_name(self, overwrite_name):
+    def _validate_name(self):
         """
         Validate name passed to the module.
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
         If no name is assigned, it creates a default name with layer count as the variable.
-
-        Args
-        overwrite_name: str, default = None
-            This will overwrite the name of the module with the specified name. This is needed for debug layers re-using this Linear
-            module such as LayerNormLinear. The idea is to re-name the Linear module which is a part of another layer with that layers name.
-            Only needed if layer names are assigned after model initialization like in Megatron-LM.
         """
         assert self.debug
         import nvdlfw_inspect.api as debug_api
-
-        if overwrite_name:
-            self.name = overwrite_name
 
         if self.name is None:
             debug_api.log_message(
