@@ -53,7 +53,7 @@ model_configs_infer = {
     "infer_0": ModelConfig(
         4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
     ),
-    # "infer_1": ModelConfig(2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6),
+    # "infer_1": ModelConfig(2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16),
 }
 
 qkv_formats = ["bshd", "sbhd", "thd"]
@@ -92,7 +92,6 @@ class Simulation:
         self.context_lens = torch.randint(
             1, self.max_ctx_len, [total_requests], dtype=torch.int32, device="cpu"
         )
-        # self.context_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate gen lengths in Exponential distribution
         gen_dist = Exponential(1 / self.max_gen_len)
@@ -101,7 +100,6 @@ class Simulation:
             dtype=torch.int32, device="cpu"
         )
         self.gen_lens = torch.where(gen_lens == 0, 1, gen_lens).to(dtype=torch.int32, device="cpu")
-        # self.gen_lens = 4 * torch.ones(total_requests, dtype=torch.int32, device="cpu")
 
         # simulate arrival times in Poisson distribution
         if poisson_rate is None:
@@ -111,7 +109,6 @@ class Simulation:
         self.arrival_times = torch.cumsum(arrival_intervals, dim=0).to(
             dtype=torch.int32, device="cpu"
         )
-        # self.arrival_times = torch.zeros(total_requests, dtype=torch.int32, device="cpu")
         self.last_arrival = self.arrival_times.max().item()
 
         # initialize tensors
@@ -170,6 +167,7 @@ class Simulation:
         self.t_ctx_lens = torch.cat([self.t_ctx_lens, self.context_lens[new_seq_ids]], dim=0)
         gen_lens = torch.Tensor([0] * len(new_seq_ids)).to(dtype=torch.int32, device="cpu")
         self.t_gen_lens = torch.cat([self.t_gen_lens, gen_lens], dim=0)
+
         # append new seqs' ctx_lens to step_lens
         self.step_lens = torch.cat([self.step_lens, self.context_lens[new_seq_ids]], dim=0)
 
@@ -181,6 +179,7 @@ class Simulation:
         self.t_seq_ids = self.t_seq_ids[~finished]
         self.t_ctx_lens = self.t_ctx_lens[~finished]
         self.t_gen_lens = self.t_gen_lens[~finished]
+
         # add ones for unfinished seqs to step_lens
         self.step_lens = torch.ones([len(self.t_seq_ids)], dtype=torch.int32, device="cpu")
 
@@ -188,6 +187,7 @@ class Simulation:
         # remove finished seqs
         if self.t != 0:
             self.remove_finished()
+
         # get allowed new seqs
         arrived_seq_ids = torch.where(self.arrival_times == self.t, True, False).nonzero().view(-1)
         queuing_seq_ids = torch.cat([self.delayed_seq_ids, arrived_seq_ids], dim=0)
@@ -202,8 +202,10 @@ class Simulation:
         else:
             new_seq_ids = queuing_seq_ids
             self.delayed_seq_ids = torch.Tensor().to(dtype=torch.int32)
+
         # add new seqs to batch
         self.add_new_seqs(new_seq_ids)
+
         # update batch variables
         self.t_batch_size = len(self.t_seq_ids)
         self.t_total_lens = self.t_ctx_lens + self.t_gen_lens
@@ -242,26 +244,27 @@ def get_model(
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
-        model = [
-            TransformerLayer(
-                hidden_size=hidden_size,
-                ffn_hidden_size=4 * hidden_size,
-                num_attention_heads=config.num_heads,
-                num_gqa_groups=config.num_gqa_groups,
-                hidden_dropout=0.0,
-                attention_dropout=config.dropout_p,
-                init_method=init_method,
-                output_layer_init_method=output_layer_init_method,
-                layer_number=layer_number,
-                kv_channels=config.head_dim_qk,
-                self_attn_mask_type=attn_mask_type,
-                params_dtype=dtype,
-                attn_input_format=qkv_format,
-            )
-            .cuda()
-            .eval()
-            for layer_number in range(1, num_layers + 1)
-        ]
+        with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+            model = [
+                TransformerLayer(
+                    hidden_size=hidden_size,
+                    ffn_hidden_size=4 * hidden_size,
+                    num_attention_heads=config.num_heads,
+                    num_gqa_groups=config.num_gqa_groups,
+                    hidden_dropout=0.0,
+                    attention_dropout=config.dropout_p,
+                    init_method=init_method,
+                    output_layer_init_method=output_layer_init_method,
+                    layer_number=layer_number,
+                    kv_channels=config.head_dim_qk,
+                    self_attn_mask_type=attn_mask_type,
+                    params_dtype=dtype,
+                    attn_input_format=qkv_format,
+                )
+                .cuda()
+                .eval()
+                for layer_number in range(1, num_layers + 1)
+            ]
     if module == "DotProductAttention":
         with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
             model = [
@@ -288,6 +291,7 @@ def generate_args(
     qkv_format: str = "bshd",
     mode: str = "full_inputs",
 ):
+    # full inputs used as reference
     if mode == "full_inputs":
         warmup = False
         shapes = []
@@ -315,6 +319,7 @@ def generate_args(
                     config.head_dim_v,
                 ]
             )
+    # sample args used for cuda graph warmup
     elif mode == "sample_args":
         warmup = True
         shapes = []
@@ -390,13 +395,6 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("is_fp8", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
     logger = logging.getLogger("test_paged_attn")
-    num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
-    config = model_configs_infer[model]
-    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
-        config_max_seqlen_q = config.max_seqlen_q
-        config_max_seqlen_kv = config.max_seqlen_kv
-        config.max_seqlen_q = 256
-        config.max_seqlen_kv = 256
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         fp8_format=recipe.Format.HYBRID,
@@ -407,6 +405,15 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
+
+    config = model_configs_infer[model]
+    num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
+    # flash-attn v2 requires page_size >= 256
+    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
+        config_max_seqlen_q = config.max_seqlen_q
+        config_max_seqlen_kv = config.max_seqlen_kv
+        config.max_seqlen_q = 256
+        config.max_seqlen_kv = 256
 
     # create a real-life simulation
     max_batch_size = config.batch_size
@@ -545,7 +552,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        # with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
         model = [
             make_graphed_callables(
                 model[i],
@@ -640,8 +646,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         batch_size = max_batch_size if is_cuda_graph else sim.t_batch_size
         cu_seqlens_q = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_q[1 : sim.t_batch_size + 1] = torch.cumsum(sim.step_lens, dim=0)
-        cu_seqlens_kv = torch.zeros(batch_size + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_kv[1 : sim.t_batch_size + 1] = torch.cumsum(sim.t_total_lens, dim=0)
+        cu_seqlens_kv = cu_seqlens_q.clone()
         step_dict = OrderedDict(zip(sim.t_seq_ids.tolist(), sim.step_lens.tolist()))
         inference_params.pre_step(step_dict)
         if inference_params.is_paged:
@@ -650,11 +655,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
-                    *(
-                        incremental_output
-                        if isinstance(incremental_output, List)
-                        else incremental_output
-                    ),
+                    *incremental_output,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
@@ -669,44 +670,31 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":
-                print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
-                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(incremental_output[i, token_index, :4])
                 torch.testing.assert_close(
-                    # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # incremental_output[:sim.step_lens[i] - 1, i, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
-                    incremental_output[i, token_index, :],
+                    incremental_output[i, sim.step_lens[i] - 1, :],
                     atol=tol,
                     rtol=tol,
                 )
             if qkv_format == "sbhd":
-                print(i, seq, sim.t_total_lens, sim.step_lens, token_index)
-                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(incremental_output[token_index, i, :4])
                 torch.testing.assert_close(
-                    # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # incremental_output[:sim.step_lens[i] - 1, i, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
-                    incremental_output[token_index, i, :],
+                    incremental_output[sim.step_lens[i] - 1, i, :],
                     atol=tol,
                     rtol=tol,
                 )
             if qkv_format == "thd":
-                print("i ", i, seq, cu_seqlens_q)
-                print(full_output[seq, sim.t_total_lens[i] - 1, :4])
-                print(incremental_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(
-                    # full_output[seq, sim.t_total_lens[i] - sim.step_lens[i]:sim.t_total_lens[i] - 1, :],
-                    # incremental_output[cu_seqlens_q[i]:cu_seqlens_q[i + 1] - 1, :],
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     incremental_output[cu_seqlens_q[i + 1] - 1, :],
                     atol=tol,
                     rtol=tol,
                 )
+
         sim.t += 1
         sim.t_gen_lens = sim.t_gen_lens + 1
 
+    # last value in complete_times should be equal to sim.t
     sim.serving_times = sim.arrival_times + sim.request_delays
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)

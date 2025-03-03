@@ -55,50 +55,44 @@ class KVCacheManager:
 
 class InferenceParams:
     """
-    Inference parameters that are passed to the main model in order
-    to efficiently cache previous tokens and reuse them for the current
-    inference iteration.
-
-    A typical KV caching workflow is as follows.::
-
-      modules = [TransformerLayer() for _ in range(num_layers)]
-      model = torch.nn.Sequential(*modules)
-      inference_params = InferenceParams(max_batch_size, max_seqlen_kv, ...)
-      for i in range(inference_iterations):
-          # seq_ids = [0, 2, 3]
-          # step_lens = [10, 1, 1]
-          # step_dict = OrderedDict(zip(seq_ids, step_lens))
-          inference_params.pre_step(step_dict)
-          output = model(
-                ...,
-                inference_params=inference_params,
-                attn_mask_type="padding_causal",
-                )
-          # assume qkv_format = "bshd"
-          output = output[:,step_dict.values()]
-
-
-    The memory allocation and copies of the new KV tokens to KV cache take place
-    in the following locations.::
+    KV caching mechanism in inference. The memory allocation of the caches, and the copying of
+    new tokens to the cache take place at the following locations in TransformerLayer.::
 
       class TransformerLayer:
           class MultiHeadAttention:
-              if self.layer_number not in inference_params:
+              if self.layer_number not in inference_params.cache_manager.cache:
                   inference_params.allocate_memory(self.layer_number)
-          class DotProductAttention:
-              if inference_params is not None:
-                  k_cache, v_cache, new_qkv_format = inference_params.step(
-                      new_k, new_v, qkv_format)
-              output = attention(new_q, k_cache, v_cache, new_qkv_format)
+              class DotProductAttention:
+                  if inference_params is not None:
+                      k_cache, v_cache, new_qkv_format = inference_params.step(
+                          new_k, new_v, qkv_format)
+                  output = attention(new_q, k_cache, v_cache, new_qkv_format)
 
-    InferenceParams supports cache_qkv_format = "bshd" only, and the step() function may
-    change qkv_format depending on the attention backend.
+    allocate_memory() can be called independently if needed. step() takes 'bshd', 'sbhd' and 'thd'
+    formats and converts new_k and new_v to 'bshd' in both NonPagedKVCacheManager and PagedKVCacheManager.
+    Since new_q's format is unchanged, the returned new_qkv_format is 'bshd', 'sbhd_2bshd' and 'thd_2bshd',
+    respectively. A standard workflow for using InferenceParams to cache KV tokens, is as follows.::
 
-    backend                    | qkv_format        | new_qkv_format
-    ------------------------------------------------------------------------------------
-    FusedAttention             | {bshd, sbhd, thd} | {bshd_2bshd, sbhd_2bshd, thd_2bshd}
-    FlashAttention             | {bshd, sbhd, thd} | {bshd, sbhd, thd}
-    UnfusedDotProductAttention | {bshd, sbhd, thd} | {bshd, sbhd, bshd}
+      model = [TransformerLayer() for _ in range(num_layers)]
+      # initialize InferenceParams, for example, with PagedKVCacheManager
+      inference_params = InferenceParams(..., is_paged=True)
+      # inference iterations
+      for i in range(num_iters):
+          # get step info, e.g. seq_ids = [0, 2, 3], step_lens = [10, 1, 1]
+          step_dict = OrderedDict(zip(seq_ids, step_lens))
+          # update inference_params state
+          inference_params.pre_step(step_dict)
+          output = model(
+                ...,
+                attn_mask_type="padding_causal",
+                cu_seqlens_q=cu_seqlens_new_q,
+                cu_seqlens_kv=cu_seqlens_new_kv,
+                inference_params=inference_params,
+                )
+          # get inference tokens based on qkv_format
+          # "bshd": output = output[:,step_dict.values()-1]
+          # "sbhd": output = output[step_dict.values()-1,:]
+          # "thd" : output = output[cu_seqlens_new_q[j+1]-1], j=0,...b-1
 
 
     Parameters
@@ -151,9 +145,6 @@ class InferenceParams:
         self.dtype = dtype
         self.head_dim_v = head_dim_v if head_dim_v is not None else head_dim_k
         self.is_paged = is_paged
-        _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-        _NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-        _NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
 
         if not self.is_paged:
             cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager
@@ -167,6 +158,7 @@ class InferenceParams:
             )
         else:
             assert page_size is not None, "Paged KV cache requires page_size is not None."
+            self.page_size = page_size
             assert (
                 max_seqlen_kv % page_size == 0
             ), "Paged KV cache requires max_seqlen_kv % page_size = 0."
@@ -174,8 +166,6 @@ class InferenceParams:
             assert (
                 total_num_pages == self.max_batch_size * max_pages_per_seq
             ), "Paged KV cache requires total_num_pages = max_batch_size * max_pages_per_seq."
-            self.page_size = page_size
-            self.max_seqlen_kv = max_seqlen_kv
             self.total_num_pages = total_num_pages
 
             cls = cache_manager if cache_manager is not None else PagedKVCacheManager
@@ -194,7 +184,6 @@ class InferenceParams:
             assert max_ctx_len is not None, "max_ctx_len is required when qkv_format=thd!"
             self.max_ctx_len = max_ctx_len
 
-        # NonPagedKVCacheManager and PagedKVCacheManager only support 'bshd' cache
         self.cache_qkv_format = "bshd"
         self.input_qkv_format = qkv_format
         if self.input_qkv_format == self.cache_qkv_format:
@@ -202,9 +191,8 @@ class InferenceParams:
         else:
             self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
 
-        self.sequences_pre = OrderedDict()
+        self.sequences_pre_step = OrderedDict()
         self.sequences = OrderedDict()
-        self.step_dict = OrderedDict()
         self.batch_size = 0
 
         self.cu_seqlens_q = torch.zeros(
@@ -261,37 +249,33 @@ class InferenceParams:
         step_dict: OrderedDict,
     ):
         """Update tracked sequences and prepare for step()"""
-        self.step_dict = step_dict
         self.batch_size = len(step_dict)
-        self.total_tokens = sum(step_dict.values())
 
         self.sequences = self.cache_manager.pre_step(step_dict)
-        self.sequences_pre = OrderedDict()
+        # track the pre-step seqlens for the next layer in the model
+        self.sequences_pre_step = OrderedDict()
         for k, v in self.sequences.items():
-            self.sequences_pre[k] = v - self.step_dict[k]
+            self.sequences_pre_step[k] = v - step_dict[k]
 
-        actual_batch_size = len(step_dict)
         seqlens_q = list(step_dict.values())
-        cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, actual_batch_size + 1)]
-        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (self.max_batch_size - actual_batch_size)
+        cu_seqlens_q = [0] + [sum(seqlens_q[:i]) for i in range(1, self.batch_size + 1)]
+        cu_seqlens_q = cu_seqlens_q + [cu_seqlens_q[-1]] * (self.max_batch_size - self.batch_size)
         self.cu_seqlens_q.copy_(torch.Tensor(cu_seqlens_q).to(dtype=torch.int32, device="cpu"))
 
-        seq_lens = list(self.sequences.values())
-        cu_seqlens_kv = [0] + [sum(seq_lens[:i]) for i in range(1, actual_batch_size + 1)]
+        seqlens_kv = list(self.sequences.values())
+        cu_seqlens_kv = [0] + [sum(seqlens_kv[:i]) for i in range(1, self.batch_size + 1)]
         cu_seqlens_kv = cu_seqlens_kv + [cu_seqlens_kv[-1]] * (
-            self.max_batch_size - actual_batch_size
+            self.max_batch_size - self.batch_size
         )
         self.cu_seqlens_kv.copy_(torch.Tensor(cu_seqlens_kv).to(dtype=torch.int32, device="cpu"))
 
     def get_seqlens_pre_step(self):
-        """Get cached sequence lengths for current iteration before adding step_dict.values"""
-        return torch.Tensor(list(self.sequences_pre.values())).to(dtype=torch.int32, device="cpu")
+        """Get cached sequence lengths before the stepping"""
+        return torch.Tensor(list(self.sequences_pre_step.values())).to(dtype=torch.int32, device="cpu")
 
     def convert_paged_to_nonpaged(self, layer_number: int):
         """
-        Convert k_cache and v_cache from paged to non-paged format. This is used by the
-        UnfusedDotProductAttention backend. Both k_cache and v_cache are assumed to be
-        in 'bshd' format.
+        Convert k_cache and v_cache from paged to non-paged format.
 
         Parameters
         ----------
@@ -308,7 +292,6 @@ class InferenceParams:
         k_cache, v_cache = self.cache_manager.cache[layer_number]
         page_table = self.cache_manager.page_table
         batch_size = page_table.shape[0]
-        actual_batch_size = len(self.step_dict)
         new_k_cache = rearrange(
             k_cache[page_table.flatten()],
             "(b npages) page_size ... -> b (npages page_size) ...",
@@ -320,8 +303,8 @@ class InferenceParams:
             b=batch_size,
         )
 
-        new_k_cache = new_k_cache[:actual_batch_size].contiguous()
-        new_v_cache = new_v_cache[:actual_batch_size].contiguous()
+        new_k_cache = new_k_cache[:self.batch_size].contiguous()
+        new_v_cache = new_v_cache[:self.batch_size].contiguous()
 
         return new_k_cache, new_v_cache
 
@@ -333,7 +316,7 @@ class InferenceParams:
         qkv_format: str,
     ):
         """
-        Copy the new KV tokens to the KV cache and reshape Q if necessary.
+        Copy new KV tokens to the cache.
 
         Parameters
         ----------
@@ -353,7 +336,7 @@ class InferenceParams:
         v_cache: torch.Tensor
             Full value tensor containing both previous and current value tokens
         page_table: torch.Tensor
-            Page table for paged KV cache, [batch_size, max_pages_per_seq]. None for non-paged KV cache
+            Page table for paged KV cache, [batch_size, max_pages_per_seq]. None for non-paged KV cache.
         cu_seqlens_q: torch.Tensor
             Updated cumulative sequence lengths for query, [batch_size + 1]
         cu_seqlens_kv: torch.Tensor
@@ -363,7 +346,7 @@ class InferenceParams:
         max_seqlen_kv: int
             Update maximum sequence length for key and value
         qkv_format: str
-            Updated qkv_format, e.g. the input 'thd' format may become 'thd_2bshd' after step()
+            Updated qkv_format, e.g. 'thd' format becomes 'thd_2bshd' after step()
         """
         self.input_qkv_format = qkv_format
         if self.input_qkv_format == self.cache_qkv_format:
@@ -422,8 +405,8 @@ class NonPagedKVCacheManager(KVCacheManager):
             dtype=torch.int32,
             device=torch.cuda.current_device(),
         )
-        # always in [0, ..., b-1] fashion due to reindexing
-        self.batch_indices_post = torch.range(
+        # after re-indexing, batch indices are always [0, ..., b-1]
+        self.batch_indices_post_step = torch.range(
             0,
             self.max_batch_size - 1,
             dtype=torch.int32,
@@ -456,9 +439,9 @@ class NonPagedKVCacheManager(KVCacheManager):
     ):
         """Update tracked sequences and prepare for step()"""
         # Track unfinished sequences' indices in the batch, e.g.
-        # at t-1, seq_ids = [0, 1, 2, 3], and at t, seq_ids = [0, 2, 3], because seq_id 1 finished
-        # batch_indices = [0, 2, 3, 1] is used in step() to re-index k_cache and v_cache so that
-        # they are contiguous and match the sequence indexing in q.
+        # at t-1, seq_ids = [0, 1, 2, 3]; at t, seq_ids = [0, 2, 3] since seq_id 1 is finished
+        # step() re-indexes k_cache and v_cache using batch_indices = [0, 2, 3, 1] so that
+        # they are contiguous and match the indexing in q
         prev_batch_size = len(self.sequences)
         unfinished_seqs = self.sequences.keys() & step_dict.keys()
         finished_seqs = self.sequences.keys() - unfinished_seqs

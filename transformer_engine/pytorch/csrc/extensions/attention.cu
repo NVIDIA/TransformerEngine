@@ -1113,15 +1113,19 @@ at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t) 
 
 /***************************************************************************************************
  * KV Cache: Copy new KV tokens to the KV cache
- *   1. new_k and new_v are in qkv_format, and k_cache and v_cache are in 'bshd' format
- *   2. cu_new_lens and cu_cached_lens are in shape, [b + 1], and cu_cached_lens are the lens after current step
- *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1],
- *      max_pages_per_seq = 1. Set is_non_paged = True/False accordingly.
- *   4. is_non_paged = True re-indexes the cache based on the page_table, i.e. page_table =
- *      [[0], [3], [1], [2]] will rearrange the cache to be [[0], [1], [1], [2]].
- *   5. k_cache and v_cache should have the same page_table
- *   6. For qkv_format = thd, we assume there is no padding between sequences in new_k and new_v,
- *      e.g. new_k = [a a a b b c], not new_k = [a a a 0..0 b b 0..0 c 0..0].
+ *   1. new_k and new_v are in qkv_format; k_cache and v_cache are in 'bshd' format
+ *   2. cu_new_lens and cu_cached_lens are in shape [b + 1]; cu_cached_lens include the added lens
+ *      in current step
+ *   3. Non-paged KV cache is a special case of paged KV cache, with page_table = [b, 1] and
+ *      max_pages_per_seq = 1. We use the same underlying kernel for both non-paged and paged.
+ *      Set is_non_paged = True/False to indicate as such.
+ *   4. is_non_paged = True also re-indexes the KV cache, e.g. the initial batch indices [0, 3, 1, 2]
+ *      becomes [0, 1, 1, 2]. The page_table = batch_indices.unsqueeze(1) is however unchanged.
+ *      batch_indices_post can be used for monotonical indexing, i.e. [0, 1, 2, 3]. batch_indices is
+ *      preserved for the next layer in the same iteration.
+ *   5. Only supports same page_table for k_cache and v_cache
+ *   6. Only pad_between_seqs = False when qkv_format = thd, i.e. there should be no pad tokens
+ *      between sequences in new_k and new_v such as [a a a 0..0 b b 0..0 c 0..0].
  **************************************************************************************************/
 
 template <typename scalar_t>

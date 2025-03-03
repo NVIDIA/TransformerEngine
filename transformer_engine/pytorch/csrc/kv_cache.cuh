@@ -11,6 +11,8 @@ namespace fused_attn {
 template <typename scalar_t>
 __global__ void convert_thd_to_bshd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
                                            int b, int max_seq_len, int h, int d) {
+  // tensor: thd; new_tensor: bshd
+  // cu_seqlens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
     int num_elts = (cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx]) * h * d;
     int thd_offset = cu_seqlens[batch_idx] * h * d;
@@ -26,6 +28,8 @@ __global__ void convert_thd_to_bshd_kernel(scalar_t *tensor, scalar_t *new_tenso
 template <typename scalar_t>
 __global__ void convert_bshd_to_thd_kernel(scalar_t *tensor, scalar_t *new_tensor, int *cu_seqlens,
                                            int b, int max_seq_len, int h, int d) {
+  // tensor: bshd; new_tensor: thd
+  // cu_seqlens: [b + 1]
   for (int batch_idx = blockIdx.x; batch_idx < b; batch_idx += gridDim.x) {
     int seqlen = cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
     int num_elts = seqlen * h * d;
@@ -69,11 +73,6 @@ __global__ void reindex_kv_cache_kernel(scalar_t *k_cache, scalar_t *v_cache, in
       }
     }
   }
-  //  if (blockIdx.x == 0) {
-  //    for (int batch_idx = threadIdx.x; batch_idx < b; batch_idx++) {
-  //      batch_indices[batch_idx] = batch_idx;
-  //    }
-  //  }
 }
 
 template <typename scalar_t>

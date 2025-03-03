@@ -139,9 +139,9 @@ def _get_attention_backends(
     pad_between_seqs: bool = False,
     context_parallel: bool = False,
     deterministic: bool = False,
-    is_training: bool = True,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
+    is_training: bool = True,
     inference_params: Optional[InferenceParams] = None,
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
@@ -196,9 +196,9 @@ def _get_attention_backends(
             attention_dropout=config.dropout_p,
             context_parallel=context_parallel,
             deterministic=deterministic,
-            is_training=is_training,
             fp8=fp8,
             fp8_meta=fp8_meta,
+            is_training=is_training,
             inference_params=inference_params,
         )
         _, _, flash_attention_backend, fused_attention_backend, _, available_backends = (
