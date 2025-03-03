@@ -60,8 +60,6 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledUpperTriangMaskedSoftmax fwd"""
-        if is_in_onnx_export_mode():
-            return ScaledUpperTriangMaskedSoftmax.onnx_forward(inputs, scale)
         scale_t = torch.tensor([scale])
         softmax_results = tex.scaled_upper_triang_masked_softmax_forward(inputs, scale_t[0])
 
@@ -77,21 +75,6 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
         )
 
         return input_grads, None
-    
-    @staticmethod
-    def onnx_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledUpperTriangMaskedSoftmax fwd for ONNX export"""
-        # Scale the inputs
-        scaled_inputs = inputs * scale
-
-        # Create upper triangular mask (excluding diagonal)
-        mask = torch.triu(torch.ones_like(inputs, dtype=torch.bool), diagonal=1)
-
-        # Apply mask by setting masked positions to a large negative value
-        scaled_inputs = scaled_inputs.masked_fill(mask, float('-inf'))
-
-        # Compute softmax
-        return torch.softmax(scaled_inputs, dim=-1)
 
 
 class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
@@ -120,25 +103,6 @@ class ScaledAlignedCausalMaskedSoftmax(torch.autograd.Function):
 
         return input_grads, None
 
-    @staticmethod
-    def onnx_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledAlignedCausalMaskedSoftmax forward for ONNX export"""
-        if is_in_onnx_export_mode():
-            return ScaledAlignedCausalMaskedSoftmax.onnx_forward(inputs, scale)
-        # Scale the inputs
-        scaled_inputs = inputs * scale
-
-        # Create rectangular causal mask aligned to the bottom right corner
-        rows, cols = inputs.size(-2), inputs.size(-1)
-        diag_shift = cols - rows + 1
-        mask = torch.triu(torch.ones((rows, cols), dtype=torch.bool, device=inputs.device), diagonal=diag_shift)
-
-        # Apply mask by setting masked positions to a large negative value
-        scaled_inputs = scaled_inputs.masked_fill(mask, float('-inf'))
-
-        # Compute softmax
-        return torch.softmax(scaled_inputs, dim=-1)
-
 
 class ScaledMaskedSoftmax(torch.autograd.Function):
     """
@@ -151,8 +115,6 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, mask: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledMaskedSoftmax fwd"""
-        if is_in_onnx_export_mode():
-            return ScaledMaskedSoftmax.onnx_forward(inputs, mask, scale)
         scale_t = torch.tensor([scale])
 
         softmax_results = tex.scaled_masked_softmax_forward(inputs, mask, scale_t[0])
@@ -167,18 +129,6 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         input_grads = tex.scaled_masked_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
-    @staticmethod
-    def onnx_forward(inputs: torch.Tensor, mask: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledMaskedSoftmax forward for ONNX export"""
-        # Scale the inputs
-        scaled_inputs = inputs * scale
-
-        # Apply mask: masked positions set to large negative value
-        masked_scaled_inputs = scaled_inputs.masked_fill(mask.bool(), float('-inf'))
-
-        # Compute softmax
-        return torch.softmax(masked_scaled_inputs, dim=-1)
-
 
 class ScaledSoftmax(torch.autograd.Function):
     """
@@ -190,8 +140,6 @@ class ScaledSoftmax(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputs: torch.Tensor, scale: float) -> torch.Tensor:
         """ScaledSoftmax fwd"""
-        if is_in_onnx_export_mode():
-            return ScaledSoftmax.onnx_forward(inputs, scale)
         scale_t = torch.tensor([scale])
 
         softmax_results = tex.scaled_softmax_forward(inputs, scale_t[0])
@@ -205,12 +153,6 @@ class ScaledSoftmax(torch.autograd.Function):
 
         input_grads = tex.scaled_softmax_backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
-    
-    @staticmethod
-    def onnx_forward(inputs: torch.Tensor, scale: float) -> torch.Tensor:
-        """ScaledSoftmax forward for ONNX export"""
-        scale_t = torch.tensor([scale])
-        return torch.softmax(inputs * scale_t[0], dim=-1)
 
 
 class FusedScaleMaskSoftmax(nn.Module):
@@ -264,7 +206,6 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(inp, mask, scale)
 
         return self.forward_torch_softmax(inp, mask, scale)
-
 
     def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
         """Check FusedScaleMaskSoftmax kernel availability based on size"""

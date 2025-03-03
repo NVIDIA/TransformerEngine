@@ -172,10 +172,10 @@ class Quantizer(abc.ABC):
     def copy(self) -> Quantizer:
         """Create shallow copy"""
         return copy.copy(self)
-    
+
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Symbolic function for ONNX export"""
-    
+
     def onnx_dequantize(self, tensors: List[torch.Tensor]) -> torch.Tensor:
         """Symbolic function for ONNX export"""
 

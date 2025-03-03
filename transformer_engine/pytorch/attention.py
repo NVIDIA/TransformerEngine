@@ -461,7 +461,7 @@ def get_attention_backend(
         if use_flash_attention and _flash_attn_3_is_installed:
             logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
         _use_flash_attn_3 = False
-    
+
     # Filter: ONNX mode
     if is_in_onnx_export_mode():
         if use_flash_attention and _flash_attn_is_installed:
@@ -1186,9 +1186,7 @@ def get_full_mask(
         swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
             actual_seqlens_kv - actual_seqlens_q + window_size[1]
         ).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not(
-        (swa_left <= 0) & ~(swa_right < 0)
-    )
+    swa_mask = torch.logical_not((swa_left <= 0) & ~(swa_right < 0))
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
     else:
@@ -1382,7 +1380,7 @@ def _get_full_cu_seqlens(
     global _cu_seqlens_cache
     batch_size = int(batch_size)
     max_seqlen = int(max_seqlen)
-    
+
     if (batch_size, max_seqlen) not in _cu_seqlens_cache:
         _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
             0,
@@ -5186,7 +5184,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_type=self.attention_type,
         )
 
-
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
@@ -8287,8 +8284,6 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                 )
-            return mixed_x_layer
-            
 
             num_queries_per_key_value = (
                 self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
@@ -8341,7 +8336,7 @@ class MultiheadAttention(torch.nn.Module):
                     x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
                     for x in (query_layer, key_layer, value_layer)
                 )
-            
+
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -8384,7 +8379,6 @@ class MultiheadAttention(torch.nn.Module):
                 )
                 for x in (key_layer, value_layer)
             )
-
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:

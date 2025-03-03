@@ -208,7 +208,7 @@ class _Linear(torch.autograd.Function):
             if weight_quantizer is not None:
                 weight_quantizer.calibrate(weight)
 
-        ub_obj = None 
+        ub_obj = None
         ub_type = None
         rs_out = None
         out_dtype = activation_dtype
@@ -1100,7 +1100,7 @@ class Linear(TransformerEngineBaseModule):
             grad_output_quantizer,
             grad_input_quantizer,
         )
-    
+
     def _get_weight_and_bias_tensors(self):
         # Get concatenated weight and bias tensors
         unfused_weights = [getattr(self, name) for name in self.weight_names]
@@ -1118,7 +1118,7 @@ class Linear(TransformerEngineBaseModule):
         else:
             bias_tensor = None
         return weight_tensor, bias_tensor
-    
+
     def onnx_forward(
         self,
         input: torch.Tensor,
@@ -1144,16 +1144,16 @@ class Linear(TransformerEngineBaseModule):
         if bias_tensor is not None:
             bias_tensor = bias_tensor.to(input.dtype)
         weight_tensor = weight_tensor.to(input.dtype)
-        
+
         if self.apply_bias:
             output = onnx_gemm(weight_tensor, input, bias_tensor)
         else:
             output = onnx_gemm(weight_tensor, input, None)
-        
+
         if output_quantizer is not None:
             raise NotImplementedError("ONNX export of quantized output is not supported")
-        
+
         if self.return_bias:
             return output, bias_tensor
-        
+
         return output

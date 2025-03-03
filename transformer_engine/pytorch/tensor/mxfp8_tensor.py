@@ -125,7 +125,9 @@ class MXFP8Quantizer(Quantizer):
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
 
-    def create_tensor_from_data(self, data: torch.Tensor, scale_inv: torch.Tensor, fake_dtype: torch.dtype) -> MXFP8Tensor:
+    def create_tensor_from_data(
+        self, data: torch.Tensor, scale_inv: torch.Tensor, fake_dtype: torch.dtype
+    ) -> MXFP8Tensor:
         return MXFP8Tensor(
             shape=data.shape,
             dtype=fake_dtype,
@@ -138,9 +140,11 @@ class MXFP8Quantizer(Quantizer):
             tensor = tensor.to(dtype=torch.float32)
         data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
         return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
-    
+
     def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
-        return torch.ops.tex.mxfp8_dequantize(tensor._data, tensor._scale_inv, int(TE_DType_map[self.dtype]))
+        return torch.ops.tex.mxfp8_dequantize(
+            tensor._data, tensor._scale_inv, int(TE_DType_map[self.dtype])
+        )
 
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):

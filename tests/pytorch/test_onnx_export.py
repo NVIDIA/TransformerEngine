@@ -78,6 +78,7 @@ supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
+
 @onnx_op(
     op_type="trt::TRT_FP8QuantizeLinear",
     domain="trt",
@@ -85,17 +86,17 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
         PyCustomOpDef.dt_float,
         PyCustomOpDef.dt_float,
     ],
-    outputs=[
-        PyCustomOpDef.dt_uint8
-    ]
+    outputs=[PyCustomOpDef.dt_uint8],
 )
 def trt_fp8_quantize(t, scale):
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1/torch.from_numpy(scale).cuda(), 
+        scale=1 / torch.from_numpy(scale).cuda(),
         amax=torch.zeros([1]).cuda(),
-        fp8_dtype=tex.DType.kFloat8E4M3)
+        fp8_dtype=tex.DType.kFloat8E4M3,
+    )
     return q(x)._data.cpu().numpy()
+
 
 @onnx_op(
     op_type="trt::TRT_FP8DequantizeLinear",
@@ -104,19 +105,19 @@ def trt_fp8_quantize(t, scale):
         PyCustomOpDef.dt_uint8,
         PyCustomOpDef.dt_float,
     ],
-    outputs=[
-        PyCustomOpDef.dt_float
-    ]
+    outputs=[PyCustomOpDef.dt_float],
 )
 def trt_fp8_dequantize(t, scale):
     x = torch.from_numpy(t).cuda()
     print("-" * 50, scale)
     q = te.tensor.float8_tensor.Float8Quantizer(
-        scale=1/torch.from_numpy(scale).cuda(), 
+        scale=1 / torch.from_numpy(scale).cuda(),
         amax=torch.zeros([1]).cuda(),
-        fp8_dtype=tex.DType.kFloat8E4M3)
+        fp8_dtype=tex.DType.kFloat8E4M3,
+    )
     quantizer_tensor = q.create_tensor_from_data(x, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize().cpu().numpy()
+
 
 @onnx_op(
     op_type="trt::TRT_MXFP8QuantizeLinear",
@@ -130,6 +131,7 @@ def trt_mxfp8_quantize(t):
     q = te.tensor.mxfp8_tensor.MXFP8Quantizer(tex.DType.kFloat8E4M3)
     return q(x)._data.cpu().numpy()
 
+
 @onnx_op(
     op_type="trt::TRT_MXFP8DequantizeLinear",
     domain="trt",
@@ -137,9 +139,7 @@ def trt_mxfp8_quantize(t):
         PyCustomOpDef.dt_uint8,
         PyCustomOpDef.dt_uint8,
     ],
-    outputs=[
-        PyCustomOpDef.dt_float
-    ]
+    outputs=[PyCustomOpDef.dt_float],
 )
 def trt_mxfp8_dequantize(t, scale_inv):
     x = torch.from_numpy(t).cuda()
@@ -200,7 +200,7 @@ def do_export(
         inds_to_del = [i for i in range(len(inps)) if inps[i] is None]
         input_names = [input_names[i] for i in range(len(inps)) if i not in inds_to_del]
 
-        model(*inps) # warm-up run
+        model(*inps)  # warm-up run
         with te.export.onnx_export(True):
             model(*inps)
         with te.export.onnx_export(True):
@@ -232,12 +232,15 @@ def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
     """Initialize the FP8 quantization scales in module"""
     module.init_fp8_metadata(num_gemms)
     for quantizer in module.quantizers["scaling_fwd"]:
-        quantizer.scale = (
-            torch.ones(1, dtype=torch.float32, device="cuda") * scale
-        )
+        quantizer.scale = torch.ones(1, dtype=torch.float32, device="cuda") * scale
 
 
-def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool, fp8_recipe: recipe.Recipe):
+def te_infer(
+    model: torch.nn.Module,
+    inps: Union[Tuple[torch.tensor], torch.tensor],
+    is_fp8: bool,
+    fp8_recipe: recipe.Recipe,
+):
     """Transformer Engine forward propagation."""
     with torch.inference_mode(), te.fp8_autocast(
         enabled=is_fp8, fp8_recipe=fp8_recipe
@@ -414,10 +417,11 @@ def get_attn_mask_str(use_mask, attn_mask_type):
     return attn_mask_str
 
 
-
 """
 Tests cases begin here.
 """
+
+
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize("fp8_recipe", fp8_recipes)
@@ -549,7 +553,7 @@ def test_export_layernorm(
             if not use_fp8:
                 validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
             elif precision != torch.bfloat16:
-                validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8, te_outputs=te_outputs)  
+                validate_result(fname, inp, model, atol=1e-3, is_fp8=use_fp8, te_outputs=te_outputs)
 
 
 @pytest.mark.parametrize("scale_factor", [112])
@@ -697,9 +701,10 @@ def test_export_layernorm_mlp(
         serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16,):
             return
-        atol = 1e-2 if use_fp8 else (5e-1 if activation == "swiglu" else 1e-3) # TODO(pgadzinski) - check 1e-2
+        atol = (
+            1e-2 if use_fp8 else (5e-1 if activation == "swiglu" else 1e-3)
+        )  # TODO(pgadzinski) - check 1e-2
         validate_result(fname, inp, model, atol=atol, is_fp8=use_fp8, te_outputs=te_outputs)
-
 
 
 @skip_FP8
@@ -860,7 +865,6 @@ def test_export_multihead_attention(
         return_bias=True,
     ).to(device="cuda")
 
-
     inp_context = (hidden_states_context, attention_mask, encoder_output)
     input_names = ["hidden_states", "attention_mask", "encoder_output"]
     output_names = ["attention_output", "attention_bias"]
@@ -951,10 +955,7 @@ def test_export_multihead_attention(
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize(
     "output_layernorm",
-    [
-         True, # TO DO: handle this
-        False
-    ],
+    [True, False],  # TO DO: handle this
 )
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_qkv_params", [False, True])
@@ -1018,7 +1019,12 @@ def test_export_transformer_layer(
     ).to(device="cuda")
     do_export(model, inp, fname, fp8_recipe, use_fp8, input_names=input_names)
     te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
-    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names,)
+    serialize_inputs_outputs(
+        fname,
+        inp,
+        te_outputs,
+        input_names=input_names,
+    )
     if precision in (torch.bfloat16,):
         return
     atol = 5e-1 if use_fp8 else (5e-1 if activation == "swiglu" else 1e-3)
@@ -1089,10 +1095,10 @@ def test_export_gpt_generation(
         use_fp8,
         input_names=input_names,
         output_names=output_names,
-        #dynamic_axes={
+        # dynamic_axes={
         #    "input": {0: "seq", 1: "bs"},
         #    "output": {0: "seq", 1: "bs"},
-        #},
+        # },
     )
     te_outputs = te_infer(model, inp, is_fp8=use_fp8)
     serialize_inputs_outputs(

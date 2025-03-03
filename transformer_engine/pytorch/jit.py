@@ -20,11 +20,13 @@ dropout_fuser = torch.jit.script
 if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = torch.compile
 
+
 def disable_onnx_wrapper(func, recursive=True):
     if is_in_onnx_export_mode():
         return func
     else:
         return torch._dynamo.disable(func, recursive=recursive)
+
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308

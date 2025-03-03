@@ -174,10 +174,12 @@ class Float8Quantizer(Quantizer):
             tensor = tensor.to(torch.float32)
         data = torch.ops.tex.fp8_quantize(tensor, self.scale.item())
         return self.create_tensor_from_data(data, fake_dtype=torch.float32)
-    
+
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
-        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item(), int(TE_DType_map[tensor.dtype]))
+        out = torch.ops.tex.fp8_dequantize(
+            tensor._data, self.scale.item(), int(TE_DType_map[tensor.dtype])
+        )
         out = out.to(tensor.dtype)
         return out
 

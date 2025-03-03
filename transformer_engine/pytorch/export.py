@@ -46,11 +46,14 @@ def is_in_onnx_export_mode() -> bool:
     """Returns True if onnx export mode is enabled, False otherwise."""
     return _IN_ONNX_EXPORT_MODE
 
+
 def assert_warmed_up(module: torch.nn.Module) -> None:
     """Assert that the model has been warmed up before exporting to ONNX."""
-    assert hasattr(module, "forwarded_at_least_once"), \
-        "Model must be warmed up before exporting to ONNX, \
-            please run model with the same recipe before exporting."
+    assert hasattr(module, "forwarded_at_least_once"), (
+        "Model must be warmed up before exporting to ONNX,             please run model with the"
+        " same recipe before exporting."
+    )
+
 
 if TORCH_MAJOR == 2 and TORCH_MINOR >= 4 or TORCH_MAJOR > 2:
     from .onnx_extensions import (
@@ -62,5 +65,5 @@ if TORCH_MAJOR == 2 and TORCH_MINOR >= 4 or TORCH_MAJOR > 2:
         onnx_layernorm,
         onnx_attention_mask_func,
         onnx_gemm,
-        te_translation_table
+        te_translation_table,
     )

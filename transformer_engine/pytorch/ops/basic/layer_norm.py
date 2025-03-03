@@ -291,10 +291,12 @@ class LayerNorm(BasicOperation):
         grad_weight = reshape(dw, weight_dims)
         grad_bias = reshape(db, weight_dims)
         return grad_input, (grad_weight, grad_bias)
-    
+
     def op_onnx_forward(
         self,
         input_: torch.Tensor,
     ) -> torch.Tensor:
         weight = self.weight + 1 if self.zero_centered_gamma else self.weight
-        return torch.nn.functional.layer_norm(input_, input_.shape[-1:], weight, self.bias, self.eps)
+        return torch.nn.functional.layer_norm(
+            input_, input_.shape[-1:], weight, self.bias, self.eps
+        )
