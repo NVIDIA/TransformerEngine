@@ -5,9 +5,9 @@
 """NVFuser functions and JIT utilities"""
 import os
 from typing import Callable, Optional, Tuple
+import torch
 
 from .export import is_in_onnx_export_mode
-import torch
 
 # pylint: disable=unnecessary-lambda-assignment
 
@@ -20,14 +20,6 @@ dropout_fuser = torch.jit.script
 if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = torch.compile
 
-
-def disable_onnx_wrapper(func, recursive=True):
-    if is_in_onnx_export_mode():
-        return func
-    else:
-        return torch._dynamo.disable(func, recursive=recursive)
-
-
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
 no_torch_dynamo = lambda recursive=True: lambda func: func
@@ -35,8 +27,8 @@ if torch.__version__ >= "2":
     import torch._dynamo
 
     if torch.__version__ >= "2.1":
-        no_torch_dynamo = lambda recursive=True: lambda f: disable_onnx_wrapper(
-            f, recursive=recursive
+        no_torch_dynamo = lambda recursive=True: lambda f: (
+            f if is_in_onnx_export_mode() else torch._dynamo.disable(f, recursive=recursive)
         )
     else:
         # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True

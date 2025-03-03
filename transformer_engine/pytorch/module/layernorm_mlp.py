@@ -1494,7 +1494,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
             grad_input_quantizer,
         )
 
-    def onnx_forward(self, input: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """
+            ONNX-compatible version of the forward function that provides numerical equivalence
+            while only using operations that have defined ONNX symbolic translations.
+            This simplified implementation is designed specifically for inference scenarios.
+        """
         assert_warmed_up(self)
         (
             fc1_input_quantizer,
@@ -1504,7 +1509,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             output_quantizer,
             *_,
         ) = self._get_quantizers()
-        input_dtype = input.dtype
+        inp_dtype = inp.dtype
 
         fc1_weight = self.fc1_weight
         fc1_bias = self.fc1_bias if self.use_bias else None
@@ -1513,13 +1518,13 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         # layernorm + fp8 cast
         ln_out, ln_out_return = onnx_layernorm(
-            input,
+            inp,
             self.layer_norm_weight,
             self.layer_norm_bias,
             self.eps,
             self.normalization,
             self.zero_centered_gamma,
-            input_dtype,
+            inp_dtype,
             self.return_layernorm_output,
             fc1_input_quantizer,
         )
@@ -1527,7 +1532,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if fc1_weight_quantizer is not None:
             fc1_weight_q = fc1_weight_quantizer.onnx_quantize(fc1_weight)
             fc1_weight = fc1_weight_quantizer.onnx_dequantize(fc1_weight_q)
-        fc1_weight = fc1_weight.to(input_dtype)
+        fc1_weight = fc1_weight.to(inp_dtype)
 
         fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
 
@@ -1551,12 +1556,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if fc2_weight_quantizer is not None:
             fc2_weight_q = fc2_weight_quantizer.onnx_quantize(fc2_weight)
             fc2_weight = fc2_weight_quantizer.onnx_dequantize(fc2_weight_q)
-        fc2_weight = fc2_weight.to(input_dtype)
+        fc2_weight = fc2_weight.to(inp_dtype)
 
         if fc2_input_quantizer is not None:
             act_out_q = fc2_input_quantizer.onnx_quantize(act_out)
             act_out = fc2_input_quantizer.onnx_dequantize(act_out_q)
-        act_out = act_out.to(input_dtype)
+        act_out = act_out.to(inp_dtype)
 
         fc2_out = onnx_gemm(fc2_weight, act_out, fc2_bias)
 
@@ -1565,8 +1570,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         if self.return_layernorm_output:
             if self.return_bias:
-                return fc2_out, fc2_bias.to(input_dtype), ln_out_return
+                return fc2_out, fc2_bias.to(inp_dtype), ln_out_return
             return fc2_out, ln_out_return
         if self.return_bias:
-            return fc2_out, fc2_bias.to(input_dtype)
+            return fc2_out, fc2_bias.to(inp_dtype)
         return fc2_out

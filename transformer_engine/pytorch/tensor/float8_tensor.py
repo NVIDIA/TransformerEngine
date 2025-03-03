@@ -4,14 +4,13 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, List
+from typing import Optional, Tuple, Iterable
 import warnings
 
 import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..constants import TE_DType as TE_DType_map
 from ..utils import devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
@@ -178,7 +177,7 @@ class Float8Quantizer(Quantizer):
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
         out = torch.ops.tex.fp8_dequantize(
-            tensor._data, self.scale.item(), int(TE_DType_map[tensor.dtype])
+            tensor._data, self.scale.item()
         )
         out = out.to(tensor.dtype)
         return out
@@ -216,10 +215,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
-        try:
-            repr_str = str(self.dequantize(dtype=self.dtype))
-        except Exception as e:
-            repr_str = str(self._data) + " (failed to dequantize)"
+        repr_str = str(self.dequantize(dtype=self.dtype))
         return (
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "

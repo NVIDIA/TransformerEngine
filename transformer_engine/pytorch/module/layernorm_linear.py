@@ -1336,9 +1336,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def onnx_forward(
         self,
-        input: torch.Tensor,
+        inp: torch.Tensor,
         fp8_output: bool,
     ) -> torch.Tensor:
+        """
+            ONNX-compatible version of the forward function that provides numerical equivalence
+            while only using operations that have defined ONNX symbolic translations.
+            This simplified implementation is designed specifically for inference scenarios.
+        """
         assert_warmed_up(self)
         (
             input_quantizer,
@@ -1346,17 +1351,17 @@ class LayerNormLinear(TransformerEngineBaseModule):
             output_quantizer,
             *_,
         ) = self._get_quantizers(fp8_output)
-        input_dtype = input.dtype
+        inp_dtype = inp.dtype
 
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         ln_out, ln_out_return = onnx_layernorm(
-            input,
+            inp,
             self.layer_norm_weight,
             self.layer_norm_bias,
             self.eps,
             self.normalization,
             self.zero_centered_gamma,
-            input_dtype,
+            inp_dtype,
             self.return_layernorm_output,
             input_quantizer,
         )
@@ -1364,19 +1369,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if weight_quantizer is not None:
             weight_tensor_quantized = weight_quantizer.onnx_quantize(weight_tensor)
             weight_tensor = weight_quantizer.onnx_dequantize(weight_tensor_quantized)
-        weight_tensor = weight_tensor.to(input_dtype)
+        weight_tensor = weight_tensor.to(inp_dtype)
 
         if bias_tensor is not None:
-            bias_tensor = bias_tensor.to(input_dtype)
+            bias_tensor = bias_tensor.to(inp_dtype)
 
         output = onnx_gemm(weight_tensor, ln_out, bias_tensor if not self.return_bias else None)
 
         if output_quantizer is not None:
             raise NotImplementedError("ONNX export of quantized output is not supported")
         if self.return_layernorm_output and self.return_bias:
-            return output, bias_tensor.to(input_dtype), ln_out_return
+            return output, bias_tensor.to(inp_dtype), ln_out_return
         if self.return_layernorm_output:
             return output, ln_out_return
         if self.return_bias:
-            return output, bias_tensor.to(input_dtype)
+            return output, bias_tensor.to(inp_dtype)
         return output

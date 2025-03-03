@@ -1121,9 +1121,14 @@ class Linear(TransformerEngineBaseModule):
 
     def onnx_forward(
         self,
-        input: torch.Tensor,
+        inp: torch.Tensor,
         fp8_output: bool,
     ) -> torch.Tensor:
+        """
+            ONNX-compatible version of the forward function that provides numerical equivalence
+            while only using operations that have defined ONNX symbolic translations.
+            This simplified implementation is designed specifically for inference scenarios.
+        """
         assert_warmed_up(self)
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         (
@@ -1132,23 +1137,23 @@ class Linear(TransformerEngineBaseModule):
             output_quantizer,
             *_,
         ) = self._get_quantizers(fp8_output, False)
-        input_dtype = input.dtype
+        inp_dtype = inp.dtype
 
         if input_quantizer is not None:
-            input_q = input_quantizer.onnx_quantize(input)
-            input = input_quantizer.onnx_dequantize(input_q)
-            input = input.to(input_dtype)
+            inp_q = input_quantizer.onnx_quantize(inp)
+            inp = input_quantizer.onnx_dequantize(inp_q)
+            inp = inp.to(inp_dtype)
         if weight_quantizer is not None:
             weight_q = weight_quantizer.onnx_quantize(weight_tensor)
             weight_tensor = weight_quantizer.onnx_dequantize(weight_q)
         if bias_tensor is not None:
-            bias_tensor = bias_tensor.to(input.dtype)
-        weight_tensor = weight_tensor.to(input.dtype)
+            bias_tensor = bias_tensor.to(inp_dtype)
+        weight_tensor = weight_tensor.to(inp_dtype)
 
         if self.apply_bias:
-            output = onnx_gemm(weight_tensor, input, bias_tensor)
+            output = onnx_gemm(weight_tensor, inp, bias_tensor)
         else:
-            output = onnx_gemm(weight_tensor, input, None)
+            output = onnx_gemm(weight_tensor, inp, None)
 
         if output_quantizer is not None:
             raise NotImplementedError("ONNX export of quantized output is not supported")
