@@ -218,7 +218,6 @@ class InferenceParams:
             device=torch.cuda.current_device(),
         )
 
-
     def reset(self):
         """Reset InferenceParams state"""
         self.sequences = OrderedDict()
@@ -645,7 +644,6 @@ class PagedKVCacheManager(KVCacheManager):
             device=torch.cuda.current_device(),
         )
         self.cache[layer_number] = (k_cache, v_cache)
-
 
     def print_cache(self):
         """Print KV cache status"""

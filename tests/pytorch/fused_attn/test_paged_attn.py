@@ -545,7 +545,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        #with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
+        # with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
         model = [
             make_graphed_callables(
                 model[i],
@@ -650,9 +650,11 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
-                    *incremental_output
-                    if isinstance(incremental_output, List)
-                    else incremental_output,
+                    *(
+                        incremental_output
+                        if isinstance(incremental_output, List)
+                        else incremental_output
+                    ),
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,

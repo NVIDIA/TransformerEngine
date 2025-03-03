@@ -2062,7 +2062,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 #    flash_attn_fwd = _flash_attn_varlen_fwd_v3
                 # else:
                 #    flash_attn_fwd = _flash_attn_fwd_v3
-                flash_attn_fwd = _flash_attn_fwd_v3  # pylint: disable=possibly-used-before-assignment
+                flash_attn_fwd = (
+                    _flash_attn_fwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
             else:
                 if qkv_format == "thd":
@@ -3014,11 +3016,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if use_fa_v3:
-                #if ctx.qkv_format == "thd":
+                # if ctx.qkv_format == "thd":
                 #    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                #else:
+                # else:
                 #    flash_attn_bwd = _flash_attn_bwd_v3
-                flash_attn_bwd = _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                flash_attn_bwd = (
+                    _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
@@ -4081,9 +4085,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if use_fa_v3:
-                #if ctx.qkv_format == "thd":
+                # if ctx.qkv_format == "thd":
                 #    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                #else:
+                # else:
                 #    flash_attn_bwd = _flash_attn_bwd_v3
                 flash_attn_bwd = _flash_attn_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
@@ -4614,11 +4618,13 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
             if use_fa_v3:
-                #if ctx.qkv_format == "thd":
+                # if ctx.qkv_format == "thd":
                 #    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                #else:
+                # else:
                 #    flash_attn_bwd = _flash_attn_bwd_v3
-                flash_attn_bwd = _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                flash_attn_bwd = (
+                    _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_backward_kwargs["window_size"] = ctx.window_size
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
@@ -5609,7 +5615,7 @@ def get_qkv_layout(
         Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 
-    #q, k, v = [x.contiguous() for x in [q, k, v]]
+    # q, k, v = [x.contiguous() for x in [q, k, v]]
     check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
     assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
     if "_2" in qkv_format:
@@ -6056,7 +6062,9 @@ class FlashAttention(torch.nn.Module):
                 #       |                         |     bshd/sbhd/thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
-                    func = flash_attn_func if not use_fa_v3 else flash_attn_func_v3  # pylint: disable=possibly-used-before-assignment
+                    func = (
+                        flash_attn_func if not use_fa_v3 else flash_attn_func_v3
+                    )  # pylint: disable=possibly-used-before-assignment
                 else:
                     if not use_fa_v3:
                         func = flash_attn_varlen_func
@@ -8767,7 +8775,7 @@ class MultiheadAttention(torch.nn.Module):
                     )
 
                 sequence_start = inference_params.get_seqlens_pre_step()
-                #sequence_start = inference_params.seqlens[0]
+                # sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]
