@@ -528,7 +528,6 @@ def get_attention_backend(
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
     # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
-    #          | FP8            | non-paged       | sm89+        | bshd,sbhd,thd |
     # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
     # Flash v3 | FP16/BF16      | non-paged/paged | sm80         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm80         | thd           | >= 1
@@ -544,8 +543,9 @@ def get_attention_backend(
                 if _flash_attn_3_is_installed:
                     logger.debug("Disabling FlashAttention 3 for FP8 KV caching and non-THD")
                 use_flash_attention_3 = False
-            if use_fused_attention and inference_params.is_paged:
-                logger.debug("Disabling FusedAttention for FP8 paged attention")
+            if use_fused_attention:
+                # TODO(cyang): enable fused attn for FP8 non-paged
+                logger.debug("Disabling FusedAttention for FP8 KV caching")
                 use_fused_attention = False
             if use_unfused_attention:
                 logger.debug("Disabling UnfusedAttention for FP8 attention")
@@ -6939,35 +6939,6 @@ class FusedAttention(torch.nn.Module):
                 )
         else:
             with self.attention_dropout_ctx():
-                print(
-                    f"{max_seqlen_q=}",
-                    f"{max_seqlen_kv=}",
-                    f"{cu_seqlens_q=}",
-                    f"{cu_seqlens_kv=}",
-                    f"{cu_seqlens_q_padded=}",
-                    f"{cu_seqlens_kv_padded=}",
-                    f"{page_table_k=}",
-                    f"{page_table_v=}",
-                    f"{query_layer.shape}",
-                    f"{key_layer.shape}",
-                    f"{value_layer.shape}",
-                    f"{qkv_dtype=}",
-                    f"{core_attention_bias=}",
-                    f"{self.softmax_scale=}",
-                    f"{self.attention_dropout if self.training else 0.0=}",
-                    f"{fast_zero_fill=}",
-                    f"{qkv_layout=}",
-                    f"{core_attention_bias_type=}",
-                    f"{attn_mask_type=}",
-                    f"{window_size=}",
-                    f"{None=}",  # rng_gen
-                    f"{fused_attention_backend=}",
-                    f"{use_FAv2_bwd=}",
-                    f"{fp8=}",
-                    f"{fp8_meta=}",
-                    f"{quantizers=}",
-                    f"{self.deterministic=}",
-                )
                 output = FusedAttnFunc.apply(
                     self.training,
                     max_seqlen_q,
@@ -7704,15 +7675,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     for x in [query_layer, key_layer, value_layer]
                 ]
 
-                if query_layer.shape[0] == 2:
-                    print("bbbbbbbbbbbbbbbbbb")
-                    print("q", query_layer[0, 0, 0, :4])
-                    print("k", key_layer[0, 0, 0, :4])
-                    print("v", value_layer[0, 0, 0, :4])
-                    print("q", query_layer[1, 0, 0, :4])
-                    print("k", key_layer[1, 0, 0, :4])
-                    print("v", value_layer[1, 0, 0, :4])
-                    print("bbbbbbbbbbbbbbbbbb")
                 (
                     key_layer,
                     value_layer,
@@ -7730,58 +7692,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_q_padded = None
                 cu_seqlens_kv_padded = None
 
-            if query_layer.shape[0] >= 7:
-                # print('q', query_layer[0,0,0,:4])
-                # print('k',   key_layer[0,0,0,:4])
-                # print('v', value_layer[0,0,0,:4])
-                # print('q', query_layer[1,6,0,:4])
-                # print('k',   key_layer[1,6,0,:4])
-                # print('v', value_layer[1,6,0,:4])
-                # print('xxxxxxx')
-                # print('q', query_layer[5,28,0,:4])
-                # print('k',   key_layer[5,28,0,:4])
-                # print('v', value_layer[5,28,0,:4])
-                # print('q', query_layer[6,15,0,:4])
-                # print('k',   key_layer[6,15,0,:4])
-                # print('v', value_layer[6,15,0,:4])
-                print("xxxxxxx")
-                # print('q', query_layer[5,26,0,:4])
-                # print('k',   key_layer[5,26,0,:4])
-                # print('v', value_layer[5,26,0,:4])
-                # print('q', query_layer[6,13,0,:4])
-                # print('k',   key_layer[6,13,0,:4])
-                # print('v', value_layer[6,13,0,:4])
-                # torch.save(query_layer, 'full_q.pt')
-                # torch.save(key_layer, 'full_k.pt')
-                # torch.save(value_layer, 'full_v.pt')
-                print("q", query_layer[5, 35:37, 0, :4])
-                print("k", key_layer[5, 35:37, 0, :4])
-                print("v", value_layer[5, 35:37, 0, :4])
-                print("q", query_layer[6, 22:24, 0, :4])
-                print("k", key_layer[6, 22:24, 0, :4])
-                print("v", value_layer[6, 22:24, 0, :4])
-            if query_layer.shape[0] == 2:
-                # torch.save(query_layer, 'partial_q.pt')
-                # torch.save(key_layer, 'partial_k.pt')
-                # torch.save(value_layer, 'partial_v.pt')
-                print("q", query_layer[0, 0, 0, :4])
-                print("k", key_layer[0, 36, 0, :4])
-                print("v", value_layer[0, 36, 0, :4])
-                print("q", query_layer[1, 0, 0, :4])
-                print("k", key_layer[1, 23, 0, :4])
-                print("v", value_layer[1, 23, 0, :4])
-                # print('q', query_layer[0,0,0,:4])
-                # print('k',   key_layer[0,26,0,:4])
-                # print('v', value_layer[0,26,0,:4])
-                # print('q', query_layer[1,0,0,:4])
-                # print('k',   key_layer[1,13,0,:4])
-                # print('v', value_layer[1,13,0,:4])
-                # print('q', query_layer[0,0,0,:4])
-                # print('k',   key_layer[0,35:37,0,:4])
-                # print('v', value_layer[0,35:37,0,:4])
-                # print('q', query_layer[1,0,0,:4])
-                # print('k',   key_layer[1,22:24,0,:4])
-                # print('v', value_layer[1,22:24,0,:4])
             # get accurate qkv_layout
             if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
                 (

@@ -279,7 +279,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
          (cudnn_runtime_version >= 90600 &&
           attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK &&
           max_seqlen_q <= max_seqlen_kv && bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-          dropout == 0.0)) &&
+          dropout == 0.0) ||
+         (cudnn_runtime_version >= 90701)) &&
         // bias + mask combination
         (!(cudnn_runtime_version >= 8906 &&
            (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
@@ -294,7 +295,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
            (q_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90) ||
            kv_format == NVTE_QKV_Format::NVTE_SBHD || kv_format == NVTE_QKV_Format::NVTE_BSHD ||
            (kv_format == NVTE_QKV_Format::NVTE_THD && sm_arch_ >= 90)) &&
-          cudnn_runtime_version >= 90700)) &&
+          cudnn_runtime_version >= 90701)) &&
         // sliding window
         // pre-9.2: full attn, causal
         ((cudnn_runtime_version < 90200 && window_size_left == -1 &&
