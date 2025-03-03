@@ -537,9 +537,7 @@ def get_attention_backend(
                 use_fused_attention = False
         else:
             if q_format == "thd" and pad_between_seqs:
-                logger.debug(
-                    "Disabling all backends for pad_between_seqs = True and KV caching"
-                )
+                logger.debug("Disabling all backends for pad_between_seqs = True and KV caching")
                 use_flash_attention = False
                 use_fused_attention = False
                 use_unfused_attention = False
@@ -795,7 +793,9 @@ def get_attention_backend(
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
     ):
-        if (use_flash_attention_2 and _flash_attn_is_installed) or (use_flash_attention_3 and _flash_attn_3_is_installed):
+        if (use_flash_attention_2 and _flash_attn_is_installed) or (
+            use_flash_attention_3 and _flash_attn_3_is_installed
+        ):
             logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
 
@@ -965,11 +965,7 @@ def get_attention_backend(
         "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
         " UnfusedDotProductAttention=%s}",
         bool(available_backends[0]),
-        (
-            f" ({str(flash_attention_backend)})"
-            if flash_attention_backend is not None
-            else ""
-        ),
+        (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
         bool(available_backends[1]),
         (
             f" (sub-backend {int(fused_attention_backend)})"
@@ -3127,7 +3123,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q,
                                 ctx.max_seqlen_kv,
                             ]
-                        if use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                        if use_flash_attn_3 or (
+                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        ):
                             fa_backward_kwargs["window_size"] = (-1, 0)
                         elif _flash_attn_2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -3242,7 +3240,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q,
                                 ctx.max_seqlen_kv // 2,
                             ]
-                        if use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                        if use_flash_attn_3 or (
+                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        ):
                             fa_backward_kwargs["window_size"] = (-1, -1)
                         if _flash_attn_2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -3359,7 +3359,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q // 2,
                                 ctx.max_seqlen_kv,
                             ]
-                        if use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                        if use_flash_attn_3 or (
+                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        ):
                             fa_backward_kwargs["window_size"] = (-1, -1)
                         elif _flash_attn_2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -3916,7 +3918,9 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 max_seqlen_q,
                                 max_seqlen_kv_,
                             ]
-                        if use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                        if use_flash_attn_3 or (
+                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        ):
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
                         elif _flash_attn_2_7_0_plus:
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
@@ -6043,9 +6047,9 @@ class FlashAttention(torch.nn.Module):
                         fa_optional_forward_kwargs["block_table"] = (
                             inference_params.cache_manager.page_table[:batch_size]
                             if inference_params.is_paged
-                            else inference_params.cache_manager.batch_indices_post_step.unsqueeze(1)[
-                                :batch_size
-                            ]
+                            else inference_params.cache_manager.batch_indices_post_step.unsqueeze(
+                                1
+                            )[:batch_size]
                         )
                     output = func(
                         query_layer,
@@ -8720,7 +8724,9 @@ class MultiheadAttention(torch.nn.Module):
                 elif self.qkv_format == "bshd":
                     sequence_length = key_layer.size(1)
                 else:
-                    raise ValueError(f"qkv_format={self.qkv_format} not supported for KV caching and RoPE.")
+                    raise ValueError(
+                        f"qkv_format={self.qkv_format} not supported for KV caching and RoPE."
+                    )
 
                 sequence_start = inference_params.get_seqlens_pre_step()
                 # sequence_start = inference_params.seqlens[0]

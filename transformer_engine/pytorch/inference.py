@@ -271,7 +271,9 @@ class InferenceParams:
 
     def get_seqlens_pre_step(self):
         """Get cached sequence lengths before the stepping"""
-        return torch.Tensor(list(self.sequences_pre_step.values())).to(dtype=torch.int32, device="cpu")
+        return torch.Tensor(list(self.sequences_pre_step.values())).to(
+            dtype=torch.int32, device="cpu"
+        )
 
     def convert_paged_to_nonpaged(self, layer_number: int):
         """
@@ -303,8 +305,8 @@ class InferenceParams:
             b=batch_size,
         )
 
-        new_k_cache = new_k_cache[:self.batch_size].contiguous()
-        new_v_cache = new_v_cache[:self.batch_size].contiguous()
+        new_k_cache = new_k_cache[: self.batch_size].contiguous()
+        new_v_cache = new_v_cache[: self.batch_size].contiguous()
 
         return new_k_cache, new_v_cache
 
