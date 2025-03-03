@@ -6,13 +6,13 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType as TE_DType_map
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
@@ -124,6 +124,23 @@ class MXFP8Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
+
+    def create_tensor_from_data(self, data: torch.Tensor, scale_inv: torch.Tensor, fake_dtype: torch.dtype) -> MXFP8Tensor:
+        return MXFP8Tensor(
+            shape=data.shape,
+            dtype=fake_dtype,
+            rowwise_data=data,
+            rowwise_scale_inv=scale_inv,
+        )
+
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(dtype=torch.float32)
+        data, scale_inv = torch.ops.tex.mxfp8_quantize(tensor)
+        return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
+    
+    def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
+        return torch.ops.tex.mxfp8_dequantize(tensor._data, tensor._scale_inv, int(TE_DType_map[self.dtype]))
 
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):

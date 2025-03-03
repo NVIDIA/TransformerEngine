@@ -66,7 +66,13 @@ assert OPSET >= TRILU_OPSET
 ORT_CUSTOM_OPS_LIB = os.path.join(TESTS_DIR, "custom_ort_ops", "libcustom_ort_ops.so")
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 skip_FP8 = pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+
+fp8_recipes = [
+    recipe.MXFP8BlockScaling(),
+    recipe.DelayedScaling(),
+]
 
 supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
@@ -83,7 +89,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
         PyCustomOpDef.dt_uint8
     ]
 )
-def trt_quantize(t, scale):
+def trt_fp8_quantize(t, scale):
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
         scale=1/torch.from_numpy(scale).cuda(), 
@@ -102,7 +108,7 @@ def trt_quantize(t, scale):
         PyCustomOpDef.dt_float
     ]
 )
-def trt_dequantize(t, scale):
+def trt_fp8_dequantize(t, scale):
     x = torch.from_numpy(t).cuda()
     print("-" * 50, scale)
     q = te.tensor.float8_tensor.Float8Quantizer(
@@ -111,6 +117,37 @@ def trt_dequantize(t, scale):
         fp8_dtype=tex.DType.kFloat8E4M3)
     quantizer_tensor = q.create_tensor_from_data(x, fake_dtype=torch.float32)
     return quantizer_tensor.dequantize().cpu().numpy()
+
+@onnx_op(
+    op_type="trt::TRT_MXFP8QuantizeLinear",
+    domain="trt",
+    inputs=[
+        PyCustomOpDef.dt_float,
+    ],
+)
+def trt_mxfp8_quantize(t):
+    x = torch.from_numpy(t).cuda()
+    q = te.tensor.mxfp8_tensor.MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    return q(x)._data.cpu().numpy()
+
+@onnx_op(
+    op_type="trt::TRT_MXFP8DequantizeLinear",
+    domain="trt",
+    inputs=[
+        PyCustomOpDef.dt_uint8,
+        PyCustomOpDef.dt_uint8,
+    ],
+    outputs=[
+        PyCustomOpDef.dt_float
+    ]
+)
+def trt_mxfp8_dequantize(t, scale_inv):
+    x = torch.from_numpy(t).cuda()
+    scale_inv_tensor = torch.from_numpy(scale_inv).cuda()
+    q = te.tensor.mxfp8_tensor.MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer_tensor = q.create_tensor_from_data(x, scale_inv_tensor, fake_dtype=torch.float32)
+    return quantizer_tensor.dequantize().cpu().numpy()
+
 
 @pytest.fixture()
 def seed_default_rng():
@@ -139,13 +176,13 @@ def do_export(
     inp: torch.Tensor,
     fname: str,
     use_fp8: bool = True,
+    fp8_recipe: recipe.FP8Recipe = None,
     opset: int = OPSET,
     input_names: List[str] = None,
     output_names: List[str] = None,
     dynamic_shapes: List[str] = None,
 ):
     """Export to ONNX"""
-    fp8_recipe = create_fp8_recipe()
     input_names = input_names or ["input"]
     output_names = output_names or ["output"]
 
@@ -200,9 +237,8 @@ def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
         )
 
 
-def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool):
+def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool, fp8_recipe: recipe.FP8Recipe):
     """Transformer Engine forward propagation."""
-    fp8_recipe = create_fp8_recipe()
     with torch.inference_mode(), te.fp8_autocast(
         enabled=is_fp8, fp8_recipe=fp8_recipe
     ), warnings.catch_warnings():
@@ -382,10 +418,9 @@ def get_attn_mask_str(use_mask, attn_mask_type):
 """
 Tests cases begin here.
 """
-
-
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
 # Returning the bias is a TE fusion optimization we don't care about.
 @pytest.mark.parametrize("return_bias", [False])
 @pytest.mark.parametrize(
@@ -405,6 +440,7 @@ def test_export_linear(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
+    recipe: recipe.FP8Recipe,
     use_bias: bool,
     return_bias: bool,
     precision: torch.dtype,
@@ -412,6 +448,8 @@ def test_export_linear(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -456,6 +494,7 @@ def test_export_linear(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize(
     "precision",
     [
@@ -470,6 +509,7 @@ def test_export_layernorm(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
+    recipe: recipe.FP8Recipe,
     precision: torch.dtype,
     zero_centered_gamma: bool,
     normalization: str,
@@ -477,6 +517,8 @@ def test_export_layernorm(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -489,7 +531,7 @@ def test_export_layernorm(
     fname = f"te.layernorm_linear{fp8_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=use_fp8):
+        with te.fp8_autocast(enabled=use_fp8, recipe=recipe):
             layernorm_cls = te.LayerNorm if normalization == "LayerNorm" else te.RMSNorm
             model = layernorm_cls(
                 hidden_size,
@@ -540,6 +582,8 @@ def test_export_layernorm_linear(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -612,6 +656,8 @@ def test_export_layernorm_mlp(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -725,6 +771,7 @@ test_configs_attention_type = [
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("return_layernorm_output", [False])
@@ -735,6 +782,7 @@ def test_export_multihead_attention(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
+    recipe: recipe.FP8Recipe,
     use_mask: bool,
     attn_mask_type: str,
     precision: torch.dtype,
@@ -746,6 +794,8 @@ def test_export_multihead_attention(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     hidden_size = 256
     sequence_length = 128
@@ -888,6 +938,7 @@ def test_export_multihead_attention(
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize(
     "output_layernorm",
@@ -904,6 +955,7 @@ def test_export_transformer_layer(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
+    recipe: recipe.FP8Recipe,
     use_mask: bool,
     attn_mask_type: str,
     output_layernorm: bool,
@@ -915,6 +967,8 @@ def test_export_transformer_layer(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
+    if recipe.mxfp8() and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
 
     # Layer configuration
     hidden_size = 64

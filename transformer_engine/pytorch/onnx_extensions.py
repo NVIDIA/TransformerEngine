@@ -26,8 +26,9 @@ import onnxscript
 from onnxscript import opset18 as op
 import transformer_engine_torch as tex
 from .tensor.float8_tensor import Float8Quantizer
+from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .constants import TE_DType
-from typing import Optional
+from typing import Optional, Tuple
 from .export import is_in_onnx_export_mode
 
 # ONNX GEMM for inference
@@ -131,6 +132,75 @@ def TRT_FP8DequantizeLinear(
     scale: onnxscript.onnx_types.TensorType
 ) -> onnxscript.onnx_types.TensorType:
     """ TRT FP8 Dequantize Linear from Float8Tensor used for inference. """
+    return tensor
+
+# ONNX MXFP8 Quantization
+
+@torch.library.custom_op("tex::mxfp8_quantize", mutates_args=[])
+def onnx_quantize_mxfp8_op(tensor: torch.Tensor) -> torch.Tensor:
+    """ Quantize to MXFP8Tensor used for inference. """
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantized_tensor = quantizer(tensor)
+    return quantized_tensor._data, quantized_tensor._scale_inv
+
+@onnx_quantize_mxfp8_op.register_fake
+def _(tensor: torch.Tensor):
+    """ Fake quantize to MXFP8Tensor used for inference. """
+    mxfp8_scale_shape = tensor.shape
+    return torch.empty(
+        tensor.shape, 
+        dtype=torch.uint8, 
+        device=tensor.device
+    ), torch.empty(
+        mxfp8_scale_shape, 
+        dtype=torch.uint8, 
+        device=tensor.device
+    )
+
+def onnx_quantize_mxfp8_symbolic(
+    tensor: onnxscript.onnx_types.TensorType,
+    scale: float,
+) -> onnxscript.onnx_types.TensorType:
+    """ Symbolic quantize to MXFP8Tensor used for inference. """
+    scale_inv = op.Constant(value_float=1/scale)
+    return TRT_MXFP8QuantizeLinear(tensor, scale_inv)
+
+# This is a dummy function that is used to create a TRT MXFP8 Quantize Linear node.
+@onnxscript.script(trt_opset, default_opset=op)
+def TRT_MXFP8QuantizeLinear(
+    tensor: onnxscript.onnx_types.TensorType
+) -> Tuple[onnxscript.onnx_types.TensorType, onnxscript.onnx_types.TensorType]:
+    """ TRT MXFP8 Quantize Linear used for inference. """
+    return tensor, tensor
+
+# ONNX MXFP8 Dequantization
+
+@torch.library.custom_op("tex::mxfp8_dequantize", mutates_args=[])
+def onnx_dequantize_mxfp8_op(tensor: torch.Tensor, scale_inv: torch.Tensor) -> torch.Tensor:
+    """ Dequantize from MXFP8Tensor used for inference. """
+    quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+    quantizer_tensor = quantizer.create_tensor_from_data(tensor, fake_dtype=torch.float32)
+    return quantizer_tensor.dequantize()
+
+@onnx_dequantize_mxfp8_op.register_fake
+def _(tensor: torch.Tensor, scale_inv: torch.Tensor):
+    """ Fake dequantize from MXFP8Tensor used for inference. """
+    return torch.empty(tensor.shape, dtype=torch.float32, device=tensor.device)
+
+def onnx_dequantize_mxfp8_symbolic(
+    tensor: onnxscript.onnx_types.TensorType,
+    scale_inv: onnxscript.onnx_types.TensorType
+) -> onnxscript.onnx_types.TensorType:
+    """ Symbolic dequantize from MXFP8Tensor used for inference. """
+    return TRT_MXFP8DequantizeLinear(tensor, scale_inv)
+
+# This is a dummy function that is used to create a TRT MXFP8 Dequantize Linear node.
+@onnxscript.script(trt_opset, default_opset=op)
+def TRT_MXFP8DequantizeLinear(
+    tensor: onnxscript.onnx_types.TensorType,
+    scale_inv: onnxscript.onnx_types.TensorType
+) -> onnxscript.onnx_types.TensorType:
+    """ TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference. """
     return tensor
 
 # ONNX LayerNorm
