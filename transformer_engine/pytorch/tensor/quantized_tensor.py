@@ -439,7 +439,8 @@ class QuantizedTensor(torch.Tensor):
         data.
 
         """
-        shape = shape if shape is not None else tensor.shape
+        if shape is None:
+            shape = data.shape if data is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
         if data is not None:

@@ -11,14 +11,16 @@ from .export import is_in_onnx_export_mode
 
 # pylint: disable=unnecessary-lambda-assignment
 
-jit_fuser = torch.jit.script
+jit_fuser = lambda func: func
 if torch.__version__ >= "2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     jit_fuser = torch.compile
+
 
 # See: https://github.com/NVIDIA/TransformerEngine/issues/597
 dropout_fuser = torch.jit.script
 if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))):
     dropout_fuser = torch.compile
+
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
