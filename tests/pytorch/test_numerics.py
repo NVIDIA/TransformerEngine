@@ -2127,9 +2127,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
         cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
         cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
-        seqlens_kv = (i + 1) * torch.ones(B, dtype=torch.int32, device="cuda")
-        cu_seqlens_kv = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens_kv[1:] = torch.cumsum(seqlens_kv, dim=0)
+        cu_seqlens_kv = cu_seqlens_q.clone()
 
         mask_type = "padding"
         kwargs = {}
