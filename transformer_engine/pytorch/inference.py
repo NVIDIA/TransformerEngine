@@ -121,10 +121,6 @@ class InferenceParams:
         Total number of pages in the KV cache. Required for is_paged = True.
     page_size: int, default = None
         Page size of the KV cache. Required for is_paged = True.
-    num_heads_q: int, default = None
-        Number of attention heads in queries
-    head_dim_q: int, default = None
-        Head size for queries. Required for qkv_format = 'thd'.
     max_ctx_len: int, default = None
         Maximum context length in inference. 1 <= max_ctx_len <= max_seqlen_kv.
     qkv_format: str, default = "bshd"
@@ -144,8 +140,6 @@ class InferenceParams:
         is_paged: bool = False,
         total_num_pages: int = None,
         page_size: int = None,
-        num_heads_q: int = None,
-        head_dim_q: int = None,
         max_ctx_len: int = None,
         qkv_format: str = "bshd",
         cache_manager: KVCacheManager = None,
@@ -242,7 +236,7 @@ class InferenceParams:
             f"head_dim_v={self.head_dim_v}"
         )
 
-    def allocate_memory(self, layer_number: int, qkv_format: str):
+    def allocate_memory(self, layer_number: int):
         """
         Allocate memory for the cache. For layer layer_number,
         - NonPagedKVCacheManager:

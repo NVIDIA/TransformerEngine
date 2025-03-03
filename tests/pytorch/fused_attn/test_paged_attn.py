@@ -384,7 +384,7 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention", "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
@@ -392,7 +392,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     logger = logging.getLogger("test_paged_attn")
     num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     config = model_configs_infer[model]
-    if backend == "FlashAttention" and _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
@@ -413,7 +413,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     page_size = None
     total_num_pages = None
     if is_paged:
-        page_size = 256 if backend == "FlashAttention" and _flash_attn_3_is_installed else 16
+        page_size = 256 if backend == "FlashAttention" and not _flash_attn_3_is_installed else 16
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
     else:
@@ -438,13 +438,11 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         is_paged=is_paged,
         page_size=page_size,
         total_num_pages=total_num_pages,
-        num_heads_q=config.num_heads,
-        head_dim_q=config.head_dim_qk,
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
     )
     for layer_number in range(1, num_layers + 1):
-        inference_params.allocate_memory(layer_number, qkv_format)
+        inference_params.allocate_memory(layer_number)
 
     # figure out supported backends
     inference_params_qkv_format = "bshd"
@@ -546,18 +544,18 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         sample_kwargs["max_seqlen_q"] = config.max_ctx_len
         sample_kwargs["max_seqlen_kv"] = config.max_seqlen_kv
 
-        with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
-            model = [
-                make_graphed_callables(
-                    model[i],
-                    sample_args,
-                    num_warmup_iters=10,
-                    fp8_enabled=is_fp8,
-                    sample_kwargs=sample_kwargs,
-                    fp8_recipe=fp8_recipe,
-                )
-                for i in range(num_layers)
-            ]
+        #with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
+        model = [
+            make_graphed_callables(
+                model[i],
+                sample_args,
+                num_warmup_iters=10,
+                fp8_enabled=is_fp8,
+                sample_kwargs=sample_kwargs,
+                fp8_recipe=fp8_recipe,
+            )
+            for i in range(num_layers)
+        ]
 
         sim.reset()
         inference_params.reset()
@@ -712,6 +710,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
 
-    if backend == "FlashAttention" and _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
         config.max_seqlen_q = config_max_seqlen_q
         config.max_seqlen_kv = config_max_seqlen_kv
