@@ -12,8 +12,7 @@ from nvdlfw_inspect.registry import Registry
 import torch
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
+from transformer_engine.pytorch.tensor.quantized_tensor import all_tensor_types
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
@@ -110,7 +109,7 @@ class TEDefaultFeatures:
 
     def modify_tensor(self, *_args, **_kwargs):
         """API call used to process the tensor."""
-        raise RuntimeError(
+        raise NotImplementedError(
             "modify_tensor_enabled() returned True, modify_tensor() was invoked, but it is not"
             " handled by any API."
         )
@@ -200,13 +199,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
         if api_name == "modity_tensor":
-            assert type(ret) in [
-                torch.Tensor,
-                Float8Tensor,
-                Float8TensorBase,
-                MXFP8Tensor,
-                MXFP8TensorBase,
-            ]
+            assert type(ret) in all_tensor_types
             if type(ret) == torch.Tensor:  # pylint: disable=unidiomatic-typecheck
                 assert ret.dtype == kwargs["dtype"]
 

@@ -125,9 +125,9 @@ class DebugQuantizer(Quantizer):
 
     def get_tensors_plan(self):
         """
-        Retruns (rowwise_plan, columnwise_plan), that each element of the tuple is one of the
-        API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, HIGH_PRECISION, indicating what quanitzer
-        does with these tensors.
+        Returns (rowwise_plan, columnwise_plan). Each element of the tuple is one of
+        API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, or HIGH_PRECISION, indicating the behavior
+        of this quanitzer with respect to these tensors.
         """
         import nvdlfw_inspect.api as debug_api
 

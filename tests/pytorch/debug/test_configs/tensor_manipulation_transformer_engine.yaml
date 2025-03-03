@@ -12,15 +12,15 @@ transformer_engine_fc1_manipulation:
       enabled: True
       gemms: [dgrad]
       tensors: [gradient]
-    FakeQuantFp8: # Disable FP8 GEMM for Wgrad. Fake quantize activations to Wgrad and run high precision GEMM
+    FakeQuant: # Disable FP8 GEMM for Wgrad. Fake quantize activations to Wgrad and run high precision GEMM
       enabled: True
       gemms: [fprop]
       tensors_struct:
         - tensor: activation
-          quant_format: E4M3
+          quant_format: FP8E4M3
           margin: 1
         - tensor: weight
-          quant_format: E4M3
+          quant_format: FP8E4M3
           margin: 2
 
 transformer_engine_fc2_manipulation:
@@ -43,9 +43,9 @@ transformer_engine_fc2_manipulation:
               margin: 8
             - tensor: gradient
               margin: 4
-    FakeQuantFp8: # Disable FP8 GEMM for DGrad. Fake quantize weights and gradients to DGrad and run high precision GEMM
+    FakeQuant: # Disable FP8 GEMM for DGrad. Fake quantize weights and gradients to DGrad and run high precision GEMM
       enabled: True
       gemms_struct:
         - gemm: dgrad
           tensors: [weight, gradient]
-          quant_format: E5M2
+          quant_format: FP8E5M2

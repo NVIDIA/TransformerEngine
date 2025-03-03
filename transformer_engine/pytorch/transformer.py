@@ -339,7 +339,6 @@ class TransformerLayer(torch.nn.Module):
 
         self.attn_input_format = attn_input_format
 
-        self.debug = TEDebugState.debug_enabled
         self.name = name
 
         attention_args = (
@@ -684,7 +683,7 @@ class TransformerLayer(torch.nn.Module):
                 enc_dec_attn_mask[i].dtype == torch.bool for i in range(len(enc_dec_attn_mask))
             ), "Encoder-decoder attention mask must be boolean tensor(s)"
 
-        if self.debug:
+        if TEDebugState.debug_enabled:
             TransformerEngineBaseModule._validate_name(self)
 
         # For AMP

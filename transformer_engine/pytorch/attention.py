@@ -7964,7 +7964,6 @@ class MultiheadAttention(torch.nn.Module):
         self.hidden_size_q = self.hidden_size_per_attention_head * num_attention_heads
         self.hidden_size_kv = self.hidden_size_per_attention_head * self.num_gqa_groups
 
-        self.debug = TEDebugState.debug_enabled
         self.name = name
 
         common_gemm_kwargs = {
@@ -8293,7 +8292,7 @@ class MultiheadAttention(torch.nn.Module):
             core_attention_bias_type in AttnBiasTypes
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
-        if self.debug:
+        if TEDebugState.debug_enabled:
             TransformerEngineBaseModule._validate_name(self)
 
         # =================================================

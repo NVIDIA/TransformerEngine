@@ -117,13 +117,13 @@ def general_gemm(
         A = A.get_tensor(not transa)
         B = B.get_tensor(transb)
 
-    assert (type(A) in [torch.Tensor, torch.nn.parameter.Parameter]) == (
-        type(B) in [torch.Tensor, torch.nn.parameter.Parameter]
-    ), (
-        "[Debug tools] Processed tensors should both be FP8 tensors or both be torch tensors  "
-        f"            but type(A) = {type(A)},             "
-        f"  type(B) = {type(B)}"
-    )
+        assert (type(A) in [torch.Tensor, torch.nn.parameter.Parameter]) == (
+            type(B) in [torch.Tensor, torch.nn.parameter.Parameter]
+        ), (
+            "[Debug tools] Processed tensors should both be FP8 tensors or both be torch tensors  "
+            f"            but type(A) = {type(A)},             "
+            f"  type(B) = {type(B)}"
+        )
 
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]

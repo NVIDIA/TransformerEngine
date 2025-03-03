@@ -459,7 +459,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fp8_meta["fp8_checkpoint"] = False
         self.fp8_meta["fp8_group"] = None
         self.fp8_meta_tensors_initialized = False
-        self.debug = False
         self.quantizers = {"scaling_fwd": {}, "scaling_bwd": {}}
         self.tp_group = None
         self.tp_size = 1
@@ -847,14 +846,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.restore_fp8_meta_tensors(self.fp8_meta)
 
-        if self.debug:
-            import nvdlfw_inspect.api as debug_api
-
-            # if debug_api is ended,
-            # then simply end debug
-            if debug_api.DEBUG_MANAGER is None:
-                self.debug = False
-                TEDebugState.reset()
 
     def set_nccl_overlap_warning_if_tp(self) -> None:
         """When using TP, the NCCL communication needs to be scheduled
@@ -1118,7 +1109,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         This is invoked in the forward() method as module names are assigned after Model is initialized in Megatron-LM.
         If no name is assigned, it creates a default name with layer count as the variable.
         """
-        assert self.debug
+        assert TEDebugState.debug_enabled
         import nvdlfw_inspect.api as debug_api
 
         if self.name is None:

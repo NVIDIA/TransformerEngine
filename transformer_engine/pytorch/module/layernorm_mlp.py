@@ -1207,12 +1207,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
             bool(int(os.getenv("NVTE_GEMM_GELU_FUSION", "0")))
             and self.activation == "gelu"
             and ((_ub_communicators is None) or (not get_ub("fc1_fprop").is_atomic_gemm()))
-            and not self.debug
         )
-        self.debug = TEDebugState.debug_enabled
         self.name = name
 
-        if self.debug:
+        if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         if tp_group is None:
@@ -1368,7 +1366,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self,
         inp: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-        overwrite_name: str = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply layer normalization to the input followed by a feedforward network (MLP Block).
@@ -1391,8 +1388,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        if self.debug:
-            self._validate_name(overwrite_name)
+        if TEDebugState.debug_enabled:
+            self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1403,9 +1400,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, num_gemms=2) as inp:
 
-            quantizers = self._get_quantizers() if not self.debug else self._get_debug_quantizers()
-            debug = self.debug
-            if self.debug:
+            quantizers = self._get_quantizers() if not TEDebugState.debug_enabled else self._get_debug_quantizers()
+            debug = TEDebugState.debug_enabled
+            if debug:
                 if not any_feature_enabled(quantizers):
                     quantizers = self._get_quantizers()
                     debug = False
@@ -1571,7 +1568,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
         base_quantizers = list(self._get_quantizers())
-        assert self.debug
+        assert TEDebugState.debug_enabled
 
         def make_debug(prefix, offset):
             labels = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]

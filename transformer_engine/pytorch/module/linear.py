@@ -775,10 +775,9 @@ class Linear(TransformerEngineBaseModule):
         self.apply_bias = bias and not return_bias
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
-        self.debug = TEDebugState.debug_enabled
         self.name = name
 
-        if self.debug:
+        if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn of userbuffers
 
         if device == "meta":
@@ -991,7 +990,6 @@ class Linear(TransformerEngineBaseModule):
         is_first_microbatch: Optional[bool] = None,
         fp8_output: Optional[bool] = False,
         fp8_grad: Optional[bool] = False,
-        overwrite_name: Optional[str] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1014,8 +1012,9 @@ class Linear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        if self.debug:
-            self._validate_name(overwrite_name)
+        
+        if TEDebugState.debug_enabled:
+            self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1047,11 +1046,11 @@ class Linear(TransformerEngineBaseModule):
 
             quantizers = (
                 self._get_quantizers(fp8_output, fp8_grad)
-                if not self.debug
+                if not TEDebugState.debug_enabled
                 else self._get_debug_quantizers(fp8_output, fp8_grad)
             )
-            debug = self.debug
-            if self.debug:
+            debug = TEDebugState.debug_enabled
+            if debug:
                 if not any_feature_enabled(quantizers):
                     # If no feature is used, then run faster implementation with debug = False.
                     quantizers = self._get_quantizers(fp8_output, fp8_grad)
@@ -1150,7 +1149,7 @@ class Linear(TransformerEngineBaseModule):
 
     def _get_debug_quantizers(self, fp8_output, fp8_grad):
         original_quantizers = self._get_quantizers(fp8_output, fp8_grad)
-        assert self.debug
+        assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]

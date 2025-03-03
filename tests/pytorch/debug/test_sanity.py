@@ -54,10 +54,10 @@ fake_quant_config:
   layers:
     layer_types: [linear]
   transformer_engine:
-    FakeQuantFp8:
+    FakeQuant:
       enabled: True
       gemms: [fprop, dgrad, wgrad]
-      quant_format: 5E2M
+      quant_format: FP8E5M2
 """,
 }
 

@@ -628,7 +628,7 @@ FAKE_QUANT_CONFIG = Template(
   layers:
     layer_types: [linear]
   transformer_engine:
-    FakeQuantFp8:
+    FakeQuant:
       enabled: True
       gemms_struct:
 $gemms
@@ -639,7 +639,7 @@ $gemms
 def fake_quant_fp8_create_config(
     fprop_inp, fprop_weight, dgrad_weight, dgrad_grad, wgrad_input, wgrad_grad, config_file
 ):
-    format_to_str = {tex.DType.kFloat8E4M3: "E4M3", tex.DType.kFloat8E5M2: "E5M2"}
+    format_to_str = {tex.DType.kFloat8E4M3: "FP8E4M3", tex.DType.kFloat8E5M2: "FP8E5M2"}
     gemms = ""
 
     def _add_tensor(quant_format, tensor):

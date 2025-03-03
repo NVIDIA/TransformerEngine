@@ -938,9 +938,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
 
-        self.debug = TEDebugState.debug_enabled
         self.name = name
-        if self.debug:
+        if TEDebugState.debug_enabled:
             self._turn_off_unsupported_features_in_debug()  # turn off userbuffers
 
         if tp_group is None:
@@ -1221,7 +1220,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        if self.debug:
+        if TEDebugState.debug_enabled:
             self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
@@ -1252,13 +1251,13 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
-            debug = self.debug
+            debug = TEDebugState.debug_enabled
             quantizers = (
                 self._get_quantizers(fp8_output)
-                if not self.debug
+                if not TEDebugState.debug_enabled
                 else self._get_debug_quantizers(fp8_output)
             )
-            if self.debug:
+            if debug:
                 if not any_feature_enabled(quantizers):
                     # If no feature is used, then run faster implementation with debug = False.
                     quantizers = self._get_quantizers(fp8_output)
@@ -1366,7 +1365,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def _get_debug_quantizers(self, fp8_output):
         original_quantizers = self._get_quantizers(fp8_output)
-        assert self.debug
+        assert TEDebugState.debug_enabled
         from ...debug.pytorch.debug_quantization import DebugQuantizer
 
         names = ["activation", "weight", "output", "dgrad", "wgrad", "gradient"]
