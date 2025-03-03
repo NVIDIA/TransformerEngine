@@ -175,8 +175,8 @@ def do_export(
     model: torch.nn.Module,
     inp: torch.Tensor,
     fname: str,
+    fp8_recipe: recipe.Recipe,
     use_fp8: bool = True,
-    fp8_recipe: recipe.FP8Recipe = None,
     opset: int = OPSET,
     input_names: List[str] = None,
     output_names: List[str] = None,
@@ -237,7 +237,7 @@ def set_layer_scale(module: torch.nn.Module, scale: float, num_gemms: int):
         )
 
 
-def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool, fp8_recipe: recipe.FP8Recipe):
+def te_infer(model: torch.nn.Module, inps: Union[Tuple[torch.tensor], torch.tensor], is_fp8: bool, fp8_recipe: recipe.Recipe):
     """Transformer Engine forward propagation."""
     with torch.inference_mode(), te.fp8_autocast(
         enabled=is_fp8, fp8_recipe=fp8_recipe
@@ -420,9 +420,9 @@ Tests cases begin here.
 """
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 # Returning the bias is a TE fusion optimization we don't care about.
-@pytest.mark.parametrize("return_bias", [False])
+@pytest.mark.parametrize("return_bias", [True, False])
 @pytest.mark.parametrize(
     "precision,      use_bias",
     [
@@ -440,7 +440,7 @@ def test_export_linear(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
-    recipe: recipe.FP8Recipe,
+    fp8_recipe: recipe.Recipe,
     use_bias: bool,
     return_bias: bool,
     precision: torch.dtype,
@@ -448,8 +448,10 @@ def test_export_linear(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if return_bias and not use_bias:
+        pytest.skip("Cannot return bias when bias is disabled")
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -480,8 +482,8 @@ def test_export_linear(
         model = Test_Linear(in_features, out_features, use_bias, return_bias, precision).to(
             device="cuda"
         )
-        do_export(model, inp, fname, use_fp8)
-        te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+        do_export(model, inp, fname, fp8_recipe, use_fp8)
+        te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
         serialize_inputs_outputs(fname, inp, te_outputs)
 
         if precision in (torch.bfloat16,):
@@ -494,7 +496,7 @@ def test_export_linear(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize(
     "precision",
     [
@@ -509,7 +511,7 @@ def test_export_layernorm(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
-    recipe: recipe.FP8Recipe,
+    fp8_recipe: recipe.Recipe,
     precision: torch.dtype,
     zero_centered_gamma: bool,
     normalization: str,
@@ -517,7 +519,7 @@ def test_export_layernorm(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     # Set dimensions (these are arbitrary).
@@ -531,7 +533,7 @@ def test_export_layernorm(
     fname = f"te.layernorm_linear{fp8_str}{high_prec_str}.onnx"
 
     with torch.no_grad():
-        with te.fp8_autocast(enabled=use_fp8, recipe=recipe):
+        with te.fp8_autocast(enabled=use_fp8, fp8_recipe=recipe):
             layernorm_cls = te.LayerNorm if normalization == "LayerNorm" else te.RMSNorm
             model = layernorm_cls(
                 hidden_size,
@@ -539,8 +541,8 @@ def test_export_layernorm(
                 zero_centered_gamma=zero_centered_gamma,
             ).to(device="cuda")
 
-            do_export(model, inp, fname, use_fp8)
-            te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+            do_export(model, inp, fname, fp8_recipe, use_fp8)
+            te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
             serialize_inputs_outputs(fname, inp, te_outputs)
             if precision in (torch.bfloat16,):
                 return
@@ -552,9 +554,9 @@ def test_export_layernorm(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-# Returning the bias is a TE fusion optimization we don't care about.
-@pytest.mark.parametrize("return_bias", [False])
-@pytest.mark.parametrize("return_layernorm_output", [False])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("return_bias", [True, False])
+@pytest.mark.parametrize("return_layernorm_output", [True, False])
 @pytest.mark.parametrize(
     "precision,      use_bias",
     [
@@ -572,6 +574,7 @@ def test_export_layernorm_linear(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
+    fp8_recipe: recipe.Recipe,
     use_bias: bool,
     return_bias: bool,
     return_layernorm_output: bool,
@@ -582,8 +585,10 @@ def test_export_layernorm_linear(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if return_bias and not use_bias:
+        pytest.skip("Cannot return bias when bias is disabled")
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -610,9 +615,9 @@ def test_export_layernorm_linear(
             ).to(device="cuda")
             if use_fp8:
                 set_layer_scale(model, scale_factor, num_gemms=2)
-            do_export(model, inp, fname, use_fp8)
+            do_export(model, inp, fname, fp8_recipe, use_fp8)
 
-            te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+            te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
             serialize_inputs_outputs(fname, inp, te_outputs)
             if precision in (torch.bfloat16,):
                 return
@@ -624,9 +629,9 @@ def test_export_layernorm_linear(
 
 @pytest.mark.parametrize("scale_factor", [112])
 @pytest.mark.parametrize("use_fp8", [False, True])
-# Returning the bias is a TE fusion optimization we don't care about.
-@pytest.mark.parametrize("return_bias", [False])
-@pytest.mark.parametrize("return_layernorm_output", [False])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("return_bias", [True, False])
+@pytest.mark.parametrize("return_layernorm_output", [True, False])
 @pytest.mark.parametrize(
     "precision,      use_bias",
     [
@@ -645,6 +650,7 @@ def test_export_layernorm_mlp(
     seed_default_rng,
     scale_factor: float,
     use_fp8: bool,
+    fp8_recipe: recipe.Recipe,
     use_bias: bool,
     return_bias: bool,
     return_layernorm_output: bool,
@@ -656,8 +662,10 @@ def test_export_layernorm_mlp(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if return_bias and not use_bias:
+        pytest.skip("Cannot return bias when bias is disabled")
 
     # Set dimensions (these are arbitrary).
     in_features = 64
@@ -684,8 +692,8 @@ def test_export_layernorm_mlp(
         ).to(device="cuda")
         if use_fp8:
             set_layer_scale(model, scale_factor, num_gemms=2)
-        do_export(model, inp, fname, use_fp8)
-        te_outputs = te_infer(model, inp, is_fp8=use_fp8)
+        do_export(model, inp, fname, fp8_recipe, use_fp8)
+        te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
         serialize_inputs_outputs(fname, inp, te_outputs)
         if precision in (torch.bfloat16,):
             return
@@ -771,7 +779,7 @@ test_configs_attention_type = [
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize("precision", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("return_layernorm_output", [False])
@@ -782,7 +790,7 @@ def test_export_multihead_attention(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
-    recipe: recipe.FP8Recipe,
+    fp8_recipe: recipe.Recipe,
     use_mask: bool,
     attn_mask_type: str,
     precision: torch.dtype,
@@ -794,7 +802,7 @@ def test_export_multihead_attention(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     hidden_size = 256
@@ -862,16 +870,17 @@ def test_export_multihead_attention(
         model,
         inp_context,
         fname,
+        fp8_recipe,
         use_fp8,
         input_names=input_names,
         output_names=output_names,
-        dynamic_shapes={
-             "hidden_states": {0: seq, 1: bs},
-             "attention_mask": {0: seq, 1: bs} if use_mask else None,
-             "encoder_output": {0: seq, 1: bs} if attention_type == "cross" else None,
-        },
+        # dynamic_shapes={
+        #     "hidden_states": {0: seq, 1: bs},
+        #     "attention_mask": {0: seq, 1: bs} if use_mask else None,
+        #     "encoder_output": {0: seq, 1: bs} if attention_type == "cross" else None,
+        # },
     )
-    te_outputs = te_infer(model, inp_context, is_fp8=use_fp8)
+    te_outputs = te_infer(model, inp_context, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
     serialize_inputs_outputs(
         fname, inp_context, te_outputs, input_names=input_names, output_names=output_names
     )
@@ -938,12 +947,12 @@ def test_export_multihead_attention(
 
 
 @pytest.mark.parametrize("use_fp8", [False, True])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
 @pytest.mark.parametrize("use_mask, attn_mask_type", test_configs_multihead_attention)
 @pytest.mark.parametrize(
     "output_layernorm",
     [
-        # True, # TO DO: handle this
+         True, # TO DO: handle this
         False
     ],
 )
@@ -955,7 +964,7 @@ def test_export_transformer_layer(
     seed_default_rng,
     set_max_seq_len,
     use_fp8: bool,
-    recipe: recipe.FP8Recipe,
+    fp8_recipe: recipe.Recipe,
     use_mask: bool,
     attn_mask_type: str,
     output_layernorm: bool,
@@ -967,7 +976,7 @@ def test_export_transformer_layer(
     # Skip FP8 tests on non-hopper devices
     if use_fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8_recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
 
     # Layer configuration
@@ -1007,9 +1016,9 @@ def test_export_transformer_layer(
         zero_centered_gamma=zero_centered_gamma,
         activation=activation,
     ).to(device="cuda")
-    do_export(model, inp, fname, use_fp8, input_names=input_names)
-    te_outputs = te_infer(model, inp, is_fp8=use_fp8)
-    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
+    do_export(model, inp, fname, fp8_recipe, use_fp8, input_names=input_names)
+    te_outputs = te_infer(model, inp, is_fp8=use_fp8, fp8_recipe=fp8_recipe)
+    serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names,)
     if precision in (torch.bfloat16,):
         return
     atol = 5e-1 if use_fp8 else (5e-1 if activation == "swiglu" else 1e-3)
