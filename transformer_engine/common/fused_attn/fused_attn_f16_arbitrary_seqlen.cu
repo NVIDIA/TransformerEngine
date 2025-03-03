@@ -102,10 +102,10 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
 
   try {
     FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d_qk, d_v,
-                               //num_pages_k,
-                               //num_pages_v,
-                               //page_size_k,
-                               //page_size_v,
+                               num_pages_k,
+                               num_pages_v,
+                               page_size_k,
+                               page_size_v,
                                max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h,
                                scaling_factor, is_training, dropout_probability, layout, bias_type,
                                mask_type, window_size_left, window_size_right, true, tensorType,
@@ -519,11 +519,11 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
 
   try {
     FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d_qk, d_v,
-                               //0,
-                               //0,
-                               //0,
-                               //0,
-                               1, 1, bias_b, bias_h, scaling_factor, true, dropout_probability,
+                               0,
+                               0,
+                               0,
+                               0,
+                               0, 0, bias_b, bias_h, scaling_factor, true, dropout_probability,
                                layout, bias_type, mask_type, window_size_left, window_size_right,
                                deterministic, tensorType, tensorType};
 
