@@ -2,4 +2,4 @@
 #
 # See LICENSE for license information.
 
-"""Kernels written with OpenAI Triton."""
+"""Debug features."""

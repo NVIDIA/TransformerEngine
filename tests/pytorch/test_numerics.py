@@ -100,7 +100,7 @@ mask_types = ["causal", "no_mask"]
 if os.environ.get("DEBUG", False):
     # The numerics of all the layers should work the same,
     # when debug=True. I fed them with dummy feature
-    # to prevent switching off debug, what can happend if
+    # to prevent switching off debug, which can happen if
     # no feature is active.
     import nvdlfw_inspect.api as debug_api
 
