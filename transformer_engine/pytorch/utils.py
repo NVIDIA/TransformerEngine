@@ -6,6 +6,7 @@
 from __future__ import annotations
 import functools
 import math
+import os
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
@@ -326,3 +327,62 @@ def round_up_to_nearest_multiple(value, multiple):
     if multiple == 0:
         raise ValueError("multiple cannot be zero.")
     return ((value + multiple - 1) // multiple) * multiple
+
+
+@functools.lru_cache(maxsize=None)
+def _nvtx_enabled() -> bool:
+    """Check if NVTX range profiling is enabled"""
+    return bool(int(os.getenv("NVTE_NVTX_ENABLED", "0")))
+
+
+# Messages associated with active NVTX ranges
+_nvtx_range_messages: list[str] = []
+
+
+def nvtx_range_push(msg: str) -> None:
+    """Push NVTX range onto stack, if NVTX range profiling is enabled
+
+    Set `NVTE_NVTX_ENABLED=1` in the environment to enable NVTX range
+    profiling.
+
+    Parameters
+    ----------
+    msg: str
+        Message to associate with range
+
+    """
+    if not _nvtx_enabled():
+        return
+    _nvtx_range_messages.append(msg)
+    torch.cuda.nvtx.range_push(msg)
+
+
+def nvtx_range_pop(msg: Optional[str] = None) -> None:
+    """Pop NVTX range from stack, if NVTX range profiling is enabled
+
+    Set `NVTE_NVTX_ENABLED=1` in the environment to enable NVTX range
+    profiling.
+
+    Parameters
+    ----------
+    msg: str, optional
+        Message associated with range
+
+    """
+
+    # Return immediately if NVTX range profiling is not enabled
+    if not _nvtx_enabled():
+        return
+
+    # Update list of NVTX range messages and check for consistency
+    if not _nvtx_range_messages:
+        raise RuntimeError("Attempted to pop NVTX range from empty stack")
+    last_msg = _nvtx_range_messages.pop()
+    if msg is not None and msg != last_msg:
+        raise ValueError(
+            f"Attempted to pop NVTX range from stack with msg={msg}, "
+            f"but last range has msg={last_msg}"
+        )
+
+    # Pop NVTX range
+    torch.cuda.nvtx.range_pop()

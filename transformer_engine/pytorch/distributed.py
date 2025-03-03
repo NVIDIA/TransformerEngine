@@ -874,7 +874,7 @@ def _all_gather_fp8(
             dtype = input_.dtype
             device = input_.device
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
-    elif isinstance(input, Float8Tensor):
+    elif isinstance(input_, Float8Tensor):
         out = input_.make_like(input_, shape=out_shape)
         out._data = torch.empty_like(
             out_shape,
