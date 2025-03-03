@@ -9,7 +9,6 @@
 #include <cuda_runtime_api.h>
 #include <inttypes.h>
 #include <math.h>
-#include <nvml.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +20,7 @@
 #include <utility>
 
 #include "common/util/cuda_driver.h"
+#include "common/util/cuda_nvml.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 #include "common/util/system.h"
@@ -91,15 +91,6 @@ int stringCmp(const void *a, const void *b) { return strcmp((const char *)a, (co
     }                                                            \
   } while (0);
 
-#define NVMLCHECK(call)                                                                  \
-  do {                                                                                   \
-    nvmlReturn_t result = call;                                                          \
-    if (result != NVML_SUCCESS) {                                                        \
-      printf("Failed, NVML error %s:%d '%s' (%d)\n", __FILE__, __LINE__, #call, result); \
-      exit(EXIT_FAILURE);                                                                \
-    }                                                                                    \
-  } while (0);
-
 bool has_mnnvl_fabric(int device_id) {
 #if CUDA_VERSION < 12040
   if (getenv("NVTE_UBDEBUG")) {
@@ -116,16 +107,15 @@ bool has_mnnvl_fabric(int device_id) {
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &fabric_handle_supported,
                               CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
   if (fabric_handle_supported) {
-    NVMLCHECK(nvmlInit_v2());
+    NVTE_CALL_CHECK_CUDA_NVML(nvmlInit_v2);
     nvmlDevice_t local_device;
-    NVMLCHECK(nvmlDeviceGetHandleByIndex_v2(device_id, &local_device));
+    NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetHandleByIndex_v2, device_id, &local_device);
     nvmlGpuFabricInfoV_t fabricInfo = {};
     fabricInfo.version = nvmlGpuFabricInfo_v2;
     fabricInfo.clusterUuid[0] = '\0';
-    nvmlReturn_t nvml_status = nvmlDeviceGetGpuFabricInfoV(local_device, &fabricInfo);
-    NVMLCHECK(nvmlShutdown());
-    if (nvml_status == NVML_SUCCESS && fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED &&
-        fabricInfo.clusterUuid[0] != '\0') {
+    NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetGpuFabricInfoV, local_device, &fabricInfo);
+    NVTE_CALL_CHECK_CUDA_NVML(nvmlShutdown);
+    if (fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED && fabricInfo.clusterUuid[0] != '\0') {
       mnnvl_fabric_support = true;
     }
   }
