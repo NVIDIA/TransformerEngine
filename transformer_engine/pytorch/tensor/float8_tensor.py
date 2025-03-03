@@ -348,6 +348,15 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose = torch.Tensor() if self._transpose is not None else None
         self._transpose_invalid = True
 
+    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
+        """Prepare the tensor base for saving for backward
+
+        After calling this, the tensor instance does not hold any
+        data.
+
+        """
+        return [self], None
+
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
@@ -402,7 +411,10 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return [Float8Tensor.make_like(tensor, data=split_tensor) for split_tensor in func_out]
+            return [
+                Float8Tensor.make_like(tensor, data=split_tensor, shape=split_tensor.shape)
+                for split_tensor in func_out
+            ]
         if func == aten.new_zeros.default:
             tensor = args[0]
             data = tensor._data
@@ -412,7 +424,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out)
+            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
         if func == torch.ops.aten.as_strided.default:
             tensor = args[0]
             data = tensor._data
@@ -422,7 +434,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
                 [data] + list(args[1:]),
                 kwargs,
             )
-            return Float8Tensor.make_like(tensor, data=func_out)
+            return Float8Tensor.make_like(tensor, data=func_out, shape=func_out.shape)
         if func == torch.ops.aten.detach.default:
             return cls.detach(args[0])
         if func == torch.ops.aten.clone.default:

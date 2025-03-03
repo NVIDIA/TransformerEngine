@@ -1385,7 +1385,7 @@ def _get_full_cu_seqlens(
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
-@torch.compile
+@jit_fuser
 def pack_tensor(
     indices: torch.Tensor,
     tensor: torch.Tensor,
@@ -1409,7 +1409,7 @@ def pack_tensor(
     return packed
 
 
-@torch.compile
+@jit_fuser
 def pack_2_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1423,7 +1423,7 @@ def pack_2_tensors(
     return t1_packed, t2_packed
 
 
-@torch.compile
+@jit_fuser
 def pack_3_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1439,7 +1439,7 @@ def pack_3_tensors(
     return t1_packed, t2_packed, t3_packed
 
 
-@torch.compile
+@jit_fuser
 def unpack_tensor(
     indices: torch.Tensor,
     dim0: int,
@@ -1462,7 +1462,7 @@ def unpack_tensor(
     return unpacked
 
 
-@torch.compile
+@jit_fuser
 def unpack_2_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -1477,7 +1477,7 @@ def unpack_2_tensors(
     return t1_unpacked, t2_unpacked
 
 
-@torch.compile
+@jit_fuser
 def unpack_3_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -1680,7 +1680,7 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
-@torch.compile
+@jit_fuser
 def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
     """
     Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
@@ -1700,7 +1700,7 @@ def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
     return chunk_ids
 
 
-@torch.compile
+@jit_fuser
 def reorder_seq_chunks_for_a2a(x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn):
     """Reorder sequence chunk for A2A communication."""
     if before_attn:
