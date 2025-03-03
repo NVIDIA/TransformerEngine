@@ -69,7 +69,7 @@ inline std::string getenv_default_value<std::string>() {
   return std::string();
 }
 
-/*! \brief Template specialization to get the default values for filesystem 
+/*! \brief Template specialization to get the default values for filesystem
 * path data type */
 template <>
 inline std::filesystem::path getenv_default_value<std::filesystem::path>() {
