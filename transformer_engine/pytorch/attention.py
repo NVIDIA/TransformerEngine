@@ -3745,6 +3745,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -4222,6 +4223,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -4747,6 +4749,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -5606,6 +5609,7 @@ def get_qkv_layout(
         Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 
+    #q, k, v = [x.contiguous() for x in [q, k, v]]
     check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
     assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
     if "_2" in qkv_format:
