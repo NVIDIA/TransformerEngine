@@ -87,14 +87,14 @@ class InferenceParams:
                   inference_params.allocate_memory(self.layer_number)
           class DotProductAttention:
               if inference_params is not None:
-                  q, k_cache, v_cache, qkv_format = inference_params.step(
-                      new_q, new_k, new_v, qkv_format)
-              output = attention(q, k_cache, v_cache, new_qkv_format)
+                  k_cache, v_cache, new_qkv_format = inference_params.step(
+                      new_k, new_v, qkv_format)
+              output = attention(new_q, k_cache, v_cache, new_qkv_format)
 
     InferenceParams supports cache_qkv_format = "bshd" only, and the step() function may
     change qkv_format depending on the attention backend.
 
-    Backend                    | Before step()     | After step()
+    backend                    | qkv_format        | new_qkv_format
     ------------------------------------------------------------------------------------
     FusedAttention             | {bshd, sbhd, thd} | {bshd_2bshd, sbhd_2bshd, thd_2bshd}
     FlashAttention             | {bshd, sbhd, thd} | {bshd, sbhd, thd}
@@ -207,8 +207,17 @@ class InferenceParams:
         self.step_dict = OrderedDict()
         self.batch_size = 0
 
-        self.cu_seqlens_q = None
-        self.cu_seqlens_kv = None
+        self.cu_seqlens_q = torch.zeros(
+            self.max_batch_size + 1,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+        self.cu_seqlens_kv = torch.zeros(
+            self.max_batch_size + 1,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+
 
     def reset(self):
         """Reset InferenceParams state"""
@@ -248,17 +257,6 @@ class InferenceParams:
         """
         self.cache_manager.allocate_memory(layer_number)
 
-        self.cu_seqlens_q = torch.zeros(
-            self.max_batch_size + 1,
-            dtype=torch.int32,
-            device=torch.cuda.current_device(),
-        )
-        self.cu_seqlens_kv = torch.zeros(
-            self.max_batch_size + 1,
-            dtype=torch.int32,
-            device=torch.cuda.current_device(),
-        )
-
     def pre_step(
         self,
         step_dict: OrderedDict,
@@ -288,7 +286,7 @@ class InferenceParams:
 
     def get_seqlens_pre_step(self):
         """Get cached sequence lengths for current iteration before adding step_dict.values"""
-        return self.sequences_pre
+        return torch.Tensor(list(self.sequences_pre.values())).to(dtype=torch.int32, device="cpu")
 
     def convert_paged_to_nonpaged(self, layer_number: int):
         """
@@ -420,8 +418,18 @@ class NonPagedKVCacheManager(KVCacheManager):
         # cache tensors, cache[layer_number] = (k_cache, v_cache)
         self.cache = {}
         # track sequence indices in the batch in order to re-index k_cache and v_cache
-        self.batch_indices = None
-        self.batch_indices_post = None
+        self.batch_indices = torch.zeros(
+            self.max_batch_size,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
+        # always in [0, ..., b-1] fashion due to reindexing
+        self.batch_indices_post = torch.range(
+            0,
+            self.max_batch_size - 1,
+            dtype=torch.int32,
+            device=torch.cuda.current_device(),
+        )
 
     def allocate_memory(self, layer_number):
         """Allocate memory for the cache"""
@@ -442,19 +450,6 @@ class NonPagedKVCacheManager(KVCacheManager):
             device=torch.cuda.current_device(),
         )
         self.cache[layer_number] = (k_cache, v_cache)
-
-        self.batch_indices = torch.zeros(
-            self.max_batch_size,
-            dtype=torch.int32,
-            device=torch.cuda.current_device(),
-        )
-        # always in [0, ..., b-1] fashion due to reindexing
-        self.batch_indices_post = torch.range(
-            0,
-            self.max_batch_size - 1,
-            dtype=torch.int32,
-            device=torch.cuda.current_device(),
-        )
 
     def pre_step(
         self,
@@ -618,7 +613,9 @@ class PagedKVCacheManager(KVCacheManager):
         # allocated pages, {seq_id: [page_id,...]}
         self.allocated_pages = defaultdict(list)
         # page table, [batch_size, max_pages_per_seq]
-        self.page_table = None
+        self.page_table = torch.zeros(
+            self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device="cuda"
+        )
 
     def reset(self):
         """Reset cache manager state"""
@@ -649,9 +646,6 @@ class PagedKVCacheManager(KVCacheManager):
         )
         self.cache[layer_number] = (k_cache, v_cache)
 
-        self.page_table = torch.zeros(
-            self.max_batch_size, self.max_pages_per_seq, dtype=torch.int32, device="cuda"
-        )
 
     def print_cache(self):
         """Print KV cache status"""

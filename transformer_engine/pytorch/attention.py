@@ -8592,7 +8592,7 @@ class MultiheadAttention(torch.nn.Module):
             inference_params is not None
             and self.layer_number not in inference_params.cache_manager.cache
         ):
-            inference_params.allocate_memory(self.layer_number, self.qkv_format)
+            inference_params.allocate_memory(self.layer_number)
 
         # ======================
         # Query, Key, and Value
@@ -8762,8 +8762,8 @@ class MultiheadAttention(torch.nn.Module):
                         f"qkv_format={self.qkv_format} is not supported for KV caching and RoPE."
                     )
 
-                # sequence_start = inference_params.get_seqlens_pre_step()
-                sequence_start = inference_params.seqlens[0]
+                sequence_start = inference_params.get_seqlens_pre_step()
+                #sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]

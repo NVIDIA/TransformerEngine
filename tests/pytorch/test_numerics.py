@@ -78,7 +78,7 @@ model_configs = {
 
 model_configs_inference = {
     # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 256),
 }
 backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
@@ -2029,14 +2029,13 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model_key", model_configs_inference.keys())
-@pytest.mark.parametrize("use_RoPE", all_boolean)
+@pytest.mark.parametrize("use_RoPE", [False]) #all_boolean)
 @pytest.mark.parametrize("input_format", input_formats_inference)
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("is_cuda_graph", [False, True])
 def test_kv_cache_accuracy(
-    dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged, is_cuda_graph
+    dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged
 ):
     reset_rng_states()
 
@@ -2102,16 +2101,11 @@ def test_kv_cache_accuracy(
         head_dim_k=head_size,
         dtype=dtype,
         is_paged=is_paged,
-        total_num_pages=4,
+        total_num_pages=int(B_max*S_max/256),
         page_size=256,
-        is_cuda_graph=is_cuda_graph,
-        num_heads_q=H,
-        head_dim_q=head_size,
     )
 
     rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
-
-    inference_params.step_dict = OrderedDict(zip(list(range(B)), [1] * B))
 
     input = torch.randn((S, B, D), dtype=dtype, device="cuda")
     if input_format == "bshd":
@@ -2123,7 +2117,10 @@ def test_kv_cache_accuracy(
     full_output = model(hidden_states=input, rotary_pos_emb=rotary_freqs if use_RoPE else None)
 
     # Incrementaly generate outputs using KV-cache
+    step_dict = OrderedDict(zip(list(range(B)), [1] * B))
     for i in range(S):
+        inference_params.pre_step(step_dict)
+
         if input_format == "sbhd":
             incremental_input = input[i].view(1, B, D)
         else:

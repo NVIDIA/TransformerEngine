@@ -441,8 +441,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         max_ctx_len=config.max_ctx_len,
         qkv_format=qkv_format,
     )
-    for layer_number in range(1, num_layers + 1):
-        inference_params.allocate_memory(layer_number)
+    if module == "DotProductAttention":
+        for layer_number in range(1, num_layers + 1):
+            inference_params.allocate_memory(layer_number)
 
     # figure out supported backends
     inference_params_qkv_format = "bshd"
@@ -649,11 +650,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
-                    *(
-                        incremental_output
-                        if isinstance(incremental_output, List)
-                        else incremental_output
-                    ),
+                    *incremental_output
+                    if isinstance(incremental_output, List)
+                    else incremental_output,
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
