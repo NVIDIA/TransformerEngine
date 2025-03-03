@@ -17,20 +17,10 @@
 #include "logging.h"
 
 namespace transformer_engine {
-/*! \brief Get environment variable and convert to type
- *
- * If the environment variable is unset or empty, a falsy value is
- * returned.
-*/
-template <typename T = std::string>
-T getenv(const char *variable);
 
-/*! \brief Get environment variable and convert to type */
-template <typename T = std::string>
-T getenv(const char *variable, const T &default_value);
+namespace detail {
 
-namespace {
-
+/*! \brief Template specialization to get the env var for numeric data types */
 template <typename T>
 inline typename std::enable_if<std::is_arithmetic<T>::value, T>::type getenv_helper(
     const char *variable, const T &default_value) {
@@ -46,6 +36,7 @@ inline typename std::enable_if<std::is_arithmetic<T>::value, T>::type getenv_hel
   return value;
 }
 
+/*! \brief Template specialization to get the env var for string-like data types */
 template <typename T>
 inline typename std::enable_if<!std::is_arithmetic<T>::value, T>::type getenv_helper(
     const char *variable, const T &default_value) {
@@ -58,33 +49,53 @@ inline typename std::enable_if<!std::is_arithmetic<T>::value, T>::type getenv_he
   }
 }
 
-}  // namespace
+/*! \brief Template specialization to get the default values for different
+* numeric data types
+*/
+template <typename T>
+inline T getenv_default_value() {
+  return 0;
+}
 
-#define NVTE_INSTANTIATE_GETENV(T, default_value)                     \
-  template <>                                                         \
-  inline T getenv<T>(const char *variable, const T &default_value_) { \
-    return getenv_helper<T>(variable, default_value_);                \
-  }                                                                   \
-  template <>                                                         \
-  inline T getenv<T>(const char *variable) {                          \
-    return getenv_helper<T>(variable, default_value);                 \
-  }
-NVTE_INSTANTIATE_GETENV(bool, false);
-NVTE_INSTANTIATE_GETENV(float, 0.f);
-NVTE_INSTANTIATE_GETENV(double, 0.);
-NVTE_INSTANTIATE_GETENV(int8_t, 0);
-NVTE_INSTANTIATE_GETENV(int16_t, 0);
-NVTE_INSTANTIATE_GETENV(int32_t, 0);
-NVTE_INSTANTIATE_GETENV(int64_t, 0);
-NVTE_INSTANTIATE_GETENV(uint8_t, 0);
-NVTE_INSTANTIATE_GETENV(uint16_t, 0);
-NVTE_INSTANTIATE_GETENV(uint32_t, 0);
-NVTE_INSTANTIATE_GETENV(uint64_t, 0);
-NVTE_INSTANTIATE_GETENV(std::string, std::string());
-NVTE_INSTANTIATE_GETENV(std::filesystem::path, std::filesystem::path());
+/*! \brief Template specialization to get the default values for bool */
+template <>
+inline bool getenv_default_value<bool>() {
+  return false;
+}
+
+/*! \brief Template specialization to get the default values for string */
+template <>
+inline std::string getenv_default_value<std::string>() {
+  return std::string();
+}
+
+/*! \brief Template specialization to get the default values for filesystem 
+* path data type */
+template <>
+inline std::filesystem::path getenv_default_value<std::filesystem::path>() {
+  return std::filesystem::path();
+}
+
+}  // namespace detail
+
+/*! \brief Get environment variable and convert to type
+ *
+ * If the environment variable is unset or empty, a false value is
+ * returned.
+*/
+template <typename T = std::string>
+inline T getenv(const char *variable) {
+  return detail::getenv_helper<T>(variable, detail::getenv_default_value<T>());
+}
+
+/*! \brief Get environment variable and convert to type */
+template <typename T = std::string>
+inline T getenv(const char *variable, const T &default_value) {
+  return detail::getenv_helper<T>(variable, default_value);
+}
 
 inline bool file_exists(const std::string &path) {
-  return static_cast<bool>(std::ifstream(path.c_str()));
+  return std::filesystem::exists(path) && std::filesystem::is_regular_file(path);
 }
 
 }  // namespace transformer_engine
