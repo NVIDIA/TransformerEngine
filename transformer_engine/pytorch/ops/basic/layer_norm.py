@@ -24,6 +24,7 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, reshape
+from ...export import is_in_onnx_export_mode
 
 
 class LayerNorm(BasicOperation):
@@ -179,6 +180,8 @@ class LayerNorm(BasicOperation):
         prev_op: Optional[BasicOperation] = None,
         next_op: Optional[BasicOperation] = None,
     ) -> torch.Tensor:
+        if is_in_onnx_export_mode():
+            return self.op_onnx_forward(input_)
 
         # Check tensor dims
         weight = self.weight
@@ -288,3 +291,10 @@ class LayerNorm(BasicOperation):
         grad_weight = reshape(dw, weight_dims)
         grad_bias = reshape(db, weight_dims)
         return grad_input, (grad_weight, grad_bias)
+    
+    def op_onnx_forward(
+        self,
+        input_: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = self.weight + 1 if self.zero_centered_gamma else self.weight
+        return torch.nn.functional.layer_norm(input_, input_.shape[-1:], weight, self.bias, self.eps)

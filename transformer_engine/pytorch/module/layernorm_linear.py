@@ -56,7 +56,7 @@ from ..tensor.quantized_tensor import (
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from ..export import is_in_onnx_export_mode
+from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_layernorm, onnx_gemm    
 
 from ..cpp_extensions import (
     general_gemm,
@@ -189,7 +189,7 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}.norm")
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            ln_out,
+            None,
             ln_weight,
             ln_bias,
             eps,
@@ -303,6 +303,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_type=ub_type,
             extra_output=rs_out,
         )
+
         nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if not weight.requires_grad:
@@ -1220,11 +1221,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             (
-                self.input_quantizer,
-                self.weight_quantizer,
-                self.output_quantizer,
-                self.grad_output_quantizer,
-                self.grad_input_quantizer,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_output_quantizer,
+                grad_input_quantizer,
             ) = self._get_quantizers(fp8_output)
 
             if torch.is_grad_enabled():
@@ -1245,11 +1246,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.fp8,
                 self.fp8_calibration,
                 self.fuse_wgrad_accumulation,
-                self.input_quantizer,
-                self.weight_quantizer,
-                self.output_quantizer,
-                self.grad_output_quantizer,
-                self.grad_input_quantizer,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_output_quantizer,
+                grad_input_quantizer,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
@@ -1300,7 +1301,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        weight_quantizer.internal = True
+        #weight_quantizer.internal = True
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():
@@ -1339,28 +1340,29 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input: torch.Tensor,
         fp8_output: bool,
     ) -> torch.Tensor:
+        assert_warmed_up(self)
+        input_quantizer, weight_quantizer, output_quantizer, *_, = self._get_quantizers(fp8_output)
+        input_dtype = input.dtype
+
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
-
-        ln_weight = self.layer_norm_weight if not self.zero_centered_gamma else self.layer_norm_weight + 1
-        if self.normalization == "RMSNorm":
-            ln_out = torch.nn.functional.rms_norm(input, input.shape[-1:], ln_weight, self.eps)
-        else:
-            ln_out = torch.nn.functional.layer_norm(input, input.shape[-1:], ln_weight, self.layer_norm_bias, self.eps)
+        ln_out = onnx_layernorm(
+            input, self.layer_norm_weight, self.layer_norm_bias, 
+            self.eps, self.normalization, self.zero_centered_gamma, 
+            input_dtype, self.return_layernorm_output, input_quantizer
+        )
+    
+        if weight_quantizer is not None:
+            weight_tensor_quantized = weight_quantizer.onnx_quantize(weight_tensor)
+            weight_tensor = weight_quantizer.onnx_dequantize(weight_tensor_quantized)
+        weight_tensor = weight_tensor.to(input_dtype)
+                
+        if bias_tensor is not None:
+            bias_tensor = bias_tensor.to(input_dtype)
         
-
-        if self.input_quantizer is not None:
-            ln_out, ln_out_dtype = self.input_quantizer.onnx_quantize(ln_out)
-            ln_out = self.input_quantizer.onnx_dequantize(ln_out, ln_out_dtype)
+        output = onnx_gemm(weight_tensor, ln_out, bias_tensor)
         
-        if self.weight_quantizer is not None:
-            weight_tensor, weight_tensor_dtype = self.weight_quantizer.onnx_quantize(weight_tensor)
-            weight_tensor = self.weight_quantizer.onnx_dequantize(weight_tensor, weight_tensor_dtype)
-        
-        output = torch.ops.tex.gemm_inf(ln_out, weight_tensor, bias_tensor)
-        
-        if self.output_quantizer is not None:
-            output, output_dtype = self.output_quantizer.onnx_quantize(output)
-            output = self.output_quantizer.onnx_dequantize(output, output_dtype)
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
 
         if self.return_layernorm_output:
             return output, ln_out

@@ -86,7 +86,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from transformer_engine.pytorch.export import is_in_onnx_export_mode
+from transformer_engine.pytorch.export import is_in_onnx_export_mode, onnx_attention_mask_func
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -1115,7 +1115,7 @@ def get_full_mask(
         Attention type, {"self", "cross"}
     bottom_right_alignment: bool, default = `True`
         Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
-        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
+        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly# WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
         specifies "causal" or "causal_bottom_right".
 
     Returns
@@ -1187,7 +1187,7 @@ def get_full_mask(
             actual_seqlens_kv - actual_seqlens_q + window_size[1]
         ).view(batch_size, 1, 1, 1)
     swa_mask = torch.logical_not(
-        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
+        (swa_left <= 0) & ~(swa_right < 0)
     )
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
@@ -1380,6 +1380,9 @@ def _get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
+    batch_size = int(batch_size)
+    max_seqlen = int(max_seqlen)
+    
     if (batch_size, max_seqlen) not in _cu_seqlens_cache:
         _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
             0,
@@ -5131,7 +5134,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(attention_mask_func)
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(onnx_attention_mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -5183,6 +5186,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_type=self.attention_type,
         )
 
+
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
         apply_qk_layer_scaling = self.apply_qk_layer_scaling and key_layer.dtype == torch.float16
 
@@ -5211,13 +5215,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # preallocting result tensor: [b * np, sq, sk]
+        # WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
+        is_bf16 = query_layer.dtype == torch.bfloat16
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            dtype=query_layer.dtype,
+            dtype=torch.float32 if is_in_onnx_export_mode() and is_bf16 else query_layer.dtype,
             device=torch.cuda.current_device(),
         )
+
+        if is_in_onnx_export_mode() and is_bf16:
+            matmul_result = matmul_result.bfloat16()
 
         scale = self.softmax_scale
         if apply_qk_layer_scaling:
@@ -5316,7 +5325,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
             # [b, sq, np, hn] --> [b, sq, hp]
             context_layer = context_layer.view(batch_size, seqlen, -1)
-
         return context_layer
 
 
@@ -8279,6 +8287,8 @@ class MultiheadAttention(torch.nn.Module):
                     is_first_microbatch=is_first_microbatch,
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                 )
+            return mixed_x_layer
+            
 
             num_queries_per_key_value = (
                 self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
@@ -8331,6 +8341,7 @@ class MultiheadAttention(torch.nn.Module):
                     x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
                     for x in (query_layer, key_layer, value_layer)
                 )
+            
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -8373,6 +8384,7 @@ class MultiheadAttention(torch.nn.Module):
                 )
                 for x in (key_layer, value_layer)
             )
+
 
             # Attention head [sq, b, h] --> [sq, b, hp]
             if self.input_layernorm:
@@ -8450,7 +8462,6 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
         # Core attention computation
         # ===========================
-
         context_layer = self.core_attention(
             query_layer,
             key_layer,

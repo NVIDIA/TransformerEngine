@@ -802,6 +802,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
             FP8GlobalStateManager.get_old_fp8_meta_tensors_for_recompute(self.fp8_meta)

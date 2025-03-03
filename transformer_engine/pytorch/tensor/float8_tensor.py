@@ -167,19 +167,19 @@ class Float8Quantizer(Quantizer):
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
-        """Symbolic function for ONNX export"""
+        """Function using primitives with ONNX defined translations."""
         # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
         # custom ops, so cast the input if needed.
-        if tensor.dtype != torch.float32:
+        tensor_dtype = tensor.dtype
+        if tensor_dtype != torch.float32:
             tensor = tensor.to(torch.float32)
-        data = torch.ops.tex.quantize(tensor, id(Float8Quantizer), self.amax, self.scale, 1 / self.scale, int(self.dtype))
-        return data, tensor.dtype
+        data = torch.ops.tex.fp8_quantize(tensor, self.scale.item())
+        return self.create_tensor_from_data(data, fake_dtype=torch.float32)
     
-    def onnx_dequantize(self, tensor: QuantizedTensor, fake_dtype: torch.dtype) -> torch.Tensor:
-        """Symbolic function for ONNX export"""
-        out =  torch.ops.tex.dequantize(tensor, id(Float8Quantizer), self.amax, self.scale,  int(self.dtype), int(TE_DType_map[fake_dtype]))
-        if out.dtype != torch.float32:
-            out = out.to(torch.float32)
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item(), int(TE_DType_map[tensor.dtype]))
+        out = out.to(tensor.dtype)
         return out
 
 
