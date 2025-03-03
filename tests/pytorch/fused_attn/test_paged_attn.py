@@ -14,7 +14,6 @@ import torch
 from torch.distributions import Exponential
 from transformer_engine.pytorch import make_graphed_callables
 from transformer_engine.common import recipe
-import transformer_engine.pytorch.fp8 as fp8
 from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
@@ -22,7 +21,7 @@ from transformer_engine.pytorch.transformer import (
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     InferenceParams,
-    _use_flash_attn_3,
+    _flash_attn_3_is_installed,
 )
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
@@ -36,7 +35,6 @@ from test_fused_attn import (
     _get_attention_backends,
 )
 from tests.pytorch.test_numerics import assert_allclose
-fp8_available, reason_for_no_fp8 = fp8.FP8GlobalStateManager.is_fp8_available()
 
 # Initialize RNG state
 seed = 1234
@@ -49,8 +47,6 @@ _cuda_rng_state = torch.cuda.get_rng_state()
 param_types = [torch.float16]
 if is_bf16_compatible():
     param_types.append(torch.bfloat16)
-if fp8_available:
-    param_types.append(torch.float8_e4m3fn)
 
 model_configs_infer = {
     #    test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
@@ -388,83 +384,36 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FlashAttention"])#, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
-def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph):
+@pytest.mark.parametrize("is_fp8", [False, True])
+def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
     logger = logging.getLogger("test_paged_attn")
     num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     config = model_configs_infer[model]
-
-    is_fp8 = dtype == torch.float8_e4m3fn
-    if is_fp8:
-        dtype = torch.bfloat16
-
-    # figure out supported backends
-    inference_params_qkv_format = "bshd"
-    if is_paged:
-        qkv_layout = "paged_kv_" + "_".join([inference_params_qkv_format] * 3)
-    else:
-        qkv_layout = "_".join([inference_params_qkv_format] * 3)
-    available_backends, fused_attn_backends = _get_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        window_size=config.window_size,
-        pad_between_seqs=False,
-    )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if backend == "FlashAttention" and not flash_attn_supported:
-        pytest.skip("FlashAttention backend is not supported")
-    if backend == "FusedAttention" and not fused_attn_supported:
-        pytest.skip("FusedAttention backend is not supported")
-    if backend == "UnfusedAttention" and not unfused_attn_supported:
-        pytest.skip("UnfusedAttention backend is not supported")
-    os.environ["NVTE_FLASH_ATTN"] = str(int(backend == "FlashAttention"))
-    os.environ["NVTE_FUSED_ATTN"] = str(int(backend == "FusedAttention"))
-    os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
-    if backend == "UnfusedAttention" and is_cuda_graph:
-        pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
-    # flash-attn requires page size >= 256
-    if backend == "FlashAttention" and not _use_flash_attn_3:
+    if backend == "FlashAttention" and _flash_attn_3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
         config.max_seqlen_kv = 256
-    if is_fp8 and (qkv_format != "thd" or module != "DotProductAttention"):
-        pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=is_fp8,
+        fp8_mha=is_fp8,
+    )
+    fp8_meta = {}
+    fp8_meta["recipe"] = fp8_recipe
 
-    # create full model
-    model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="reference")
-
-    # generate data for all requests
-    assert (
-        config.max_seqlen_q == config.max_seqlen_kv
-    ), "This test only simulates max_seqlen_q = max_seqlen_kv."
-    full_inputs = generate_args(module, config, dtype, qkv_format="bshd", mode="full_inputs")
-
-    # generate reference results
-    logger.info("=== Generating all tokens at once ===")
-    if module == "DotProductAttention":
-        full_output = full_inputs
-        for m in model:
-            full_output = m(
-                *full_output if isinstance(full_output, List) else full_output,
-            )
-    if module == "TransformerLayer":
-        full_output = full_inputs
-        for m in model:
-            full_output = m(
-                full_output[0] if isinstance(full_output, List) else full_output,
-            )
-
-    # simulate real-life inference
-    logger.info("=== Generating one token at a time ===")
+    # create a real-life simulation
     max_batch_size = config.batch_size
     page_size = None
     total_num_pages = None
     if is_paged:
-        page_size = 256 if backend == "FlashAttention" and not _use_flash_attn_3 else 16
+        page_size = 256 if backend == "FlashAttention" and _flash_attn_3_is_installed else 16
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
     else:
@@ -497,17 +446,65 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     for layer_number in range(1, num_layers + 1):
         inference_params.allocate_memory(layer_number, qkv_format)
 
+    # figure out supported backends
+    inference_params_qkv_format = "bshd"
+    qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
+    if is_paged:
+        qkv_layout = "paged_kv_" +  qkv_layout
+    available_backends, _, fused_attn_backends = _get_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        window_size=config.window_size,
+        pad_between_seqs=False,
+        is_training=False,
+        fp8=is_fp8,
+        fp8_meta=fp8_meta,
+        inference_params=inference_params,
+    )
+    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
+    if backend == "FlashAttention" and not flash_attn_supported:
+        pytest.skip("FlashAttention backend is not supported")
+    if backend == "FusedAttention" and not fused_attn_supported:
+        pytest.skip("FusedAttention backend is not supported")
+    if backend == "UnfusedAttention" and not unfused_attn_supported:
+        pytest.skip("UnfusedAttention backend is not supported")
+    os.environ["NVTE_FLASH_ATTN"] = str(int(backend == "FlashAttention"))
+    os.environ["NVTE_FUSED_ATTN"] = str(int(backend == "FusedAttention"))
+    os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
+    if backend == "UnfusedAttention" and is_cuda_graph:
+        pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
+    if is_fp8 and not (qkv_format == "thd" and module == "DotProductAttention" and dtype == torch.float16):
+        pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
+
+    # create full model
+    logger.info("=== Generating all tokens at once ===")
+    model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="reference")
+
+    # generate data for all requests
+    assert (
+        config.max_seqlen_q == config.max_seqlen_kv
+    ), "This test only simulates max_seqlen_q = max_seqlen_kv."
+    full_inputs = generate_args(module, config, dtype, qkv_format="bshd", mode="full_inputs")
+
+    # generate reference results
+    if module == "DotProductAttention":
+        full_output = full_inputs
+        for m in model:
+            full_output = m(
+                *full_output if isinstance(full_output, List) else full_output,
+            )
+    if module == "TransformerLayer":
+        full_output = full_inputs
+        for m in model:
+            full_output = m(
+                full_output[0] if isinstance(full_output, List) else full_output,
+            )
+
     # create inference model
+    logger.info("=== Generating one token at a time ===")
     model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="inference", fp8_dpa=is_fp8, fp8_mha=is_fp8)
 
-    fp8_recipe = recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.HYBRID,
-        amax_history_len=1,
-        amax_compute_algo="most_recent",
-        fp8_dpa=is_fp8,
-        fp8_mha=is_fp8,
-    )
     # graph the model if necessary
     if is_cuda_graph:
         t_seq_ids = torch.range(0, max_batch_size, dtype=torch.int32, device="cpu")
@@ -653,7 +650,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         incremental_output = incremental_output[0]
 
         # compare results
-        tol = get_tols(module, backend, dtype=dtype)
+        tol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":
@@ -699,6 +696,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
 
-    if backend == "FlashAttention" and not _use_flash_attn_3:
+    if backend == "FlashAttention" and _flash_attn_3_is_installed:
         config.max_seqlen_q = config_max_seqlen_q
         config.max_seqlen_kv = config_max_seqlen_kv
