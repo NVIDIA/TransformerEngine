@@ -139,6 +139,7 @@ def _get_attention_backends(
     pad_between_seqs: bool = False,
     context_parallel: bool = False,
     deterministic: bool = False,
+    is_training: bool = True,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
     inference_params: Optional[InferenceParams] = None,
@@ -171,6 +172,7 @@ def _get_attention_backends(
 
     fused_attn_backends = []
     available_backends = None
+    flash_attention_backend = None
     fused_attention_backend = None
 
     def test():
@@ -194,24 +196,25 @@ def _get_attention_backends(
             attention_dropout=config.dropout_p,
             context_parallel=context_parallel,
             deterministic=deterministic,
+            is_training=is_training,
             fp8=fp8,
             fp8_meta=fp8_meta,
             inference_params=inference_params,
         )
-        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
+        _, _, flash_attention_backend, fused_attention_backend, _, available_backends = get_attention_backend(
             attention_params
         )
-        return available_backends, fused_attention_backend
+        return available_backends, flash_attention_backend, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
     with logging_context():
         for i in range(3):
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
             _attention_backends["backend_selection_requires_update"] = True
-            available_backends, fused_attention_backend = test()
+            available_backends, flash_attention_backend, fused_attention_backend = test()
             if fused_attention_backend == FusedAttnBackend[backends[i]]:
                 fused_attn_backends.append(fused_attention_backend)
-    return available_backends, fused_attn_backends
+    return available_backends, flash_attention_backend, fused_attn_backends
 
 
 model_configs_base = {
@@ -263,7 +266,7 @@ def test_dot_product_attention(
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
-    available_backends, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -1127,7 +1130,7 @@ def test_transformer_layer(
     workspace_opt = True
 
     # Test backend availability
-    available_backends, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
