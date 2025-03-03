@@ -203,6 +203,7 @@ def general_grouped_gemm(
             for o in out
         ]  # this should differ with respect to single output
 
+    # TODO: Move the swizzle to the C++ side. # pylint: disable=fixme
     original_scale_inverses_list = [swizzle_inputs(A[i], B[i], layout) for i in range(num_gemms)]
     bias = tex.te_general_grouped_gemm(
         A,

@@ -112,6 +112,9 @@ class Fp8Unpadding(torch.nn.Module):
         padded_m_splits = [
             (m + self.align_size - 1) // self.align_size * self.align_size for m in m_splits
         ]
+        # no padding needed
+        if m_splits == padded_m_splits:
+            return inp
 
         if torch.is_grad_enabled():
             fn = _Fp8Unpadding.apply

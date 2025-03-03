@@ -116,6 +116,9 @@ class Fp8Padding(torch.nn.Module):
         padded_m_splits = [
             (m + self.align_size - 1) // self.align_size * self.align_size for m in m_splits
         ]
+        # no padding needed
+        if m_splits == padded_m_splits:
+            return inp, m_splits
 
         if torch.is_grad_enabled():
             fn = _Fp8Padding.apply
