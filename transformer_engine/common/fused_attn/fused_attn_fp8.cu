@@ -1672,32 +1672,14 @@ void fused_attn_fp8_fwd_impl_v1(
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
 
   try {
-    FADescriptor_v1 descriptor{b,
-                               h,
-                               hg,
-                               s_q,
-                               s_kv,
-                               d,
-                               d,
+    FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d, d,
                                //0,
                                //0,
                                //0,
                                //0,
-                               1,
-                               1,
-                               bias_b,
-                               bias_h,
-                               scaling_factor,
-                               is_training,
-                               dropout_probability,
-                               layout,
-                               bias_type,
-                               mask_type,
-                               0,
-                               0,
-                               true,
-                               fwd_tensor_type,
-                               fwd_tensor_type};
+                               1, 1, bias_b, bias_h, scaling_factor, is_training,
+                               dropout_probability, layout, bias_type, mask_type, 0, 0, true,
+                               fwd_tensor_type, fwd_tensor_type};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =
@@ -1976,31 +1958,13 @@ void fused_attn_fp8_bwd_impl_v1(
   NVTE_CHECK(~is_alibi, "FP8 fused attention does not support ALiBi yet!");
 
   try {
-    FADescriptor_v1 descriptor{b,
-                               h,
-                               hg,
-                               s_q,
-                               s_kv,
-                               d,
-                               d,
+    FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d, d,
                                //0,
                                //0,
                                //0,
                                //0,
-                               1,
-                               1,
-                               bias_b,
-                               bias_h,
-                               scaling_factor,
-                               true,
-                               dropout_probability,
-                               layout,
-                               bias_type,
-                               mask_type,
-                               0,
-                               0,
-                               false,
-                               fwd_tensor_type,
+                               1, 1, bias_b, bias_h, scaling_factor, true, dropout_probability,
+                               layout, bias_type, mask_type, 0, 0, false, fwd_tensor_type,
                                bwd_tensor_type};
 
     namespace fe = cudnn_frontend;

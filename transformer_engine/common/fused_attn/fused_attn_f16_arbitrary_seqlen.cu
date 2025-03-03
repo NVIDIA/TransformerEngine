@@ -101,31 +101,14 @@ void fused_attn_arbitrary_seqlen_fwd_impl(
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   try {
-    FADescriptor_v1 descriptor{b,
-                               h,
-                               hg,
-                               s_q,
-                               s_kv,
-                               d_qk,
-                               d_v,
+    FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d_qk, d_v,
                                //num_pages_k,
                                //num_pages_v,
                                //page_size_k,
                                //page_size_v,
-                               max_pages_per_seq_k,
-                               max_pages_per_seq_v,
-                               bias_b,
-                               bias_h,
-                               scaling_factor,
-                               is_training,
-                               dropout_probability,
-                               layout,
-                               bias_type,
-                               mask_type,
-                               window_size_left,
-                               window_size_right,
-                               true,
-                               tensorType,
+                               max_pages_per_seq_k, max_pages_per_seq_v, bias_b, bias_h,
+                               scaling_factor, is_training, dropout_probability, layout, bias_type,
+                               mask_type, window_size_left, window_size_right, true, tensorType,
                                tensorType};
 
     namespace fe = cudnn_frontend;
@@ -535,32 +518,14 @@ void fused_attn_arbitrary_seqlen_bwd_impl(
   const DType ragged_offset_type = cudnn_runtime_version >= 90500 ? DType::kInt64 : DType::kInt32;
 
   try {
-    FADescriptor_v1 descriptor{b,
-                               h,
-                               hg,
-                               s_q,
-                               s_kv,
-                               d_qk,
-                               d_v,
+    FADescriptor_v1 descriptor{b, h, hg, s_q, s_kv, d_qk, d_v,
                                //0,
                                //0,
                                //0,
                                //0,
-                               1,
-                               1,
-                               bias_b,
-                               bias_h,
-                               scaling_factor,
-                               true,
-                               dropout_probability,
-                               layout,
-                               bias_type,
-                               mask_type,
-                               window_size_left,
-                               window_size_right,
-                               deterministic,
-                               tensorType,
-                               tensorType};
+                               1, 1, bias_b, bias_h, scaling_factor, true, dropout_probability,
+                               layout, bias_type, mask_type, window_size_left, window_size_right,
+                               deterministic, tensorType, tensorType};
 
     namespace fe = cudnn_frontend;
     using graph_and_tensors =

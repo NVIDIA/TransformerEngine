@@ -201,8 +201,8 @@ def _get_attention_backends(
             fp8_meta=fp8_meta,
             inference_params=inference_params,
         )
-        _, _, flash_attention_backend, fused_attention_backend, _, available_backends = get_attention_backend(
-            attention_params
+        _, _, flash_attention_backend, fused_attention_backend, _, available_backends = (
+            get_attention_backend(attention_params)
         )
         return available_backends, flash_attention_backend, fused_attention_backend
 

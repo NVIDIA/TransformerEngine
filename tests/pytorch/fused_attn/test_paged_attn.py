@@ -384,7 +384,7 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("model", model_configs_infer.keys())
 @pytest.mark.parametrize("qkv_format", qkv_formats)
 @pytest.mark.parametrize("is_paged", [False, True])
-@pytest.mark.parametrize("backend", ["FusedAttention"])#, "FlashAttention", "UnfusedAttention"])
+@pytest.mark.parametrize("backend", ["FusedAttention"])  # , "FlashAttention", "UnfusedAttention"])
 @pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
@@ -450,7 +450,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     inference_params_qkv_format = "bshd"
     qkv_layout = qkv_format + "_" + "_".join([inference_params_qkv_format] * 2)
     if is_paged:
-        qkv_layout = "paged_kv_" +  qkv_layout
+        qkv_layout = "paged_kv_" + qkv_layout
     available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
@@ -474,7 +474,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
-    if is_fp8 and not (qkv_format == "thd" and module == "DotProductAttention" and dtype == torch.float16):
+    if is_fp8 and not (
+        qkv_format == "thd" and module == "DotProductAttention" and dtype == torch.float16
+    ):
         pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
 
     # create full model
@@ -503,7 +505,17 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
 
     # create inference model
     logger.info("=== Generating one token at a time ===")
-    model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="inference", fp8_dpa=is_fp8, fp8_mha=is_fp8)
+    model = get_model(
+        module,
+        config,
+        dtype,
+        backend,
+        qkv_format,
+        num_layers,
+        mode="inference",
+        fp8_dpa=is_fp8,
+        fp8_mha=is_fp8,
+    )
 
     # graph the model if necessary
     if is_cuda_graph:
@@ -639,7 +651,11 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         with fp8_autocast(enabled=is_fp8, fp8_recipe=fp8_recipe):
             for m in model:
                 incremental_output = m(
-                    *incremental_output if isinstance(incremental_output, List) else incremental_output,
+                    *(
+                        incremental_output
+                        if isinstance(incremental_output, List)
+                        else incremental_output
+                    ),
                     cu_seqlens_q=cu_seqlens_q,
                     cu_seqlens_kv=cu_seqlens_kv,
                     inference_params=inference_params,
@@ -678,7 +694,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
                     rtol=tol,
                 )
             if qkv_format == "thd":
-                print('i ', i, seq, cu_seqlens_q)
+                print("i ", i, seq, cu_seqlens_q)
                 print(full_output[seq, sim.t_total_lens[i] - 1, :4])
                 print(incremental_output[cu_seqlens_q[i + 1] - 1, :4])
                 torch.testing.assert_close(

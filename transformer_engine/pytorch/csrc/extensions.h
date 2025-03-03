@@ -74,8 +74,8 @@ at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, 
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
 void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
                       torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
-                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len, int max_pages_per_seq,
-                      bool is_non_paged);
+                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
+                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM
