@@ -496,7 +496,7 @@ inline bool is_block_scaling(const NVTEScalingMode &mode) {
 }
 
 inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
-  return is_tensor_scaling(mode);
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
 
 inline bool is_current_tensor_scaling(const NVTEScalingMode &mode) {
