@@ -87,21 +87,10 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     restore_from_saved,
 )
 
+# Import attention utils
+import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 
-# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
-_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
-_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
-_stream_handler = logging.StreamHandler()
-_stream_handler.setFormatter(_formatter)
-fa_logger = logging.getLogger(__name__)
-fa_logger.setLevel(_log_level)
-if not fa_logger.hasHandlers():
-    fa_logger.addHandler(_stream_handler)
+dpa_utils.AttentionLogging.setup_logging()
 
 
 @functools.lru_cache(maxsize=None)
@@ -140,7 +129,7 @@ try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
+        dpa_utils.AttentionLogging.fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
             """ "pip3 install flash-attn".""",
         )
@@ -174,7 +163,7 @@ else:
     elif (
         torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
     ):
-        fa_logger.warning(
+        dpa_utils.AttentionLogging.fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             _get_supported_versions(
                 (
@@ -205,7 +194,7 @@ try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
     if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
+        dpa_utils.AttentionLogging.fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             _flash_attn_3_installation_steps,
         )
@@ -407,9 +396,9 @@ def get_attention_backend(
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
-    logger.setLevel(_log_level)
+    logger.setLevel(dpa_utils.AttentionLogging._log_level)
     if not logger.hasHandlers():
-        logger.addHandler(_stream_handler)
+        logger.addHandler(dpa_utils.AttentionLogging._stream_handler)
     device_compute_capability = get_device_compute_capability()
     cudnn_version = get_cudnn_version()
     run_config = {
@@ -5728,9 +5717,9 @@ class FlashAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.logger = logging.getLogger("FlashAttention")
-        self.logger.setLevel(_log_level)
+        self.logger.setLevel(dpa_utils.AttentionLogging._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(_stream_handler)
+            self.logger.addHandler(dpa_utils.AttentionLogging._stream_handler)
 
     def forward(
         self,
@@ -6953,9 +6942,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")
-        self.logger.setLevel(_log_level)
+        self.logger.setLevel(dpa_utils.AttentionLogging._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(_stream_handler)
+            self.logger.addHandler(dpa_utils.AttentionLogging._stream_handler)
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",", "_")
         if attn_mask_type == "causal_padding":
