@@ -1710,26 +1710,30 @@ def get_seq_chunk_ids_for_reordering_after_attn(cp_size, device):
 
 
 @jit_fuser
-def reorder_seq_chunks_for_a2a(x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn):
-    """Reorder sequence chunk for A2A communication."""
-    if before_attn:
-        # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn]
-        # or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
-        x = x.movedim(0, seq_dim).contiguous()
-        # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn]
-        # or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 2) :])
-        # reorder the sequence chunks
-        x = torch.index_select(x, dim=seq_dim, index=chunk_ids_for_a2a)
-    else:
-        # [b, cp*2, s//2, np//cp, hn] -> [cp*2, b, s//2, np//cp, hn]
-        # or [cp*2, s//2, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
-        x = x.movedim(seq_dim, 0).contiguous()
-        # reorder the sequence chunks
-        x = torch.index_select(x, dim=0, index=chunk_ids_for_a2a)
-        # [cp*2, b, s//2, np//cp, hn] -> [cp, 2, b, s//2, np//cp, hn]
-        # or [cp*2, s//2, b, np//cp, hn] -> [cp, 2, s//2, b, np//cp, hn]
-        x = x.view(cp_size, 2, *x.shape[1:])
+def reorder_seq_chunks_for_a2a_before_attn(x, chunk_ids_for_a2a, seq_dim, cp_size):
+    """Reorder sequence chunk for A2A communication before attention compute."""
+    # [cp, b, s, np//cp, hn] -> [b, cp, s, np//cp, hn]
+    # or [cp, s, b, np//cp, hn] -> [cp, s, b, np//cp, hn]
+    x = x.movedim(0, seq_dim).contiguous()
+    # [b, cp, s, np//cp, hn] -> [b, cp*2, s//2, np//cp, hn]
+    # or [cp, s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+    x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 2) :])
+    # reorder the sequence chunks
+    x = torch.index_select(x, dim=seq_dim, index=chunk_ids_for_a2a)
+    return x
+
+
+@jit_fuser
+def reorder_seq_chunks_for_a2a_after_attn(x, chunk_ids_for_a2a, seq_dim, cp_size):
+    """Reorder sequence chunk for A2A communication after attention compute."""
+    # [b, cp*2, s//2, np//cp, hn] -> [cp*2, b, s//2, np//cp, hn]
+    # or [cp*2, s//2, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
+    x = x.movedim(seq_dim, 0).contiguous()
+    # reorder the sequence chunks
+    x = torch.index_select(x, dim=0, index=chunk_ids_for_a2a)
+    # [cp*2, b, s//2, np//cp, hn] -> [cp, 2, b, s//2, np//cp, hn]
+    # or [cp*2, s//2, b, np//cp, hn] -> [cp, 2, s//2, b, np//cp, hn]
+    x = x.view(cp_size, 2, *x.shape[1:])
     return x
 
 
@@ -1757,8 +1761,8 @@ def flash_attn_a2a_communicate(
                     a2a_reqs[i - 2].wait()
                     x = a2a_outputs[i - 2]
                     # reorder the sequence chunks
-                    x = reorder_seq_chunks_for_a2a(
-                        x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
+                    x = reorder_seq_chunks_for_a2a_before_attn(
+                        x, chunk_ids_for_a2a, seq_dim, cp_size
                     )
                     # [b, cp*2, s//2, np//cp, hn] -> [b, cp*s, np//cp, hn]
                     # or [cp*2, s//2, b, np//cp, hn] -> [cp*s, b, np//cp, hn]
@@ -1784,8 +1788,8 @@ def flash_attn_a2a_communicate(
                 # or [cp*s, b, np//cp, hn] -> [cp*2, s//2, b, np//cp, hn]
                 x = x.view(*x.shape[:seq_dim], cp_size * 2, -1, *x.shape[(seq_dim + 1) :])
                 # reorder the sequence chunks
-                a2a_inputs[i] = reorder_seq_chunks_for_a2a(
-                    x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn
+                a2a_inputs[i] = reorder_seq_chunks_for_a2a_after_attn(
+                    x, chunk_ids_for_a2a, seq_dim, cp_size
                 )
             if i > 1:
                 with torch.cuda.stream(cp_stream):
