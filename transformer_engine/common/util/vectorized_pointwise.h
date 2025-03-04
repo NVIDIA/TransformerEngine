@@ -400,19 +400,16 @@ void VectorizedUnaryGradKernelLauncher(const InputTypeGrad *grad, const InputTyp
 
 template <bool kPow2Scaling>
 __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_ptr,
-                                                        fp32 *scale_inv_ptr, const fp32 max_fp8,
-                                                        const fp32 epsilon) {
+                                                        const fp32 max_fp8, const fp32 epsilon) {
   float clamp_amax = amax;
   if (amax <= epsilon) {
     clamp_amax = epsilon;
   }
 
   float scale = 1.f;
-  float scale_inv = 1.f;
 
   if (isinf(clamp_amax) || clamp_amax == 0.f) {
     *scale_ptr = scale;
-    *scale_inv_ptr = scale_inv;
     return;
   }
 
@@ -438,24 +435,21 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
     scale = *reinterpret_cast<float *>(&scale_bits);
   }
 
-  scale_inv = 1.0f / scale;
-
   *scale_ptr = scale;
-  *scale_inv_ptr = scale_inv;
 }
 
 template <bool kPow2Scaling>
-__global__ void compute_scale_from_amax_kernel(fp32 *amax_ptr, fp32 *scale_ptr, fp32 *scale_inv_ptr,
+__global__ void compute_scale_from_amax_kernel(fp32 *amax_ptr, fp32 *scale_ptr,
                                                const fp32 max_fp8, const fp32 epsilon) {
-  compute_scale_from_amax<kPow2Scaling>(*amax_ptr, scale_ptr, scale_inv_ptr, max_fp8, epsilon);
+  compute_scale_from_amax<kPow2Scaling>(*amax_ptr, scale_ptr, max_fp8, epsilon);
 }
 
 template <bool kPow2Scaling>
-void ComputeScaleFromAmaxKernelLauncher(fp32 *amax_ptr, fp32 *scale_ptr, fp32 *scale_inv_ptr,
+void ComputeScaleFromAmaxKernelLauncher(fp32 *amax_ptr, fp32 *scale_ptr,
                                         const fp32 max_fp8, const fp32 epsilon,
                                         cudaStream_t stream) {
   compute_scale_from_amax_kernel<kPow2Scaling>
-      <<<1, 1, 0, stream>>>(amax_ptr, scale_ptr, scale_inv_ptr, max_fp8, epsilon);
+      <<<1, 1, 0, stream>>>(amax_ptr, scale_ptr, max_fp8, epsilon);
 }
 
 template <int nvec, bool aligned, typename InputType>
@@ -504,7 +498,7 @@ void VectorizedUnaryKernelAmaxLauncher(const InputType *input, fp32 *amax, const
     num_blocks = std::min(num_blocks, max_blocks);
 
     // cuda memset amax to zero to allow torch.empty when allocating amax tensor
-    cudaMemset(amax, 0, sizeof(float));
+    cudaMemsetAsync(amax, 0, sizeof(float), stream);
 
     switch (align) {
       case Alignment::SAME_ALIGNED:

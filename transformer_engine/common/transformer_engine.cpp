@@ -150,8 +150,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
-    if (is_tensor_scaling(t.scaling_mode)) {
-      NVTE_CHECK(t.amax.dptr != nullptr, "FP8 output ", name, " must have amax tensor");
+    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && t.amax.dptr != nullptr) {
       NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Invalid amax dtype (expected ",
                  to_string(DType::kFloat32), ", got ", to_string(t.amax.dtype), ")");
       NVTE_CHECK(product(t.amax.shape) == 1, "Invalid shape of amax in output ", name,
@@ -217,7 +216,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   NVTEShape ret;
 
   // FP8 tensor keeps shape in rowwise data
-  if (transformer_engine::is_tensor_scaling(t.scaling_mode)) {
+  if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     ret.data = t.data.shape.data();
     ret.ndim = t.data.shape.size();
     return ret;

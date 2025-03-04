@@ -43,7 +43,6 @@ extern "C" {
  */
 
 /*! \brief Find amax value of input tensor for FP8 quantier.
- *         Then it will use this amax to compute scale and scale_inv.
  *
  *  \param[in]     input            Input tensor to be cast.
  *  \param[in,out] output           Output FP8 tensor.

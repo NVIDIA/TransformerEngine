@@ -60,6 +60,8 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
       return x;
     }
   }
+  NVTE_CHECK(dynamic_cast<NoneQuantizer *>(my_quantizer.get()) != nullptr,
+           "Unexpected quantization params type.");
 
   // Regular pyTorch tensor
   at::Tensor torch_tensor = tensor.cast<at::Tensor>();
