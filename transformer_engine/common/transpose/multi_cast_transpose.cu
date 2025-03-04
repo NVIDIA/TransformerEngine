@@ -207,14 +207,14 @@ void multi_fp8_quantize(const std::vector<Tensor*> input_list, std::vector<Tenso
     return;
   }
 
-  bool no_transpose = std::all_of(input_list.begin(), input_list.end(), [](const Tensor* t) {
+  bool no_transpose = std::all_of(output_list.begin(), output_list.end(), [](const Tensor* t) {
     return t->columnwise_data.dptr == nullptr;
   });
-  bool has_transpose = std::all_of(input_list.begin(), input_list.end(), [](const Tensor* t) {
+  bool has_transpose = std::all_of(output_list.begin(), output_list.end(), [](const Tensor* t) {
     return t->columnwise_data.dptr != nullptr;
   });
   if (!no_transpose && !has_transpose) {
-    NVTE_CHECK(false, "All tensors must either have or not have columnwise data!");
+    NVTE_CHECK(false, "All output tensors must either have or not have columnwise data!");
   }
 
   // Check that tensor properties are valid
@@ -225,7 +225,6 @@ void multi_fp8_quantize(const std::vector<Tensor*> input_list, std::vector<Tenso
     const auto& output = *output_list[tensor_id];
     CheckInputTensor(input, "multi_cast_transpose_input_" + std::to_string(tensor_id));
     CheckInputTensor(output, "multi_cast_transpose_output_" + std::to_string(tensor_id));
-    //std::cout << *static_cast<char*>(output.data.dptr) << std::endl;
     NVTE_CHECK(output.has_data(), "Output tensor must have data allocated.");
 
     NVTE_CHECK(input.data.dtype == itype, "Input tensor types do not match.");
