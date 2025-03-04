@@ -80,7 +80,7 @@ inline std::filesystem::path getenv_default_value<std::filesystem::path>() {
 
 /*! \brief Get environment variable and convert to type
  *
- * If the environment variable is unset or empty, a false value is
+ * If the environment variable is unset or empty, a falsy value is
  * returned.
 */
 template <typename T = std::string>
