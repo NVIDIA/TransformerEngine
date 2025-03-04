@@ -21,7 +21,6 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...tensor.float8_tensor import Float8Quantizer, Float8Tensor
 from ...tensor.quantized_tensor import QuantizedTensor
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
@@ -34,7 +33,6 @@ from ..op import (
 from .._common import (
     convert_tensor,
     get_fp8_meta_from_fp8_tensor,
-    is_float8_tensor,
     reshape,
 )
 
@@ -209,16 +207,8 @@ class UserbuffersForwardLinear(FusedOperation):
         if with_quantized_compute:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            if not isinstance(input_quantizer, Float8Quantizer):
-                raise ValueError(
-                    "Invalid quantizer for input tensor (Userbuffers only supports FP8)"
-                )
             if weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
-            if not isinstance(weight_quantizer, Float8Quantizer):
-                raise ValueError(
-                    "Invalid quantizer for weight tensor (Userbuffers only supports FP8)"
-                )
             if output_quantizer is not None:
                 raise ValueError("FP8 output is not supported")
         else:
@@ -241,7 +231,7 @@ class UserbuffersForwardLinear(FusedOperation):
         x_local = input
         own_quantized_x_local = False
         if with_quantized_compute:
-            if not isinstance(x_local, Float8Tensor):
+            if not isinstance(x_local, QuantizedTensor):
                 input_quantizer.set_usage(
                     rowwise=True,
                     columnwise=(not with_ub_all_gather),
@@ -337,7 +327,7 @@ class UserbuffersForwardLinear(FusedOperation):
         grad_input_quantizer = None
         if with_quantized_compute:
             recipe = FP8GlobalStateManager.get_fp8_recipe()
-            if not recipe.delayed():
+            if not recipe.delayed() and not recipe.mxfp8():
                 raise RuntimeError(
                     "Userbuffers is only supported with FP8 delayed scaling recipe"
                 )

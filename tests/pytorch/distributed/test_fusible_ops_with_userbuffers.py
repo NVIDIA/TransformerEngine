@@ -41,6 +41,8 @@ mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available(
 quantization_list: list[Optional[str]] = [None]
 if fp8_available:
     quantization_list.append("fp8")
+if mxfp8_available:
+    quantization_list.append("mxfp8")
 
 
 # Check if there are multiple GPUs
@@ -424,18 +426,14 @@ if torch.cuda.device_count() > 1:
 
 
 @pytest.mark.parametrize("world_size", _world_sizes)
-@pytest.mark.parametrize("fp8", (False, True))
+@pytest.mark.parametrize("quantization", quantization_list)
 def test_fuser_ops_with_userbuffers(
     *,
     world_size: int,
     dtype: torch.dtype = torch.bfloat16,
-    fp8: bool,
+    quantization: Optional[str],
 ) -> None:
     """Launch parallel job and run tests"""
-
-    # Skip invalid configurations
-    if fp8 and not fp8_available:
-        pytest.skip(reason_for_no_fp8)
 
     # Parallel job launcher
     command = []
@@ -458,8 +456,8 @@ def test_fuser_ops_with_userbuffers(
             str(dtype),
         )
     )
-    if fp8:
-        command.append("--fp8")
+    if quantization is not None:
+        command.extend(("--quantization", quantization))
 
     # Environment
     env = dict(os.environ)
@@ -484,23 +482,20 @@ def main() -> None:
     parser.add_argument("--num-heads", type=int, default=16)
     parser.add_argument("--head-dim", type=int, default=32)
     parser.add_argument("--dtype", type=str, default="bfloat16")
-    parser.add_argument("--fp8", action="store_true")
+    parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args()
 
     # Run parallel tests if needed
     if args.parallel:
 
         # Model config
-        quantization = None
-        if args.fp8:
-            quantization = "fp8"
         model_config = ModelConfig(
             sequence_length=args.sequence_length,
             batch_size=args.batch_size,
             num_heads=args.num_heads,
             head_dim=args.head_dim,
             dtype=str_to_dtype(args.dtype),
-            quantization=quantization,
+            quantization=args.quantization,
         )
 
         # Initialize Userbuffers
@@ -515,7 +510,7 @@ def main() -> None:
                 model_config.num_heads * model_config.head_dim,
             ],
             torch.distributed.get_world_size(group),
-            use_fp8=model_config.quantization == "fp8",
+            use_fp8=model_config.quantization is not None,
             dtype=model_config.dtype,
             bootstrap_backend=bootstrap_backend,
             ub_cfgs=userbuffer_configs,
