@@ -13,17 +13,6 @@ import torch
 from torch.utils._pytree import tree_map
 
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
-
-all_tensor_types = [
-    torch.Tensor,
-    torch.nn.Parameter,
-    Float8Tensor,
-    Float8TensorBase,
-    MXFP8Tensor,
-    MXFP8TensorBase,
-]
 
 
 def prepare_for_saving(

@@ -765,9 +765,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
-        if self.debug and self.fp8_parameters:
-            raise RuntimeError("Primary FP8 parameters is not supported in the debug module. ")
-
         if self.fp8_parameters or fp8_enabled:
             if (
                 self.fp8_initialized

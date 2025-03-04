@@ -12,7 +12,7 @@ from nvdlfw_inspect.registry import Registry
 import torch
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
-from transformer_engine.pytorch.tensor.quantized_tensor import all_tensor_types
+from transformer_engine.pytorch.tensor import all_tensor_types
 from transformer_engine.debug.pytorch.debug_state import TEDebugState
 
 
