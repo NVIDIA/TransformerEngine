@@ -541,7 +541,7 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
 @pytest.mark.parametrize("use_bias", all_boolean)
 @pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
 @pytest.mark.parametrize("num_gemms", [4])
-def test_sanity_groupped_linear(
+def test_sanity_grouped_linear(
     dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
 ):
     config = model_configs[model]
@@ -553,14 +553,14 @@ def test_sanity_groupped_linear(
     if fp8_recipe is not None:
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
-        if fp8_recipe.mxfp8() and not mxfp8_available:
-            pytest.skip("Groupped linear does not support MXFP8")
+        if fp8_recipe.mxfp8():
+            pytest.skip("Grouped linear does not support MXFP8")
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
     use_fp8 = fp8_recipe is not None
     with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
-        te_groupped_linear = GroupedLinear(
+        te_grouped_linear = GroupedLinear(
             num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
         ).cuda()
 
@@ -576,7 +576,7 @@ def test_sanity_groupped_linear(
         m_splits[num_gemms // 2] = 0
 
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
-        out = te_groupped_linear(inp_hidden_states, m_splits)
+        out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
