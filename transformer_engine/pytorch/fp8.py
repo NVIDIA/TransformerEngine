@@ -56,7 +56,7 @@ def get_fp8_torch_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> torch.
         fp8_recipe.fp8_format == Format.HYBRID and fprop_tensor
     ):
         return torch.float8_e4m3fn
-    return torch.float8_e5m2fn
+    return torch.float8_e5m2
 
 
 def get_fp8_te_dtype(fp8_recipe: Recipe, fprop_tensor: bool = True) -> tex.DType:

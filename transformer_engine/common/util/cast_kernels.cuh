@@ -261,7 +261,13 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
               }
             }
             in_compute[j] = elt;
-            if (!out_of_bounds) {
+
+            if constexpr (IS_ACT || IS_DACT) {
+              if (!out_of_bounds) {
+                thread_amax = fmaxf(thread_amax, fabsf(elt));
+              }
+            } else {
+              // If no activation, elt is 0 so we can safely do this
               thread_amax = fmaxf(thread_amax, fabsf(elt));
             }
           }
@@ -320,7 +326,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             }
           }
           in_compute[i] = elt;
-          if (!out_of_bounds) {
+          if constexpr (IS_ACT || IS_DACT) {
+            if (!out_of_bounds) {
+              amax = fmaxf(amax, fabsf(elt));
+            }
+          } else {
+            // If no activation, elt is 0 so we can safely do this
             amax = fmaxf(amax, fabsf(elt));
           }
         }
@@ -1110,7 +1121,9 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
       if (!IS_DBIAS && !IS_DACT) {
-        if (is_full_tile_1D_tensor(output) && is_fp8_dtype(output->dtype())) {
+        if (is_full_tile_1D_tensor(output) && is_fp8_dtype(output->dtype()) &&
+            is_aligned_tensor_data(input, TMA_gmem_alignment) &&
+            is_aligned_tensor_data(*output, TMA_gmem_alignment)) {
           // Aligned AND FP8
           cast_fp8_1D<IS_ACT, ParamOP, OP>(input, output, stream);
         } else {
@@ -1118,7 +1131,10 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
           CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
         }
       } else if (!IS_DBIAS && IS_DACT) {
-        if (dimensions_supported_by_TMA(output) && is_fp8_dtype(output->dtype())) {
+        if (dimensions_supported_by_TMA(output) && is_fp8_dtype(output->dtype()) &&
+            is_aligned_tensor_data(input, TMA_gmem_alignment) &&
+            is_aligned_tensor_data(*output, TMA_gmem_alignment) &&
+            is_aligned_tensor_data(*act_input, TMA_gmem_alignment)) {
           // Aligned AND FP8 (+dAct)
           cast_fp8_2D<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,
                                                       stream);

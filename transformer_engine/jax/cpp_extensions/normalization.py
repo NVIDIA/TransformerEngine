@@ -13,7 +13,7 @@ from jax import dtypes
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax.extend import ffi
+from jax import ffi
 
 from transformer_engine import transformer_engine_jax
 

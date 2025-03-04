@@ -161,6 +161,36 @@ class TestFloat8Tensor:
         with pytest.raises(AssertionError):
             torch.testing.assert_close(x_fp8 + y_fp8, x_ref - y_fp8, **tols)
 
+    @pytest.mark.parametrize("dims", [2, [4, 4], [8, 5, 3, 3]])
+    def test_chunk_op(
+        self,
+        dims: DimsType,
+        fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+        scale: float = 3.5,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        """Test for ops for which shape of inputs and outputs differ."""
+
+        # Initialize random data
+        dims = _to_list(dims)
+        x_ref = torch.randn(dims, dtype=dtype, device="cpu")
+        x_fp8 = to_float8(x_ref, fp8_dtype=fp8_dtype, scale=1.0)
+
+        # Get chunks.
+        chunk1, chunk2 = x_fp8.chunk(2, dim=0)
+
+        # Test chunks.
+        torch.testing.assert_close(x_fp8[0 : dims[0] // 2,], chunk1, atol=0, rtol=0)
+        torch.testing.assert_close(x_fp8[dims[0] // 2 :,], chunk2, atol=0, rtol=0)
+
+        # Check shapes.
+        assert (
+            chunk1.shape == torch.Size([x_fp8.shape[0] // 2]) + x_fp8.shape[1:]
+        ), "Wrong shape for chunk1"
+        assert (
+            chunk2.shape == torch.Size([x_fp8.shape[0] // 2]) + x_fp8.shape[1:]
+        ), "Wrong shape for chunk2"
+
     def test_inplace_ops(
         self,
         dims: DimsType = 23,

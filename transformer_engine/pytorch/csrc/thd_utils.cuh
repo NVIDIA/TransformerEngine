@@ -3,12 +3,58 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_CUH_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_CUH_
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_THD_UTILS_H_
-
+#include <assert.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
+
+struct LseCorrectionFunctor {
+  __forceinline__ __device__ static void run(double *lse, float *half_lse, size_t idx,
+                                             size_t half_idx) {
+    double val = lse[idx];
+    float val_per_step = half_lse[half_idx];
+    double max_scale = max(val, val_per_step);
+    double min_scale = min(val, val_per_step);
+    lse[idx] = max_scale + log(1.0 + exp(min_scale - max_scale));
+  }
+};
+
+struct ReadLseFunctor {
+  __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
+                                             size_t half_idx) {
+    half_lse[half_idx] = lse[idx];
+  }
+};
+
+struct EmptyFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {}
+};
+
+struct CopyFunctor {
+  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {
+    reinterpret_cast<float4 *>(token)[idx] = reinterpret_cast<float4 *>(token_per_step)[idx];
+  }
+};
+
+template <typename dtype>
+struct AddFunctor {
+  __forceinline__ __device__ static void run(dtype *token, dtype *token_per_step, int idx) {
+    float4 d_ = reinterpret_cast<float4 *>(token)[idx];
+    dtype *p_ = reinterpret_cast<dtype *>(&d_);
+
+    float4 d = reinterpret_cast<float4 *>(token_per_step)[idx];
+    dtype *p = reinterpret_cast<dtype *>(&d);
+
+#pragma unroll
+    for (int i = 0; i < sizeof(float4) / sizeof(dtype); i++) {
+      p_[i] += p[i];
+    }
+
+    reinterpret_cast<float4 *>(token)[idx] = d_;
+  }
+};
 
 namespace transformer_engine {
 namespace fused_attn {
@@ -33,39 +79,74 @@ __forceinline__ __device__ int binary_search(int target, int *array, int len) {
 /***************************************************************************************************
  * Support THD format for Context Parallel: Generate partitioned indices for input tokens
  **************************************************************************************************/
-
 __global__ void thd_partition_indices_kernel(int *output, int *cu_seqlens, int batch,
-                                             int total_tokens, int world_size, int rank);
+                                             int total_tokens, int world_size, int rank) {
+  extern __shared__ int cu_seqlens_s[];
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    int seqlen = cu_seqlens[i];
+    // Currently we assume that each sequence length is divisible by (world_size*2) since we have
+    // to distribute each sequence evenly to different GPUs.
+    assert(seqlen % (world_size * 2) == 0);
+    cu_seqlens_s[i] = seqlen / world_size;
+  }
+  __syncthreads();
+
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int num_threads = blockDim.x * gridDim.x;
+
+  for (int token_id = tid; token_id < total_tokens / world_size; token_id += num_threads) {
+    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
+    int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
+    int index = token_id - cu_seqlens_s[seq_id];
+    int offset = index < seq_len / 2 ? rank : (world_size - 1) * 2 - rank;
+    index += cu_seqlens_s[seq_id] * world_size + seq_len / 2 * offset;
+    output[token_id] = index;
+  }
+}
 
 /***************************************************************************************************
  * Support THD format for Context Parallel: Read the half of a THD tensor
  **************************************************************************************************/
-
 __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_seqlens, int batch,
                                             int hidden_size_in_bytes, int half_idx,
-                                            int dim_size_of_token);
+                                            int dim_size_of_token) {
+  extern __shared__ int cu_seqlens_s[];
+  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+    cu_seqlens_s[i] = cu_seqlens[i] / 2;
+  }
+  __syncthreads();
+
+  int warpid = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+  int laneid = threadIdx.x % 32;
+  int num_warps = (blockDim.x * gridDim.x) / 32;
+  int num_total_tokens = cu_seqlens_s[batch];
+  int num_float4s_per_token = hidden_size_in_bytes / sizeof(float4);
+
+  size_t offset = static_cast<size_t>(dim_size_of_token) * hidden_size_in_bytes;
+  half = reinterpret_cast<void *>(reinterpret_cast<char *>(half) + offset / 2 * blockIdx.y);
+  tensor = reinterpret_cast<void *>(reinterpret_cast<char *>(tensor) + offset * blockIdx.y);
+
+  for (int token_id = warpid; token_id < num_total_tokens; token_id += num_warps) {
+    int seqid = binary_search(token_id, cu_seqlens_s, batch + 1);
+
+    size_t offset_in_bytes = static_cast<size_t>(token_id) * hidden_size_in_bytes;
+    float4 *cur_half_token =
+        reinterpret_cast<float4 *>(reinterpret_cast<char *>(half) + offset_in_bytes);
+
+    offset_in_bytes =
+        (static_cast<size_t>(token_id) + cu_seqlens_s[seqid + half_idx]) * hidden_size_in_bytes;
+    float4 *cur_token =
+        reinterpret_cast<float4 *>(reinterpret_cast<char *>(tensor) + offset_in_bytes);
+
+    for (int idx = laneid; idx < num_float4s_per_token; idx += 32) {
+      cur_half_token[idx] = cur_token[idx];
+    }
+  }
+}
 
 /***************************************************************************************************
  * Support THD format for Context Parallel: softmax_lse related operations
  **************************************************************************************************/
-
-struct LseCorrectionFunctor {
-  __forceinline__ __device__ static void run(double *lse, float *half_lse, size_t idx,
-                                             size_t half_idx) {
-    double val = lse[idx];
-    float val_per_step = half_lse[half_idx];
-    double max_scale = max(val, val_per_step);
-    double min_scale = min(val, val_per_step);
-    lse[idx] = max_scale + log(1.0 + exp(min_scale - max_scale));
-  }
-};
-
-struct ReadLseFunctor {
-  __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
-                                             size_t half_idx) {
-    half_lse[half_idx] = lse[idx];
-  }
-};
 
 template <typename lse_dtype, bool lse_packed, typename Functor>
 __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens, int batch,
@@ -163,34 +244,6 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
  * Support THD format for Context Parallel: Gradients correction in backward
  **************************************************************************************************/
 
-struct EmptyFunctor {
-  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {}
-};
-
-struct CopyFunctor {
-  __forceinline__ __device__ static void run(void *token, void *token_per_step, int idx) {
-    reinterpret_cast<float4 *>(token)[idx] = reinterpret_cast<float4 *>(token_per_step)[idx];
-  }
-};
-
-template <typename dtype>
-struct AddFunctor {
-  __forceinline__ __device__ static void run(dtype *token, dtype *token_per_step, int idx) {
-    float4 d_ = reinterpret_cast<float4 *>(token)[idx];
-    dtype *p_ = reinterpret_cast<dtype *>(&d_);
-
-    float4 d = reinterpret_cast<float4 *>(token_per_step)[idx];
-    dtype *p = reinterpret_cast<dtype *>(&d);
-
-#pragma unroll
-    for (int i = 0; i < sizeof(float4) / sizeof(dtype); i++) {
-      p_[i] += p[i];
-    }
-
-    reinterpret_cast<float4 *>(token)[idx] = d_;
-  }
-};
-
 template <typename dtype, typename Functor_0, typename Functor_1, int functor_idx, int group_size>
 __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, int *cu_seqlens,
                                            int batch, int hidden_size, int dim_size_of_token) {
@@ -246,5 +299,4 @@ __global__ void thd_grad_correction_kernel(dtype *grad, dtype *grad_per_step, in
 
 }  // namespace fused_attn
 }  // namespace transformer_engine
-
 #endif

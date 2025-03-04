@@ -33,11 +33,12 @@ What is Transformer Engine?
 .. overview-begin-marker-do-not-remove
 
 Transformer Engine (TE) is a library for accelerating Transformer models on NVIDIA GPUs, including
-using 8-bit floating point (FP8) precision on Hopper GPUs, to provide better performance with lower
-memory utilization in both training and inference. TE provides a collection of highly optimized
-building blocks for popular Transformer architectures and an automatic mixed precision-like API that
-can be used seamlessly with your framework-specific code. TE also includes a framework agnostic
-C++ API that can be integrated with other deep learning libraries to enable FP8 support for Transformers.
+using 8-bit floating point (FP8) precision on Hopper, Ada, and Blackwell GPUs, to provide better
+performance with lower memory utilization in both training and inference. TE provides a collection
+of highly optimized building blocks for popular Transformer architectures and an automatic mixed
+precision-like API that can be used seamlessly with your framework-specific code. TE also includes a
+framework agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
+support for Transformers.
 
 As the number of parameters in Transformer models continues to grow, training and inference for
 architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
@@ -51,16 +52,16 @@ not available natively in frameworks today.
 
 TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
 Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8 support.
-Modules provided by TE internally maintain scaling factors and other values needed for FP8 training, greatly
-simplifying mixed precision training for users.
+layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8
+support. Modules provided by TE internally maintain scaling factors and other values needed for FP8
+training, greatly simplifying mixed precision training for users.
 
 Highlights
 ==========
 
 * Easy-to-use modules for building Transformer layers with FP8 support
 * Optimizations (e.g. fused kernels) for Transformer models
-* Support for FP8 on NVIDIA Hopper and NVIDIA Ada GPUs
+* Support for FP8 on NVIDIA Hopper, Ada, and Blackwell GPUs
 * Support for optimizations across all precisions (FP16, BF16) on NVIDIA Ampere GPU architecture generations and later
 
 Examples
@@ -149,22 +150,22 @@ Installation
 Pre-requisites
 ^^^^^^^^^^^^^^^^^^^^
 * Linux x86_64
-* CUDA 12.0+ for Hopper and CUDA 12.1+ for Ada
-* NVIDIA Driver supporting CUDA 12.0 or later
-* cuDNN 8.1 or later
-* For fused attention, CUDA 12.1 or later, NVIDIA Driver supporting CUDA 12.1 or later, and cuDNN 8.9 or later.
+* CUDA 12.1+ (CUDA 12.8+ for Blackwell)
+* NVIDIA Driver supporting CUDA 12.1 or later
+* cuDNN 9.3 or later
 
 Docker
 ^^^^^^^^^^^^^^^^^^^^
 
 The quickest way to get started with Transformer Engine is by using Docker images on
-`NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_. For example to use the NGC PyTorch container interactively,
+`NVIDIA GPU Cloud (NGC) Catalog <https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch>`_.
+For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:23.10-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.01-py3
 
-Where 23.10 is the container version. For example, 23.10 for the October 2023 release.
+Where 25.01 (corresponding to January 2025 release) is the container version.
 
 pip
 ^^^^^^^^^^^^^^^^^^^^
@@ -174,15 +175,21 @@ To install the latest stable version of Transformer Engine,
 
     pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
-This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
+This will automatically detect if any supported deep learning frameworks are installed and build
+Transformer Engine support for them. To explicitly specify frameworks, set the environment variable
+NVTE_FRAMEWORK to a comma-separated list (e.g. NVTE_FRAMEWORK=jax,pytorch).
 
-Alternatively, the package can be directly installed from `Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
+Alternatively, the package can be directly installed from
+`Transformer Engine's PyPI <https://pypi.org/project/transformer-engine/>`_, e.g.
 
 .. code-block:: bash
 
     pip install transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be
+explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]).
+Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX
+and PyTorch extensions.
 
 From source
 ^^^^^^^^^^^
@@ -190,7 +197,7 @@ From source
 
 Compiling with FlashAttention-2
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Transformer Engine release v0.11.0 adds support for FlashAttention-2 in PyTorch for improved performance.
+Transformer Engine release v0.11.0 added support for FlashAttention-2 in PyTorch for improved performance.
 
 It is a known issue that FlashAttention-2 compilation is resource-intensive and requires a large amount of RAM (see `bug <https://github.com/Dao-AILab/flash-attention/issues/358>`_), which may lead to out of memory errors during the installation of Transformer Engine. Please try setting **MAX_JOBS=1** in the environment to circumvent the issue.
 

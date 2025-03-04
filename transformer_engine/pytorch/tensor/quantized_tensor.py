@@ -28,7 +28,7 @@ def prepare_for_saving(
             tensor_list.append(None)
             tensor_objects_list.append(None)
         elif type(tensor) in (torch.Tensor, torch.nn.Parameter):
-            tensor_list.append(tensor.data)
+            tensor_list.append(tensor)
             tensor_objects_list.append(None)
         else:
             t, t_obj = tensor.prepare_for_saving()
@@ -116,10 +116,7 @@ class Quantizer(abc.ABC):
         """Quantize tensor in-place"""
 
     def quantize(
-        self,
-        tensor: torch.Tensor,
-        *,
-        out: Optional[QuantizedTensor] = None,
+        self, tensor: torch.Tensor, *, out: Optional[QuantizedTensor] = None
     ) -> QuantizedTensor:
         """Quantize tensor"""
         if out is not None:
@@ -159,10 +156,7 @@ class Quantizer(abc.ABC):
         """
 
     def set_usage(
-        self,
-        *,
-        rowwise: Optional[bool] = None,
-        columnwise: Optional[bool] = None,
+        self, *, rowwise: Optional[bool] = None, columnwise: Optional[bool] = None
     ) -> None:
         """Set how the quantized tensor is expected to be used
 
@@ -194,8 +188,7 @@ class _QuantizeFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(
-        _ctx: torch.autograd.function.FunctionCtx,  # unused
-        grad: torch.Tensor,
+        _ctx: torch.autograd.function.FunctionCtx, grad: torch.Tensor  # unused
     ) -> Tuple[Optional[torch.Tensor], ...]:
         # pylint: disable=missing-function-docstring
         # Assume that we want gradients in full precision
@@ -212,9 +205,7 @@ class _IdentityFunc(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
-        tensor: QuantizedTensor,
-        init_kwargs: Optional[Dict[str, Any]] = None,
+        ctx, tensor: QuantizedTensor, init_kwargs: Optional[Dict[str, Any]] = None
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
 
@@ -408,8 +399,7 @@ class QuantizedTensor(torch.Tensor):
         return torch._C._disabled_torch_function_impl(func, types, args, kwargs)
 
     def contiguous(
-        self,
-        memory_format: torch.memory_format = torch.contiguous_format,
+        self, memory_format: torch.memory_format = torch.contiguous_format
     ) -> QuantizedTensor:
         # pylint: disable=missing-function-docstring
         raise NotImplementedError(
@@ -443,7 +433,8 @@ class QuantizedTensor(torch.Tensor):
         data.
 
         """
-        shape = shape if shape is not None else tensor.shape
+        if shape is None:
+            shape = data.shape if data is not None else tensor.shape
         dtype = dtype if dtype is not None else tensor.dtype
         kwargs = tensor.get_metadata()
         if data is not None:

@@ -104,6 +104,9 @@ class LayerNorm(_LayerNormOp):
 
         # Flag for sequence parallelism (custom Megatron-LM integration)
         self.sequence_parallel: Optional[bool] = sequence_parallel
+        if sequence_parallel is not None:
+            self.weight.sequence_parallel = sequence_parallel
+            self.bias.sequence_parallel = sequence_parallel
 
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
