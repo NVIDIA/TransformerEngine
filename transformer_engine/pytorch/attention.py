@@ -2677,7 +2677,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             )
                         else:
                             flash_attn_fwd_second_half_softmax_lse_correction(
-                                softmax_lse.view(*softmax_lse.shape[:-1], 2, -1), softmax_lse_per_step[i - 1]
+                                softmax_lse.view(*softmax_lse.shape[:-1], 2, -1),
+                                softmax_lse_per_step[i - 1],
                             )
 
                 if i < cp_size:
