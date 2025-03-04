@@ -4,8 +4,9 @@
 
 
 : ${TE_PATH:=/opt/transformerengine}
+: ${LIGHTNING_THUNDER_PATH:=/opt/pytorch/lightning-thunder}
 
-pip install pytest==8.2.1
+pip install pytest==8.2.1 pytest-benchmark==5.1.0
 
 FAIL=0
 
@@ -22,6 +23,8 @@ pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_permutation.py || FAIL=1
-NVTE_TORCH_COMPILE=0 NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || FAIL=1
+pytest -v -s $TE_PATH/tests/pytorch/test_parallel_cross_entropy.py || FAIL=1
+NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || FAIL=1
+pytest -v -s ${LIGHTNING_THUNDER_PATH}/thunder/tests/test_transformer_engine_executor.py
 
 exit $FAIL
