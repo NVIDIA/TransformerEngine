@@ -11,6 +11,7 @@ import typing
 import torch
 from transformer_engine.pytorch.triton import linear_cross_entropy as linear_cross_entropy_kernels
 
+
 class LinearCrossEntropy(torch.autograd.Function):
     """
     This class implements a custom autograd function for linear (matmul) and cross entropy, whose equivalent
@@ -26,12 +27,15 @@ class LinearCrossEntropy(torch.autograd.Function):
             return logprobs, entropy
         ```
     """
+
     @staticmethod
-    def forward(ctx,
-                hidden: torch.Tensor,
-                weight: torch.Tensor,
-                labels: torch.Tensor,
-                reduction: typing.Optional[str] = "mean") -> typing.List[torch.Tensor]:
+    def forward(
+        ctx,
+        hidden: torch.Tensor,
+        weight: torch.Tensor,
+        labels: torch.Tensor,
+        reduction: typing.Optional[str] = "mean",
+    ) -> typing.List[torch.Tensor]:
         """
         The forward pass of the Linear Cross Entropy.
         Args:
@@ -45,10 +49,15 @@ class LinearCrossEntropy(torch.autograd.Function):
             entropy (torch.Tensor): The entropy of shape (num_tokens,).
         """
         with torch.cuda.nvtx.range("EfficientEntropy-forward"):
-            REDUCTION = linear_cross_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
+            REDUCTION = linear_cross_entropy_kernels.get_entropy_reduction_enum_number(
+                reduction.lower()
+            )
 
-            logprobs, entropy, _maximum, _maximum_indices, _acc =\
-                linear_cross_entropy_kernels.efficient_entropy_foward(hidden, weight, labels, REDUCTION)
+            logprobs, entropy, _maximum, _maximum_indices, _acc = (
+                linear_cross_entropy_kernels.efficient_entropy_foward(
+                    hidden, weight, labels, REDUCTION
+                )
+            )
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _maximum_indices, _acc)
             ctx.REDUCTION = REDUCTION
@@ -56,9 +65,7 @@ class LinearCrossEntropy(torch.autograd.Function):
         return logprobs, entropy
 
     @staticmethod
-    def backward(ctx,
-                 dlogprobs: torch.Tensor,
-                 dentropy: torch.Tensor) -> typing.List[torch.Tensor]:
+    def backward(ctx, dlogprobs: torch.Tensor, dentropy: torch.Tensor) -> typing.List[torch.Tensor]:
         """
         The backward pass of the Linear Cross Entropy.
         Args:
@@ -73,10 +80,16 @@ class LinearCrossEntropy(torch.autograd.Function):
             REDUCTION = ctx.REDUCTION
 
             d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
-                dlogprobs, dentropy,
-                hidden, weight, labels,
-                _maximum, _maximum_indices, _acc,
-                REDUCTION)
+                dlogprobs,
+                dentropy,
+                hidden,
+                weight,
+                labels,
+                _maximum,
+                _maximum_indices,
+                _acc,
+                REDUCTION,
+            )
 
         return d_hidden, d_weight, None, None
 
