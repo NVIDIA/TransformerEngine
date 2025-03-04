@@ -278,12 +278,12 @@ class UserbuffersForwardLinear(FusedOperation):
             w = w.to(dtype=dtype)
 
         # Construct output tensor
-        y_local = None
+        reduce_scatter_output = None
         if with_ub_reduce_scatter:
-            y_local = torch.empty(y_local_size, dtype=dtype, device=device)
+            reduce_scatter_output = torch.empty(y_local_size, dtype=dtype, device=device)
 
         # Perform GEMM
-        y, *_, rs_output = general_gemm(
+        gemm_output, *_, reduce_scatter_output = general_gemm(
             w,
             x,
             get_workspace(),
@@ -293,12 +293,12 @@ class UserbuffersForwardLinear(FusedOperation):
             use_split_accumulator=_2X_ACC_FPROP,
             ub=ub_comm,
             ub_type=ub_type,
-            extra_output=y_local,
+            extra_output=reduce_scatter_output,
         )
         if with_ub_reduce_scatter:
-            y_local = rs_output
+            y_local = reduce_scatter_output
         else:
-            y_local = y
+            y_local = gemm_output
 
         # Return cast tensors
         extra_outputs = {"input": x_local, "weight": w}

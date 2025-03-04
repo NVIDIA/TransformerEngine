@@ -4,8 +4,6 @@
 
 """Linear layer backward with Userbuffers communication."""
 
-# pylint: skip-file  ### TODO Debug Userbuffers support
-
 from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
