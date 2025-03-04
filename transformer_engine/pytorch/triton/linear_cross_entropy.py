@@ -409,11 +409,9 @@ def efficient_entropy_backward_kernel_general_preprocess(num_tokens: int,
     if reduction == 0: # none
         d_logprobs = tl.load(d_logprobs_ptr + offs_am * stride_d_logprobs, mask=offs_am < num_tokens)
     elif reduction == 1: # sum
-        d_logprobs = tl.load(d_logprobs_ptr)
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(tl.load(d_logprobs_ptr), (BLOCK_SIZE_M,))
     else: # mean
-        d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32)), (BLOCK_SIZE_M,))
 
     maximum = tl.load(maximum_ptr + offs_am, mask=offs_am < num_tokens)
     accu = tl.load(accu_ptr + offs_am, mask=offs_am < num_tokens)
@@ -553,10 +551,10 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(num_tokens: int,
         d_logprobs = tl.load(d_logprobs_ptrs, mask=offs_am < num_tokens, other=0.0)
     elif reduction == 1: # sum
         d_logprobs = tl.load(d_logprobs_ptr)
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else: # mean
         d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
 
     d_max_ptrs = d_max_ptr + offs_am * stride_d_max
     d_max = tl.load(d_max_ptrs, mask=offs_am < num_tokens, other=0.0)
@@ -683,10 +681,10 @@ def efficient_entropy_backward_kernel_general_d_logits(num_tokens: int,
         d_logprobs = tl.load(d_logprobs_ptrs, mask=offs_am < num_tokens, other=0.0)
     elif reduction == 1: # sum
         d_logprobs = tl.load(d_logprobs_ptr)
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
     else: # mean
         d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
-        d_logprobs.broadcast_to((BLOCK_SIZE_M,))
+        d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
 
     d_max_ptrs = d_max_ptr + offs_am * stride_d_max
     d_max = tl.load(d_max_ptrs, mask=offs_am < num_tokens, other=0.0)
