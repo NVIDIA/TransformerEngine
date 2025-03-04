@@ -1,4 +1,4 @@
 {
-	global: *nvte*; *transformer_engine*;
+	global: *nvte*; *transformer_engine*; *nvshmem*;
 	local: *;
 };
