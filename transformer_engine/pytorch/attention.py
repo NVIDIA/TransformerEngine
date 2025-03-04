@@ -2694,7 +2694,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(
-                        out.view(*out_per_step[i].shape)
+                        out.view(*out_per_step[i].shape),
                         out_per_step[i],
                         softmax_lse,
                         softmax_lse_per_step[i],
