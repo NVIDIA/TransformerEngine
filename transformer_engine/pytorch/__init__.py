@@ -102,6 +102,7 @@ from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch.linear_cross_entropy import linear_cross_entropy
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False
