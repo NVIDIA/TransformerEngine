@@ -1599,13 +1599,12 @@ def flash_attn_fwd_out_correction(
     movedim_dst: int,
 ):
     """Merge partial outputs of each step in Attention with context parallelism"""
-    out_ = out.view(out_per_step.shape)
     softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(
         movedim_src, movedim_dst
     )
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step * softmax_lse_corrected_exp
-    out_.add_(out_corrected)
+    out.add_(out_corrected)
 
 
 @jit_fuser
@@ -2695,7 +2694,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     flash_attn_fwd_out_correction(
-                        out,
+                        out.view(*out_per_step[i].shape)
                         out_per_step[i],
                         softmax_lse,
                         softmax_lse_per_step[i],
