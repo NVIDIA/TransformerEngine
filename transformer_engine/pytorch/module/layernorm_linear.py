@@ -441,13 +441,16 @@ class _LayerNormLinear(torch.autograd.Function):
             (  # pylint: disable=unbalanced-tuple-unpacking
                 inputmat,
                 weight,
-                _,
+                origin_weight,
                 bias,
                 ln_weight,
                 ln_out,
                 mu,
                 rsigma,
             ) = restore_from_saved(ctx.tensor_objects, saved_tensors)
+            # Delete the references to tensor objects once they've been consumed
+            # by the `restore_from_saved` method to construct back the actual tensors.
+            ctx.tensor_objects = None
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
@@ -722,17 +725,22 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if ctx.requires_wgrad:
             # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(weight, "grad_added_to_main_grad"):
-                weight.grad_added_to_main_grad = True
-                if getattr(weight, "zero_out_wgrad", False):
+            if ctx.fuse_wgrad_accumulation and hasattr(origin_weight, "grad_added_to_main_grad"):
+                origin_weight.grad_added_to_main_grad = True
+                if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = torch.zeros(
-                        weight.main_grad.shape,
-                        dtype=weight.dtype,
+                        origin_weight.main_grad.shape,
+                        dtype=origin_weight.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
-                    wgrad = None
+                    wgrad = torch.empty(
+                        origin_weight.main_grad.shape,
+                        dtype=origin_weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
         else:
