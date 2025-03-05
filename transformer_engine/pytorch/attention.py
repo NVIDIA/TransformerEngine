@@ -1948,9 +1948,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 batch_dim = qkv_format.index("b")
                 cu_seqlens_q, cu_seqlens_q_half = _get_cu_seqlens_info_with_cp(
-                    q.shape[batch_dim], max_seqlen_q, cp_size, cu_seqlens_q)
+                    q.shape[batch_dim], max_seqlen_q, cp_size, cu_seqlens_q
+                )
                 cu_seqlens_kv, cu_seqlens_kv_half = _get_cu_seqlens_info_with_cp(
-                    q.shape[batch_dim], max_seqlen_kv, cp_size, cu_seqlens_kv)
+                    q.shape[batch_dim], max_seqlen_kv, cp_size, cu_seqlens_kv
+                )
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
             cu_seqlens_q_padded = cu_seqlens_q_padded // cp_size
