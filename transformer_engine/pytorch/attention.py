@@ -1590,18 +1590,28 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
+def flash_attn_fwd_out_correction_init(
+    out_int_step: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    softmax_lse_int_step: torch.Tensor,
+    seq_dim: int,
+):
+    """Merge partial outputs of each step in Attention with context parallelism"""
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_int_step - softmax_lse).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
+    out_int_step.mul_(softmax_lse_corrected_exp)
+
+
+@jit_fuser
 def flash_attn_fwd_out_correction(
     out: torch.Tensor,
     out_per_step: torch.Tensor,
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
-    movedim_src: int,
-    movedim_dst: int,
+    seq_dim: int,
 ):
     """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(
-        movedim_src, movedim_dst
-    )
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step * softmax_lse_corrected_exp
     out.add_(out_corrected)
@@ -1613,16 +1623,12 @@ def flash_attn_fwd_second_half_out_correction(
     out_per_step: torch.Tensor,
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
-    movedim_src: int,
-    movedim_dst: int,
     seq_dim: int,
 ):
     """Merge second half of partial outputs of each step in Attention with context parallelism"""
     out_ = out.select(seq_dim, 1)
     softmax_lse_ = softmax_lse.view(*softmax_lse.shape[:-1], 2, -1)[..., 1, :]
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse_).movedim(
-        movedim_src, movedim_dst
-    )
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse_).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_per_step * softmax_lse_corrected_exp
     out_.add_(out_corrected)
@@ -2705,8 +2711,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
-                        out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        if qkv_format == "thd":
+                            out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
                         flash_attn_fwd_softmax_lse_correction(
                             softmax_lse, softmax_lse_per_step[i - 1]
@@ -2738,14 +2745,22 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         for i in range(cp_size):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_out_correction(
-                        out.view(*out_per_step[i].shape),
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        0 if softmax_lse_in_packed_format else 2,
-                        2 if softmax_lse_in_packed_format else seq_dim,
-                    )
+                    if i == 0:
+                        flash_attn_fwd_out_correction_init(
+                            out_per_step[0],
+                            softmax_lse,
+                            softmax_lse_per_step[0],
+                            seq_dim,
+                        )
+                        out = out_per_step[0].view(q.shape)
+                    else:
+                        flash_attn_fwd_out_correction(
+                            out.view(*out_per_step[i].shape),
+                            out_per_step[i],
+                            softmax_lse,
+                            softmax_lse_per_step[i],
+                            seq_dim,
+                        )
                 elif qkv_format == "thd":
                     tex.thd_out_correction(
                         out,
@@ -2763,8 +2778,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_per_step[i],
                         softmax_lse,
                         softmax_lse_per_step[i],
-                        0 if softmax_lse_in_packed_format else 2,
-                        2 if softmax_lse_in_packed_format else seq_dim,
                         seq_dim,
                     )
                 elif qkv_format == "thd":
