@@ -991,7 +991,7 @@ def get_attention_backend(
         use_unfused_attention = False
     selected_backend = "NoBackend"
     if use_flash_attention:
-        selected_backend = "FlashAttention ({str(flash_attention_backend)})"
+        selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
     elif use_fused_attention:
         selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
@@ -7858,7 +7858,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     self.logger.info("Running with UnfusedDotProductAttention backend")
             else:
                 use_flash_attention = _attention_backends["use_flash_attention"]
-                flash_attention_backend = _attention_backends["fused_attention_backend"]
+                flash_attention_backend = _attention_backends["flash_attention_backend"]
                 use_fused_attention = _attention_backends["use_fused_attention"]
                 fused_attention_backend = _attention_backends["fused_attention_backend"]
                 use_unfused_attention = _attention_backends["use_unfused_attention"]
