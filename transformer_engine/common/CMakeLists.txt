@@ -78,6 +78,7 @@ list(APPEND transformer_engine_SOURCES
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
+     util/cuda_nvml.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
      swizzle/swizzle.cu
