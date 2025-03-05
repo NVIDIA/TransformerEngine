@@ -160,8 +160,6 @@ void compute_ref_x1(const ProcessingMethod processing_method,
             }
         }
     }
-
-    // Convert final dbias values to output type
     for (size_t j = 0; j < cols; ++j) {
         output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
     }
