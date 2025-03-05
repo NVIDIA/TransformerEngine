@@ -7,8 +7,12 @@ import torch
 from contextlib import nullcontext
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
-SIZE = 4096
+#Check if FP8 supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+SIZE = 512
 
 models = {
     "linear": te.Linear,
@@ -68,6 +72,10 @@ def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
 @pytest.mark.parametrize("fp8", [True, False])
 @pytest.mark.parametrize("model_key", models.keys())
 def test_cpu_offload(fp8, model_key) -> None:
+
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     model_cls = models[model_key]
 
     without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False)
