@@ -1847,6 +1847,25 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
 
+_cu_seqlens_info_with_cp_cache = {}
+
+
+def _get_cu_seqlens_info_with_cp(
+    batch_size: int,
+    max_seqlen: int,
+    cp_size: int,
+    cu_seqlens: torch.Tensor,
+):
+    """Cumulative sequence lengths with CP being considered."""
+    global _cu_seqlens_info_with_cp_cache
+    if (batch_size, max_seqlen, cp_size) not in _cu_seqlens_info_with_cp_cache:
+        _cu_seqlens_info_with_cp_cache[(batch_size, max_seqlen, cp_size)] = (
+            cu_seqlens // cp_size,
+            cu_seqlens // (cp_size * 2),
+        )
+    return _cu_seqlens_info_with_cp_cache[(batch_size, max_seqlen, cp_size)]
+
+
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
     """
     Attention implementation with context parallelism. Exchange KV between CP ranks
@@ -1918,27 +1937,34 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         causal = "causal" in attn_mask_type
         padding = "padding" in attn_mask_type
 
+        batch_dim = None
         seq_dim = None
+        pad_between_seqs_q, pad_between_seqs_kv = False, False
+        cu_seqlens_q_half, cu_seqlens_kv_half = None, None
         if qkv_format in ["bshd", "sbhd"]:
             seq_dim = qkv_format.index("s")
             qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
+            cu_seqlens_q_padded, cu_seqlens_kv_padded = None, None
+            if use_fused_attention:
+                batch_dim = qkv_format.index("b")
+                cu_seqlens_q, cu_seqlens_q_half = _get_cu_seqlens_info_with_cp(
+                    q.shape[batch_dim], max_seqlen_q, cp_size, cu_seqlens_q)
+                cu_seqlens_kv, cu_seqlens_kv_half = _get_cu_seqlens_info_with_cp(
+                    q.shape[batch_dim], max_seqlen_kv, cp_size, cu_seqlens_kv)
         else:
             qkv_layout = qkv_format + "_" + qkv_format + "_" + qkv_format
+            cu_seqlens_q_padded = cu_seqlens_q_padded // cp_size
+            cu_seqlens_kv_padded = cu_seqlens_kv_padded // cp_size
+            if use_fused_attention:
+                pad_between_seqs_q = cu_seqlens_q_padded is not None and not torch.equal(
+                    cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1]
+                )
+                pad_between_seqs_kv = cu_seqlens_kv_padded is not None and not torch.equal(
+                    cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1]
+                )
 
-        pad_between_seqs_q = cu_seqlens_q_padded is not None and not torch.equal(
-            cu_seqlens_q_padded[:-1], cu_seqlens_q[:-1]
-        )
-        pad_between_seqs_kv = cu_seqlens_kv_padded is not None and not torch.equal(
-            cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1]
-        )
         max_seqlen_q = max_seqlen_q // cp_size
         max_seqlen_kv = max_seqlen_kv // cp_size
-        cu_seqlens_q_padded = (
-            None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // cp_size
-        )
-        cu_seqlens_kv_padded = (
-            None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded // cp_size
-        )
         cu_seqlens_q_per_step = [None for _ in range(cp_size)]
         cu_seqlens_kv_per_step = [None for _ in range(cp_size)]
 
@@ -2126,14 +2152,18 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
+                            else:
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q
                             if pad_between_seqs_kv:
                                 cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_kv, cu_seqlens_kv_padded, cp_size, rank, True, True
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
+                            else:
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv
                             if qkv_format == "bshd":
                                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                                 q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
@@ -2252,8 +2282,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
+                            else:
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q
                             if pad_between_seqs_kv:
                                 cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_kv,
@@ -2263,8 +2295,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     True,
                                     False,
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // (cp_size * 2)
+                            else:
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv_half
                             if qkv_format == "bshd":
                                 # [b, 2, sq//2, np, hn] -> [b, sq, np, hn]
                                 q_inputs[i % 2] = q.view(q.shape[0], -1, *q.shape[-2:])
@@ -2388,8 +2422,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, False, True
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_q_per_step[i] = cu_seqlens_q // (cp_size * 2)
+                            else:
+                                cu_seqlens_q_per_step[i] = cu_seqlens_q_half
                             if pad_between_seqs_kv:
                                 cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
                                     cu_seqlens_kv,
@@ -2399,8 +2435,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     True,
                                     True,
                                 )
-                            elif use_fused_attention or qkv_format == "thd":
+                            elif qkv_format == "thd":
                                 cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
+                            else:
+                                cu_seqlens_kv_per_step[i] = cu_seqlens_kv
                             if qkv_format == "bshd":
                                 # [b, 2, sq//2, np, hn] -> [b, sq//2, np, hn]
                                 q_inputs[i % 2] = q[:, 1, ...]
@@ -2533,8 +2571,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             cu_seqlens_q_per_step[i] = get_cu_seqlens_on_cp_rank(
                                 cu_seqlens_q, cu_seqlens_q_padded, cp_size, rank, True, True
                             )
-                        elif use_fused_attention or qkv_format == "thd":
+                        elif qkv_format == "thd":
                             cu_seqlens_q_per_step[i] = cu_seqlens_q // cp_size
+                        else:
+                            cu_seqlens_q_per_step[i] = cu_seqlens_q
                         if pad_between_seqs_kv:
                             cu_seqlens_kv_per_step[i] = get_cu_seqlens_on_cp_rank(
                                 cu_seqlens_kv,
@@ -2544,8 +2584,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 True,
                                 True,
                             )
-                        elif use_fused_attention or qkv_format == "thd":
+                        elif qkv_format == "thd":
                             cu_seqlens_kv_per_step[i] = cu_seqlens_kv // cp_size
+                        else:
+                            cu_seqlens_kv_per_step[i] = cu_seqlens_kv
                         if use_fused_attention:
                             if attn_bias is not None:
                                 idx = (rank - i) % cp_size
@@ -3847,9 +3889,10 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         max_seqlen_kv = max_seqlen_kv // (2 * cp_size)
         if use_fused_attention or qkv_format == "thd":
             cu_seqlens_q = cu_seqlens_q // (2 * cp_size)
-        cu_seqlens_q_padded = (
-            None if cu_seqlens_q_padded is None else cu_seqlens_q_padded // (2 * cp_size)
-        )
+        if cu_seqlens_q_padded is not None and qkv_format == "thd":
+            cu_seqlens_q_padded = cu_seqlens_q_padded // (2 * cp_size)
+        else:
+            cu_seqlens_q_padded = None
 
         # [b, s, np, hn] -> [b, 2, s//2, np, hn] or [s, b, np, hn] -> [2, s//2, b, np, hn]
         q = q.view(*q.shape[:seq_dim], 2, q.shape[seq_dim] // 2, *q.shape[(seq_dim + 1) :])
