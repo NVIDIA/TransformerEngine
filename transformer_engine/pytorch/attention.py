@@ -98,7 +98,7 @@ _log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
-fa_logger = logging.getLogger()
+fa_logger = logging.getLogger(__name__)
 fa_logger.setLevel(_log_level)
 if not fa_logger.hasHandlers():
     fa_logger.addHandler(_stream_handler)
@@ -118,7 +118,7 @@ _flash_attn_is_installed = False
 _flash_attn_version = PkgVersion("0")
 _flash_attn_version_required = PkgVersion("2.1.1")
 _flash_attn_version_required_blackwell = PkgVersion("2.7.3")
-_flash_attn_max_version = PkgVersion("2.7.3")
+_flash_attn_max_version = PkgVersion("2.7.4.post1")
 _flash_attn_2_plus = False
 _flash_attn_2_1_plus = False
 _flash_attn_2_3_plus = False
@@ -507,13 +507,16 @@ def get_attention_backend(
     if use_flash_attention and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
-        or (head_dim_qk > 192 and device_compute_capability not in ((8, 0), (9, 0)))
+        or (
+            head_dim_qk > 192
+            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+        )
     ):
         if _flash_attn_is_installed:
             logger.debug(
                 "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
                 "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-                "head_dim_qk <= 256 (>192 requires sm80/90). "
+                "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
                 head_dim_qk,
                 head_dim_v,
@@ -1382,7 +1385,7 @@ def _get_full_cu_seqlens(
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
-@torch.compile
+@jit_fuser
 def pack_tensor(
     indices: torch.Tensor,
     tensor: torch.Tensor,
@@ -1406,7 +1409,7 @@ def pack_tensor(
     return packed
 
 
-@torch.compile
+@jit_fuser
 def pack_2_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1420,7 +1423,7 @@ def pack_2_tensors(
     return t1_packed, t2_packed
 
 
-@torch.compile
+@jit_fuser
 def pack_3_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
@@ -1436,7 +1439,7 @@ def pack_3_tensors(
     return t1_packed, t2_packed, t3_packed
 
 
-@torch.compile
+@jit_fuser
 def unpack_tensor(
     indices: torch.Tensor,
     dim0: int,
@@ -1459,7 +1462,7 @@ def unpack_tensor(
     return unpacked
 
 
-@torch.compile
+@jit_fuser
 def unpack_2_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -1474,7 +1477,7 @@ def unpack_2_tensors(
     return t1_unpacked, t2_unpacked
 
 
-@torch.compile
+@jit_fuser
 def unpack_3_tensors(
     indices: torch.Tensor,
     dim0: int,
@@ -1642,7 +1645,7 @@ def get_cu_seqlens_on_cp_rank(
     return cu_seqlens_on_cp_rank
 
 
-@torch.compile
+@jit_fuser
 def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
     """
     Context parallelism assigns two discontiguous sequence chunks to each GPU for load balancing.
@@ -1662,7 +1665,7 @@ def get_seq_chunk_ids_for_reordering(cp_size, device, to_contiguous):
     return chunk_ids
 
 
-@torch.compile
+@jit_fuser
 def reorder_seq_chunks_for_a2a(x, chunk_ids_for_a2a, seq_dim, cp_size, before_attn):
     """Reorder sequence chunk for A2A communication."""
     if before_attn:

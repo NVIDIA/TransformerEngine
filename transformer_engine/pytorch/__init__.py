@@ -7,14 +7,25 @@
 # pylint: disable=wrong-import-position,wrong-import-order
 
 import logging
+import functools
+import sys
 import importlib
 import importlib.util
-import sys
-import torch
 from importlib.metadata import version
+from packaging.version import Version as PkgVersion
+
+import torch
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+
+_logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=None)
+def torch_version() -> tuple[int, ...]:
+    """Get PyTorch version"""
+    return PkgVersion(str(torch.__version__)).release
 
 
 def _load_library():
@@ -40,7 +51,7 @@ def _load_library():
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
+            _logger.info(
                 "Could not find package %s. Install transformer-engine using 'pip"
                 " install transformer-engine[pytorch]==VERSION'",
                 module_name,
@@ -51,13 +62,20 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = solib
     spec.loader.exec_module(solib)
+
+
+assert torch_version() >= (2, 1), f"Minimum torch version 2.1 required. Found {torch_version()}."
 
 
 _load_library()
@@ -89,6 +107,7 @@ from transformer_engine.pytorch.distributed import CudaRNGStatesTracker
 from transformer_engine.pytorch.cpu_offload import get_cpu_offload_context
 from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
+from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
 
 try:
     torch._dynamo.config.error_on_nested_jit_trace = False

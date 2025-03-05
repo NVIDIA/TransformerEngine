@@ -34,11 +34,7 @@ using ExtBarrierOp = std::function<void(ExtComm)>;
 #define NVTE_MAX_REQUESTS 1024
 #define NVTE_LAUNCH_GPU 1
 #define NVTE_LAUNCH_CPU 2
-#define NVTE_MAX_NVLINK 8
-
-#define UB_MEM_UC_CONTIG 1
-#define UB_MEM_MC_CREATED 2
-#define UB_MEM_ALLOCATED 4
+#define NVTE_MAX_NVLINK 32
 
 #define NVTE_UB_MEM_UC_CONTIG 1
 #define NVTE_UB_MEM_MC_CREATED 2
@@ -124,11 +120,8 @@ struct communicator {
       ar_nvrank;  // number of gpus(and first gpu in a group) of gpus per node in reduction subgroup
                   // (_splitar init used) would be equal to (nvsize,0) for regular comm_create
   int ar2_nvsize, ar2_firstgpu, ar2_nvrank;  // with ar_nvsize as a step
-  int pipe_id;  // which allreduce set of groups (pipeline rank in range of 0..pipeline_size)
   int sm_arch;
-  int num_nodes, my_node,
-      first_node;  // comm_inter communicator, per-rail allreduce (might have subset of nodes)
-  int num2_nodes, my2_node, first2_node;  // with num_nodes as a stride
+  int num_nodes, my_node;
   // max value for running block counters in hostflags
   int basecounter[userbuffers_op_types];  // NOLINT(*)
 
@@ -136,20 +129,11 @@ struct communicator {
 
   void *mem_mr[NVTE_MAX_REGIONS];
 
-  ub_request *fifo;
-  int nblocks, alignblock, minblock, asyncblocks, active_nreqs;
-  ub_request active_req[userbuffers_op_types];  // NOLINT(*)
-  int padding[7];
-  volatile int head;
-  int padding2[15];
-  volatile int tail;
-
   // Abstract communication callbacks to support external bootstrapping (e.g. DL frameworks)
   ExtAllgatherOp _allgather;
   ExtBarrierOp _barrier;
 
   ExtComm comm_world;
-  ExtComm comm_inter;  // reduction group communicator (subset of the nodes) along GPU rail
   ExtComm comm_intra;  // full intranode (all ndev GPUS)
 #ifdef NVTE_UB_WITH_MPI
   MPI_Request mpihndl[NVTE_MAX_SHARP];
@@ -198,11 +182,6 @@ void destroy_communicator_mpi(communicator *comm);
     returns handler if buffer is registered already, or -1 if not.
     returned offset is offset of gpubuff relative to buffer registered
 */
-
-int pipe_rank(communicator *comm,
-              int step);  // helper function to help walk across allreduce1 x allreduce2 groups
-                          // data-parallel and tensor-parallel position within data and tensor
-                          // groups would be preserved
 
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
 /*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
