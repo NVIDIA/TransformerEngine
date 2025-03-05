@@ -351,7 +351,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         )
 
         if not torch_stray_tensor:
-            
+
             # obtain a unique tensor tag
             tensor_tag = (self.current_group, self.tensor_count_current_group)
             self.tensor_count_current_group += 1
@@ -371,9 +371,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     self.tensor_tag_to_state[tensor_tag].append(t)
                 else:
                     self.tensor_tag_to_state[tensor_tag] = t
-    
-                if self.current_group < self.num_offload_group and self.tensor_need_offloading_checker(
-                    t
+
+                if (
+                    self.current_group < self.num_offload_group
+                    and self.tensor_need_offloading_checker(t)
                 ):
                     if fp8_tensor:
                         self.tensor_tag_to_buf[tensor_tag].append(t)
@@ -473,7 +474,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor_list = []
                         for state_tuple in state:
                             tensor_list.append(SynchronizedGroupOffloadHandler.reload(state_tuple))
-                        _ , recovered_tensor = self.fp8_tensor_object_map[tensor_label].restore_from_saved(tensor_list) 
+                        _, recovered_tensor = self.fp8_tensor_object_map[
+                            tensor_label
+                        ].restore_from_saved(tensor_list)
                         self.tensor_tag_to_state[tensor_label] = recovered_tensor
 
     def on_group_commit_backward(self):
