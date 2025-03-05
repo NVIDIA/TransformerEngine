@@ -109,7 +109,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Determine whether to avoid fused kernel
   bool force_unfused_kernel = false;
   if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
-    if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN", false)) {
+    if (!transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
       // TE only supports MXFP8 norm with cuDNN backend
       force_unfused_kernel = true;
     } else if (N % 128 != 0 || H % 128 != 0) {
@@ -225,7 +225,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Determine whether to avoid fused kernel
   bool force_unfused_kernel = false;
   if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
-    if (!transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN", false)) {
+    if (!transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
       // TE only supports MXFP8 norm with cuDNN backend
       force_unfused_kernel = true;
     } else if (N % 128 != 0 || H % 128 != 0) {
