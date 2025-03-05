@@ -101,22 +101,23 @@ def onnx_quantize_fp8_symbolic(
     scale_inv = op.Constant(value_float=1 / scale)
     return TRT_FP8QuantizeLinear(tensor, scale_inv)
 
+
 # Define the schema for the custom operator
 schema = defs.OpSchema(
-    name = "TRT_FP8QuantizeLinear",
-    domain = "trt",
-    since_version = 1,
-    doc = "TRT FP8 Quantize Linear used for inference.",
-    inputs = [
+    name="TRT_FP8QuantizeLinear",
+    domain="trt",
+    since_version=1,
+    doc="TRT FP8 Quantize Linear used for inference.",
+    inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(float)", "Input tensor to quantize"),
-        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for quantization")
+        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for quantization"),
     ],
-    outputs = [
-        defs.OpSchema.FormalParameter("output", "tensor(uint8)", "Quantized output tensor")
-    ]
+    outputs=[defs.OpSchema.FormalParameter("output", "tensor(uint8)", "Quantized output tensor")],
 )
 
-TRT_FP8QuantizeLinear = onnxscript.values.Op(opset=trt_opset, name="TRT_FP8QuantizeLinear", op_schema=schema)
+TRT_FP8QuantizeLinear = onnxscript.values.Op(
+    opset=trt_opset, name="TRT_FP8QuantizeLinear", op_schema=schema
+)
 
 
 # ONNX FP8 Dequantization
@@ -146,21 +147,22 @@ def onnx_dequantize_fp8_symbolic(
     scale_inv = op.Constant(value_float=1 / scale)
     return TRT_FP8DequantizeLinear(tensor, scale_inv)
 
+
 schema = defs.OpSchema(
-    name = "TRT_FP8DequantizeLinear",
-    domain = "trt",
-    since_version = 1,
-    doc = "TRT FP8 Dequantize Linear from Float8Tensor used for inference.",
-    inputs = [
+    name="TRT_FP8DequantizeLinear",
+    domain="trt",
+    since_version=1,
+    doc="TRT FP8 Dequantize Linear from Float8Tensor used for inference.",
+    inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(uint8)", "Input tensor to dequantize"),
-        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for dequantization")
+        defs.OpSchema.FormalParameter("scale", "tensor(float)", "Scale factor for dequantization"),
     ],
-    outputs = [
-        defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")
-    ]
+    outputs=[defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")],
 )
 
-TRT_FP8DequantizeLinear = onnxscript.values.Op(opset=trt_opset, name="TRT_FP8DequantizeLinear", op_schema=schema)
+TRT_FP8DequantizeLinear = onnxscript.values.Op(
+    opset=trt_opset, name="TRT_FP8DequantizeLinear", op_schema=schema
+)
 
 # ONNX MXFP8 Quantization
 
@@ -190,20 +192,24 @@ def onnx_quantize_mxfp8_symbolic(
 
 
 schema = defs.OpSchema(
-    name = "TRT_MXFP8QuantizeLinear",
-    domain = "trt",
-    since_version = 1,
-    doc = "TRT MXFP8 Quantize Linear used for inference.",
-    inputs = [
+    name="TRT_MXFP8QuantizeLinear",
+    domain="trt",
+    since_version=1,
+    doc="TRT MXFP8 Quantize Linear used for inference.",
+    inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(float)", "Input tensor to quantize"),
     ],
-    outputs = [
+    outputs=[
         defs.OpSchema.FormalParameter("output", "tensor(uint8)", "Quantized output tensor"),
-        defs.OpSchema.FormalParameter("scale_inv", "tensor(uint8)", "Scale factor for quantization")
-    ]
+        defs.OpSchema.FormalParameter(
+            "scale_inv", "tensor(uint8)", "Scale factor for quantization"
+        ),
+    ],
 )
 
-TRT_MXFP8QuantizeLinear = onnxscript.values.Op(opset=trt_opset, name="TRT_MXFP8QuantizeLinear", op_schema=schema)
+TRT_MXFP8QuantizeLinear = onnxscript.values.Op(
+    opset=trt_opset, name="TRT_MXFP8QuantizeLinear", op_schema=schema
+)
 # ONNX MXFP8 Dequantization
 
 
@@ -229,18 +235,19 @@ def onnx_dequantize_mxfp8_symbolic(
     """Symbolic dequantize from MXFP8Tensor used for inference."""
     return TRT_MXFP8DequantizeLinear(tensor, scale_inv)
 
+
 schema = defs.OpSchema(
-    name = "TRT_MXFP8DequantizeLinear",
-    domain = "trt",
-    since_version = 1,
-    doc = "TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference.",
-    inputs = [
+    name="TRT_MXFP8DequantizeLinear",
+    domain="trt",
+    since_version=1,
+    doc="TRT MXFP8 Dequantize Linear from MXFP8Tensor used for inference.",
+    inputs=[
         defs.OpSchema.FormalParameter("tensor", "tensor(uint8)", "Input tensor to dequantize"),
-        defs.OpSchema.FormalParameter("scale_inv", "tensor(uint8)", "Scale factor for dequantization")
+        defs.OpSchema.FormalParameter(
+            "scale_inv", "tensor(uint8)", "Scale factor for dequantization"
+        ),
     ],
-    outputs = [
-        defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")
-    ]
+    outputs=[defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")],
 )
 
 
