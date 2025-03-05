@@ -439,15 +439,14 @@ __device__ __forceinline__ void compute_scale_from_amax(fp32 amax, fp32 *scale_p
 }
 
 template <bool kPow2Scaling>
-__global__ void compute_scale_from_amax_kernel(fp32 *amax_ptr, fp32 *scale_ptr,
-                                               const fp32 max_fp8, const fp32 epsilon) {
+__global__ void compute_scale_from_amax_kernel(fp32 *amax_ptr, fp32 *scale_ptr, const fp32 max_fp8,
+                                               const fp32 epsilon) {
   compute_scale_from_amax<kPow2Scaling>(*amax_ptr, scale_ptr, max_fp8, epsilon);
 }
 
 template <bool kPow2Scaling>
-void ComputeScaleFromAmaxKernelLauncher(fp32 *amax_ptr, fp32 *scale_ptr,
-                                        const fp32 max_fp8, const fp32 epsilon,
-                                        cudaStream_t stream) {
+void ComputeScaleFromAmaxKernelLauncher(fp32 *amax_ptr, fp32 *scale_ptr, const fp32 max_fp8,
+                                        const fp32 epsilon, cudaStream_t stream) {
   compute_scale_from_amax_kernel<kPow2Scaling>
       <<<1, 1, 0, stream>>>(amax_ptr, scale_ptr, max_fp8, epsilon);
 }

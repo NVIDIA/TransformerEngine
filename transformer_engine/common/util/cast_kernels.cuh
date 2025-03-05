@@ -1052,8 +1052,7 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
-                {}, stream);
+                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1078,8 +1077,7 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
                 is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
-                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N,
-                {}, stream);
+                reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
           });  // NOLINT(*)
@@ -1256,8 +1254,7 @@ inline void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsi
           const fp32 max_fp8 = Quantized_Limits<OType>::max_norm;
           ComputeScaleFromAmaxKernelLauncher<kPow2Scale>(
               reinterpret_cast<fp32 *>(output->amax.dptr),
-              reinterpret_cast<fp32 *>(output->scale.dptr),
-              max_fp8, epsilon,
+              reinterpret_cast<fp32 *>(output->scale.dptr), max_fp8, epsilon,
               stream););  // power of 2 scales
   );                      // output type
 }

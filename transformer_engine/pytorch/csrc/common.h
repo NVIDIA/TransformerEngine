@@ -207,29 +207,6 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
   }
 }
 
-inline at::ScalarType GetATenDTypeFromNVTEDtype(NVTEDType t) {
-  switch (t) {
-    case kNVTEByte:
-      return torch::kByte;
-    case kNVTEInt32:
-      return torch::kInt32;
-    case kNVTEInt64:
-      return torch::kInt64;
-    case kNVTEFloat32:
-      return at::kFloat;
-    case kNVTEFloat16:
-      return at::kHalf;
-    case kNVTEBFloat16:
-      return at::kBFloat16;
-    case kNVTEFloat8E4M3:
-      return at::kFloat8_e4m3fn;
-    case kNVTEFloat8E5M2:
-      return at::kFloat8_e5m2;
-    default:
-      NVTE_ERROR("Invalid type");
-  }
-}
-
 inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
   switch (t) {
     case at::kFloat8_e4m3fn:
@@ -289,8 +266,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(
     at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
     NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
-at::Tensor makeATenTensor(NVTEBasicTensor tensor);
-
 template <typename T>
 T product(const std::vector<T>& shape);
 
@@ -311,8 +286,6 @@ at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
-
-at::IntArrayRef convertShapeToATenArrayRef(const NVTEShape& shape);
 
 int roundup(const int value, const int multiple);
 

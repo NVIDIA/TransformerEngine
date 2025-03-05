@@ -60,8 +60,8 @@ TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantize
       return x;
     }
   }
-  NVTE_CHECK(dynamic_cast<NoneQuantizer *>(my_quantizer.get()) != nullptr,
-           "Unexpected quantization params type.");
+  NVTE_CHECK(dynamic_cast<NoneQuantizer*>(my_quantizer.get()) != nullptr,
+             "Unexpected quantization params type.");
 
   // Regular pyTorch tensor
   at::Tensor torch_tensor = tensor.cast<at::Tensor>();
@@ -150,28 +150,6 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor,
                                      scaling_mode);
 }
 
-at::Tensor makeATenTensor(NVTEBasicTensor tensor) {
-  at::IntArrayRef torch_shape = convertShapeToATenArrayRef(tensor.shape);
-  std::vector<int64_t> strides(torch_shape.size(), 1);
-  // convert shape to strides
-  // eg. shape = [2, 3, 4], then strides = [12, 4, 1]
-  // eg. shape = [1,], then strides = [1,]
-  // eg. shape = [2, 3], then strides = [3, 1]
-  if (tensor.shape.ndim > 1) {
-    for (int i = tensor.shape.ndim - 2; i >= 0; i--) {
-      strides[i] = strides[i + 1] * tensor.shape.data[i + 1];
-    }
-  }
-  at::IntArrayRef strides_ref(strides);
-  auto deleter = [](void* ptr) {};
-  at::ScalarType at_dtype = GetATenDTypeFromNVTEDtype(tensor.dtype);
-  at::TensorOptions tensor_opts;
-  tensor_opts = tensor_opts.dtype(at_dtype).device(torch::kCUDA);
-  at::Tensor tensor_torch =
-      at::from_blob(tensor.data_ptr, torch_shape, strides_ref, deleter, tensor_opts);
-  return tensor_torch;
-}
-
 template <typename T>
 T product(const std::vector<T>& shape) {
   T ret = 1;
@@ -254,11 +232,6 @@ void* getDataPtr(at::Tensor tensor, int offset) {
 
 std::vector<size_t> convertShape(const NVTEShape& shape) {
   return std::vector<size_t>(shape.data, shape.data + shape.ndim);
-}
-
-at::IntArrayRef convertShapeToATenArrayRef(const NVTEShape& shape) {
-  std::vector<int64_t> shape_int64(shape.data, shape.data + shape.ndim);
-  return c10::IntArrayRef(shape_int64);
 }
 
 int roundup(const int value, const int multiple) {

@@ -55,7 +55,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
       // construct torch tesnor from NVTEBasicTensor without reallocating memory
-      at::Tensor amax_tensor_torch = makeATenTensor(te_output.get_amax());
+      at::Tensor& amax_tensor_torch = my_quantizer_cs->amax;
       std::vector<at::Tensor> tensors = {amax_tensor_torch};
       // allreduce amax tensor
       c10d::AllreduceOptions allreduce_opts;
