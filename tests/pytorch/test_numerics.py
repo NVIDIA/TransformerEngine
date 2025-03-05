@@ -1421,7 +1421,7 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            if recipe.delayed():
+            if recipe.delayed() or recipe.float8_current_scaling():
                 split_size = 16
             if recipe.mxfp8():
                 split_size = 128
@@ -1482,8 +1482,6 @@ def test_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if fp8 and recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:

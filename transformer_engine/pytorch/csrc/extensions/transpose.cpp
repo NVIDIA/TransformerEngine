@@ -17,7 +17,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   std::vector<py::object> py_output_objects_list;
-  std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
+  std::vector<transformer_engine::TensorWrapper> tensor_wrapper_input_list;
+  std::vector<transformer_engine::TensorWrapper> tensor_wrapper_output_list;
   auto none = py::none();
 
   // create TE tensors from input
@@ -40,8 +41,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
 
     nvte_tensor_output_list.emplace_back(output_tensor.data());
     nvte_tensor_input_list.emplace_back(input_tensor.data());
-    tensor_wrappers.emplace_back(std::move(input_tensor));
-    tensor_wrappers.emplace_back(std::move(output_tensor));
+    tensor_wrapper_input_list.emplace_back(std::move(input_tensor));
+    tensor_wrapper_output_list.emplace_back(std::move(output_tensor));
   }
 
   // Check tensor lists
@@ -65,6 +66,27 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
                         nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
   } else {
     for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
+      // For per-tensor current scaling mode, we need to compute amax and scale before quantization
+      if (nvte_tensor_scaling_mode(nvte_tensor_output_list[i]) == NVTE_CURRENT_TENSOR_SCALING) {
+        auto quantizer = convert_quantizer(quantizer_list[i]);
+        // quantizer here has to be a Float8CurrentScalingQuantizer
+        auto quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer.get());
+        nvte_compute_amax(nvte_tensor_input_list[i], nvte_tensor_output_list[i],
+                          at::cuda::getCurrentCUDAStream());
+        // check if we need to do amax reudction (depending on model parallel configs)
+        if (quantizer_cs->with_amax_reduction) {
+          c10::intrusive_ptr<dist_group_type> process_group_ptr =
+              quantizer_cs->amax_reduction_group;
+          // construct torch tensor from NVTEBasicTensor without reallocating memory
+          at::Tensor amax_tensor_torch = makeATenTensor(tensor_wrapper_output_list[i].get_amax());
+          std::vector<at::Tensor> tensors = {amax_tensor_torch};
+          // allreduce amax tensor
+          c10d::AllreduceOptions allreduce_opts;
+          allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
+          process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
+        }
+        nvte_compute_scale_from_amax(nvte_tensor_output_list[i], at::cuda::getCurrentCUDAStream());
+      }
       nvte_quantize(nvte_tensor_input_list[i], nvte_tensor_output_list[i],
                     at::cuda::getCurrentCUDAStream());
     }
