@@ -68,33 +68,30 @@ void compute_ref_x1(const InputType* input,
     const size_t blocks_per_tile_Y = tile_size_Y / block_size_Y;
     const size_t blocks_per_tile_X = tile_size_X / block_size_X;
 
-    #pragma omp parallel proc_bind(spread)
-    {
-        #pragma omp for schedule(static)
-        for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
-            const size_t tile_Y = t / tiles_num_X;
-            const size_t tile_X = t % tiles_num_X;
-            const size_t tile_offset_Y = tile_Y * tile_size_Y;
-            const size_t tile_offset_X = tile_X * tile_size_X;
+    #pragma omp parallel for schedule(static) proc_bind(spread)
+    for (size_t t = 0; t < tiles_num_Y * tiles_num_X; ++t) {
+        const size_t tile_Y = t / tiles_num_X;
+        const size_t tile_X = t % tiles_num_X;
+        const size_t tile_offset_Y = tile_Y * tile_size_Y;
+        const size_t tile_offset_X = tile_X * tile_size_X;
 
-            for (size_t ii = 0; ii < blocks_per_tile_Y; ++ii) {
-                const size_t block_idx_Y = tile_Y * blocks_per_tile_Y + ii;
-                const size_t block_offset_Y = ii * block_size_Y;
-                const size_t i_min = tile_offset_Y + block_offset_Y;
-                if (i_min >= rows) continue;
-                const size_t i_max = std::min(i_min + block_size_Y, rows);
+        for (size_t ii = 0; ii < blocks_per_tile_Y; ++ii) {
+            const size_t block_idx_Y = tile_Y * blocks_per_tile_Y + ii;
+            const size_t block_offset_Y = ii * block_size_Y;
+            const size_t i_min = tile_offset_Y + block_offset_Y;
+            if (i_min >= rows) continue;
+            const size_t i_max = std::min(i_min + block_size_Y, rows);
 
-                for (size_t jj = 0; jj < blocks_per_tile_X; ++jj) {
-                    const size_t block_idx_X = tile_X * blocks_per_tile_X + jj;
-                    const size_t block_offset_X = jj * block_size_X;
-                    const size_t j_min = tile_offset_X + block_offset_X;
-                    if (j_min >= cols) continue;
-                    const size_t j_max = std::min(j_min + block_size_X, cols);
+            for (size_t jj = 0; jj < blocks_per_tile_X; ++jj) {
+                const size_t block_idx_X = tile_X * blocks_per_tile_X + jj;
+                const size_t block_offset_X = jj * block_size_X;
+                const size_t j_min = tile_offset_X + block_offset_X;
+                if (j_min >= cols) continue;
+                const size_t j_max = std::min(j_min + block_size_X, cols);
 
-                    const size_t scale_idx = block_idx_Y * scales_stride + block_idx_X;
-                    dequantize_block<InputType, OutputType>(
-                        input, output, scales, scale_idx, i_min, i_max, j_min, j_max, cols);
-                }
+                const size_t scale_idx = block_idx_Y * scales_stride + block_idx_X;
+                dequantize_block<InputType, OutputType>(
+                    input, output, scales, scale_idx, i_min, i_max, j_min, j_max, cols);
             }
         }
     }
