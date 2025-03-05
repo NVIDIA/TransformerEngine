@@ -51,8 +51,12 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)

@@ -17,10 +17,8 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax import ffi
 
-from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
-
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import (
+import transformer_engine_jax
+from transformer_engine_jax import (
     NVTE_Bias_Type,
     NVTE_Mask_Type,
     NVTE_QKV_Layout,
@@ -28,6 +26,8 @@ from transformer_engine.transformer_engine_jax import (
     NVTE_Fused_Attn_Backend,
     nvte_get_qkv_format,
 )
+from transformer_engine.jax.attention import CPStrategy, SequenceDescriptor
+
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
