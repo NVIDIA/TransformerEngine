@@ -9,7 +9,7 @@ from contextlib import nullcontext
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
-#Check if FP8 supported
+# Check if FP8 supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 SIZE = 512
