@@ -840,6 +840,22 @@ L1_pytorch_mcore_integration--B200_1GPU:
     - .L1_test_on_cluster
     - .B200_1GPU
 
+L1_pytorch_thunder_integration--H100_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test
+    - .H100_1GPU
+
+L1_pytorch_thunder_integration--B200_1GPU:
+    variables:
+      FRAMEWORK: pytorch
+    needs: [ pytorch-py3-devel ]
+    extends:
+    - .L1_test_on_cluster
+    - .B200_1GPU
+
 L1_pytorch_distributed_unittest--H100_4GPU:
     variables:
       FRAMEWORK: pytorch
