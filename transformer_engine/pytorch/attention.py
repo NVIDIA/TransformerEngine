@@ -1591,6 +1591,7 @@ def flash_attn_p2p_communicate(
 
 @jit_fuser
 def flash_attn_fwd_out_correction_init(
+    out: torch.Tensor,
     out_int_step: torch.Tensor,
     softmax_lse: torch.Tensor,
     softmax_lse_int_step: torch.Tensor,
@@ -1600,7 +1601,7 @@ def flash_attn_fwd_out_correction_init(
     softmax_lse_corrected_exp = torch.exp(softmax_lse_int_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_int_step * softmax_lse_corrected_exp
-    return out_corrected
+    out.copy_(out_corrected)
 
 
 @jit_fuser
@@ -2715,6 +2716,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
                         if qkv_format == "thd":
                             out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
+                        else:
+                            out = torch.empty_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
                         flash_attn_fwd_softmax_lse_correction(
                             softmax_lse, softmax_lse_per_step[i - 1]
@@ -2747,13 +2750,13 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
                     if i == 0:
-                        out = flash_attn_fwd_out_correction_init(
+                        flash_attn_fwd_out_correction_init(
+                            out.view(*out_per_step[0].shape),
                             out_per_step[0],
                             softmax_lse,
                             softmax_lse_per_step[0],
                             seq_dim,
                         )
-                        out = out.view(q.shape)
                     else:
                         flash_attn_fwd_out_correction(
                             out.view(*out_per_step[i].shape),
