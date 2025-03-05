@@ -217,6 +217,7 @@ def do_export(
                 output_names=output_names,
                 do_constant_folding=True,
                 operator_export_type=torch.onnx.OperatorExportTypes.ONNX_FALLTHROUGH,
+                optimize=inps[0].dtype != torch.bfloat16 # optimizer does not work with bfloat16 yet - will need to change that after onnxscript supports bfloat16
             )
 
 
