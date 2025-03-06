@@ -19,13 +19,13 @@ from transformer_engine.pytorch.attention import (
     DotProductAttention,
     MultiheadAttention,
     RotaryPositionEmbedding,
+    _attention_backends,
+)
+from transformer_engine.pytorch.dot_product_attention.utils import (
+    FAUtils,
     get_attention_backend,
-    _flash_attn_is_installed,
-    _flash_attn_2_3_plus,
-    _flash_attn_3_is_installed,
     check_set_window_size,
     AttentionParams,
-    _attention_backends,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -191,9 +191,16 @@ def _get_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
-        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
+        use_flash_attention, use_fused_attention, fused_attention_backend, use_unfused_attention, available_backends = get_attention_backend(
             attention_params
         )
+        # Set attention.py _attention_backends var using return value
+        # from get_attention_backend()
+        _attention_backends["use_flash_attention"] = use_flash_attention
+        _attention_backends["use_fused_attention"] = use_fused_attention
+        _attention_backends["fused_attention_backend"] = fused_attention_backend
+        _attention_backends["use_unfused_attention"] = use_unfused_attention
+        _attention_backends["backend_selection_requires_update"] = False
         return available_backends, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
@@ -269,12 +276,12 @@ def test_dot_product_attention(
     # mannually pads and unpads the input and output of FlashAttention for testing purposes
     if (
         pad_between_seqs
-        and _flash_attn_is_installed
+        and FAUtils.is_installed
         and not (
             config.max_seqlen_q != config.max_seqlen_kv
             and config.attn_mask_type in ["causal", "padding_causal"]
         )
-        and (config.window_size[0] == -1 or _flash_attn_2_3_plus)
+        and (config.window_size[0] == -1 or FAUtils.v2_3_plus)
     ):
         flash_attn_supported = True
 
@@ -581,7 +588,7 @@ model_configs_swa = {
 }
 
 
-@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif(not FAUtils.v2_3_plus, reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_swa])
 @pytest.mark.parametrize("model", model_configs_swa.keys())
@@ -603,7 +610,7 @@ model_configs_alibi_slopes = {
 }
 
 
-@pytest.mark.skipif(not _flash_attn_2_3_plus, reason="Flash-attn 2.3+ is required.")
+@pytest.mark.skipif(not FAUtils.v2_3_plus, reason="Flash-attn 2.3+ is required.")
 @pytest.mark.parametrize("dtype", param_types_lean)
 @pytest.mark.parametrize("model_configs", [model_configs_alibi_slopes])
 @pytest.mark.parametrize("model", model_configs_alibi_slopes.keys())
@@ -1445,7 +1452,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     ):
         pytest.skip("FP8 with padding or head_dim != 128 is not supported for cuDNN < 9.7")
 
-    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
+    if FAUtils.v3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1471,7 +1478,7 @@ def test_mha_fp8_vs_f16(dtype, model, qkv_format, input_layernorm, fp8_dpa_bwd, 
     rtol = 5e-1
     rmse_tol = 0.15
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
+    if FAUtils.v3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
@@ -1656,7 +1663,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "1"
 
-    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
+    if FAUtils.v3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         os.environ["NVTE_FLASH_ATTN"] = "1"
         os.environ["NVTE_FUSED_ATTN"] = "0"
         _attention_backends["backend_selection_requires_update"] = True
@@ -1685,7 +1692,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training):
     rmse_tol = 0.11
     bwd_names = ["dq", "dk", "dv"]
     logging.debug("========== {:^25s} ==========".format("forward output"))
-    if _flash_attn_3_is_installed and not is_training and "padding" not in config.attn_mask_type:
+    if FAUtils.v3_is_installed and not is_training and "padding" not in config.attn_mask_type:
         _error(
             flash_attn_fwd_fp8,
             fused_attn_fwd_f16,
