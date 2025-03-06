@@ -459,7 +459,7 @@ __device__ void cu_seqlens_padded_to_offsets_impl(
         case NVTE_QKV_Layout_Group::NVTE_3HD:
         case NVTE_QKV_Layout_Group::NVTE_H3D:
           offsets_k[tid] = 3 * h * d_qk * cu_seqlens_q_padded[cu_seqlens_id];
-          offsets_v[tid] = offsets_v[cu_seqlens_id];
+          offsets_v[tid] = offsets_k[cu_seqlens_id];
           break;
         case NVTE_QKV_Layout_Group::NVTE_HD_2HD:
         case NVTE_QKV_Layout_Group::NVTE_HD_H2D:
