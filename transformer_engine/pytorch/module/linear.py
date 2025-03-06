@@ -129,7 +129,7 @@ class _Linear(torch.autograd.Function):
             parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
         )
         own_quantized_input = False
-        if fp8 or debug:
+        if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             if (
                 any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
@@ -138,7 +138,7 @@ class _Linear(torch.autograd.Function):
                 raise NotImplementedError(
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling"
                 )
-
+        if fp8 or debug:
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
