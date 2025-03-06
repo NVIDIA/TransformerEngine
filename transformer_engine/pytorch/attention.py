@@ -1381,9 +1381,15 @@ def _get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
-    batch_size = int(batch_size)
-    max_seqlen = int(max_seqlen)
-
+    
+    if is_in_onnx_export_mode():
+        return torch.arange(
+            0,
+            (batch_size + 1) * max_seqlen,
+            step=max_seqlen,
+            dtype=torch.int32,
+            device=device,
+        )
     if (batch_size, max_seqlen) not in _cu_seqlens_cache:
         _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
             0,
@@ -5343,7 +5349,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
                 dtype=query_layer.dtype
             )
-
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
         attention_probs = self.scale_mask_softmax(
@@ -5368,6 +5373,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             query_layer.size(0),
             value_layer.size(3),
         )
+
 
         # change view [sk, b * np, hn]
         value_layer = value_layer.reshape(value_layer.size(0), output_size[0] * output_size[1], -1)
@@ -7497,6 +7503,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
                     query_layer, key_layer, value_layer, qkv_format=qkv_format
                 )
+            
 
             global _alibi_cache
             if alibi_slopes is not None:
@@ -7520,7 +7527,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-
+        
             core_attention_bias_shape = None
             if core_attention_bias is not None:
                 if (
@@ -7551,7 +7558,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_kv_padded is not None
                 and not torch.equal(cu_seqlens_kv_padded[:-1], cu_seqlens_kv[:-1])
             )
-
             attention_params = AttentionParams(
                 qkv_type=type(query_layer),
                 qkv_dtype=query_layer.dtype,
@@ -7580,38 +7586,45 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
             )
             global _attention_backends, _use_flash_attn_3
-            if (
-                _attention_backends["attention_params"] is None
-                or attention_params != _attention_backends["attention_params"]
-            ):
-                _attention_backends["attention_params"] = attention_params
-                _attention_backends["backend_selection_requires_update"] = True
-            if _attention_backends["backend_selection_requires_update"]:
-                _use_flash_attn_3 = _flash_attn_3_is_installed
-                (
-                    use_flash_attention,
-                    use_fused_attention,
-                    fused_attention_backend,
-                    use_unfused_attention,
-                    _,
-                ) = get_attention_backend(attention_params)
-                if use_flash_attention:
-                    self.logger.info(
-                        "Running with FlashAttention backend (version %s)",
-                        _flash_attn_version if not _use_flash_attn_3 else _flash_attn_3_version,
-                    )
-                elif use_fused_attention:
-                    self.logger.info(
-                        "Running with FusedAttention backend (sub-backend %s)",
-                        int(fused_attention_backend),
-                    )
-                elif use_unfused_attention:
-                    self.logger.info("Running with UnfusedDotProductAttention backend")
+
+
+            if not is_in_onnx_export_mode():
+                if (
+                    _attention_backends["attention_params"] is None
+                    or attention_params != _attention_backends["attention_params"]
+                ):
+                    _attention_backends["attention_params"] = attention_params
+                    _attention_backends["backend_selection_requires_update"] = True
+                if _attention_backends["backend_selection_requires_update"]:
+                    _use_flash_attn_3 = _flash_attn_3_is_installed
+                    (
+                        use_flash_attention,
+                        use_fused_attention,
+                        fused_attention_backend,
+                        use_unfused_attention,
+                        _,
+                    ) = get_attention_backend(attention_params)
+                    if use_flash_attention:
+                        self.logger.info(
+                            "Running with FlashAttention backend (version %s)",
+                            _flash_attn_version if not _use_flash_attn_3 else _flash_attn_3_version,
+                        )
+                    elif use_fused_attention:
+                        self.logger.info(
+                            "Running with FusedAttention backend (sub-backend %s)",
+                            int(fused_attention_backend),
+                        )
+                    elif use_unfused_attention:
+                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                else:
+                    use_flash_attention = _attention_backends["use_flash_attention"]
+                    use_fused_attention = _attention_backends["use_fused_attention"]
+                    fused_attention_backend = _attention_backends["fused_attention_backend"]
+                    use_unfused_attention = _attention_backends["use_unfused_attention"]
             else:
-                use_flash_attention = _attention_backends["use_flash_attention"]
-                use_fused_attention = _attention_backends["use_fused_attention"]
-                fused_attention_backend = _attention_backends["fused_attention_backend"]
-                use_unfused_attention = _attention_backends["use_unfused_attention"]
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = True
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
@@ -7719,7 +7732,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "Attention activation Offloading is only implemented"
                     "with Flash Attention and Fused Attention!"
                 )
-
             if use_unfused_attention:
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -8357,6 +8369,7 @@ class MultiheadAttention(torch.nn.Module):
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                 )
 
+
             num_queries_per_key_value = (
                 self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
             )
@@ -8480,6 +8493,7 @@ class MultiheadAttention(torch.nn.Module):
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
+
 
         if rotary_pos_emb is not None:
             assert not isinstance(query_layer, Float8Tensor) and not isinstance(

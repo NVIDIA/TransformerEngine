@@ -8,7 +8,6 @@ from typing import Callable, Tuple, Union, Optional
 import torch
 from torch import nn
 import transformer_engine_torch as tex
-from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 
 THREADS_PER_WARP = 32
@@ -45,7 +44,10 @@ def _get_onnx_export_causal_mask(
     assert len(onnx_causal_mask.size()) == 2
     assert onnx_causal_mask.size(0) == onnx_causal_mask.size(1)
     assert onnx_causal_mask.size(0) >= (seq_k - seq_q) >= 0
-    derived_mask = onnx_causal_mask[seq_k - seq_q : seq_k, :seq_k]
+    derived_mask = torch.triu(
+                    torch.ones(seq_k, seq_k, device="cuda"),
+                    diagonal=1,
+                ).bool()
     return derived_mask
 
 
@@ -202,7 +204,10 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.attn_mask_type = attn_mask_type
 
         assert scale is None or self.softmax_in_fp32, "softmax should be in fp32 when scaled"
-        if self.is_kernel_available(mask, *inp.size()) and not is_in_onnx_export_mode():
+        if is_in_onnx_export_mode():
+            return self.forward_torch_softmax(inp, mask, scale)
+
+        if self.is_kernel_available(mask, *inp.size()):
             return self.forward_fused_softmax(inp, mask, scale)
 
         return self.forward_torch_softmax(inp, mask, scale)
@@ -284,11 +289,11 @@ class FusedScaleMaskSoftmax(nn.Module):
                 )
             else:
                 causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
+            
             if mask is None:
                 mask = causal_mask
             else:
                 mask = torch.logical_or(mask, causal_mask)
-
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":
             mask_output = self.mask_func(inp, mask)

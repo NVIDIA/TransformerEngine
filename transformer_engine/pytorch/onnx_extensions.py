@@ -23,15 +23,18 @@ The primary goal of ONNX export is to enable inference compatibility with Tensor
 
 from typing import Tuple
 import torch
+import math
 import onnxscript
 from onnxscript import opset18 as op
 import transformer_engine_torch as tex
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .constants import TE_DType
-from .export import is_in_onnx_export_mode
 import onnx
 from onnx import defs, helper
+
+from .constants import MXFP8_BLOCK_SCALING_SIZE
+from .utils import round_up_to_nearest_multiple
 
 # ONNX GEMM for inference
 
@@ -168,17 +171,20 @@ TRT_FP8DequantizeLinear = onnxscript.values.Op(
 
 
 @torch.library.custom_op("tex::mxfp8_quantize", mutates_args=[])
-def onnx_quantize_mxfp8_op(tensor: torch.Tensor) -> torch.Tensor:
+def onnx_quantize_mxfp8_op(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Quantize to MXFP8Tensor used for inference."""
     quantizer = MXFP8Quantizer(tex.DType.kFloat8E4M3)
     quantized_tensor = quantizer(tensor)
-    return quantized_tensor._data, quantized_tensor._scale_inv
+    return quantized_tensor._rowwise_data, quantized_tensor._rowwise_scale_inv
 
 
 @onnx_quantize_mxfp8_op.register_fake
 def _(tensor: torch.Tensor):
     """Fake quantize to MXFP8Tensor used for inference."""
-    mxfp8_scale_shape = tensor.shape
+    mxfp8_scale_shape = [
+        round_up_to_nearest_multiple(math.prod(tensor.shape[:-1]), 128),
+        round_up_to_nearest_multiple(tensor.shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4)
+    ]
     return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.empty(
         mxfp8_scale_shape, dtype=torch.uint8, device=tensor.device
     )
@@ -186,9 +192,10 @@ def _(tensor: torch.Tensor):
 
 def onnx_quantize_mxfp8_symbolic(
     tensor: onnxscript.onnx_types.TensorType,
-) -> onnxscript.onnx_types.TensorType:
+) -> Tuple[onnxscript.onnx_types.TensorType, onnxscript.onnx_types.TensorType]:
     """Symbolic quantize to MXFP8Tensor used for inference."""
-    return TRT_MXFP8QuantizeLinear(tensor)
+    tensor_out, scale_inv_out = TRT_MXFP8QuantizeLinear(tensor)
+    return tensor_out, scale_inv_out
 
 
 schema = defs.OpSchema(
@@ -248,6 +255,10 @@ schema = defs.OpSchema(
         ),
     ],
     outputs=[defs.OpSchema.FormalParameter("output", "tensor(float)", "Dequantized output tensor")],
+)
+
+TRT_MXFP8DequantizeLinear = onnxscript.values.Op(
+    opset=trt_opset, name="TRT_MXFP8DequantizeLinear", op_schema=schema
 )
 
 

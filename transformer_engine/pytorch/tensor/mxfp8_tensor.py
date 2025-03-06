@@ -151,7 +151,7 @@ class MXFP8Quantizer(Quantizer):
 
     def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
         return torch.ops.tex.mxfp8_dequantize(
-            tensor._data, tensor._scale_inv, int(TE_DType_map[self.dtype])
+            tensor._rowwise_data, tensor._rowwise_scale_inv
         )
 
 
