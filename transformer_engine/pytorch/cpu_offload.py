@@ -414,6 +414,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                 self.tensor_tag_to_state[tensor_tag].append(state)
                             else:
                                 self.tensor_tag_to_state[tensor_tag] = state
+                        else:
+                            self.tensor_tag_to_state[tensor_tag] = state
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
