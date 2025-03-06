@@ -45,7 +45,6 @@ torch.nn.Module.half = _make_module_cast_func(torch.float16)
 torch.nn.Module.bfloat16 = _make_module_cast_func(torch.bfloat16)
 
 
-
 all_tensor_types = [
     torch.Tensor,
     torch.nn.Parameter,
