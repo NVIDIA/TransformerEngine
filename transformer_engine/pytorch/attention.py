@@ -1592,15 +1592,15 @@ def flash_attn_p2p_communicate(
 @jit_fuser
 def flash_attn_fwd_out_correction_init(
     out: torch.Tensor,
-    out_int_step: torch.Tensor,
+    out_init_step: torch.Tensor,
     softmax_lse: torch.Tensor,
-    softmax_lse_int_step: torch.Tensor,
+    softmax_lse_init_step: torch.Tensor,
     seq_dim: int,
 ):
     """Merge partial outputs of the first step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_int_step - softmax_lse).movedim(2, seq_dim)
+    softmax_lse_corrected_exp = torch.exp(softmax_lse_init_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_int_step * softmax_lse_corrected_exp
+    out_corrected = out_init_step * softmax_lse_corrected_exp
     out.copy_(out_corrected)
 
 
