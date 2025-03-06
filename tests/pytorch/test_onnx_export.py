@@ -75,6 +75,7 @@ supported_activations = ["gelu", "relu", "reglu", "geglu", "swiglu"]
 
 all_normalizations = ["LayerNorm", "RMSNorm"]
 
+
 @onnx_op(
     op_type="trt::TRT_FP8QuantizeLinear",
     domain="trt",
