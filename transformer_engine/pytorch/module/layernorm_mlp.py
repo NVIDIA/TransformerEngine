@@ -1415,10 +1415,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     quantizers = self._get_quantizers()
                     debug = False
 
-
             if debug and isinstance(fc1_weight, QuantizedTensor):
                 raise RuntimeError("FP8 weights are not supported in debug mode.")
-            
+
             # Get quantizers
             (
                 fc1_input_quantizer,
