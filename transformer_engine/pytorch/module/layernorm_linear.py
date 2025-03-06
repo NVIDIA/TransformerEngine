@@ -1265,6 +1265,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     # If no feature is used, then run faster implementation with debug = False.
                     quantizers = self._get_quantizers(fp8_output)
                     debug = False
+
+            if debug and isinstance(weight_tensor, QuantizedTensor):
+                raise RuntimeError("FP8 weights are not supported in debug mode.")
+
             (
                 input_quantizer,
                 weight_quantizer,

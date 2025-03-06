@@ -173,7 +173,7 @@ class _Linear(torch.autograd.Function):
         weightmat = weight
 
         if fp8 or debug:
-            if not isinstance(weight, QuantizedTensor) or debug:
+            if not isinstance(weight, QuantizedTensor):
                 # Configure quantizer
                 if weight_quantizer is not None:
                     columnwise_usage = is_grad_enabled and inp.requires_grad
@@ -1058,6 +1058,9 @@ class Linear(TransformerEngineBaseModule):
                     # If no feature is used, then run faster implementation with debug = False.
                     quantizers = self._get_quantizers(fp8_output, fp8_grad)
                     debug = False
+            
+            if debug and isinstance(weight_tensor, QuantizedTensor):
+                raise RuntimeError("FP8 weights are not supported in debug mode.")
 
             (
                 input_quantizer,
