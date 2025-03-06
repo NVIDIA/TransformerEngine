@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -25,6 +25,14 @@ struct Shape {
 };
 
 std::vector<size_t> MakeShapeVector(NVTEShape shape);
+
+inline size_t product(const std::vector<size_t> &shape) {
+  size_t ret = 1;
+  for (const auto &elem : shape) {
+    ret *= elem;
+  }
+  return ret;
+}
 
 }  // namespace jax
 }  // namespace transformer_engine

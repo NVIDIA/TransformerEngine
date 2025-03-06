@@ -1,10 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <transformer_engine/normalization.h>
+#include <transformer_engine/transpose.h>
 
 #include <cstdint>
 #include <cstdlib>
@@ -25,6 +26,11 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
                    const float epsilon, Tensor* z, Tensor* mu, Tensor* rsigma, Tensor* workspace,
                    const int multiprocessorCount, const bool zero_centered_gamma,
                    cudaStream_t stream) {
+  if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
+      !is_block_scaling(z->scaling_mode)) {
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
+  }
+
   NVTE_CHECK(x.data.shape.size() == 2);
   NVTE_CHECK(gamma.data.shape == beta.data.shape);
   NVTE_CHECK(x.data.shape[1] == gamma.data.shape[0]);
@@ -51,7 +57,9 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
 
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  if (use_cudnn_norm_fwd()) {
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
+
+  if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
@@ -59,6 +67,10 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, beta.data.dptr,
                                 mu->data.dptr, rsigma->data.dptr);
   }
+
+  bool training =
+      is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
+
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::LayerNorm, NVTE_Norm_Stage::Forward,
       gamma.data.dtype,  // wtype
@@ -66,18 +78,31 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
-  } else {
-    NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-    plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
-                  reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
-                  workspace->data.dptr, stream);
   }
+
+  NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+  NVTE_CHECK(
+      !is_block_scaling(z->scaling_mode) || (!training || z->columnwise_scale_inv.dptr != nullptr),
+      "Columnwise scale_inv must be allocated for NormFwdTraining!");
+  plan->execute(z, x.data.dptr, gamma.data.dptr, beta.data.dptr, mu->data.dptr,
+                reinterpret_cast<void*>(const_cast<float*>(&epsilon)), rsigma->data.dptr,
+                workspace->data.dptr, stream);
+
+  // Compute FP8 transpose if required
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+    Tensor transpose_data;
+    transpose_data.data = z->columnwise_data;
+    transpose_data.scaling_mode = z->scaling_mode;
+    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
+                   stream);
+  }
+
   return;
 }
 

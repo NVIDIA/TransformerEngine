@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -8,8 +8,8 @@
 #include <transformer_engine/transpose.h>
 
 #include <cfloat>
-#include <iostream>
-#include <type_traits>
+#include <functional>
+#include <numeric>
 
 #include "../common.h"
 #include "../utils.cuh"
@@ -376,8 +376,24 @@ void populate_transpose_dbias_workspace_config(const Tensor &input, /*cast*/
 
   const size_t num_rows_partial_dbias = DIVUP(num_rows, tile_size_y);
 
-  workspace->data.shape = {num_rows_partial_dbias, row_length};
-  workspace->data.dtype = DType::kFloat32;
+  if (workspace->data.dptr == nullptr) {
+    // Set workspace size
+    workspace->data.shape = {num_rows_partial_dbias, row_length};
+    workspace->data.dtype = DType::kFloat32;
+  } else {
+    // Check that workspace matches expected size
+    const size_t workspace_size =
+        std::accumulate(workspace->data.shape.begin(), workspace->data.shape.end(), 1,
+                        std::multiplies<size_t>()) *
+        typeToSize(workspace->data.dtype);
+    const size_t required_size = num_rows_partial_dbias * row_length * typeToSize(DType::kFloat32);
+    NVTE_CHECK(!workspace->data.shape.empty(), "Invalid workspace dims (expected (",
+               num_rows_partial_dbias, ",", row_length, "), found ())");
+    NVTE_CHECK(workspace_size >= required_size, "Invalid workspace (expected dims=(",
+               num_rows_partial_dbias, ",", row_length, "), dtype=", to_string(DType::kFloat32),
+               "; found dims=", workspace->data.shape,
+               ", dtype=", typeToSize(workspace->data.dtype), ")");
+  }
 }
 
 template <typename BiasType>
@@ -426,10 +442,9 @@ void fp8_transpose_dbias(const Tensor &input, Tensor *transposed_output, Tensor 
           constexpr int nvec_in = desired_load_size / type_size;
           constexpr int nvec_out = desired_store_size / type_size;
 
-          if (workspace->data.dptr == nullptr) {
-            populate_transpose_dbias_workspace_config(input, workspace, nvec_out);
-            return;
-          }
+          // Check workspace size
+          populate_transpose_dbias_workspace_config(input, workspace, nvec_out);
+          if (workspace->data.dptr == nullptr) { return; }
 
           NVTE_CHECK(row_length % nvec_in == 0, "Unsupported shape.");
           NVTE_CHECK(num_rows % nvec_out == 0, "Unsupported shape.");

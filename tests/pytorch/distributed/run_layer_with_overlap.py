@@ -1,14 +1,16 @@
 #!/usr/bin/python3
 
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import os
 import sys
 import socket
+import subprocess
 import argparse
 import warnings
+import pprint
 
 import torch
 import torch.distributed as dist
@@ -39,6 +41,8 @@ def _te_layer_argtype(name):
 
 def _get_layer_args(config, tp_group, tp_size, reference=False):
     hidden_size = config.num_heads * config.head_dim
+    ffn_hidden_size = 4 * hidden_size
+    qkv_size = 3 * hidden_size
     input_shape = [config.seq_length, config.batch_size, hidden_size]
     args = [hidden_size]
     kwargs = {
@@ -47,38 +51,41 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
         "tp_group": tp_group,
         "tp_size": tp_size,
         "sequence_parallel": True,
+        "ub_overlap_ag": not reference,
+        "ub_overlap_rs": not reference,
     }
-    kwargs["ub_overlap_ag"] = not reference
 
-    if config.layer_type is te.Linear:
-        input_shape[2] = hidden_size // tp_size
-        args.append(hidden_size)
-        kwargs["parallel_mode"] = "row"
-        kwargs["ub_overlap_rs"] = not reference
-        kwargs["ub_name"] = "proj"
+    if config.layer_type in [te.Linear, te.LayerNormLinear]:
+        if config.linear_parallel_mode == "row":
+            input_shape[-1] = ffn_hidden_size // tp_size
+            args = [ffn_hidden_size, hidden_size]
+            kwargs["ub_name"] = "proj" if config.layer_type == te.Linear else "fc2"
+        elif config.linear_parallel_mode == "column":
+            input_shape[0] = config.seq_length // tp_size
+            args.append(qkv_size)
+            kwargs["ub_name"] = "qkv"
+            kwargs["ub_overlap_rs_dgrad"] = config.overlap_rs_dgrad and not reference
+            kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
+            kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
+        kwargs["parallel_mode"] = config.linear_parallel_mode
     else:
         input_shape[0] = config.seq_length // tp_size
-        kwargs["ub_bulk_wgrad"] = not reference
-        kwargs["ub_bulk_dgrad"] = not reference
-        if config.layer_type is te.LayerNormLinear:
-            args.append(3 * hidden_size)
-            kwargs["parallel_mode"] = "column"
-            kwargs["ub_name"] = "qkv"
-        else:
-            kwargs["set_parallel_mode"] = True
-            kwargs["ub_overlap_rs"] = not reference
-            if config.layer_type in [te.LayerNormMLP, te.TransformerLayer]:
-                args.append(4 * hidden_size)
-                kwargs["seq_length"] = config.seq_length
-            if config.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
-                args.append(config.num_heads)
-                kwargs["attention_dropout"] = 0.0
-                kwargs["fuse_qkv_params"] = True
-                if config.layer_type is te.MultiheadAttention:
-                    kwargs["input_layernorm"] = True
-                else:
-                    kwargs["ub_tp_comm_overlap"] = not reference
-                    kwargs["hidden_dropout"] = 0.0
+        if config.layer_type in [te.LayerNormMLP, te.TransformerLayer]:
+            args.append(ffn_hidden_size)
+            kwargs["seq_length"] = config.seq_length
+        if config.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
+            args.append(config.num_heads)
+            kwargs["attention_dropout"] = 0.0
+            kwargs["fuse_qkv_params"] = True
+            if config.layer_type is te.MultiheadAttention:
+                kwargs["input_layernorm"] = True
+            else:
+                kwargs["ub_tp_comm_overlap"] = not reference
+                kwargs["hidden_dropout"] = 0.0
+        kwargs["set_parallel_mode"] = True
+        kwargs["ub_overlap_rs_dgrad"] = config.overlap_rs_dgrad and not reference
+        kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
+        kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
 
     return args, kwargs, input_shape
 
@@ -89,12 +96,12 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument("-l", "--layer-type", type=_te_layer_argtype, default=te.LayerNormMLP)
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
-    parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
+    parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
-        "-n", "--num-heads", type=int, default=12, help="Number of attention heads."
+        "-n", "--num-heads", type=int, default=16, help="Number of attention heads."
     )
     parser.add_argument(
-        "-d", "--head-dim", type=int, default=64, help="Dimension of each attention head."
+        "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
@@ -126,6 +133,19 @@ def _parse_args(argv=None, namespace=None):
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
     )
     parser.add_argument(
+        "--linear-parallel-mode",
+        type=str.lower,
+        default="row",
+        choices=["row", "column"],
+        help="Parallel mode for te.Linear.",
+    )
+    parser.add_argument(
+        "--overlap-rs-dgrad",
+        action="store_true",
+        default=False,
+        help="Replace bulk DGRAD/WGRAD overlaps with DGRAD+RS in the backward pass for AG+GEMM.",
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=False,
@@ -154,7 +174,7 @@ def _compare_tensors(name, test, ref, rtol, atol):
             )
             return 1, numerics_info
 
-    diff = torch.abs(test - ref).flatten()
+    diff = torch.abs(test.flatten() - ref.flatten())
     m = torch.argmax(diff)
     abs_err = diff[m].item()
     rel_err = abs_err / max(abs(ref.flatten()[m].item()), 1e-5)
@@ -190,14 +210,21 @@ def _train(opts):
         opts.tcp_init = True
         opts.bind_to_device = True
         opts.bootstrap_backend = "mpi"
-    elif "TORCHELASTIC_RUN_ID" in os.environ:
+    else:
         WORLD_RANK = int(os.getenv("RANK", "0"))
         WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
         LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
-    else:
-        raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
-    assert LOCAL_SIZE == WORLD_SIZE
+        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(torch.cuda.device_count())))
+
+    result = subprocess.run(
+        "nvidia-smi -q | grep -m1 CliqueId | awk '{printf $3}'",
+        capture_output=True,
+        text=True,
+        shell=True,
+    )
+
+    if result.stdout == "0":  # Extra checks for non-MNNVL platforms
+        assert WORLD_SIZE == LOCAL_SIZE
 
     def dist_print(msg, src=None, end="\n", debug=False, error=False):
         if debug and not opts.debug:
@@ -208,7 +235,7 @@ def _train(opts):
         dist.barrier()
 
     # Set device and initialize RNG states
-    torch.cuda.set_device(WORLD_RANK)
+    torch.cuda.set_device(LOCAL_RANK)
     torch.manual_seed(opts.seed)
     torch.cuda.manual_seed(opts.seed)
 
@@ -230,12 +257,19 @@ def _train(opts):
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
     # Intialize userbuffers
+    ub_cfgs = None
+    if opts.overlap_rs_dgrad:
+        ub_cfgs = {
+            "qkv_dgrad": {"method": "ring_exchange"},
+            "fc1_dgrad": {"method": "ring_exchange"},
+        }
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
         WORLD_SIZE,
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
+        ub_cfgs=ub_cfgs,
     )
 
     # Initialize the Transformer Engine layer with overlap
@@ -243,6 +277,10 @@ def _train(opts):
     with te.fp8_model_init(enabled=opts.fp8_init):
         test_model = opts.layer_type(*args, **kwargs)
     dist_print("Initialized test model...", debug=True)
+    if WORLD_RANK == 0:
+        pprint.pprint(kwargs)
+        sys.stdout.write("\n")
+    dist.barrier()
 
     # Initialize the reference model and copy all parameters
     ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, WORLD_SIZE, reference=True)
@@ -277,12 +315,12 @@ def _train(opts):
                     out, *_ = y
                 else:
                     out = y
-        loss = out.sum()
-        loss.backward()
+                loss = out.sum()
+                loss.backward()
         return out
 
     torch_rng_state = torch.get_rng_state()
-    cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{WORLD_RANK}"))
+    cuda_rng_state = torch.cuda.get_rng_state(torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         test_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(test_graph):
@@ -299,7 +337,7 @@ def _train(opts):
             names.append(test_name + ".grad")
 
     torch.set_rng_state(torch_rng_state)
-    torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{WORLD_RANK}"))
+    torch.cuda.set_rng_state(cuda_rng_state, torch.device(f"cuda:{LOCAL_RANK}"))
     if opts.use_cuda_graphs:
         ref_graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(ref_graph):
@@ -333,7 +371,7 @@ def _train(opts):
             dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
             numerics_failed[0] = int(grad_failed)
             dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
-            if bool(numerics_failed.item()):
+            if bool(numerics_failed.item()) and not opts.debug:
                 break
 
     te.module.base.destroy_ub()

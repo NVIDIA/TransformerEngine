@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -205,17 +205,8 @@ void transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cudaStr
   NVTE_CHECK(output.data.dptr != nullptr, "Output is not allocated.");
   NVTE_CHECK(input.data.dtype == output.data.dtype, "Input and output type must match.");
 
-  // Number of elements in tensor
-  auto numel = [](const Tensor &tensor) -> size_t {
-    size_t acc = 1;
-    for (const auto &dim : tensor.data.shape) {
-      acc *= dim;
-    }
-    return acc;
-  };
-
   if (noop.data.dptr != nullptr) {
-    NVTE_CHECK(numel(noop) == 1, "Expected 1 element, ", "but found ", numel(noop), ".");
+    NVTE_CHECK(noop.numel() == 1, "Expected 1 element, ", "but found ", noop.numel(), ".");
     NVTE_CHECK(noop.data.dtype == DType::kFloat32);
     NVTE_CHECK(noop.data.dptr != nullptr);
   }

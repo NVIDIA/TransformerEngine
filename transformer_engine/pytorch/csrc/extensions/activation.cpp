@@ -1,276 +1,118 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include "extensions.h"
+#include "pybind.h"
 
-at::Tensor gelu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                transformer_engine::DType otype) {
-  using namespace transformer_engine;
+namespace transformer_engine::pytorch {
 
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
+template <void (*act_func)(const NVTETensor, NVTETensor, cudaStream_t)>
+py::object activation_helper(const at::Tensor& input, py::handle quantizer, int shape_divisor = 1) {
+  init_extension();
+  auto my_quantizer = convert_quantizer(quantizer);
+  auto input_tensor = input.contiguous();
 
-  auto output = allocateTorchTensor(M, N, otype);
+  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
+  const auto& te_input_shape = te_input.shape();
+  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
+  input_shape[input_shape.size() - 1] /= shape_divisor;
+  auto fake_tensor_type = input.scalar_type();
 
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype, amax.data_ptr(),
-                                               scale.data_ptr(), scale_inv.data_ptr());
+  auto [te_output, out] =
+      my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
-  nvte_gelu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
+  act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
 
-  return output;
+  return out;
 }
 
-at::Tensor dgelu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
+template <void (*act_func)(const NVTETensor, const NVTETensor, NVTETensor, cudaStream_t)>
+py::object dactivation_helper(const at::Tensor& grad, const at::Tensor& input,
+                              py::handle quantizer) {
+  init_extension();
+  auto my_quantizer = convert_quantizer(quantizer);
+  auto input_tensor = input.contiguous();
+  auto grad_tensor = grad.contiguous();
 
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
+  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
+  const TensorWrapper& te_grad = makeTransformerEngineTensor(grad_tensor);
+  const auto& te_input_shape = te_input.shape();
+  std::vector<size_t> input_shape(te_input_shape.data, te_input_shape.data + te_input_shape.ndim);
+  auto fake_tensor_type = input.scalar_type();
 
-  auto output = allocateTorchTensor(M, N, otype);
+  auto [te_output, out] =
+      my_quantizer->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
 
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
+  act_func(te_grad.data(), te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
 
-  nvte_dgelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+  return out;
 }
 
-at::Tensor relu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = static_cast<size_t>(input.numel()) / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype, amax.data_ptr(),
-                                               scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_relu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object gelu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_gelu>(input, quantizer);
 }
 
-at::Tensor drelu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_drelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object dgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dgelu>(grad, input, quantizer);
 }
 
-at::Tensor geglu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                 transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N / 2, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu =
-      makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype, amax.data_ptr(),
-                                  scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_geglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object relu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_relu>(input, quantizer);
 }
 
-at::Tensor dgeglu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_dgeglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object drelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_drelu>(grad, input, quantizer);
 }
 
-at::Tensor reglu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                 transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N / 2, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu =
-      makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype, amax.data_ptr(),
-                                  scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_reglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object geglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_geglu>(input, quantizer, 2);
 }
 
-at::Tensor dreglu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_dreglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object qgeglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_qgeglu>(input, quantizer, 2);
 }
 
-at::Tensor swiglu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                  transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N / 2, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu =
-      makeTransformerEngineTensor(output.data_ptr(), {M, N / 2}, otype, amax.data_ptr(),
-                                  scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_swiglu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object dgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dgeglu>(grad, input, quantizer);
 }
 
-at::Tensor dswiglu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N / 2}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_dswiglu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object dqgeglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dqgeglu>(grad, input, quantizer);
 }
 
-at::Tensor qgelu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                 transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype, amax.data_ptr(),
-                                               scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_qgelu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object reglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_reglu>(input, quantizer, 2);
 }
 
-at::Tensor dqgelu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_dqgelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object dreglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dreglu>(grad, input, quantizer);
 }
 
-at::Tensor srelu(at::Tensor input, at::Tensor scale, at::Tensor amax, at::Tensor scale_inv,
-                 transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = static_cast<size_t>(input.numel()) / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype, amax.data_ptr(),
-                                               scale.data_ptr(), scale_inv.data_ptr());
-
-  nvte_srelu(input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object swiglu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_swiglu>(input, quantizer, 2);
 }
 
-at::Tensor dsrelu(at::Tensor grad, at::Tensor input, transformer_engine::DType otype) {
-  using namespace transformer_engine;
-
-  size_t N = static_cast<size_t>(input.size(-1));
-  size_t M = input.numel() / N;
-
-  auto output = allocateTorchTensor(M, N, otype);
-
-  auto itype = GetTransformerEngineDType(input.scalar_type());
-  auto gtype = GetTransformerEngineDType(grad.scalar_type());
-  auto input_cu = makeTransformerEngineTensor(input.data_ptr(), {M, N}, itype);
-  auto grad_cu = makeTransformerEngineTensor(grad.data_ptr(), {M, N}, gtype);
-  auto output_cu = makeTransformerEngineTensor(output.data_ptr(), {M, N}, otype);
-
-  nvte_dsrelu(grad_cu.data(), input_cu.data(), output_cu.data(), at::cuda::getCurrentCUDAStream());
-
-  return output;
+py::object dswiglu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dswiglu>(grad, input, quantizer);
 }
+
+py::object qgelu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_qgelu>(input, quantizer);
+}
+
+py::object dqgelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dqgelu>(grad, input, quantizer);
+}
+
+py::object srelu(const at::Tensor& input, py::handle quantizer) {
+  return activation_helper<nvte_srelu>(input, quantizer);
+}
+
+py::object dsrelu(const at::Tensor& grad, const at::Tensor& input, py::handle quantizer) {
+  return dactivation_helper<nvte_dsrelu>(grad, input, quantizer);
+}
+
+}  // namespace transformer_engine::pytorch

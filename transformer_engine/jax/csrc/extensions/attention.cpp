@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -213,14 +213,14 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   auto layout_group = nvte_get_qkv_layout_group(qkv_layout);
 
 static void FusedAttnForwardImpl(
-    cudaStream_t stream, void *q, void *k, void *v, void *bias, void *q_cu_seqlens,
-    void *kv_cu_seqlens, void *q_seq_offsets, void *k_seq_offsets, void *seed, void *output,
-    void *softmax_aux, void *rng_state, void *workspace, size_t input_batch, size_t bias_batch,
-    size_t q_max_seqlen, size_t kv_max_seqlen, size_t attn_heads, size_t num_gqa_groups,
-    size_t bias_heads, size_t head_dim, size_t max_segments_per_seq, size_t wkspace_size,
-    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
-    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
-    bool is_training, bool deterministic, int64_t window_size_left, int64_t window_size_right) {
+    cudaStream_t stream, void *q, void *k, void *v, void *bias, void *seed, void *q_cu_seqlens,
+    void *kv_cu_seqlens, void *q_seq_offsets, void *k_seq_offsets, void *output, void *softmax_aux,
+    void *rng_state, void *workspace, size_t input_batch, size_t bias_batch, size_t q_max_seqlen,
+    size_t kv_max_seqlen, size_t attn_heads, size_t num_gqa_groups, size_t bias_heads,
+    size_t head_dim, size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
+    bool deterministic, int64_t window_size_left, int64_t window_size_right) {
   FUSED_ATTN_IMPL_COMMON_BLOCK;
 
   /* Input tensors */
@@ -229,6 +229,10 @@ static void FusedAttnForwardImpl(
   if (is_ragged) {
     auto output_size = input_batch * q_max_seqlen * attn_heads * head_dim;
     cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
+
+    // Memset to 0xF0 for filling large negative numbers
+    auto softmax_aux_size = input_batch * q_max_seqlen * attn_heads;
+    cudaMemsetAsync(softmax_aux, 0xF0, softmax_aux_size * sizeof(float), stream);
   }
 
   /* Output tensors */
@@ -303,11 +307,11 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   void *k = buffers[1];
   void *v = buffers[2];
   void *bias = buffers[3];
-  void *q_cu_seqlens = buffers[4];
-  void *kv_cu_seqlens = buffers[5];
-  void *q_seq_offsets = is_ragged ? buffers[6] : nullptr;
-  void *k_seq_offsets = is_ragged ? buffers[7] : nullptr;
-  void *seed = buffers[8];
+  void *seed = buffers[4];
+  void *q_cu_seqlens = buffers[5];
+  void *kv_cu_seqlens = buffers[6];
+  void *q_seq_offsets = is_ragged ? buffers[7] : nullptr;
+  void *k_seq_offsets = is_ragged ? buffers[8] : nullptr;
 
   /* Output buffer from XLA */
   void *output = buffers[9];
@@ -316,7 +320,7 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   void *workspace = buffers[12];
 
   FusedAttnForwardImpl(
-      stream, q, k, v, bias, q_cu_seqlens, kv_cu_seqlens, q_seq_offsets, k_seq_offsets, seed,
+      stream, q, k, v, bias, seed, q_cu_seqlens, kv_cu_seqlens, q_seq_offsets, k_seq_offsets,
       output, softmax_aux, rng_state, workspace, descriptor.input_batch, descriptor.bias_batch,
       descriptor.q_max_seqlen, descriptor.kv_max_seqlen, descriptor.attn_heads,
       descriptor.num_gqa_groups, descriptor.bias_heads, descriptor.head_dim,
@@ -354,24 +358,24 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   DType wkspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
 
 Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
-                               Buffer_Type v_buf, Buffer_Type bias_buf,
+                               Buffer_Type v_buf, Buffer_Type bias_buf, Buffer_Type seed_buf,
                                Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
-                               Buffer_Type seed_buf, Result_Type output_buf,
+                               Variadic_Buffer_Type _unused_args, Result_Type output_buf,
                                Result_Type softmax_aux_buf, Result_Type rng_state_buf,
                                Result_Type workspace_buf, Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
 
   FusedAttnForwardImpl(
       stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
-      bias_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(), kv_cu_seqlens_buf.untyped_data(),
-      is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
-      is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, seed_buf.untyped_data(),
-      output_buf->untyped_data(), softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(),
-      workspace_buf->untyped_data(), input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
-      attn_heads, num_gqa_groups, bias_heads, head_dim, max_segments_per_seq, wkspace_size,
-      scaling_factor, dropout_probability, bias_type, mask_type, qkv_layout, dtype, wkspace_dtype,
-      is_training, deterministic, window_size_left, window_size_right);
+      bias_buf.untyped_data(), seed_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(),
+      kv_cu_seqlens_buf.untyped_data(), is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
+      is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, output_buf->untyped_data(),
+      softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(), workspace_buf->untyped_data(),
+      input_batch, bias_batch, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads,
+      head_dim, max_segments_per_seq, wkspace_size, scaling_factor, dropout_probability, bias_type,
+      mask_type, qkv_layout, dtype, wkspace_dtype, is_training, deterministic, window_size_left,
+      window_size_right);
 
   return ffi_with_cuda_error_check();
 }
@@ -383,11 +387,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Arg<Buffer_Type>()      // k
                                   .Arg<Buffer_Type>()      // v
                                   .Arg<Buffer_Type>()      // bias
+                                  .Arg<Buffer_Type>()      // seed_buf
                                   .Arg<Buffer_Type>()      // q_cu_seqlens
                                   .Arg<Buffer_Type>()      // kv_cu_seqlens
                                   .Arg<Buffer_Type>()      // q_seq_offsets
                                   .Arg<Buffer_Type>()      // k_seq_offsets
-                                  .Arg<Buffer_Type>()      // seed_buf
+                                  .RemainingArgs()         // _cp_aux_args unused
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // softmax_aux
                                   .Ret<Buffer_Type>()      // rng_state
@@ -535,7 +540,8 @@ static void FusedAttnBackwardImpl(
     auto qkv_tensor = TensorWrapper(q, qkv_shape, dtype);
     auto dqkv_tensor = TensorWrapper(dq, qkv_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, transformer_engine::product(qkv_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::jax::product(qkv_shape) * typeToSize(dtype),
+                      stream);
     }
     nvte_fused_attn_bwd_qkvpacked(qkv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
                                   s_tensor.data(),  // not used for F16
@@ -553,8 +559,9 @@ static void FusedAttnBackwardImpl(
     auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
     auto dkv_tensor = TensorWrapper(dk, kv_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, transformer_engine::product(q_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dk, 0, transformer_engine::product(kv_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dk, 0, transformer_engine::jax::product(kv_shape) * typeToSize(dtype),
+                      stream);
     }
     nvte_fused_attn_bwd_kvpacked(
         q_tensor.data(), kv_tensor.data(), output_tensor.data(), doutput_tensor.data(),
@@ -576,9 +583,9 @@ static void FusedAttnBackwardImpl(
     auto dk_tensor = TensorWrapper(dk, k_shape, dtype);
     auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
     if (is_ragged) {
-      cudaMemsetAsync(dq, 0, transformer_engine::product(q_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dk, 0, transformer_engine::product(k_shape) * typeToSize(dtype), stream);
-      cudaMemsetAsync(dv, 0, transformer_engine::product(v_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dk, 0, transformer_engine::jax::product(k_shape) * typeToSize(dtype), stream);
+      cudaMemsetAsync(dv, 0, transformer_engine::jax::product(v_shape) * typeToSize(dtype), stream);
     }
     nvte_fused_attn_bwd(q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
                         doutput_tensor.data(),
@@ -642,9 +649,9 @@ Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_T
                                 Buffer_Type output_buf, Buffer_Type doutput_buf,
                                 Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
                                 Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
-                                Result_Type dq_buf, Result_Type dk_buf, Result_Type dv_buf,
-                                Result_Type dbias_buf, Result_Type workspace_buf,
-                                Dictionary attrs) {
+                                Variadic_Buffer_Type _unused_args, Result_Type dq_buf,
+                                Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf,
+                                Result_Type workspace_buf, Dictionary attrs) {
   FUSED_ATTN_FFI_GET_ATTRS;
 
   FusedAttnBackwardImpl(
@@ -677,6 +684,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Arg<Buffer_Type>()      // kv_cu_seqlens
                                   .Arg<Buffer_Type>()      // q_seq_offsets
                                   .Arg<Buffer_Type>()      // k_seq_offsets
+                                  .RemainingArgs()         // _cp_aux_args unused
                                   .Ret<Buffer_Type>()      // dq
                                   .Ret<Buffer_Type>()      // dk
                                   .Ret<Buffer_Type>()      // dv

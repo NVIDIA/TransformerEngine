@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -37,7 +37,7 @@ install_and_import("pybind11")
 from pybind11.setup_helpers import build_ext as BuildExtension
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
-CMakeBuildExtension = get_build_ext(BuildExtension)
+CMakeBuildExtension = get_build_ext(BuildExtension, True)
 
 
 if __name__ == "__main__":

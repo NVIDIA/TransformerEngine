@@ -1,8 +1,10 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Linear layer backward with Userbuffers communication."""
+
+# pylint: skip-file  ### TODO Debug Userbuffers support
 
 from __future__ import annotations
 from collections.abc import Iterable
@@ -12,11 +14,7 @@ import warnings
 import torch
 
 from transformer_engine_torch import CommOverlapAlgo
-from ...cpp_extensions import (
-    fp8_cast_transpose_bgrad_fused,
-    fp8_gemm,
-    gemm,
-)
+from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
@@ -48,6 +46,9 @@ class UserbuffersBackwardLinear(FusedOperation):
         bias: Optional[Bias],
         reduce_scatter: Optional[ReduceScatter],
     ) -> None:
+
+        ### TODO Debug Userbuffers support
+        raise NotImplementedError("Userbuffers support has been broken by recent refactors")
 
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": None, "bias": None, "reduce_scatter": None}
@@ -705,6 +706,8 @@ def fuse_userbuffers_backward_linear(
         Updated forward pass operations
 
     """
+
+    return ops  ### TODO Debug Userbuffers support
 
     # Return immediately if environment is not distributed
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:

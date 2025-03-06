@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -12,10 +12,9 @@ Prerequisites
 .. _driver link: https://www.nvidia.com/drivers
 
 1. Linux x86_64
-2. `CUDA 12.0 <https://developer.nvidia.com/cuda-downloads>`__
-3. |driver link|_ supporting CUDA 12.0 or later.
-4. `cuDNN 8.1 <https://developer.nvidia.com/cudnn>`__ or later.
-5. For FP8/FP16/BF16 fused attention, `CUDA 12.1 <https://developer.nvidia.com/cuda-downloads>`__ or later, |driver link|_ supporting CUDA 12.1 or later, and `cuDNN 8.9.1 <https://developer.nvidia.com/cudnn>`__ or later.
+2. `CUDA 12.1+ (12.8+ for Blackwell support) <https://developer.nvidia.com/cuda-downloads>`__
+3. |driver link|_ supporting CUDA 12.1 or later.
+4. `cuDNN 9.3 <https://developer.nvidia.com/cudnn>`__ or later.
 
 If the CUDA Toolkit headers are not available at runtime in a standard
 installation path, e.g. within `CUDA_HOME`, set
@@ -37,7 +36,7 @@ Transformer Engine can be directly installed from `our PyPI <https://pypi.org/pr
 
     pip install transformer_engine[pytorch]
 
-To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch,paddle]). Transformer Engine ships wheels for the core library as well as the PaddlePaddle extensions. Source distributions are shipped for the JAX and PyTorch extensions.
+To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
 
 pip - from GitHub
 -----------------------
@@ -76,7 +75,7 @@ Execute the following command to install the latest development build of Transfo
 
 This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
 
-In order to install a specific PR, execute after changing NNN to the PR number:
+In order to install a specific PR, execute (after changing NNN to the PR number):
 
 .. code-block:: bash
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -83,6 +83,13 @@ def _load_library():
     """Load shared library with Transformer Engine C extensions"""
 
     so_path = get_te_path() / "transformer_engine" / f"libtransformer_engine.{_get_sys_extension()}"
+    if not so_path.exists():
+        so_path = (
+            get_te_path()
+            / "transformer_engine"
+            / "wheel_lib"
+            / f"libtransformer_engine.{_get_sys_extension()}"
+        )
     if not so_path.exists():
         so_path = get_te_path() / f"libtransformer_engine.{_get_sys_extension()}"
     assert so_path.exists(), f"Could not find libtransformer_engine.{_get_sys_extension()}"

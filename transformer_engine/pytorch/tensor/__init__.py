@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -6,10 +6,12 @@
 
 import torch
 
-from .float8_tensor import Float8Tensor
-from .quantized_tensor import QuantizedTensor
+from .quantized_tensor import QuantizedTensor, Quantizer
 
-__all__ = ["Float8Tensor", "QuantizedTensor"]
+__all__ = [
+    "QuantizedTensor",
+    "Quantizer",
+]
 
 
 def _make_module_cast_func(dtype):
@@ -22,14 +24,8 @@ def _make_module_cast_func(dtype):
 
     def tensor_cast_func(tensor: torch.Tensor) -> torch.Tensor:
         """Cast tensor dtype"""
-        if isinstance(tensor, Float8Tensor):
-            return Float8Tensor.make_like(
-                tensor,
-                data=tensor._data,
-                fp8_attrs=tensor._fp8_attrs,
-                dtype=dtype,
-                requires_grad=tensor.requires_grad,
-            )
+        if isinstance(tensor, QuantizedTensor):
+            return tensor.__class__.make_like(tensor, dtype=dtype)
         if tensor.is_floating_point():
             return getattr(tensor, cast_func_name)()
         return tensor

@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,9 +8,8 @@ from typing import List
 
 import torch
 
-from ..cpp_extensions import (
-    multi_padding_fused,
-)
+import transformer_engine_torch as tex
+
 from ..jit import no_torch_dynamo
 
 
@@ -56,8 +55,8 @@ class _Fp8Unpadding(torch.autograd.Function):
                 [total_row, in_features], dtype=grad_output.dtype, device=grad_output.device
             )
             # FP8 pad input for forward, FP8 input transpose for backward wgrad
-            multi_padding_fused(
-                grad_output.view(-1, in_features), ctx.m_splits, ctx.padded_m_splits, grad_input
+            tex.fused_multi_row_padding(
+                grad_output.view(-1, in_features), grad_input, ctx.m_splits, ctx.padded_m_splits
             )
 
         return (grad_input, None, None, None)

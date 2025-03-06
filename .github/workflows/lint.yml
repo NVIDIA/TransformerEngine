@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -61,30 +61,3 @@ jobs:
           export PYTHON_ONLY=1
           export TE_PATH=.
           bash ./qa/L0_jax_lint/test.sh
-  paddle_cpplint:
-    name: 'PaddlePaddle C++'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          sudo apt-get update
-          sudo apt-get install pip -y
-          export CPP_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_paddle_lint/test.sh
-  paddle_pylint:
-    name: 'PaddlePaddle Python'
-    runs-on: ubuntu-latest
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-      - name: 'Lint'
-        run: |
-          sudo apt-get update
-          sudo apt-get install pip -y
-          pip install paddlepaddle-gpu
-          export PYTHON_ONLY=1
-          export TE_PATH=.
-          bash ./qa/L0_paddle_lint/test.sh

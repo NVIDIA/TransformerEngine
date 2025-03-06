@@ -1,5 +1,5 @@
 ..
-    Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -42,15 +42,21 @@ pyTorch
 
 .. autoapifunction:: transformer_engine.pytorch.checkpoint
 
-.. autoapifunction:: transformer_engine.pytorch.onnx_export
-
 .. autoapifunction:: transformer_engine.pytorch.make_graphed_callables
 
 .. autoapifunction:: transformer_engine.pytorch.get_cpu_offload_context
 
 .. autoapifunction:: transformer_engine.pytorch.moe_permute
 
+.. autoapifunction:: transformer_engine.pytorch.moe_permute_with_probs  
+
 .. autoapifunction:: transformer_engine.pytorch.moe_unpermute
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index
+
+.. autoapifunction:: transformer_engine.pytorch.parallel_cross_entropy
+
+.. autoapifunction:: transformer_engine.pytorch.moe_sort_chunks_by_index_with_probs
 
 .. autoapifunction:: transformer_engine.pytorch.initialize_ub
 

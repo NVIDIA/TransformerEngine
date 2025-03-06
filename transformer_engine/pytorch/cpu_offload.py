@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,11 +9,25 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .float8_tensor import Float8Tensor
+from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
 
 CPUOffloadEnabled = False
+
+
+def set_offloading_param(tensor, param_name, value):
+    """Set the type of the offloading needed for a tensor."""
+    assert param_name in ["weight_offloading", "activation_offloading"]
+    if tensor is None:
+        return
+    if type(tensor) in [torch.Tensor, torch.nn.Parameter]:
+        setattr(tensor, param_name, value)
+    else:
+        data_tensors = tensor.get_data_tensors()
+        for tensor in data_tensors:
+            if tensor is not None:
+                setattr(tensor, param_name, value)
 
 
 def is_cpu_offload_enabled() -> bool:
@@ -123,7 +137,9 @@ class CpuOffloadHookWithOffloadHandler(CpuOffloadSavedTensorHook):
         super().__init__()
 
     def on_save_for_backward(self, tensor: torch.Tensor) -> Any:
-        retrieve_identifier = self.offload_handler.tensor_push(tensor, **self.handler_extra_kwargs)
+        retrieve_identifier = self.offload_handler.tensor_push(
+            tensor.data, **self.handler_extra_kwargs
+        )
         return retrieve_identifier
 
     def on_get_saved_tensor(self, saved_state: Any) -> torch.Tensor:
@@ -258,6 +274,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         else:
             # will be offloaded together after group commit
             self.tensor_tag_to_state[tensor_tag] = tensor
+
         return tensor_tag
 
     def tensor_pop(self, tensor_tag, **kwargs):
@@ -366,6 +383,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     if self.tensor_need_offloading_checker(tensor_on_device):
                         state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         self.tensor_tag_to_state[tensor_tag] = state
+                        tensor_on_device.data = torch.Tensor()  # Force to release memory
 
     def synchronize_on_group_commit_forward(self, current_group):
         """Synchronize on group commit forward."""
