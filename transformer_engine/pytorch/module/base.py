@@ -396,6 +396,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def __init__(self) -> None:
         super().__init__()
         assert torch.cuda.is_available(), "TransformerEngine needs CUDA."
+        self.name = None
         self.fp8_initialized = False
         self.fp8 = False
         self.fp8_calibration = False

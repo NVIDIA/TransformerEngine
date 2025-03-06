@@ -6,6 +6,8 @@
 
 import torch
 
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer
 
 __all__ = [
@@ -43,8 +45,6 @@ torch.nn.Module.half = _make_module_cast_func(torch.float16)
 torch.nn.Module.bfloat16 = _make_module_cast_func(torch.bfloat16)
 
 
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
 
 all_tensor_types = [
     torch.Tensor,
