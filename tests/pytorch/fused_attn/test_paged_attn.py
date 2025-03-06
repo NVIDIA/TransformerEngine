@@ -409,7 +409,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     config = model_configs_infer[model]
     num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     # flash-attn v2 requires page_size >= 256
-    if backend == "FlashAttention" and _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
@@ -490,9 +490,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     model = get_model(module, config, dtype, backend, qkv_format, num_layers, mode="reference")
 
     # generate data for all requests
-    assert (
-        config.max_seqlen_q == config.max_seqlen_kv
-    ), "This test only simulates max_seqlen_q = max_seqlen_kv."
     full_inputs = generate_args(module, config, dtype, qkv_format="bshd", mode="full_inputs")
 
     # generate reference results
@@ -699,6 +696,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
 
-    if backend == "FlashAttention" and _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
         config.max_seqlen_q = config_max_seqlen_q
         config.max_seqlen_kv = config_max_seqlen_kv
