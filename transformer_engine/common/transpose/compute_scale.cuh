@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+
 #ifndef TRANSFORMER_ENGINE_COMPUTE_SCALE_CUH_
 #define TRANSFORMER_ENGINE_COMPUTE_SCALE_CUH_
 
