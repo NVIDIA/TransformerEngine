@@ -468,7 +468,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     elif isinstance(state, list):
                         tensor_list = []
                         for state_tuple in state:
-                            tensor_list.append(SynchronizedGroupOffloadHandler.reload(state_tuple))
+                            if isinstance(state_tuple, tuple):
+                                tensor_list.append(SynchronizedGroupOffloadHandler.reload(state_tuple))
+                            else:
+                                tensor_list.append(state_tuple)
                         _, recovered_tensor = self.fp8_tensor_object_map[
                             tensor_label
                         ].restore_from_saved(tensor_list)
