@@ -200,6 +200,7 @@ struct TensorList {
 template <QKVFormat format>
 struct TensorFormat {
   // store the bsht order for simplified computation, where bsht corresponds to 0, 1, 2, 3, and store_format[3] marks whether bs is fused into t
+  // For example, for the SBH format, the values of store_format are {1, 0, 2, 0}; for the TH format, the values of store_format are {3, 2, any-value, 1}
   int8_t store_format[4];
   int *cu_seqlens_s;
   // size of tensor, b s h t
@@ -208,7 +209,7 @@ struct TensorFormat {
     for (int i = 0; i < 4; i++) {
       size[i] = size_kernel[i];
     }
-
+    // Initialize store_format based on the format.
     if constexpr (format == QKVFormat::TH) {
       cu_seqlens_s = cu_seqlens;
       store_format[0] = 3;
@@ -292,6 +293,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
   }
 
   int size[4] = {batch, lse_seqlen, num_heads, lse_seqlen};
+  // Since the formats of out and lse are often different, create two TensorFormat objects to calculate the address
   TensorFormat<out_format> out_full(size, cu_seqlens_s);
   TensorFormat<lse_format> lse_full(size);
 
@@ -318,6 +320,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
     id[2] = head_id;
     id[3] = token_id;
 
+    // calculate the address using the index
     idx_out_full = out_full.compute_address(id);
     idx_lse_full = lse_full.compute_address(id);
 
@@ -326,6 +329,8 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
     int end = full_num;
 
+    // The number of times the current thread participates in the computation is determined by start and end
+    // If a causal mask is applied, the current thread will not participate in the full computation if id[0] < 0
     if (start + tensors.start_tensor_this_launch > full_num) {
       out_full.compute_half_right(id);
       if (id[1] >= 0) {
