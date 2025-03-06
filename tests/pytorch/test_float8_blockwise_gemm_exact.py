@@ -13,7 +13,7 @@ from tests.pytorch.references.blockwise_fp8_gemm_reference import CuBLASRefBlock
 
 
 def fp8_blockwise_gemm_supported() -> bool:
-    return float(torch.version.cuda) >= 12.8
+    return float(torch.version.cuda) >= 12.9
 
 
 def cublas_gemm_fp8_blockwise_case(
