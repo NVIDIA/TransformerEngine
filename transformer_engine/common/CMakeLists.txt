@@ -78,9 +78,9 @@ list(APPEND transformer_engine_SOURCES
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
+     util/cuda_nvml.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
-     util/system.cpp
      swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu

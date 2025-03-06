@@ -5,12 +5,17 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import sys
 import logging
+import importlib
+import importlib.util
 import ctypes
 from importlib.metadata import version
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+
+_logger = logging.getLogger(__name__)
 
 
 def _load_library():
@@ -36,7 +41,7 @@ def _load_library():
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
+            _logger.info(
                 "Could not find package %s. Install transformer-engine using 'pip"
                 " install transformer-engine[jax]==VERSION'",
                 module_name,
@@ -47,13 +52,20 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
-    return ctypes.CDLL(so_path, mode=ctypes.RTLD_GLOBAL)
+    spec = importlib.util.spec_from_file_location(module_name, so_path)
+    solib = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = solib
+    spec.loader.exec_module(solib)
 
 
-_TE_JAX_LIB_CTYPES = _load_library()
+_load_library()
 from . import flax
 from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
 from .fp8 import NVTE_FP8_COLLECTION_NAME

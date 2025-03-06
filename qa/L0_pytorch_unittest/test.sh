@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+set -x
 
 : ${TE_PATH:=/opt/transformerengine}
 

@@ -98,7 +98,7 @@ _log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
 _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
 _stream_handler = logging.StreamHandler()
 _stream_handler.setFormatter(_formatter)
-fa_logger = logging.getLogger()
+fa_logger = logging.getLogger(__name__)
 fa_logger.setLevel(_log_level)
 if not fa_logger.hasHandlers():
     fa_logger.addHandler(_stream_handler)

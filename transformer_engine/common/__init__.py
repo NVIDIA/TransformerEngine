@@ -84,6 +84,13 @@ def _load_library():
 
     so_path = get_te_path() / "transformer_engine" / f"libtransformer_engine.{_get_sys_extension()}"
     if not so_path.exists():
+        so_path = (
+            get_te_path()
+            / "transformer_engine"
+            / "wheel_lib"
+            / f"libtransformer_engine.{_get_sys_extension()}"
+        )
+    if not so_path.exists():
         so_path = get_te_path() / f"libtransformer_engine.{_get_sys_extension()}"
     assert so_path.exists(), f"Could not find libtransformer_engine.{_get_sys_extension()}"
 

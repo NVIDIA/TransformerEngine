@@ -14,9 +14,9 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from transformer_engine.transformer_engine_jax import DType
-from transformer_engine.transformer_engine_jax import get_cublasLt_version
-from transformer_engine.transformer_engine_jax import (
+from transformer_engine_jax import DType
+from transformer_engine_jax import get_cublasLt_version
+from transformer_engine_jax import (
     get_cuda_version,
     get_device_compute_capability,
 )

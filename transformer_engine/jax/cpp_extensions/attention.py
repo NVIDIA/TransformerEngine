@@ -17,6 +17,9 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax import ffi
 
+
+import transformer_engine_jax
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -25,9 +28,6 @@ from transformer_engine.jax.attention import (
     CPStrategy,
     SequenceDescriptor,
 )
-
-from transformer_engine import transformer_engine_jax
-from transformer_engine.transformer_engine_jax import NVTE_Fused_Attn_Backend
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper

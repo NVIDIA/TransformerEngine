@@ -15,7 +15,7 @@ from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 from jax import ffi
 
-from transformer_engine import transformer_engine_jax
+import transformer_engine_jax
 
 from .base import BasePrimitive, register_primitive
 from .custom_call import custom_caller, CustomCallArgsWrapper
