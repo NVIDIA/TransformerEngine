@@ -1597,7 +1597,7 @@ def flash_attn_fwd_out_correction_init(
     softmax_lse_int_step: torch.Tensor,
     seq_dim: int,
 ):
-    """Merge partial outputs of each step in Attention with context parallelism"""
+    """Merge partial outputs of the first step in Attention with context parallelism"""
     softmax_lse_corrected_exp = torch.exp(softmax_lse_int_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_int_step * softmax_lse_corrected_exp
