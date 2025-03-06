@@ -505,7 +505,7 @@ class DebugQuantizedTensor(QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-        """ Method used to define .slice() on DebugQuantizedTensor."""
+        """Method used to define .slice() on DebugQuantizedTensor."""
         if func in [aten.slice.Tensor]:
             tensor = args[0]
             rowwise_gemm_tensor = tensor.rowwise_gemm_tensor.__torch_dispatch__(
