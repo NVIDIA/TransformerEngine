@@ -280,7 +280,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       int fd;
       volatile uint32_t abortFlag = 0;
       IpcSocketHandle ipcSock = {0};
-      uint64_t opId = 0xdeadcafeb000 + (*comm)->my_node + (*comm)->ar2_firstgpu;
+      uint64_t opId = 0xdeadcafe0000 + (*comm)->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
       IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
       (*comm)->_barrier((*comm)->comm_world);
@@ -416,6 +416,8 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
   // find internode numbers and make internode communicator
   NVTE_CHECK_CUDA(cudaFree(0));
   int mynode, numnodes;
+  mynode = myrank / numlocal;
+  numnodes = numranks / numlocal;
 
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
@@ -549,7 +551,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
       volatile uint32_t abortFlag = 0;
       IpcSocketHandle ipcSock = {0};
-      uint64_t opId = 0xdeadcafebeef + comm->my_node;
+      uint64_t opId = 0xdeadcafe0000 + comm->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
 
       // All-gather POSIX file descriptors across local ranks
