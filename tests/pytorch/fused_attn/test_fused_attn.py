@@ -191,9 +191,13 @@ def _get_attention_backends(
             fp8=fp8,
             fp8_meta=fp8_meta,
         )
-        use_flash_attention, use_fused_attention, fused_attention_backend, use_unfused_attention, available_backends = get_attention_backend(
-            attention_params
-        )
+        (
+            use_flash_attention,
+            use_fused_attention,
+            fused_attention_backend,
+            use_unfused_attention,
+            available_backends,
+        ) = get_attention_backend(attention_params)
         # Set attention.py _attention_backends var using return value
         # from get_attention_backend()
         _attention_backends["use_flash_attention"] = use_flash_attention

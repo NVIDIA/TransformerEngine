@@ -7,14 +7,14 @@ from importlib.metadata import PackageNotFoundError
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TypeAlias
 import warnings
-import logging # for get_attention_backend()
+import logging  # for get_attention_backend()
 import functools
 
 from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
-import torch # for get_attention_backend()
+import torch  # for get_attention_backend()
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
@@ -22,9 +22,9 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     QKVLayout,
     AttnBiasType,
     AttnMaskType,
-    FusedAttnBackend
+    FusedAttnBackend,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor # for AttentionParams
+from transformer_engine.pytorch.float8_tensor import Float8Tensor  # for AttentionParams
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -41,6 +41,7 @@ _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
+
 # ----Helper/Util classes-----
 # --K: Used by get_attention_backend(), DPA and FA classes--
 class AttentionLogging:
@@ -53,16 +54,22 @@ class AttentionLogging:
     @staticmethod
     def setup_logging():
         _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-        AttentionLogging._log_level = _log_levels[AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2]
+        AttentionLogging._log_level = _log_levels[
+            AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
+        ]
         AttentionLogging._stream_handler.setFormatter(AttentionLogging._formatter)
         AttentionLogging.fa_logger.setLevel(AttentionLogging._log_level)
         if not AttentionLogging.fa_logger.hasHandlers():
             AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
-#--------
+
+
+# --------
+
 
 @functools.lru_cache(maxsize=None)
 def _get_supported_versions(version_min, version_max):
     return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+
 
 # --K: Used by get_attention_backend(), DPA and FA classes--
 class FlashAttentionUtils:
@@ -91,7 +98,7 @@ class FlashAttentionUtils:
     (1) pip install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
     (2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
     (3) mkdir -p $python_path/flashattn_hopper
-    (4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""      
+    (4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
 
     @staticmethod
     def set_flash_attention_version():
@@ -111,11 +118,16 @@ class FlashAttentionUtils:
     @staticmethod
     def set_flash_attention_3_params():
         FlashAttentionUtils.v3_is_installed = True
-        FlashAttentionUtils.v3_0_0_beta = PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")
+        FlashAttentionUtils.v3_0_0_beta = (
+            PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")
+        )
         FlashAttentionUtils.use_v3 = True
+
+
 # Create a typedef/alias for code readibility
 FAUtils: TypeAlias = FlashAttentionUtils
-#--------
+# --------
+
 
 @dataclass(eq=True)
 class AttentionParams:
@@ -215,7 +227,10 @@ class AttentionParams:
             elif sf.get("recipe", None) != of.get("recipe", None):
                 return False
         return True
-#--------
+
+
+# --------
+
 
 def get_attention_backend(
     attention_params: AttentionParams = None,
@@ -852,7 +867,10 @@ def get_attention_backend(
         use_unfused_attention,
         available_backends,
     )
-#--------
+
+
+# --------
+
 
 def check_set_window_size(
     attn_mask_type: str,
@@ -897,4 +915,3 @@ def check_set_window_size(
     else:
         assert False, "Invalid attn_mask_type: " + attn_mask_type
     return window_size
-
