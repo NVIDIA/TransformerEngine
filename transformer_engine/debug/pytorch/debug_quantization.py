@@ -253,7 +253,8 @@ class DebugQuantizer(Quantizer):
         rowwise_gemm_tensor, columnwise_gemm_tensor = None, None
         if STANDARD_FP8_QUANTIZE in [self.rowwise_tensor_plan, self.columnwise_tensor_plan]:
             self.parent_quantizer.set_usage(
-                rowwise=True, columnwise=columnwise_gemm_quantize # columnwise usage only is not supported
+                rowwise=True,
+                columnwise=columnwise_gemm_quantize,  # columnwise usage only is not supported
             )
             quantized_tensor = self.parent_quantizer(tensor)
             # if both rowwise_tensor_plan and columnwise_tensor_plan need to be in fp8,
@@ -459,16 +460,18 @@ class DebugQuantizedTensor(QuantizedTensor):
 
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
-        self.tensors_to_save = [self.rowwise_gemm_tensor, self.columnwise_gemm_tensor] if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor else [self.rowwise_gemm_tensor]
-        tensor_list, tensor_objects_list = prepare_for_saving(
-            *self.tensors_to_save
+        self.tensors_to_save = (
+            [self.rowwise_gemm_tensor, self.columnwise_gemm_tensor]
+            if self.rowwise_gemm_tensor is not self.columnwise_gemm_tensor
+            else [self.rowwise_gemm_tensor]
         )
+        tensor_list, tensor_objects_list = prepare_for_saving(*self.tensors_to_save)
         self.tensors_to_save = tensor_objects_list
         # pylint: disable=unbalanced-tuple-unpacking
         return tensor_list, self
 
     def restore_from_saved(self, tensors):
-        """ Restore from saved method override """
+        """Restore from saved method override"""
         tensor_objects_list, saved_tensors = restore_from_saved(
             self.tensors_to_save,
             tensors,
