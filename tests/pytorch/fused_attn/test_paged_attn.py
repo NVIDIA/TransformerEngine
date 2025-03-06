@@ -420,7 +420,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     page_size = None
     total_num_pages = None
     if is_paged:
-        page_size = 256 if backend == "FlashAttention" and not _flash_attn_3_is_installed else 16
+        page_size = 256 if backend == "FlashAttention" and not _flash_attn_3_is_installed else 1
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
     else:
