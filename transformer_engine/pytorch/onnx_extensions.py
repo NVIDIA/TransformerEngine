@@ -14,7 +14,6 @@ For these reasons, we introduce onnx_forward methods in each layer that are simp
 primarily leverage torch operators with known ONNX symbolic functions.
 These methods avoid fusions and backward pass precomputations.
 The main considerations are quantization—which PyTorch does not natively support, so we need to implement onnx symbolic functions on our own.
-Also we define gemm to use ONNX operator GEMM, not MatMul.
 
 Since ONNX does not yet support quantization, operators from TensorRT are employed.
 The primary goal of ONNX export is to enable inference compatibility with TensorRT.
@@ -22,19 +21,22 @@ The primary goal of ONNX export is to enable inference compatibility with Tensor
 """
 
 from typing import Tuple
-import torch
 import math
+import torch
 import onnxscript
 from onnxscript import opset18 as op
+from onnx import defs
 import transformer_engine_torch as tex
+
 from .tensor.float8_tensor import Float8Quantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .constants import TE_DType
-import onnx
-from onnx import defs, helper
-
 from .constants import MXFP8_BLOCK_SCALING_SIZE
 from .utils import round_up_to_nearest_multiple
+from .export import is_in_onnx_export_mode
+
+trt_opset = onnxscript.values.Opset(
+    "trt", version=1
+)  # opset from TensorRT which supports FP8 quantization
 
 # ONNX GEMM for inference
 
@@ -64,9 +66,6 @@ def _(weight, inp, bias):
     if bias is not None:
         out = out + bias
     return out
-
-
-trt_opset = onnxscript.values.Opset("trt", version=100)
 
 
 def onnx_gemm_inf_symbolic(
@@ -167,6 +166,7 @@ TRT_FP8DequantizeLinear = onnxscript.values.Op(
     opset=trt_opset, name="TRT_FP8DequantizeLinear", op_schema=schema
 )
 
+
 # ONNX MXFP8 Quantization
 
 
@@ -183,7 +183,7 @@ def _(tensor: torch.Tensor):
     """Fake quantize to MXFP8Tensor used for inference."""
     mxfp8_scale_shape = [
         round_up_to_nearest_multiple(math.prod(tensor.shape[:-1]), 128),
-        round_up_to_nearest_multiple(tensor.shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4)
+        round_up_to_nearest_multiple(tensor.shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
     ]
     return torch.empty(tensor.shape, dtype=torch.uint8, device=tensor.device), torch.empty(
         mxfp8_scale_shape, dtype=torch.uint8, device=tensor.device
@@ -217,6 +217,8 @@ schema = defs.OpSchema(
 TRT_MXFP8QuantizeLinear = onnxscript.values.Op(
     opset=trt_opset, name="TRT_MXFP8QuantizeLinear", op_schema=schema
 )
+
+
 # ONNX MXFP8 Dequantization
 
 
@@ -292,46 +294,7 @@ def onnx_layernorm_symbolic(
     return op.LayerNormalization(inp, weight, bias, epsilon=eps)
 
 
-# This translation table should be passed to torch.onnx.export function
-# using the custom_translation_table=te_translation_table option.
-te_translation_table = {
-    torch.ops.tex.gemm_inf.default: onnx_gemm_inf_symbolic,
-    torch.ops.tex.fp8_quantize.default: onnx_quantize_fp8_symbolic,
-    torch.ops.tex.fp8_dequantize.default: onnx_dequantize_fp8_symbolic,
-    torch.ops.tex.mxfp8_quantize.default: onnx_quantize_mxfp8_symbolic,
-    torch.ops.tex.mxfp8_dequantize.default: onnx_dequantize_mxfp8_symbolic,
-    torch.ops.tex.layernorm.default: onnx_layernorm_symbolic,
-}
-
-
-# utility functions
-
-
-def onnx_attention_mask_func(
-    attention_scores: torch.Tensor, attention_mask: torch.Tensor
-) -> torch.Tensor:
-    """Get attention mask without inp="""
-    assert is_in_onnx_export_mode()
-    return attention_scores.masked_fill(attention_mask, -10000.0)
-
-
-def _get_te_dtype(dtype_id: int):
-    """Get the tex.DType enum value from the given id - reverse for int(tex.DType.*)."""
-    all_te_dtypes = list(tex.DType.__members__.values())
-    for te_dtype in all_te_dtypes:
-        if int(te_dtype) == dtype_id:
-            return te_dtype
-    raise ValueError(f"Unknown transformer engine dtype id: {dtype_id}")
-
-
-def _get_torch_dtype(dtype_id: int):
-    """Get the torch.dtype value from the given tex.DType enum value."""
-    te_dtype = _get_te_dtype(dtype_id)
-    all_torch_dtypes = [torch.float32, torch.float16, torch.bfloat16]
-    for torch_dtype in all_torch_dtypes:
-        if TE_DType[torch_dtype] == te_dtype:
-            return torch_dtype
-    raise ValueError(f"Unknown torch dtype: {te_dtype}")
+# onnx layernorm helper function - handles layernorm with quantization
 
 
 def onnx_layernorm(
@@ -371,3 +334,26 @@ def onnx_layernorm(
         ln_out = input_quantizer.onnx_dequantize(ln_out_quantized)
     ln_out = ln_out.to(output_dtype)
     return ln_out, ln_out_return
+
+
+# utility functions
+
+
+def onnx_attention_mask_func(
+    attention_scores: torch.Tensor, attention_mask: torch.Tensor
+) -> torch.Tensor:
+    """Get attention mask without inp"""
+    assert is_in_onnx_export_mode()
+    return attention_scores.masked_fill(attention_mask, -10000.0)
+
+
+# This translation table should be passed to torch.onnx.export function
+# using the custom_translation_table=te_translation_table option.
+te_translation_table = {
+    torch.ops.tex.gemm_inf.default: onnx_gemm_inf_symbolic,
+    torch.ops.tex.fp8_quantize.default: onnx_quantize_fp8_symbolic,
+    torch.ops.tex.fp8_dequantize.default: onnx_dequantize_fp8_symbolic,
+    torch.ops.tex.mxfp8_quantize.default: onnx_quantize_mxfp8_symbolic,
+    torch.ops.tex.mxfp8_dequantize.default: onnx_dequantize_mxfp8_symbolic,
+    torch.ops.tex.layernorm.default: onnx_layernorm_symbolic,
+}

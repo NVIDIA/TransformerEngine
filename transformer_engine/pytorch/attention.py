@@ -1381,7 +1381,7 @@ def _get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
-    
+
     if is_in_onnx_export_mode():
         return torch.arange(
             0,
@@ -5374,7 +5374,6 @@ class UnfusedDotProductAttention(torch.nn.Module):
             value_layer.size(3),
         )
 
-
         # change view [sk, b * np, hn]
         value_layer = value_layer.reshape(value_layer.size(0), output_size[0] * output_size[1], -1)
 
@@ -7503,7 +7502,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
                     query_layer, key_layer, value_layer, qkv_format=qkv_format
                 )
-            
 
             global _alibi_cache
             if alibi_slopes is not None:
@@ -7527,7 +7525,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 ):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
-        
+
             core_attention_bias_shape = None
             if core_attention_bias is not None:
                 if (
@@ -7586,7 +7584,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 fp8_meta=self.fp8_meta,
             )
             global _attention_backends, _use_flash_attn_3
-
 
             if not is_in_onnx_export_mode():
                 if (
@@ -8369,7 +8366,6 @@ class MultiheadAttention(torch.nn.Module):
                     fp8_output=fp8_mha and rotary_pos_emb is None,
                 )
 
-
             num_queries_per_key_value = (
                 self.num_attention_heads_per_partition // self.num_gqa_groups_per_partition
             )
@@ -8493,7 +8489,6 @@ class MultiheadAttention(torch.nn.Module):
         # ======================================================
         # Apply relative positional encoding (rotary embedding)
         # ======================================================
-
 
         if rotary_pos_emb is not None:
             assert not isinstance(query_layer, Float8Tensor) and not isinstance(

@@ -27,6 +27,7 @@ import warnings
 import numpy as np
 import onnxruntime as ort
 import torch
+import random
 from torch import nn as nn
 from typing import Optional, Union, Tuple, List
 from onnxruntime_extensions import PyCustomOpDef, get_library_path, onnx_op
@@ -36,7 +37,6 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, te_translation_table
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.utils import get_default_init_method
-
 
 # Global test configuration knobs.
 
@@ -85,7 +85,7 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
     outputs=[PyCustomOpDef.dt_uint8],
 )
 def trt_fp8_quantize(t, scale):
-    """ FP8 quantization extension for ONNX Runtime. """
+    """FP8 quantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
         scale=1 / torch.from_numpy(scale).cuda(),
@@ -105,7 +105,7 @@ def trt_fp8_quantize(t, scale):
     outputs=[PyCustomOpDef.dt_float],
 )
 def trt_fp8_dequantize(t, scale):
-    """ FP8 dequantization extension for ONNX Runtime. """
+    """FP8 dequantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.float8_tensor.Float8Quantizer(
         scale=1 / torch.from_numpy(scale).cuda(),
@@ -125,7 +125,7 @@ def trt_fp8_dequantize(t, scale):
     outputs=[PyCustomOpDef.dt_uint8, PyCustomOpDef.dt_uint8],
 )
 def trt_mxfp8_quantize(t):
-    """ MXFP8 quantization extension for ONNX Runtime. """
+    """MXFP8 quantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     q = te.tensor.mxfp8_tensor.MXFP8Quantizer(tex.DType.kFloat8E4M3)
     return q(x)._rowwise_data.cpu().numpy(), q(x)._rowwise_scale_inv.cpu().numpy()
@@ -141,7 +141,7 @@ def trt_mxfp8_quantize(t):
     outputs=[PyCustomOpDef.dt_float],
 )
 def trt_mxfp8_dequantize(t, scale_inv):
-    """ MXFP8 dequantization extension for ONNX Runtime. """
+    """MXFP8 dequantization extension for ONNX Runtime."""
     x = torch.from_numpy(t).cuda()
     scale_inv_tensor = torch.from_numpy(scale_inv).cuda()
     q = te.tensor.mxfp8_tensor.MXFP8Quantizer(tex.DType.kFloat8E4M3)
@@ -210,7 +210,8 @@ def do_export(
                 opset_version=opset,
                 input_names=input_names,
                 output_names=output_names,
-                optimize=inps[0].dtype != torch.bfloat16,  # optimizer does not work with bfloat16 yet - will need to change that after onnxscript supports bfloat16
+                optimize=inps[0].dtype
+                != torch.bfloat16,  # optimizer does not work with bfloat16 yet - will need to change that after onnxscript supports bfloat16
             )
 
 
@@ -496,7 +497,9 @@ def test_export_linear(
         if fp8_recipe is None:
             validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
         else:
-            validate_result(fname, inp, model, atol=1e-2, is_fp8=fp8_recipe is not None, te_outputs=te_outputs)
+            validate_result(
+                fname, inp, model, atol=1e-2, is_fp8=fp8_recipe is not None, te_outputs=te_outputs
+            )
 
 
 @pytest.mark.parametrize("scale_factor", [112])
@@ -555,7 +558,14 @@ def test_export_layernorm(
             if fp8_recipe is None:
                 validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
             elif precision != torch.bfloat16:
-                validate_result(fname, inp, model, atol=1e-3, is_fp8=fp8_recipe is not None, te_outputs=te_outputs)
+                validate_result(
+                    fname,
+                    inp,
+                    model,
+                    atol=1e-3,
+                    is_fp8=fp8_recipe is not None,
+                    te_outputs=te_outputs,
+                )
 
 
 @pytest.mark.parametrize("scale_factor", [112])
@@ -628,7 +638,14 @@ def test_export_layernorm_linear(
             if fp8_recipe is None:
                 validate_result(fname, inp, model, atol=1e-3, te_outputs=te_outputs)
             elif precision != torch.bfloat16:
-                validate_result(fname, inp, model, atol=1e-3, is_fp8=fp8_recipe is not None, te_outputs=te_outputs)
+                validate_result(
+                    fname,
+                    inp,
+                    model,
+                    atol=1e-3,
+                    is_fp8=fp8_recipe is not None,
+                    te_outputs=te_outputs,
+                )
 
 
 @pytest.mark.parametrize("scale_factor", [112])
@@ -702,7 +719,9 @@ def test_export_layernorm_mlp(
         atol = (
             1e-2 if fp8_recipe is not None else (5e-1 if activation == "swiglu" else 1e-3)
         )  # TODO(pgadzinski) - check 1e-2
-        validate_result(fname, inp, model, atol=atol, is_fp8=fp8_recipe is not None, te_outputs=te_outputs)
+        validate_result(
+            fname, inp, model, atol=atol, is_fp8=fp8_recipe is not None, te_outputs=te_outputs
+        )
 
 
 @skip_FP8
@@ -1020,7 +1039,13 @@ def test_export_transformer_layer(
         return
     atol = 5e-1 if fp8_recipe is not None else (5e-1 if activation == "swiglu" else 1e-3)
     validate_result(
-        fname, inp, model, atol=atol, is_fp8=fp8_recipe is not None, input_names=input_names, te_outputs=te_outputs
+        fname,
+        inp,
+        model,
+        atol=atol,
+        is_fp8=fp8_recipe is not None,
+        input_names=input_names,
+        te_outputs=te_outputs,
     )
 
 
@@ -1090,9 +1115,7 @@ def test_export_gpt_generation(
         inp,
         fname,
         fp8_recipe,
-        dynamic_shapes={
-            "hidden_states": {0: seq, 1: bs}
-        },
+        dynamic_shapes={"hidden_states": {0: seq, 1: bs}},
     )
     te_outputs = te_infer(model, inp, is_fp8=fp8_recipe is not None, fp8_recipe=fp8_recipe)
     serialize_inputs_outputs(

@@ -12,7 +12,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..constants import MXFP8_BLOCK_SCALING_SIZE, TE_DType as TE_DType_map
+from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 from ._internal.mxfp8_tensor_base import MXFP8TensorBase, _FromMXFP8Func
@@ -150,9 +150,7 @@ class MXFP8Quantizer(Quantizer):
         return self.create_tensor_from_data(data, scale_inv, fake_dtype=torch.float32)
 
     def onnx_dequantize(self, tensor: Union[MXFP8TensorBase, MXFP8Tensor]) -> torch.Tensor:
-        return torch.ops.tex.mxfp8_dequantize(
-            tensor._rowwise_data, tensor._rowwise_scale_inv
-        )
+        return torch.ops.tex.mxfp8_dequantize(tensor._rowwise_data, tensor._rowwise_scale_inv)
 
 
 class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
