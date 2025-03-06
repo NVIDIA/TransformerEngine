@@ -405,7 +405,7 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
     # Linear op
     for test_config in itertools.product(
         (False, True),  # bias
-        ("column", "row"),  # tensor_parallel_mode
+        ("row", "column"),  # tensor_parallel_mode
         (False, True),  # weight_requires_grad
     ):
         if rank == 0:
@@ -477,10 +477,10 @@ def main() -> None:
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("--parallel", action="store_true", help="Run parallel tests")
-    parser.add_argument("--sequence-length", type=int, default=32)
+    parser.add_argument("--sequence-length", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-heads", type=int, default=16)
-    parser.add_argument("--head-dim", type=int, default=32)
+    parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args()

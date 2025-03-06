@@ -141,7 +141,45 @@ CommOverlapCore::~CommOverlapCore() {
 
 TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, size_t chunk_offset,
                                                 const std::vector<size_t> &chunk_shape) {
-  TensorWrapper chunk;
+  const auto scaling_mode = source.scaling_mode();
+
+  // Tensor dimensions
+  std::vector<size_t> shape = AS_VECTOR(source.shape());
+  auto flatten_shape_to_2d = [](const std::vector<size_t> &shape) -> std::pair<size_t, size_t> {
+    if (shape.empty()) {
+      return {1, 1};
+    }
+    size_t height = 1;
+    for (size_t i=0; i<shape.size()-1; ++i) {
+      height *= shape[i];
+    }
+    return {height, shape.back()};
+  };
+  size_t height, width, chunk_height, chunk_width;
+  std::tie(height, width) = flatten_shape_to_2d(shape);
+  std::tie(chunk_height, chunk_width) = flatten_shape_to_2d(chunk_shape);
+
+  // Check tensor dimensions
+#define NVTE_DIM_CHECK(cond, message)                                   \
+  NVTE_CHECK(cond, message,                                             \
+             " (tensor shape=", shape, ", chunk shape=", chunk_shape,   \
+             ", chunk offset=", chunk_offset, ")")
+  NVTE_DIM_CHECK(height > 0 && width > 0, "Attempted to get chunk from empty tensor");
+  NVTE_DIM_CHECK(chunk_height > 0 && chunk_width > 0, "Attempted to get empty tensor chunk");
+  NVTE_DIM_CHECK(chunk_height <= height && chunk_width <= width,
+                 "Attempted to get out-of-bounds tensor chunk");
+  if (scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
+    // MXFP8 scale-inverses are padded to a 2D matrix with dims that
+    // are divisible by 128. UB doesn't handle this padding yet.
+    NVTE_DIM_CHECK(height % 128 == 0 && width % 128 == 0,
+                   "Userbuffers requires MXFP8 tensor dims that are divisible by 128");
+    NVTE_DIM_CHECK(chunk_height % 128 == 0 && chunk_width % 128 == 0,
+                   "Userbuffers requires MXFP8 tensor chunk dims that are divisible by 128");
+  }
+#undef NVTE_DIM_CHECK
+
+  // Construct tensor chunk
+  TensorWrapper chunk(scaling_mode);
   for (int param_id = 0; param_id < NVTETensorParam::kNVTENumTensorParams; param_id++) {
     auto param_type = static_cast<NVTETensorParam>(param_id);
     auto param = source.get_parameter(param_type);
@@ -168,11 +206,11 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
                   param_type == NVTETensorParam::kNVTEColumnwiseScaleInv)) {
         // Calculate block scaling offset and size
         auto scaled_tensor_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv)
-                                          ? source.shape().data[0]
-                                          : source.columnwise_shape().data[0];
+                                          ? height
+                                          : width;
         auto scaled_chunk_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv)
-                                         ? chunk_shape.front()
-                                         : chunk_shape.back();
+                                         ? chunk_height
+                                         : chunk_width;
         auto chunk_scale_start = chunk_offset / 32;
         auto chunk_scale_end = (chunk_offset + scaled_chunk_dim_size) / 32;
         auto chunk_scale_size = chunk_scale_end - chunk_scale_start;
@@ -425,11 +463,19 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
 
   assert(pre_gelu_out.numel() == 0);
 
+  // Helper function to get bias chunk if needed
+  auto maybe_get_bias_chunk = [this, &bias, m_chunk](size_t chunk_id) -> TensorWrapper {
+    if (bias.dptr() == nullptr) {
+      return TensorWrapper();
+    }
+    return get_tensor_chunk(bias, chunk_id * m_chunk, {m_chunk});
+  };
+
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
   if (_rs_overlap_first_gemm) {
     auto input_a_chunk = get_tensor_chunk(A, 0, {m_chunk, k});
     auto output_chunk = get_buffer_chunk_like(D, 0, {m, m_chunk});
-    auto bias_chunk = get_tensor_chunk(bias, 0, {m_chunk});
+    auto bias_chunk = maybe_get_bias_chunk(0);
     auto workspace_chunk = get_tensor_chunk(workspace, 0, {workspace_size_chunk});
 
     nvte_cublas_gemm(input_a_chunk.data(), B.data(), output_chunk.data(), bias_chunk.data(),
@@ -439,7 +485,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     for (int i = 1; i < _num_splits; i++) {
       input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
       output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
-      bias_chunk = get_tensor_chunk(bias, i * m_chunk, {m_chunk});
+      bias_chunk = maybe_get_bias_chunk(i);
       workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
@@ -488,7 +534,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     for (int i = 0; i < _num_splits; i++) {
       auto input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
       auto output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
-      auto bias_chunk = get_tensor_chunk(bias, i * m_chunk, {m_chunk});
+      auto bias_chunk = maybe_get_bias_chunk(i);
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
 
