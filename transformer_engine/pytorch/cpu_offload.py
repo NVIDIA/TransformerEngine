@@ -9,8 +9,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .tensor.float8_tensor import Float8Tensor
-from .tensor.mxfp8_tensor import MXFP8Tensor
+from .tensor.quantized_tensor import QuantizedTensor
 
 __all__ = ["get_cpu_offload_context"]
 
@@ -234,7 +233,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
-        fp8_offload = isinstance(src_tensor, Float8Tensor)
+        fp8_offload = isinstance(src_tensor, QuantizedTensor)
 
         cpu_backup = torch.empty(
             src_tensor.size(),
@@ -245,7 +244,7 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
         )
 
         if fp8_offload:
-            cpu_backup = Float8Tensor.make_like(src_tensor, data=cpu_backup)
+            cpu_backup = QuantizedTensor.make_like(src_tensor, data=cpu_backup)
 
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
@@ -342,7 +341,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             ),
         )
 
-        quantized_tensor = callable(getattr(tensor, "prepare_for_saving", None))
+        is_quantized_tensor = callable(getattr(tensor, "prepare_for_saving", None))
 
         if not torch_stray_tensor:
 
@@ -352,7 +351,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
             assert tensor_tag not in self.tensor_tag_to_state
 
-            if quantized_tensor:
+            if is_quantized_tensor:
                 tensor_list = tensor.prepare_for_saving()
                 self.tensor_tag_to_state[tensor_tag] = []
                 self.tensor_tag_to_buf[tensor_tag] = []
@@ -361,7 +360,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 tensor_list = [tensor]
 
             for t in tensor_list:
-                if quantized_tensor:
+                if is_quantized_tensor:
                     self.tensor_tag_to_state[tensor_tag].append(t)
                 else:
                     self.tensor_tag_to_state[tensor_tag] = t
@@ -370,7 +369,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     self.current_group < self.num_offload_group
                     and self.tensor_need_offloading_checker(t)
                 ):
-                    if quantized_tensor:
+                    if is_quantized_tensor:
                         self.tensor_tag_to_buf[tensor_tag].append(t)
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
@@ -399,9 +398,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 if group_id == group_to_offload:
                     assert not isinstance(state, tuple)
 
-                    quantized_tensor = isinstance(state, list)
+                    is_quantized_tensor = isinstance(state, list)
 
-                    if quantized_tensor:
+                    if is_quantized_tensor:
                         tensor_list = state
                         self.tensor_tag_to_state[tensor_tag] = []
                     else:
@@ -411,7 +410,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         # if offload, return the reference to cpu copy
                         if self.tensor_need_offloading_checker(tensor_on_device):
                             state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
-                            if quantized_tensor:
+                            if is_quantized_tensor:
                                 self.tensor_tag_to_state[tensor_tag].append(state)
                             else:
                                 self.tensor_tag_to_state[tensor_tag] = state
