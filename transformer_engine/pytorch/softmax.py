@@ -20,6 +20,7 @@ _default_causal_mask = {}
 
 def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
+
     def _get_mask():
         diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1
         return torch.triu(
@@ -32,6 +33,7 @@ def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     if matrix_identifiers not in _default_causal_mask:
         _default_causal_mask[matrix_identifiers] = _get_mask()
     return _default_causal_mask[matrix_identifiers]
+
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
@@ -177,9 +179,9 @@ class FusedScaleMaskSoftmax(nn.Module):
         if is_in_onnx_export_mode():
             return self.forward_torch_softmax(inp, mask, scale)
 
-        # We do not want to connect this if with previous if, 
+        # We do not want to connect this if with previous if,
         # because we want to avoid calling is_kernel_available() in ONNX mode.
-        if self.is_kernel_available(mask, *inp.size()): 
+        if self.is_kernel_available(mask, *inp.size()):
             return self.forward_fused_softmax(inp, mask, scale)
         return self.forward_torch_softmax(inp, mask, scale)
 
