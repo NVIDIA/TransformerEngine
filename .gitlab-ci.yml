@@ -668,10 +668,6 @@ upload_logs:
 "Run all L3 tests":
     <<: *MANUAL_TEST_TRIGGER
 
-.T4_1GPU: &T4_1GPU
-    tags:
-    - T4
-
 .A100_1GPU: &A100_1GPU
     tags:
     - A100
@@ -682,7 +678,7 @@ upload_logs:
       - dlcluster_h100
     variables:
       CI_SCHEDULER_TYPE: docker
-      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
       CI_SLURM_TIME: 240
 
 .H100_4GPU:
@@ -690,7 +686,7 @@ upload_logs:
       - dlcluster_h100x4
     variables:
       CI_SCHEDULER_TYPE: docker
-      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --env CI_PIPELINE_ID=${CI_PIPELINE_ID}"
       CI_SLURM_TIME: 240
 
 .L40_1GPU:
@@ -698,7 +694,7 @@ upload_logs:
     - dlcluster_l40
     variables:
       CI_SCHEDULER_TYPE: docker
-      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID} --gpus all"
+      EXTRA_DOCKER_RUN_ARGS: "--init --ipc=host --ulimit memlock=-1 --ulimit stack=$$((1024*65536)) --label RUNNER_ID=$${RUNNER_ID}"
       CI_SLURM_TIME: 240
 
 
@@ -791,14 +787,6 @@ L0_pytorch_unittest--A100_1GPU:
     extends:
     - .L0_test
     - .A100_1GPU
-
-L0_pytorch_unittest--T4_1GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L0_test
-    - .T4_1GPU
 
 L0_pytorch_unittest--H100_1GPU:
     variables:
