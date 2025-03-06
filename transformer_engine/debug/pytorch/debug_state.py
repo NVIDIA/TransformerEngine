@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """
-Managin the state of all the debuged layers.
+Managing the state of all the debugged layers.
 """
 
 import sys
@@ -23,16 +23,16 @@ class TEDebugState:
     @classmethod
     def initialize(cls):
         """
-        If debug_api is module is initialized, then sets cls.debug_enabled to True.
+        If debug_api module is initialized, then sets cls.debug_enabled to True.
         """
 
         if "nvdlfw_inspect" in sys.modules:
             import nvdlfw_inspect.api as debug_api
 
             if cls.debug_enabled is False and debug_api.DEBUG_MANAGER is not None:
-                # This method in invoked when initializing TE modules.
+                # This method is invoked when initializing TE modules.
                 # If this error is thrown, it means that some TE module had been initialized before
-                # debug_api was initialized, and now new TE module is being initialized.
+                # debug_api was initialized, and now a new TE module is being initialized.
                 # This is likely to be a bug.
                 raise RuntimeError(
                     "[nv_dlfw_inspect] nv_dlfw_inspect module should be initialized before"
@@ -52,7 +52,7 @@ class TEDebugState:
     @classmethod
     def get_layer_count(cls):
         """
-        Layer counter is used when layer names are not provided to modules by user.
+        Layer counter is used when layer names are not provided to modules by the user.
         """
         lc = cls.layer_count
         cls.layer_count += 1

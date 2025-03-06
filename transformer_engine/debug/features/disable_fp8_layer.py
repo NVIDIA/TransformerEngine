@@ -33,8 +33,8 @@ class DisableFp8Layer:
         # If FP8 training, disable FP8 for the selected layers if this feature is enabled in config.
         debug_api.log_message("FP8 Disabled", layer_name)
 
-        # If this feature is invoked, then fp8 gemm is disabled.
-        # If not, then default behaviour in TransformerEngineAPI
+        # If this feature is invoked, then FP8 GEMM is disabled.
+        # If not, then default behavior in TransformerEngineAPI
         # is that fp8_gemm() API call returns True.
         return False
 

@@ -97,7 +97,7 @@ required_kwargs = {
 
 
 class TEDefaultFeatures:
-    """Transformer Engine API calls default behaviour."""
+    """Transformer Engine API calls default behavior."""
 
     def fp8_gemm_enabled(self, *_args, **_kwargs):
         """API call responsible for choice between high-precision and FP8 GEMM execution."""
@@ -153,7 +153,7 @@ class TransformerEngineAPI(BaseNamespaceAPI):
 
     def is_multiple_feature_invocation_allowed(self, api_name):
         """
-        Check if API allowes executing multiple features for a single call
+        Check if API allows executing multiple features for a single call
         """
         return api_name in {
             "fp8_gemm_enabled",
@@ -193,12 +193,12 @@ class TransformerEngineAPI(BaseNamespaceAPI):
         return status, modified_config
 
     def output_assertions_hook(self, api_name, ret, **kwargs):
-        """Output hooks using to check correctness of the outputs of the API calls."""
+        """Output hooks used to check correctness of the outputs of the API calls."""
         if "enabled" in api_name or api_name == "fp8_gemm":
             assert isinstance(ret, bool)
         if api_name in ["inspect_tensor", "inspect_tensor_postquantize"]:
             assert ret is None
-        if api_name == "modity_tensor":
+        if api_name == "modify_tensor":
             assert type(ret) in all_tensor_types
             if type(ret) == torch.Tensor:  # pylint: disable=unidiomatic-typecheck
                 assert ret.dtype == kwargs["dtype"]

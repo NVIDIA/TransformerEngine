@@ -5,7 +5,7 @@
 """
 This file contains DebugQuantizer and DebugQuantizedTensor objects,
 which are wrappers over Quantizer and QuantizedTensor.
-These wrapper add logic related to the debugging, using the nvdlfw_inspect package.
+These wrappers add logic related to debugging, using the nvdlfw_inspect package.
 """
 
 from __future__ import annotations
@@ -40,9 +40,9 @@ HIGH_PRECISION = "High Precision"
 
 class DebugQuantizer(Quantizer):
     """
-    DebugQuantizer is Quantizer object used for debugging with nvidia-dlframework-inspect.
-    It allows to add custom calls inside quantization process - which enable to modify tensors
-    or gather tensors stats.
+    DebugQuantizer is a Quantizer object used for debugging with nvidia-dlframework-inspect.
+    It allows adding custom calls inside the quantization process - which enables modifying tensors
+    or gathering tensor stats.
     """
 
     def __init__(
@@ -64,14 +64,14 @@ class DebugQuantizer(Quantizer):
         self.rowwise_gemm_name, self.columnwise_gemm_name = _tensor_to_gemm_names_map[tensor_name]
 
         # The values of the inspect_tensor_enabled, inspect_tensor_postquantize_enabled,
-        # rowwise_tensor_plan and  columnwise_tensor_plan are computed.
-        # These fields indicate the path which API calls will be inserted.
+        # rowwise_tensor_plan, and columnwise_tensor_plan are computed.
+        # These fields indicate the path where API calls will be inserted.
         #
         # inspect_tensor*_enabled are bool fields,
-        # inicating whether some feature will need to run inspect_tensor_* calls.
+        # indicating whether some feature will need to run inspect_tensor_* calls.
         #
-        # *_tensor_plan are one of [API_TENSOR_MODIFY, STANDARD_FP8_QUANTIZE, HIGH_PRECISION]
-        # determining what will happen when quantizer is used for that tensor.
+        # *_tensor_plan are one of [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, HIGH_PRECISION]
+        # determining what will happen when the quantizer is used for that tensor.
         self.output_tensor = tensor_name in ["output", "wgrad", "dgrad"]
         if self.output_tensor:
             self.inspect_tensor_enabled, self.rowwise_tensor_plan = (
@@ -88,7 +88,7 @@ class DebugQuantizer(Quantizer):
     def get_plans_for_output_tensors(self) -> Tuple[bool, str]:
         """
         Returns tuple (inspect_tensor_enabled: bool, plan: str). Plan is one of the
-        CALL_PROCESS_TENSOR or HIGH_PRECISION, because debug quantizer does not support
+        API_CALL_MODIFY or HIGH_PRECISION, because debug quantizer does not support
         gemm output in FP8.
         """
         import nvdlfw_inspect.api as debug_api
@@ -108,7 +108,7 @@ class DebugQuantizer(Quantizer):
 
     def get_enabled_look_at_tensors(self):
         """
-        Returns tuple of booleans determining which functions look_at_tensor_*(...) should be called.
+        Returns a tuple of booleans determining which functions look_at_tensor_*(...) should be called.
         """
         import nvdlfw_inspect.api as debug_api
 
@@ -127,7 +127,7 @@ class DebugQuantizer(Quantizer):
         """
         Returns (rowwise_plan, columnwise_plan). Each element of the tuple is one of
         API_CALL_MODIFY, STANDARD_FP8_QUANTIZE, or HIGH_PRECISION, indicating the behavior
-        of this quanitzer with respect to these tensors.
+        of this quantizer with respect to these tensors.
         """
         import nvdlfw_inspect.api as debug_api
 
@@ -337,7 +337,7 @@ class DebugQuantizer(Quantizer):
     ) -> QuantizedTensor:
         """Override make_empty() from Quantizer class."""
         if self.parent_quantizer is not None:
-            return self.parent_quantizer(shape, dtype=dtype, device=device)
+            return self.parent_quantizer.make_empty(shape, dtype=dtype, device=device)
         return torch.empty(shape, dtype=dtype, device=device)
 
     def calibrate(self, tensor: torch.Tensor):
@@ -406,7 +406,7 @@ class DebugQuantizer(Quantizer):
             dst.rowwise_gemm_tensor.copy_(src)
         if self.columnwise_tensor_plan == HIGH_PRECISION:
             # if they are the same tensor object, it is sufficient to update one
-            if dst.columnwise_gemm_tensor is not dst.columnwise_gemm_tensor:
+            if dst.columnwise_gemm_tensor is not dst.rowwise_gemm_tensor:
                 dst.columnwise_gemm_tensor.copy_(src)
 
         self._call_inspect_tensor_api(src, dst.rowwise_gemm_tensor, dst.columnwise_gemm_tensor)
@@ -414,16 +414,16 @@ class DebugQuantizer(Quantizer):
     def any_feature_enabled(self) -> bool:
         """Returns bool if there is at least one API call enabled."""
         if self.output_tensor:
-            return self.inspect_tensor_enabled or self.rowwise_gemm_name == API_CALL_MODIFY
+            return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
         if (
             self.inspect_tensor_enabled
             or self.inspect_tensor_postquantize_enabled
-            or self.rowwise_gemm_name == API_CALL_MODIFY
-            or self.columnwise_gemm_name == API_CALL_MODIFY
+            or self.rowwise_tensor_plan == API_CALL_MODIFY
+            or self.columnwise_tensor_plan == API_CALL_MODIFY
         ):
             return True
         if self.parent_quantizer is not None:
-            if self.rowwise_gemm_name != STANDARD_FP8_QUANTIZE:
+            if self.rowwise_tensor_plan != STANDARD_FP8_QUANTIZE:
                 return True
             if self.columnwise_tensor_plan != STANDARD_FP8_QUANTIZE:
                 return True
@@ -505,13 +505,13 @@ class DebugQuantizedTensor(QuantizedTensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
-        """ " Method use to define .slice() on DebugQuantizedTensor."""
+        """ Method used to define .slice() on DebugQuantizedTensor."""
         if func in [aten.slice.Tensor]:
             tensor = args[0]
             rowwise_gemm_tensor = tensor.rowwise_gemm_tensor.__torch_dispatch__(
                 func,
                 types,
-                [rowwise_gemm_tensor] + list(args[1:]),
+                [tensor.rowwise_gemm_tensor] + list(args[1:]),
                 kwargs,
             )
             return DebugQuantizedTensor(

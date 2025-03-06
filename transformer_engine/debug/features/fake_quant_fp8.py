@@ -84,7 +84,7 @@ class FakeQuant(TEConfigAPIMapper):
     """
 
     def _supported_formats(self):
-        """Returns formats than one can fake quant tensor to."""
+        """Returns formats that one can fake quantize tensor to."""
         return ["FP8E4M3", "FP8E5M2", "MXFP8E4M3", "MXFP8E5M2"]
 
     def _get_margin_default(self):

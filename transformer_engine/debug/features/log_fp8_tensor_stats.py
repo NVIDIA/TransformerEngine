@@ -30,7 +30,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     To enable the feature in yaml config:
     transformer_engine:
-      log_tensor_stats:
+      log_fp8_tensor_stats:
         enabled: True
         ...
 
@@ -51,7 +51,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
     def inspect_tensor_postquantize_enabled(
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
-        """API call used to determine whether to run look_at_tensor_before_process() in the forward."""
+        """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
         # check whether logging should happen in this iteration
         return self._check_params(config, layer_name, iteration=iteration)
 
@@ -71,12 +71,11 @@ class LogFp8TensorStats(BaseLogTensorStats):
         """
 
         assert type(tensor) in [Float8Tensor, Float8TensorBase, MXFP8Tensor, MXFP8TensorBase], (
-            f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be quantized tensor when using"
-            " log_fp8_tensor_stats.                Use log_tensor_stats for high precision"
-            " tensors."
+            f"[NVTORCH INSPECT ERROR] Tensor {tensor_name} must be a quantized tensor when using"
+            " log_fp8_tensor_stats. Use log_tensor_stats for high precision tensors."
         )
 
-        # This api can be invoked twice - with the tensor and with the transpose.
+        # This API can be invoked twice - with the tensor and with the transpose.
         # We want to collect the stats once.
         if not rowwise:
             return  # tensor was already seen rowwise in the other gemm
@@ -115,7 +114,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
         STATS_BUFFERS.feed(layer_name, tensor_name, options, tensor, iteration, skip_reduction)
 
         debug_api.log_message(
-            f"Feature={self.__class__.__name__}, API=look_at_tensor_after_process: {tensor_name}",
+            f"Feature={self.__class__.__name__}, API=inspect_tensor_postquantize: {tensor_name}",
             layer_name,
-            extra_cachable_args=(tensor_name),
+            extra_cachable_args=(tensor_name,),
         )

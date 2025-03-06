@@ -23,7 +23,7 @@ def per_tensor_cast(
     tensor: torch.Tensor, fp8_dtype: tex.DType, margin: int = 0, out: Float8Tensor = None
 ) -> Float8Tensor:
     """
-    This function ocmputes the scaling factors based on the tensor amax and then casts it to the fp8
+    This function computes the scaling factors based on the tensor amax and then casts it to the fp8
     """
 
     assert tensor.dtype in (
