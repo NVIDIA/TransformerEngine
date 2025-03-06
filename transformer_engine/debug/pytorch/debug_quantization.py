@@ -478,6 +478,7 @@ class DebugQuantizedTensor(QuantizedTensor):
             return_saved_tensors=True,
         )
         if len(tensor_objects_list) == 2:
+            # pylint: disable=unbalanced-tuple-unpacking
             self.rowwise_gemm_tensor, self.columnwise_gemm_tensor = tensor_objects_list
         else:
             self.rowwise_gemm_tensor = tensor_objects_list[0]
