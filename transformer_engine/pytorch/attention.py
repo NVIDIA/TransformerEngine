@@ -105,7 +105,11 @@ _flash_attn_varlen_bwd = None
 try:
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and dpa_utils._NVTE_FLASH_ATTN:
+    if (
+        torch.cuda.is_available()
+        and get_device_compute_capability() >= (8, 0)
+        and dpa_utils._NVTE_FLASH_ATTN
+    ):
         dpa_utils.AttentionLogging.fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
             """ "pip3 install flash-attn".""",
@@ -128,10 +132,13 @@ else:
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
+
         # Setup Flash attention utils
         fa_utils.set_flash_attention_version()
     elif (
-        torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and dpa_utils._NVTE_FLASH_ATTN
+        torch.cuda.is_available()
+        and get_device_compute_capability() >= (8, 0)
+        and dpa_utils._NVTE_FLASH_ATTN
     ):
         dpa_utils.AttentionLogging.fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
@@ -152,7 +159,11 @@ else:
 try:
     fa_utils.fa3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and dpa_utils._NVTE_FLASH_ATTN:
+    if (
+        torch.cuda.is_available()
+        and get_device_compute_capability() >= (9, 0)
+        and dpa_utils._NVTE_FLASH_ATTN
+    ):
         dpa_utils.AttentionLogging.fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             fa_utils.v3_installation_steps,
@@ -2393,9 +2404,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q,
                                 ctx.max_seqlen_kv,
                             ]
-                        if fa_utils.use_v3 or (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if fa_utils.use_v3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_backward_kwargs["window_size"] = (-1, 0)
                         elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -2510,9 +2519,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q,
                                 ctx.max_seqlen_kv // 2,
                             ]
-                        if fa_utils.use_v3 or (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if fa_utils.use_v3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_backward_kwargs["window_size"] = (-1, -1)
                         if fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -2629,9 +2636,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 ctx.max_seqlen_q // 2,
                                 ctx.max_seqlen_kv,
                             ]
-                        if fa_utils.use_v3 or (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if fa_utils.use_v3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_backward_kwargs["window_size"] = (-1, -1)
                         elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
@@ -3191,9 +3196,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 max_seqlen_q,
                                 max_seqlen_kv_,
                             ]
-                        if fa_utils.use_v3 or (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if fa_utils.use_v3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
                         elif fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
@@ -4858,6 +4861,7 @@ def get_qkv_layout(
 
     return qkv_layout, q, k, v
 
+
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
     https://github.com/Dao-AILab/flash-attention
@@ -5095,9 +5099,7 @@ class FlashAttention(torch.nn.Module):
                     if fa_utils.v2_5_7_plus:
                         fa_optional_forward_kwargs["block_table"] = None
                     func = (
-                        flash_attn_varlen_func
-                        if not fa_utils.use_v3
-                        else flash_attn_varlen_func_v3
+                        flash_attn_varlen_func if not fa_utils.use_v3 else flash_attn_varlen_func_v3
                     )
                     fa_optional_forward_args_thd.append(cu_seqlens_q)
                     fa_optional_forward_args_thd.append(cu_seqlens_kv)
