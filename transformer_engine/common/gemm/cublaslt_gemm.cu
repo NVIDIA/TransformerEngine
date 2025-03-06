@@ -392,8 +392,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
-#if CUDA_VERSION >= 12080
-    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D || inputA->scaling_mode == inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
+#if CUDA_VERSION >= 12090
+else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D || inputA->scaling_mode == inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
                (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D || inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
