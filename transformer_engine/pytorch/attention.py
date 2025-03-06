@@ -1600,7 +1600,7 @@ def flash_attn_fwd_out_correction_init(
     softmax_lse_corrected_exp = torch.exp(softmax_lse_init_step - softmax_lse).movedim(2, seq_dim)
     softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
     out_corrected = out_init_step * softmax_lse_corrected_exp
-    return out_corrected
+    return out_corrected.to(out_init_step.dtype)
 
 
 @jit_fuser
