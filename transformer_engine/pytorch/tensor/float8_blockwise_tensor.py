@@ -5,7 +5,6 @@
 """Tensor class with FP8 data quantized with NxN tiles"""
 from __future__ import annotations
 from typing import Optional, Tuple, Iterable
-import warnings
 
 import math
 import torch
@@ -59,6 +58,29 @@ class Float8BlockQuantizer(Quantizer):
         *,
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
+        """Update the quantized tensor with data from the source tensor.
+
+        This method quantizes the input tensor and stores the result in the destination tensor.
+
+        Parameters
+        ----------
+        src : torch.Tensor
+            Source tensor containing the data to be quantized
+        dst : QuantizedTensor
+            Destination tensor where the quantized data will be stored
+        noop_flag : Optional[torch.Tensor]
+            Optional flag tensor indicating whether to skip the quantization operation
+
+        Returns
+        -------
+        QuantizedTensor
+            The destination tensor containing the quantized data
+
+        Raises
+        ------
+        AssertionError
+            If the destination tensor is not a Float8BlockwiseQTensor
+        """
         assert isinstance(
             dst, Float8BlockwiseQTensor
         ), f"Cannot store quantized blockwise tensor in {type(dst)} type."
@@ -75,39 +97,70 @@ class Float8BlockQuantizer(Quantizer):
         return dst
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
-        # cuBLAS kernel format (for NxN by NxN and 1xN by NxN GEMMs)
-        # The scales for 2D block quantized tensors must have scales padded
-        # to multiples of 4 on the inner dimension. TODO: Verify whether outer
-        # dimension also to be padded for either GEMM.
-        if self.block_scaling_dim == 2:
-            logical_scale_shape = [1, 1]
-            for i in range(len(shape) - 1):
-                logical_scale_shape[-2] *= shape[i]
-            if len(shape) > 0:
-                logical_scale_shape[-1] = math.ceil(shape[-1] / self.block_len)
-            logical_scale_shape[-2] = math.ceil(logical_scale_shape[-2] / self.block_len)
-            if columnwise:
-                tmp = logical_scale_shape[-1]
-                logical_scale_shape[-1] = logical_scale_shape[-2]
-                logical_scale_shape[-2] = tmp
-            logical_scale_shape[-1] = round_up_to_nearest_multiple(logical_scale_shape[-1], 4)
-            return tuple(logical_scale_shape)
-        else:
-            assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
+        """Calculate the shape of the scaling tensor for blockwise quantization.
 
-            logical_scale_shape = [1, 1]
-            for i in range(len(shape) - 1):
-                logical_scale_shape[-1] *= shape[i]
-            if len(shape) > 0:
-                logical_scale_shape[-2] = shape[-1]
-            if not columnwise:
-                logical_scale_shape[-2] = math.ceil(logical_scale_shape[-2] / self.block_len)
-                return tuple(logical_scale_shape)
-            else:
-                logical_scale_shape[-1] = math.ceil(logical_scale_shape[-1] / self.block_len)
-                return (logical_scale_shape[1], logical_scale_shape[0])
+        This method determines the shape of the scaling tensor needed for blockwise quantization,
+        taking into account the input tensor shape and whether columnwise scaling is used.
+        The scales are padded to multiples of 4 on the inner dimension for compatibility with GEMM.
+
+        Parameters
+        ----------
+        shape : Iterable[int]
+            Shape of the input tensor to be quantized
+        columnwise : bool
+            Whether to use columnwise scaling (True) or rowwise scaling (False)
+
+        Returns
+        -------
+        Tuple[int, int]
+            Shape of the scaling tensor as (outer_dim, inner_dim)
+            For 2D tensors:
+            - If columnwise: (roundup(K/blocksize), round_to_multiple(roundup(M/blocksize), 4))
+            - If rowwise: (roundup(M/blocksize), round_to_multiple(roundup(K/blocksize), 4))
+            For 1D tensors:
+            - If columnwise: (roundup(M/blocksize), round_to_multiple(K, 4))
+            - If rowwise: (roundup(K/blocksize), round_to_multiple(M, 4))
+        """
+        M, K = 1, 1
+        for i in range(len(shape) - 1):
+            M *= shape[i]
+        if len(shape) > 0:
+            K = shape[-1]
+        if self.block_scaling_dim == 2:
+            if columnwise:
+                outer = math.ceil(K / self.block_len)
+                inner = round_up_to_nearest_multiple(math.ceil(M / self.block_len), 4)
+                return (outer, inner)
+            outer = math.ceil(M / self.block_len)
+            inner = round_up_to_nearest_multiple(math.ceil(K / self.block_len), 4)
+            return (outer, inner)
+        assert self.block_scaling_dim == 1, "Only 1D or 2D blocks supported"
+        if columnwise:
+            outer = math.ceil(M / self.block_len)
+            inner = round_up_to_nearest_multiple(K, 4)
+            return (outer, inner)
+        outer = math.ceil(K / self.block_len)
+        inner = round_up_to_nearest_multiple(M, 4)
+        return (outer, inner)
 
     def get_columnwise_shape(self, shape: Iterable[int]) -> Tuple[int, ...]:
+        """Calculate the shape of a tensor after columnwise permutation.
+
+        This method rearranges the dimensions of a tensor to be columnwise,
+        moving the last dimension to the front and keeping the order of other dimensions.
+
+        Parameters
+        ----------
+        shape : Iterable[int]
+            Original shape of the tensor
+
+        Returns
+        -------
+        Tuple[int, ...]
+            New shape with dimensions rearranged for columnwise layout.
+            For a shape (d1, d2, ..., dn), returns (dn, d1, d2, ..., dn-1).
+            Returns empty tuple for empty input shape.
+        """
         if len(shape) == 0:
             return tuple()
         colwise_shape = [shape[-1]]
@@ -369,6 +422,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
+        quantizer: Quantizer,
     ) -> Float8BlockwiseQTensor:
         """Build Float8BlockwiseQTensor, for use in __reduce__
 
@@ -383,6 +437,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
+            quantizer=quantizer,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -396,6 +451,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 self._columnwise_scale_inv,
                 self._fp8_dtype,
                 self.dtype,
+                self._quantizer,
             ),
         )
 
@@ -477,8 +533,7 @@ class _ViewFunc(torch.autograd.Function):
 
         if shape != ctx.shape:
             raise NotImplementedError("View not implemented.")
-        else:
-            return tensor
+        return tensor
 
     @staticmethod
     def backward(
@@ -526,6 +581,7 @@ class _ReshapeFunc(torch.autograd.Function):
                     break
         if shape != ctx.shape:
             raise NotImplementedError("Reshape not implemented yet.")
+        return tensor
 
     @staticmethod
     def backward(

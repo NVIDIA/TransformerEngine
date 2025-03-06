@@ -9,10 +9,8 @@ import math
 from typing import Optional, Dict, Any, Tuple
 import torch
 
-import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
 from ...constants import TE_DType_To_Torch
 
 from ..quantized_tensor import Quantizer
@@ -93,7 +91,7 @@ class Float8BlockwiseQTensorBase:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""
         if columnwise_dq.dim() < 2:
             return columnwise_dq
-        permute_dims = [x for x in range(1, columnwise_dq.dim())]
+        permute_dims = list(range(1, columnwise_dq.dim()))
         permute_dims.append(0)
         return torch.permute(columnwise_dq, tuple(permute_dims)).contiguous()
 
@@ -121,7 +119,7 @@ class Float8BlockwiseQTensorBase:
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
-        k_tiles, m = scale_inv.shape
+        k_tiles, scale_m = scale_inv.shape
         if q_K % block_len != 0:
             k_pad_amount = (block_len - (q_K % block_len)) % block_len
             q = torch.nn.functional.pad(
@@ -129,7 +127,10 @@ class Float8BlockwiseQTensorBase:
             ).contiguous()
         _, padded_K = q.shape
         q_tiled = q.reshape(q_M, k_tiles, block_len)
-        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(m, k_tiles, 1)
+        if scale_m > q_M:
+            # scale_m is 4 element aligned.
+            scale_inv = scale_inv[:, :q_M].contiguous()
+        dq_scale = scale_inv.transpose(-2, -1).contiguous().reshape(q_M, k_tiles, 1)
         torch_q_dtype = TE_DType_To_Torch[self._fp8_dtype]
         result = q_tiled.view(torch_q_dtype).to(torch.float32) * dq_scale
         if padded_K != q_K:
@@ -154,15 +155,13 @@ class Float8BlockwiseQTensorBase:
             assert self._quantizer.block_scaling_dim == 1
             return self._dequantize_vectorwise(dtype=dtype)
 
-        def format_scale_as_logical_shape(q_M, q_K, scales, block_len):
+        def format_scale_as_logical_shape(q_K, scales, block_len):
             # The GEMM for 2D blocks required padding in the scales.
             derived_scale_k_shape = math.ceil(q_K / block_len)
-            scale_M, scale_K = scales.shape
+            _, scale_K = scales.shape
             if derived_scale_k_shape == scale_K:
                 return scales
-            else:
-                return scales[:, :derived_scale_k_shape].contiguous()
-            return formatted_scales
+            return scales[:, :derived_scale_k_shape].contiguous()
 
         q_M, q_K = 1, 1
         if self._rowwise_data is not None:
@@ -185,7 +184,7 @@ class Float8BlockwiseQTensorBase:
 
         orig_shape = q.shape
         q = q.reshape(q_M, q_K)
-        formatted_scales = format_scale_as_logical_shape(q_M, q_K, scale_inv, block_len)
+        formatted_scales = format_scale_as_logical_shape(q_K, scale_inv, block_len)
         assert len(formatted_scales.shape) == 2
         m_tiles, k_tiles = formatted_scales.shape
         unpadded_m, unpadded_k = q_M, q_K
@@ -220,27 +219,22 @@ class Float8BlockwiseQTensorBase:
         # pylint: disable=missing-function-docstring
         if self._rowwise_data is not None:
             return self._rowwise_data.size(*args, **kwargs)
-        else:
-            dims = list(self._columnwise_data.size(*args, **kwargs))
-            reordered = []
-            for i in range(1, len(dims)):
-                reordered.append(dims[i])
-            reordered.append(dims[0])
-            return torch.Size(reordered)
+        dims = list(self._columnwise_data.size(*args, **kwargs))
+        reordered = []
+        for i in range(1, len(dims)):
+            reordered.append(dims[i])
+        reordered.append(dims[0])
+        return torch.Size(reordered)
 
     def __repr__(self):
         if self._rowwise_data is not None:
             data = self.dequantize()
             descriptor = "rowwise"
-            scale_inv = self._rowwise_scale_inv
         else:
             data = self.dequantize()
             descriptor = "columnwise"
-            scale_inv = self._columnwise_scale_inv
         return (
             "Float8BlockwiseQTensorBase("
             f"fp8_dtype={self._fp8_dtype}, "
-            f"{descriptor}_scaled_data={data_rowwise}"
-            f"{descriptor}_scale_inv={scale_inv}, "
-            ")"
+            f"{descriptor}_scaled_data={data}"
         )

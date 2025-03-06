@@ -162,13 +162,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoad;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);         // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsLoad;                             // Row in shared memory
-    const size_t c_g = (size_t)blockIdx.x * kTileDim + c_s * kNVecSMem;  // Column in global memory
-    size_t r_g = (size_t)blockIdx.y * kTileDim + r_s;                    // Row in global memory
-    const size_t stride_g = (size_t)r_stride * row_length;               // Stride in global memory
-    const size_t num_ele =
-        c_g < row_length ? min((size_t)kNVecIn, row_length - c_g) : 0;  // For not aligned case
+        (threadIdx.x % kNumThreadsLoad) * (kNVecIn / kNVecSMem);  // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsLoad;                      // Row in shared memory
+    const size_t c_g =
+        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;    // Column in global memory
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;       // Row in global memory
+    const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
+    const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecIn), row_length - c_g)
+                                            : 0;            // For not aligned case
     const IType* input_g = &input[r_g * row_length + c_g];  // Input address in global memory
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -207,13 +208,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
     const int c_s =
-        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);       // Column in shared memory
-    int r_s = threadIdx.x / kNumThreadsStore;                            // Row in shared memory
-    const size_t c_g = (size_t)blockIdx.x * kTileDim + c_s * kNVecSMem;  // Column in global memory
-    size_t r_g = (size_t)blockIdx.y * kTileDim + r_s;                    // Row in global memory
-    const size_t stride_g = (size_t)r_stride * row_length;               // Stride in global memory
-    const size_t num_ele =
-        c_g < row_length ? min((size_t)kNVecOut, row_length - c_g) : 0;  // For not aligned case
+        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);  // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsStore;                       // Row in shared memory
+    const size_t c_g =
+        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;    // Column in global memory
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;       // Row in global memory
+    const size_t stride_g = static_cast<size_t>(r_stride) * row_length;  // Stride in global memory
+    const size_t num_ele = c_g < row_length ? min(static_cast<size_t>(kNVecOut), row_length - c_g)
+                                            : 0;          // For not aligned case
     OType* output_g = &output_c[r_g * row_length + c_g];  // Output address in global memory
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
     // the first thread to do the reduction.
@@ -259,8 +261,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       }
       if (write_scale_inv) {
         CType scale_inv = 1.0 / scale;
-        size_t row_idx = (size_t)blockIdx.y * kTileDim + r_s;
-        size_t col_idx = (size_t)blockIdx.x;
+        size_t row_idx = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+        size_t col_idx = static_cast<size_t>(blockIdx.x);
         if constexpr (kPermuteScale) {
           size_t p_row = row_idx / kTileDim;
           size_t p_col = col_idx;
@@ -303,13 +305,15 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
     constexpr int c_stride =
         kThreadsPerBlock / kNumThreadsStore;  // Stride in columns of shared memory
     constexpr int num_iterations = kTileDim / (c_stride * kNVecSMem);
-    const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;      // Row in shared memory
-    int c_s = threadIdx.x / kNumThreadsStore;                         // Column in shared memory
-    size_t r_g = (size_t)blockIdx.x * kTileDim + c_s * kNVecSMem;     // Row in global memory
-    const size_t c_g = (size_t)blockIdx.y * kTileDim + r_s;           // Column in global memory
-    const size_t stride_g = (size_t)c_stride * kNVecSMem * num_rows;  // Stride in global memory
-    const size_t num_ele =
-        c_g < num_rows ? min((size_t)kNVecOut, num_rows - c_g) : 0;  // For not aligned case
+    const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;  // Row in shared memory
+    int c_s = threadIdx.x / kNumThreadsStore;                     // Column in shared memory
+    size_t r_g =
+        static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem;     // Row in global memory
+    const size_t c_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;  // Column in global memory
+    const size_t stride_g =
+        static_cast<size_t>(c_stride) * kNVecSMem * num_rows;  // Stride in global memory
+    const size_t num_ele = c_g < num_rows ? min(static_cast<size_t>(kNVecOut), num_rows - c_g)
+                                          : 0;          // For not aligned case
     OType* output_g = &output_t[r_g * num_rows + c_g];  // Output address in global memory
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
     // the first thread to do the reduction.
@@ -353,8 +357,8 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         }
         if (write_scale_inv) {
           CType scale_inv = 1.0 / scale;
-          size_t row_idx = (size_t)blockIdx.x * kTileDim + c_s * kNVecSMem + smem_idx;
-          size_t col_idx = (size_t)blockIdx.y;
+          size_t row_idx = static_cast<size_t>(blockIdx.x) * kTileDim + c_s * kNVecSMem + smem_idx;
+          size_t col_idx = static_cast<size_t>(blockIdx.y);
           if constexpr (kPermuteScale) {
             size_t p_row = row_idx / kTileDim;
             size_t p_col = col_idx;
