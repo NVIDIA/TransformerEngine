@@ -213,12 +213,11 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """
 
     def __repr__(self, *, tensor_contents=None):
-        repr_str = str(self.dequantize(dtype=self.dtype))
         return (
             "Float8Tensor("
             f"fp8_dtype={self._fp8_dtype}, "
             f"scale_inv={self._scale_inv.item()}, "
-            f"data={repr_str}"
+            f"data={self.dequantize(dtype=self.dtype)}"
             ")"
         )
 

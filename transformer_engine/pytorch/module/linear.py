@@ -1009,7 +1009,6 @@ class Linear(TransformerEngineBaseModule):
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
         else:
             skip_fp8_weight_update = None
-
         if skip_fp8_weight_update is not None:
             is_first_microbatch = False
 
@@ -1021,18 +1020,18 @@ class Linear(TransformerEngineBaseModule):
             weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
 
             (
-                self.input_quantizer,
-                self.weight_quantizer,
-                self.output_quantizer,
-                self.grad_output_quantizer,
-                self.grad_input_quantizer,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_output_quantizer,
+                grad_input_quantizer,
             ) = self._get_quantizers(fp8_output, fp8_grad)
 
             # Make sure weight tensor has correct quantizer
             # Note: Quantizer might have changed if quantization
             # recipe changed
-            if self.weight_quantizer is not None and isinstance(weight_tensor, QuantizedTensor):
-                weight_tensor._quantizer = self.weight_quantizer
+            if weight_quantizer is not None and isinstance(weight_tensor, QuantizedTensor):
+                weight_tensor._quantizer = weight_quantizer
 
             if torch.is_grad_enabled():
                 linear_fn = _Linear.apply
@@ -1047,11 +1046,11 @@ class Linear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
-                self.input_quantizer,
-                self.weight_quantizer,
-                self.output_quantizer,
-                self.grad_output_quantizer,
-                self.grad_input_quantizer,
+                input_quantizer,
+                weight_quantizer,
+                output_quantizer,
+                grad_output_quantizer,
+                grad_input_quantizer,
                 self.fuse_wgrad_accumulation,
                 is_cpu_offload_enabled(),
                 self.tp_group,

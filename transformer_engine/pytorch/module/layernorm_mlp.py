@@ -1466,9 +1466,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ) = [None] * 8
         if self.fp8:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-            fc1_input_quantizer.internal = False  # temporary
+            fc1_input_quantizer.internal = False # temporary
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-            fc1_weight_quantizer.internal = False  # temporary
+            fc1_weight_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True, columnwise=isinstance(fc2_input_quantizer, MXFP8Quantizer)
@@ -1541,7 +1541,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
         fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
 
         fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
-        # return fc1_out
 
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),

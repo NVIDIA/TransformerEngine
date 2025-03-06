@@ -462,15 +462,6 @@ def get_attention_backend(
             logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
         _use_flash_attn_3 = False
 
-    # Filter: ONNX mode
-    if is_in_onnx_export_mode():
-        if use_flash_attention and _flash_attn_is_installed:
-            logger.debug("Disabling FlashAttention due to ONNX mode")
-        use_flash_attention = False
-        if use_fused_attention:
-            logger.debug("Disabling FusedAttention due to ONNX mode")
-        use_fused_attention = False
-
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
         torch.Tensor,
@@ -1118,7 +1109,7 @@ def get_full_mask(
         Attention type, {"self", "cross"}
     bottom_right_alignment: bool, default = `True`
         Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
-        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly# WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
+        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
         specifies "causal" or "causal_bottom_right".
 
     Returns
@@ -7084,7 +7075,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         self.cp_stream = cp_stream
         self.cp_comm_type = cp_comm_type
 
-    @no_torch_dynamo()
+    @no_torch_dynamo(recursive=False)
     def forward(
         self,
         query_layer: torch.Tensor,
@@ -7585,7 +7576,13 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             global _attention_backends, _use_flash_attn_3
 
-            if not is_in_onnx_export_mode():
+            if is_in_onnx_export_mode():
+                # We do not want to call get_attention_backend() in ONNX mode
+                # and we want to avoid using any global variables like _attention_backends.
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = True
+            else:
                 if (
                     _attention_backends["attention_params"] is None
                     or attention_params != _attention_backends["attention_params"]
@@ -7618,10 +7615,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     use_fused_attention = _attention_backends["use_fused_attention"]
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
-            else:
-                use_flash_attention = False
-                use_fused_attention = False
-                use_unfused_attention = True
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
@@ -8425,7 +8418,6 @@ class MultiheadAttention(torch.nn.Module):
                 is_first_microbatch=is_first_microbatch,
                 fp8_output=fp8_mha and rotary_pos_emb is None,
             )
-
             if self.qkv_weight_interleaved:
                 # [sq, b, (ng * 2 * hn)] --> [sq, b, ng, 2 * hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (

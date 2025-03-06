@@ -49,7 +49,7 @@ def is_in_onnx_export_mode() -> bool:
 def assert_warmed_up(module: torch.nn.Module) -> None:
     """Assert that the model has been warmed up before exporting to ONNX."""
     assert hasattr(module, "forwarded_at_least_once"), (
-        "Model must be warmed up before exporting to ONNX,             please run model with the"
+        "Model must be warmed up before exporting to ONNX, please run model with the"
         " same recipe before exporting."
     )
 

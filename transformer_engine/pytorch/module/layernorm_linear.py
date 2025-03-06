@@ -189,7 +189,7 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_push(f"{nvtx_label}.norm")
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            None,
+            ln_out,
             ln_weight,
             ln_bias,
             eps,
@@ -303,7 +303,6 @@ class _LayerNormLinear(torch.autograd.Function):
             ub_type=ub_type,
             extra_output=rs_out,
         )
-
         nvtx_range_pop(f"{nvtx_label}.gemm")
 
         if not weight.requires_grad:
@@ -1304,7 +1303,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
-        # weight_quantizer.internal = True
+        weight_quantizer.internal = True
         if fp8_output:
             output_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_OUTPUT]
         if torch.is_grad_enabled():

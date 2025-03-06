@@ -706,7 +706,6 @@ class TransformerLayer(torch.nn.Module):
                 attention_output, attention_bias, residual, self.drop_path
             )
         elif not self.parallel_attention_mlp:
-
             attention_output, attention_bias = self_attention_outputs
             hidden_states = self._bias_dropout_add(
                 attention_output, attention_bias, hidden_states, self.drop_path

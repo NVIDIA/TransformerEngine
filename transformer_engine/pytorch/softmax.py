@@ -20,37 +20,18 @@ _default_causal_mask = {}
 
 def _get_default_causal_mask(mask_type: str, sq: int, sk: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input"""
-    matrix_identifiers = (mask_type, sq, sk)
-    if matrix_identifiers not in _default_causal_mask:
+    def _get_mask():
         diagonal_offset = sk - sq + 1 if "bottom_right" in mask_type else 1
-        _default_causal_mask[matrix_identifiers] = torch.triu(
+        return torch.triu(
             torch.ones(sq, sk, dtype=torch.bool, device="cuda"), diagonal=diagonal_offset
         )
+
+    if is_in_onnx_export_mode():
+        return _get_mask()
+    matrix_identifiers = (mask_type, sq, sk)
+    if matrix_identifiers not in _default_causal_mask:
+        _default_causal_mask[matrix_identifiers] = _get_mask()
     return _default_causal_mask[matrix_identifiers]
-
-
-def _get_onnx_export_causal_mask(
-    seq_q: int, seq_k: int, onnx_causal_mask: torch.Tensor
-) -> torch.Tensor:
-    """Return the causal upper triangular mask for softmax input, for ONNX export.
-
-    ONNX does not support dynamic control-flow and requires non-square masks when
-    using a KV-cache (seq_k's length len(context)+len(generative) while seq_q's length is 1).
-
-    Argument `onnx_causal_mask` is a square triu (k=1) mask that is sliced to the correct
-    shape for GPT context and generation phases.
-    In the context phase the derived mask is a square triu of shape (seq_k, seq_k), and in
-    the generation phase the mask is rectangular with shape (1, seq_k).
-    """
-    assert len(onnx_causal_mask.size()) == 2
-    assert onnx_causal_mask.size(0) == onnx_causal_mask.size(1)
-    assert onnx_causal_mask.size(0) >= (seq_k - seq_q) >= 0
-    derived_mask = torch.triu(
-        torch.ones(seq_k, seq_k, device="cuda"),
-        diagonal=1,
-    ).bool()
-    return derived_mask
-
 
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
@@ -177,18 +158,6 @@ class FusedScaleMaskSoftmax(nn.Module):
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
 
-        # Users exporting to ONNX can optimize the attention mask for GPT text generation.
-        self.kvcache_max_seq = int(os.getenv("NVTE_ONNX_KVCACHE_MAX_SEQ_LEN", "-1"))
-        if self.kvcache_max_seq > 0:
-            self.register_buffer(
-                "onnx_causal_mask",
-                torch.triu(
-                    torch.ones(self.kvcache_max_seq, self.kvcache_max_seq, device="cuda"),
-                    diagonal=1,
-                ).bool(),
-                persistent=False,
-            )
-
     def forward(
         self,
         inp: torch.Tensor,
@@ -208,9 +177,10 @@ class FusedScaleMaskSoftmax(nn.Module):
         if is_in_onnx_export_mode():
             return self.forward_torch_softmax(inp, mask, scale)
 
-        if self.is_kernel_available(mask, *inp.size()):
+        # We do not want to connect this if with previous if, 
+        # because we want to avoid calling is_kernel_available() in ONNX mode.
+        if self.is_kernel_available(mask, *inp.size()): 
             return self.forward_fused_softmax(inp, mask, scale)
-
         return self.forward_torch_softmax(inp, mask, scale)
 
     def is_kernel_available(self, mask: torch.Tensor, b: int, np: int, sq: int, sk: int) -> bool:
@@ -283,13 +253,7 @@ class FusedScaleMaskSoftmax(nn.Module):
 
         if self.attn_mask_type in ["causal", "causal_bottom_right"]:
             seq_len_q, seq_len_k = inp.size(2), inp.size(3)
-            if is_in_onnx_export_mode() and self.kvcache_max_seq > 0:
-                assert self.kvcache_max_seq >= seq_len_k
-                causal_mask = _get_onnx_export_causal_mask(
-                    seq_len_q, seq_len_k, self.onnx_causal_mask
-                )
-            else:
-                causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
+            causal_mask = _get_default_causal_mask(self.attn_mask_type, seq_len_q, seq_len_k)
 
             if mask is None:
                 mask = causal_mask
@@ -298,7 +262,7 @@ class FusedScaleMaskSoftmax(nn.Module):
         mask_output = inp
         if mask is not None and self.attn_mask_type != "no_mask":
             mask_output = self.mask_func(inp, mask)
-        probs = torch.softmax(mask_output, dim=-1)
+        probs = torch.nn.functional.softmax(mask_output, dim=-1)
 
         if self.input_in_float16 and self.softmax_in_fp32:
             if self.input_in_fp16:
