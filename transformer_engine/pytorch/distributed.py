@@ -1006,9 +1006,8 @@ def gather_along_first_dim(
     out_shape[0] *= world_size
 
     # FP8 case: delayed scaling or current scaling
-    if (
-        isinstance(input_, Float8TensorBase)
-        or isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+    if isinstance(input_, Float8TensorBase) or isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
     ):
         return _all_gather_fp8(
             input_,
