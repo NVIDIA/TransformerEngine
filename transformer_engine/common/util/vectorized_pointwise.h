@@ -456,7 +456,7 @@ __launch_bounds__(unary_kernel_threads) __global__
     void unary_kernel_amax(const InputType *input, fp32 *amax, const size_t N,
                            const size_t num_aligned_elements) {
   VectorizedLoader<InputType, nvec, aligned> loader(input, N);
-  InputType max = 0;
+  InputType max = 0.f;
   const int warp_id = threadIdx.x / THREADS_PER_WARP;
   const size_t M = num_aligned_elements;
 
@@ -465,8 +465,15 @@ __launch_bounds__(unary_kernel_threads) __global__
 #pragma unroll
     for (int i = 0; i < nvec; ++i) {
       const InputType val = static_cast<InputType>(loader.separate()[i]);
-      __builtin_assume(max >= InputType{0});
-      if constexpr (std::is_same_v<InputType, __nv_bfloat16> || std::is_same_v<InputType, __half>) {
+      __builtin_assume(max >= InputType{0.f});
+      if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+#if __CUDA_ARCH__ >= 800
+        max = __hmax(__habs(val), max);
+#else  // Turing
+        max = static_cast<__nv_bfloat16>(fmaxf(fabsf(static_cast<float>(val)),
+                                               static_cast<float>(max)));
+#endif
+      } else if constexpr (std::is_same_v<InputType, __half>) {
         max = __hmax(__habs(val), max);
       } else {
         max = fmaxf(fabsf(val), max);
