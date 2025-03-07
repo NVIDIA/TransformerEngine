@@ -407,8 +407,6 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   }
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
-    float zero = 0.0f;
-    cudaMemcpyAsync(t.amax.dptr, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
+    cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
   }
-  cudaStreamSynchronize(stream);
 }
