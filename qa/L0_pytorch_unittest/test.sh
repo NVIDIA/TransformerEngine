@@ -7,6 +7,10 @@ set -x
 : ${TE_PATH:=/opt/transformerengine}
 
 pip install pytest==8.2.1
+pip install onnx==1.17.0
+pip install onnxruntime==1.20.1
+pip install onnxruntime_extensions==0.13.0
+pip install onnxscript==0.2.2
 
 FAIL=0
 
@@ -22,6 +26,7 @@ pytest -v -s $TE_PATH/tests/pytorch/test_gqa.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py || FAIL=1
+pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_permutation.py || FAIL=1
 pytest -v -s $TE_PATH/tests/pytorch/test_parallel_cross_entropy.py || FAIL=1
 NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || FAIL=1

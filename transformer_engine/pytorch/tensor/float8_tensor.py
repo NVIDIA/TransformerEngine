@@ -165,6 +165,21 @@ class Float8Quantizer(Quantizer):
             quantizer=self,
         )
 
+    def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Function using primitives with ONNX defined translations."""
+        # Q inputs are currently constrained to FP32 due to a similar limitation in ORT
+        # custom ops, so cast the input if needed.
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+        data = torch.ops.tex.fp8_quantize(tensor, self.scale.item())
+        return self.create_tensor_from_data(data, fake_dtype=torch.float32)
+
+    def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
+        """Function using primitives with ONNX defined translations."""
+        out = torch.ops.tex.fp8_dequantize(tensor._data, self.scale.item())
+        out = out.to(tensor.dtype)
+        return out
+
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """Experimental tensor class with FP8 data
