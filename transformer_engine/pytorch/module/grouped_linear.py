@@ -85,10 +85,6 @@ class _GroupedLinear(torch.autograd.Function):
         biases = weights_and_biases[num_gemms:]
         device = inp.device
 
-        # TODO Support MXFP8  # pylint: disable=fixme
-        if fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8():
-            raise NotImplementedError("GroupedLinear does not yet support MXFP8")
-
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
         assert inp.shape[-1] == in_features, "GEMM not possible"
@@ -362,8 +358,8 @@ class _GroupedLinear(torch.autograd.Function):
             None,
             None,
             None,
-            None,  # is_grad_enabled
-            None,  # is_grad_enabled
+            None,
+            None,
             *wgrad_list,
             *grad_biases,
         )
