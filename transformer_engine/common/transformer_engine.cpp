@@ -192,6 +192,20 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 
 }  // namespace transformer_engine
 
+NVTEQuantizationParams nvte_create_quant_params(bool force_pow_2_scales, float amax_epsilon) {
+  transformer_engine::QuantizationParams *ret = new transformer_engine::QuantizationParams;
+  ret->force_pow_2_scales = force_pow_2_scales;
+  ret->amax_epsilon = amax_epsilon;
+  return ret;
+}
+
+void nvte_destroy_quant_params(NVTEQuantizationParams params) {
+  if (params != nullptr) {
+    auto *quant_params = reinterpret_cast<transformer_engine::QuantizationParams *>(params);
+    delete quant_params;
+  }
+}
+
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   transformer_engine::Tensor *ret = new transformer_engine::Tensor;
   ret->scaling_mode = scaling_mode;
@@ -410,34 +424,4 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
     cudaMemcpyAsync(t.amax.dptr, &zero, sizeof(float), cudaMemcpyHostToDevice, stream);
   }
   cudaStreamSynchronize(stream);
-}
-
-int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false) {
-  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
-  if (t.supports_force_pow_2_scales_qopt()) {
-    t.force_pow_2_scales = zero_if_false != 0;
-    return 0;
-  } else {
-    return 1;
-  }
-}
-
-int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon) {
-  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
-  if (t.supports_amax_epsilon_qopt()) {
-    t.amax_epsilon = amax_epsilon;
-    return 0;
-  } else {
-    return 1;
-  }
-}
-
-int nvte_get_qopt_force_pow_2_scales(const NVTETensor tensor) {
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return t.force_pow_2_scales ? 1 : 0;
-}
-
-float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
-  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  return t.amax_epsilon;
 }

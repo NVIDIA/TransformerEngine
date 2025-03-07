@@ -1292,17 +1292,19 @@ inline void compute_amax_helper(const NVTETensor input, const NVTETensor output,
   }
 }
 
-inline void compute_scale_helper(const NVTETensor output, cudaStream_t stream) {
+inline void compute_scale_helper(const NVTETensor output, NVTEQuantizationParams quant_params, cudaStream_t stream) {
   // this should only work for current scaling
   auto output_tensor = reinterpret_cast<Tensor *>(output);
+  auto quant_params_ptr = reinterpret_cast<QuantizationParams *>(quant_params);
   // assert scaling mode is current scaling, and then call fp8_quantize_compute_scale_from_amax
   if (output_tensor->scaling_mode != NVTE_CURRENT_TENSOR_SCALING) {
     NVTE_ERROR("You shouldn't call compute_scale_helper for scaling mode: " +
                to_string(output_tensor->scaling_mode) +
                " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
   }
-  float amax_epsilon = output_tensor->amax_epsilon;
-  bool force_pow_2_scales = output_tensor->force_pow_2_scales;
+  
+  float amax_epsilon = quant_params_ptr->amax_epsilon;
+  bool force_pow_2_scales = quant_params_ptr->force_pow_2_scales;
   fp8_quantize_compute_scale_from_amax(output_tensor, amax_epsilon, force_pow_2_scales, stream);
 }
 

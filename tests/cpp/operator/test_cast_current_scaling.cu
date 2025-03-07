@@ -119,7 +119,8 @@ void performTest(const std::vector<size_t>& shape) {
   // compute amax
   if (is_out_fp8){
     nvte_compute_amax(input.data(), output_c.data(), 0);
-    nvte_compute_scale_from_amax(output_c.data(), 0);
+    QuantParamsWrapper quant_params(false, 0.0f);
+    nvte_compute_scale_from_amax(output_c.data(), quant_params.data(), 0);
   }
   nvte_quantize(input.data(), output_c.data(), 0);
 

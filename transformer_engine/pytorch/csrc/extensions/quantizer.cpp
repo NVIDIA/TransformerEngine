@@ -187,8 +187,6 @@ void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tenso
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
-  tensor->set_qopt_force_pow_2_scales(force_pow_2_scales);
-  tensor->set_qopt_amax_epsilon(amax_epsilon);
 }
 
 std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(

@@ -38,13 +38,13 @@ void nvte_compute_amax(const NVTETensor input, const NVTETensor output, cudaStre
   detail::compute_amax_helper(input, output, stream);
 }
 
-void nvte_compute_scale_from_amax(const NVTETensor output, cudaStream_t stream) {
+void nvte_compute_scale_from_amax(const NVTETensor output, NVTEQuantizationParams quant_params, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_scale_from_amax);
   using namespace transformer_engine;
   // suppose to handle per-tensor current scaling
   // mxfp8 scaling like block-level, sub-channel level don't need this api because
   // compute amax and quantization can be fused into one kernel because cache can fit
-  detail::compute_scale_helper(output, stream);
+  detail::compute_scale_helper(output, quant_params, stream);
 }
 
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {

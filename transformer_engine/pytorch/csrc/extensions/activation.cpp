@@ -43,7 +43,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       NVTE_ERROR(
           "per-tensor current scaling amax reduction is not supported in activation functions.");
     }
-    nvte_compute_scale_from_amax(te_output.data(), at::cuda::getCurrentCUDAStream());
+    QuantParamsWrapper quant_params(my_quantizer_cs->force_pow_2_scales, my_quantizer_cs->amax_epsilon);
+    nvte_compute_scale_from_amax(te_output.data(), quant_params.data(), at::cuda::getCurrentCUDAStream());
     nvte_quantize(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
   } else {
     act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
