@@ -392,12 +392,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         if self._quantizer is not None:
             return self._quantizer
         # Now the quantizer for Float8Tensor can be not just Float8Quantizer (delayed scaling)
-        # It can also be current scaling, can we have a better solution here?
-        return Float8Quantizer(
-            scale=torch.reciprocal(self._scale_inv),
-            amax=torch.empty(1, dtype=torch.float32, device=self.device),
-            fp8_dtype=self._fp8_dtype,
-        )
+        raise ValueError("Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable")
 
     def quantize_(
         self,

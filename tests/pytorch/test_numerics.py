@@ -559,8 +559,6 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for selective recompute.")
 
     config = model_configs[model]
 

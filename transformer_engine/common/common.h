@@ -29,6 +29,24 @@
 
 namespace transformer_engine {
 
+inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING;
+}
+
+inline bool is_block_scaling(const NVTEScalingMode &mode) {
+  return !is_tensor_scaling(mode);
+}
+
+inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
+}
+
+inline bool is_current_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_CURRENT_TENSOR_SCALING;
+}
+
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");
@@ -159,8 +177,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING ||
-          scaling_mode == NVTE_CURRENT_TENSOR_SCALING) {
+      if (is_tensor_scaling(scaling_mode)) {
         return product(data_shape, 1, data_shape.size());
       } else {
         return product(data_shape, 0, data_shape.size() - 1);
@@ -180,8 +197,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING ||
-          scaling_mode == NVTE_CURRENT_TENSOR_SCALING) {
+      if (is_tensor_scaling(scaling_mode)) {
         return data_shape.front();
       } else {
         return data_shape.back();
@@ -486,24 +502,6 @@ bool is_fp8_dtype(const DType t);
 
 std::string to_string(const DType type);
 std::string to_string(const NVTEScalingMode &type);
-
-inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING;
-}
-
-inline bool is_block_scaling(const NVTEScalingMode &mode) {
-  return mode != NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_current_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_CURRENT_TENSOR_SCALING;
-}
-
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *

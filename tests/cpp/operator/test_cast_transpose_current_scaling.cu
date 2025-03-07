@@ -37,7 +37,6 @@ void compute_ref(const InputType *data, OutputType *output_c, OutputType *output
   }
 }
 
-// IEEE_DIV only
 template <typename InputType, typename OutputType>
 void compute_amax_scale_ref(const InputType *data,
                  const size_t N, const size_t H,
@@ -125,7 +124,6 @@ void performTest(const size_t N, const size_t H) {
     nvte_compute_amax(input.data(), output.data(), 0);
     nvte_compute_scale_from_amax(output.data(), 0);
   }
-  // assume no amax reduction needed for now
   nvte_quantize(input.data(), output.data(), 0);
 
   float ref_amax;

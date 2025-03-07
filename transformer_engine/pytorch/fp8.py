@@ -219,7 +219,7 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        # delayed scaling only function, noop for any other reipe
+        # delayed scaling only function, noop for any other recipe
         if not fp8_meta["recipe"].delayed():
             return
 
@@ -446,7 +446,7 @@ class FP8GlobalStateManager:
         to ensure both forward steps are numerically same.
         """
 
-        # delayed scaling only function, noop for any other reipe
+        # delayed scaling only function, noop for any other recipe
         if not fp8_meta["recipe"].delayed():
             return
 
@@ -472,7 +472,7 @@ class FP8GlobalStateManager:
         """Switch to the copied scaling factors and amaxes from phase
         1 forward for indentical numerical outputs.
         """
-        # delayed scaling only function, noop for any other reipe
+        # delayed scaling only function, noop for any other recipe
         if not fp8_meta["recipe"].delayed():
             return
 
@@ -491,7 +491,7 @@ class FP8GlobalStateManager:
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-        # delayed scaling only function, noop for any other reipe
+        # delayed scaling only function, noop for any other recipe
         if not fp8_meta["recipe"].delayed():
             return
 

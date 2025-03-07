@@ -104,7 +104,7 @@ TEST_P(CTTestSuite, TestCastTranspose) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
-      // delay tensor scaling
+      // delayed tensor scaling
       performTest<InputType, OutputType>(size.first, size.second);
     );
   );

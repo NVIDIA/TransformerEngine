@@ -208,7 +208,6 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer.store(tid, N);
   }
   if constexpr (is_fp8<OutputType>::value) {
-    // only fp8 delayed scaling needs atomic update of amax and scale_inv
     // Reduce amax over block
     if (amax != nullptr) {
       max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);
@@ -264,7 +263,6 @@ __launch_bounds__(unary_kernel_threads) __global__
     storer.store(tid, N);
   }
   if constexpr (is_fp8<OutputType>::value) {
-    // only fp8 delayed scaling needs atomic update of amax and scale_inv
     // Reduce amax over block
     if (amax != nullptr) {
       max = reduce_max<unary_kernel_threads / THREADS_PER_WARP>(max, warp_id);

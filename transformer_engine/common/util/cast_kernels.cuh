@@ -1151,7 +1151,8 @@ void fp8_quantize_arch_ge_100(const Tensor &input, const Tensor *act_input, cons
       if (!IS_DACT) {
         CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+        NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
+                   " on GPU with compute capability >= 10.0.");
       }
       break;
     }
@@ -1184,7 +1185,8 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
       if (!IS_DACT) {
         CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
-        CastVectorizedUnaryGradKernelLauncher<ParamOP, OP>(input, act_input, output, stream);
+        NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
+                  " on GPU with compute capability < 10.0.");
       }
       break;
     }
