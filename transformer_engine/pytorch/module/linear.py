@@ -11,6 +11,7 @@ import torch
 
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Recipe
 from .base import (
     get_workspace,
     get_ub,
@@ -55,7 +56,6 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from transformer_engine.common.recipe import Recipe
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 

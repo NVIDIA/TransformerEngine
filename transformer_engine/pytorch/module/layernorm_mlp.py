@@ -15,6 +15,7 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Recipe
 from .base import (
     get_workspace,
     _ub_communicators,
@@ -59,7 +60,6 @@ from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from transformer_engine.common.recipe import Recipe
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
@@ -87,7 +87,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
         }
-    elif recipe.delayed() or recipe.mxfp8():
+    if recipe.delayed() or recipe.mxfp8():
         # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
         return {
@@ -100,19 +100,18 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
         }
-    else:
-        # no activation fusion written yet
-        # Per-tensor current scaling: []
-        return {
-            "gelu": (tex.gelu, tex.dgelu, None),
-            "relu": (tex.relu, tex.drelu, None),
-            "geglu": (tex.geglu, tex.dgeglu, None),
-            "reglu": (tex.reglu, tex.dreglu, None),
-            "swiglu": (tex.swiglu, tex.dswiglu, None),
-            "qgelu": (tex.qgelu, tex.dqgelu, None),
-            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-            "srelu": (tex.srelu, tex.dsrelu, None),
-        }
+    # no activation fusion written yet
+    # Per-tensor current scaling: []
+    return {
+        "gelu": (tex.gelu, tex.dgelu, None),
+        "relu": (tex.relu, tex.drelu, None),
+        "geglu": (tex.geglu, tex.dgeglu, None),
+        "reglu": (tex.reglu, tex.dreglu, None),
+        "swiglu": (tex.swiglu, tex.dswiglu, None),
+        "qgelu": (tex.qgelu, tex.dqgelu, None),
+        "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+        "srelu": (tex.srelu, tex.dsrelu, None),
+    }
 
 
 def _act_func(activation: str, recipe: Optional[Recipe] = None):
@@ -277,7 +276,6 @@ class _LayerNormMLP(torch.autograd.Function):
             # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
             # 2. in high precision, then we need to cast it and then gather in FP8
             # the output ln_out_total will be in FP8, and it's a full tensor
-            # TODO: fuse current scaling quantize into layernorm kernel, so ln_out is also in FP8 => save more memory
             ln_out_total, _ = gather_along_first_dim(
                 ln_out,
                 tp_group,

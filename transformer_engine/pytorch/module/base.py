@@ -916,13 +916,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
+            elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+                # FP8 current scaling does not support fused cast + dbias
+                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                # TODO zhongboz: the fused kernel of cast_transpose + dgrad calculation is still not ready for per-tensor current scaling
-                if isinstance(quantizer, Float8CurrentScalingQuantizer):
-                    # unfuse bgrad for now
-                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
-                else:
-                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+                grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias

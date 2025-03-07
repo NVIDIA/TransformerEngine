@@ -14,6 +14,7 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Recipe
 from .base import (
     get_workspace,
     get_ub,
@@ -57,7 +58,6 @@ from ..tensor.quantized_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from transformer_engine.common.recipe import Recipe
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -220,7 +220,6 @@ class _LayerNormLinear(torch.autograd.Function):
             # 1. in FP8 low precision, the cast was done by fusing quantization into layernorm kernel
             # 2. in high precision, then we need to cast it and then gather in FP8
             # the output ln_out_total will be in FP8, and it's a full tensor
-            # TODO: fuse current scaling quantize into layernorm kernel, so ln_out is also in FP8 => save more memory
             ln_out_total, _ = gather_along_first_dim(
                 ln_out,
                 tp_group,
