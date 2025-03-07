@@ -38,3 +38,4 @@ downloads/
 .pytest_cache/
 compile_commands.json
 .nfs
+tensor_dumps/

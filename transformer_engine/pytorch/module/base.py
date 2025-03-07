@@ -10,6 +10,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
+from types import MethodType
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -34,6 +36,7 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -404,6 +407,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
@@ -430,7 +434,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
-        """Increase or decrease size of amax history based on given `length`.
+        """
+        Delayed scaling only.
+
+        Increase or decrease size of amax history based on given `length`.
 
         .. warning::
             This changes the underlying amax memory location.
@@ -488,6 +495,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if recipe.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -852,7 +863,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
-                grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
+                # TODO zhongboz: the fused kernel of cast_transpose + dgrad calculation is still not ready for per-tensor current scaling
+                if isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    # unfuse bgrad for now
+                    grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
+                else:
+                    grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
@@ -894,7 +910,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # If primary weights are in fp8, wrap the parameter as FP8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                if self.preserve_high_precision_init_val:
+                    high_precision_init_val = param.detach().cpu()
+
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 assert (
                     quantizer is not None
@@ -906,7 +926,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            setattr(self, name, torch.nn.Parameter(param))
+            param = torch.nn.Parameter(param)
+            if high_precision_init_val is not None:
+
+                def get(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        return self._high_precision_init_val
+                    else:
+                        return None
+
+                def clear(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        del self._high_precision_init_val
+
+                param._high_precision_init_val = high_precision_init_val
+                param.get_high_precision_init_val = MethodType(get, param)
+                param.clear_high_precision_init_val = MethodType(clear, param)
+
+            setattr(self, name, param)
 
     @abstractmethod
     def forward(self):
@@ -944,6 +981,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
         """
+
+        # FP8 primary weights
+        if isinstance(tensor, QuantizedTensor):
+            if update_workspace and quantizer is not None:
+                tensor.update_usage(
+                    rowwise_usage=quantizer.rowwise_usage,
+                    columnwise_usage=quantizer.columnwise_usage,
+                )
+            return tensor
 
         # Try getting workspace from cache
         out = None

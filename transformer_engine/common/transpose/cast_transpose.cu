@@ -249,7 +249,10 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
       input.dtype(), InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output.dtype(), OutputType,
-          if (is_delayed_tensor_scaling(output.scaling_mode)) {
+          if (is_tensor_scaling(output.scaling_mode)) {
+            // delayed scaling and current scaling are two variants of per-tensor scaling
+            bool is_current_scaling = is_current_tensor_scaling(output.scaling_mode);
+
             constexpr const char *itype_name = TypeInfo<InputType>::name;
             constexpr const char *otype_name = TypeInfo<OutputType>::name;
             constexpr size_t itype_size = sizeof(InputType);
@@ -308,14 +311,15 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                 rtc_manager.compile(kernel_label, "cast_transpose_optimized_kernel", code,
                                     "transformer_engine/common/transpose/rtc/cast_transpose.cu");
               }
-              rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
-                                 static_cast<const InputType *>(input.data.dptr),
-                                 reinterpret_cast<const CType *>(noop.data.dptr),
-                                 static_cast<OutputType *>(output.data.dptr),
-                                 static_cast<OutputType *>(output.columnwise_data.dptr),
-                                 static_cast<const CType *>(output.scale.dptr),
-                                 static_cast<CType *>(output.amax.dptr),
-                                 static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
+              rtc_manager.launch(
+                  kernel_label, num_blocks, block_size, 0, stream,
+                  static_cast<const InputType *>(input.data.dptr),
+                  reinterpret_cast<const CType *>(noop.data.dptr),
+                  static_cast<OutputType *>(output.data.dptr),
+                  static_cast<OutputType *>(output.columnwise_data.dptr),
+                  static_cast<const CType *>(output.scale.dptr),
+                  is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
+                  static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
             } else {  // Statically-compiled general kernel
               constexpr size_t load_size = 4;
               constexpr size_t store_size = 4;
@@ -323,6 +327,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               constexpr size_t col_tile_size = store_size / otype_size * THREADS_PER_WARP;
               const int num_blocks =
                   (DIVUP(row_length, row_tile_size) * DIVUP(num_rows, col_tile_size));
+
               cast_transpose_general_kernel<load_size, store_size, InputType, OutputType>
                   <<<num_blocks, block_size, 0, stream>>>(
                       static_cast<const InputType *>(input.data.dptr),
@@ -330,7 +335,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                       static_cast<OutputType *>(output.data.dptr),
                       static_cast<OutputType *>(output.columnwise_data.dptr),
                       static_cast<const CType *>(output.scale.dptr),
-                      static_cast<CType *>(output.amax.dptr),
+                      is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
                       static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
             }
           } else {
