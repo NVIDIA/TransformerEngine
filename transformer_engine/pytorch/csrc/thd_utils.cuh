@@ -11,12 +11,12 @@
 #include <cuda_bf16.h>
 
 struct LseCorrectionFunctor {
-  __forceinline__ __device__ static void run(double *lse, float *half_lse, size_t idx,
+  __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
                                              size_t half_idx) {
-    double val = lse[idx];
+    float val = lse[idx];
     float val_per_step = half_lse[half_idx];
-    double max_scale = max(val, val_per_step);
-    double min_scale = min(val, val_per_step);
+    float max_scale = max(val, val_per_step);
+    float min_scale = min(val, val_per_step);
     lse[idx] = max_scale + log(1.0 + exp(min_scale - max_scale));
   }
 };
@@ -148,8 +148,8 @@ __global__ void thd_read_half_tensor_kernel(void *half, void *tensor, int *cu_se
  * Support THD format for Context Parallel: softmax_lse related operations
  **************************************************************************************************/
 
-template <typename lse_dtype, bool lse_packed, typename Functor>
-__global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens, int batch,
+template <bool lse_packed, typename Functor>
+__global__ void thd_lse_kernel(float *lse, float *half_lse, int *cu_seqlens, int batch,
                                int num_heads, int lse_seqlen, int second_half_lse_seqlen) {
   extern __shared__ int cu_seqlens_s[];
   for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
