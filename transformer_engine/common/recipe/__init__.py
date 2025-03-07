@@ -81,6 +81,9 @@ class Recipe:
         """Whether the given recipe is per-tensor scaling."""
         return isinstance(self, (DelayedScaling, Float8CurrentScaling))
 
+    def fp8blockwise(self):
+        """Whether the given recipe is float8 blockwise scaling."""
+        return isinstance(self, Float8BlockScaling)
 
 @dataclass()
 class DelayedScaling(Recipe):
@@ -294,3 +297,101 @@ class MXFP8BlockScaling(Recipe):
 
     def __repr__(self) -> str:
         return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"
+
+
+
+@dataclass()
+class Float8BlockScaling(Recipe):
+    """
+    Use block-wise scaling for FP8 tensors.
+
+    In this strategy, tensors are scaled in blockwise fashion. Values within
+    each block share a common scaling factor. The block dimensionality
+    can be configured. The scaling factors are float32.
+
+    Since the scaling happens in a particular direction (either rowwise
+    or columnwise), the quantized tensor and its transpose are not numerically
+    equivalent. Due to this, when Transformer Engine needs both the FP8 tensor
+    and its transpose (e.g. to calculate both forward and backward pass),
+    during the quantization both versions are computed from the high precision
+    input to avoid double quantization errors.
+
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.E4M3
+                Controls the FP8 data format used during forward and backward
+                pass.
+    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of input tensor x
+    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of weight tensor w
+    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of gradient tensor dY
+    x_block_scaling_dim: Choice to use 1x128 (1 dimensional) or 128x128 (2 dimensional)
+                    qblock scaling for x.
+    w_block_scaling_dim: Choice to use 1x128 (1 dimensional) or 128x128 (2 dimensional)
+                    qblock scaling for w.
+    grad_block_scaling_dim: Choice to use 1x128 (1 dimensional) or 128x128 (2 dimensional)
+                    qblock scaling for grad.
+    fp8_gemm_fprop: MMParams, default MMParams.use_split_accumulator=False
+                    used for calculating output y in forward pass
+    fp8_gemm_dgrad: MMParams, default MMParams.use_split_accumulator=True
+                    use for calculating dgrad in backward pass
+    fp8_gemm_wgrad: MMParams, default MMParams.use_split_accumulator=True
+                    use for calculating dgrad in backward pass
+    fp8_dpa: bool, default = `False`
+             Whether to enable FP8 dot product attention (DPA). When the model is placed in an
+             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             inputs from higher precision to FP8, performs attention in FP8, and casts tensors
+             back to higher precision as outputs. FP8 DPA currently is only supported in the
+             `FusedAttention` backend.
+    fp8_mha: bool, default = `False`
+            Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
+            operations mentioned above at the DPA boundaries. Currently only standard MHA modules
+            i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
+            `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
+            `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
+            When `fp8_mha = True, fp8_dpa = True`, it becomes
+            `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
+    """
+
+
+    fp8_format: Format = Format.HYBRID
+    fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
+    x_block_scaling_dim: int = 1
+    w_block_scaling_dim: int = 2
+    grad_block_scaling_dim: int = 1
+    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
+        assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
+        assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
+        assert not (self.x_block_scaling_dim == 2 and self.w_block_scaling_dim == 2), "2D by 2D block gemm not supported."
+        assert not (self.x_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2), "2D by 2D block gemm not supported."
+        assert not (self.w_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2), "2D by 2D block gemm not supported."
+        assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
+        assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
+        assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."
+
+    def __repr__(self) -> str:
+        return (
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
+            f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
+            f"fp8_quant_bwd_grad={self.fp8_quant_bwd_grad}, "
+            f"x_block_scaling_dim={self.x_block_scaling_dim}, "
+            f"w_block_scaling_dim={self.w_block_scaling_dim}, "
+            f"grad_block_scaling_dim={self.grad_block_scaling_dim}, "
+            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
+            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
+            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}"
+        )

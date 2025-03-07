@@ -82,7 +82,8 @@ class TestFP8RecipeLinearBase:
 
     @staticmethod
     def _get_mean_abs_relative_error(a, b):
-        return torch.mean(torch.abs((a - b) / b))
+        error = torch.where(b == 0, 0.0, torch.abs((a - b) / b))
+        return torch.mean(error)
 
     @staticmethod
     def _load_golden_tensor_values(a, b):
@@ -97,9 +98,16 @@ class TestFP8RecipeLinearBase:
         fp8_type_g = get_fp8_torch_dtype(recipe, fprop_tensor=False)
 
         # Expected tensor names based on the naming template
-        scaling_type = (  # Assuming the scaling type is PER_TENSOR for this example
-            "ScalingType.PER_TENSOR"
-        )
+        if recipe.float8_current_scaling():
+            scaling_type = (
+                "ScalingType.PER_TENSOR"
+            )
+        elif recipe.fp8blockwise():
+            scaling_type = (
+                "ScalingType.BLOCKWISE"
+            )
+        else:
+            scaling_type = "Unknown"
         current_seed = torch.initial_seed()  # Get the current seed
 
         expected_tensor_names = {

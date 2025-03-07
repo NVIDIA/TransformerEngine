@@ -14,7 +14,7 @@ from ..utils import assert_dim_for_fp8_exec, get_sm_count
 from ..tensor.quantized_tensor import Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-
+from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
 __all__ = [
     "general_gemm",
     "general_grouped_gemm",
@@ -112,6 +112,10 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
+    if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
+        # There is not use_split_accumulator == False
+        # implementation for Float8BlockwiseQTensorBase GEMM
+        use_split_accumulator = True
     args = (
         A,
         transa,  # transa

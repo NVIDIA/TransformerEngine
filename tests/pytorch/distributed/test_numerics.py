@@ -48,7 +48,7 @@ def _run_test(quantization):
 all_boolean = [True, False]
 
 
-@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "fp8_cs"])
+@pytest.mark.parametrize("quantization", [None, "fp8", "mxfp8", "fp8_cs", "fp8_block_scaling"])
 def test_distributed(quantization):
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
@@ -56,4 +56,6 @@ def test_distributed(quantization):
         pytest.skip(fp8_available)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if quantization == "fp8_block_scaling" and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
     _run_test(quantization)
