@@ -330,7 +330,8 @@ def onnx_layernorm(
             # so we cast to input_dtype and then perform cast to fp8 if needed
             ln_out = ln_out.to(output_dtype).to(torch.float32)
             ln_out_return = ln_out
-        if isinstance(input_quantizer, MXFP8Quantizer):
+        elif isinstance(input_quantizer, MXFP8Quantizer):
+            # layernorm + mxfp8 quantizer behaves differently
             ln_out = ln_out.to(output_dtype).to(torch.float32)
         ln_out_quantized = input_quantizer.onnx_quantize(ln_out)
         ln_out = input_quantizer.onnx_dequantize(ln_out_quantized)

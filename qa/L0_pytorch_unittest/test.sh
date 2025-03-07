@@ -6,6 +6,10 @@
 : ${TE_PATH:=/opt/transformerengine}
 
 pip install pytest==8.2.1
+pip install onnx==1.17.0
+pip install onnxruntime==1.20.1
+pip install onnxruntime_extensions==0.13.0
+pip install onnxscript==0.2.2
 
 FAIL=0
 
