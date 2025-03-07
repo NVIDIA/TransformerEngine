@@ -6109,7 +6109,7 @@ class FlashAttention(torch.nn.Module):
                         num_heads_q = query_layer.shape[-2]
                         num_heads_k = key_layer.shape[-2]
                         fa_3_optional_forward_kwargs["q_descale"] = (
-                            query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_q)
+                            query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
                         fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
                             0
