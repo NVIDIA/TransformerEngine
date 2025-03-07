@@ -349,12 +349,7 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose_invalid = True
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], Float8TensorBase]:
-        """Prepare the tensor base for saving for backward
-
-        After calling this, the tensor instance does not hold any
-        data.
-
-        """
+        """Prepare the tensor base for saving for backward"""
         return [self], None
 
     @classmethod
