@@ -480,7 +480,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor_list = []
                         for state_tuple in state:
                             if isinstance(state_tuple, tuple):
-                                tensor_list.append(SynchronizedGroupOffloadHandler.reload(state_tuple))
+                                tensor_list.append(
+                                    SynchronizedGroupOffloadHandler.reload(state_tuple)
+                                )
                             else:
                                 tensor_list.append(state_tuple)
                         _ = self.fp8_tensor_object_map[
