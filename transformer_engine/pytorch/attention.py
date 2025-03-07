@@ -6107,9 +6107,9 @@ class FlashAttention(torch.nn.Module):
                         fa_3_optional_forward_kwargs["q_descale"] = (
                             query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_q)
                         )
-                        fa_3_optional_forward_kwargs["k_descale"] = (
-                            key_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
-                        )
+                        fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
+                            0
+                        ).repeat(batch_size, num_heads_k)
                         fa_3_optional_forward_kwargs["v_descale"] = (
                             value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
@@ -7916,7 +7916,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bias_dtype=query_layer.dtype,
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
-                #checkpoint_core_attention=False
+                # checkpoint_core_attention=False
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.fused_attention,
