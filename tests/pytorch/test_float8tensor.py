@@ -20,7 +20,7 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
 from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
 import transformer_engine_torch as tex
 
-from tests.pytorch.references.ref_per_tensor_cs import ref_per_tensor_cs_cast
+from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
