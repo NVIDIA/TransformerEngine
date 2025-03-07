@@ -687,7 +687,7 @@ at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_s
 
 void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_step,
                                     const at::Tensor &cu_seqlens, bool lse_packed) {
-  NVTE_CHECK(lse.scalar_type() == at::ScalarType::Double);
+  NVTE_CHECK(lse.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(lse_per_step.scalar_type() == at::ScalarType::Float);
   NVTE_CHECK(cu_seqlens.scalar_type() == at::ScalarType::Int);
   NVTE_CHECK(cu_seqlens.dim() == 1);
@@ -726,14 +726,14 @@ void thd_second_half_lse_correction(at::Tensor lse, const at::Tensor &lse_per_st
   dim3 grid = {grid_x, grid_y};
 
   if (lse_packed) {
-    transformer_engine::fused_attn::thd_lse_kernel<double, true, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<true, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
+            lse.data_ptr<float>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    transformer_engine::fused_attn::thd_lse_kernel<double, false, LseCorrectionFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<false, LseCorrectionFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
-            lse.data_ptr<double>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
+            lse.data_ptr<float>(), lse_per_step.data_ptr<float>(), cu_seqlens.data_ptr<int>(),
             batch, num_heads, lse_seqlen, second_half_lse_seqlen);
   }
 }
@@ -778,12 +778,12 @@ at::Tensor thd_read_second_half_lse(const at::Tensor &lse, const at::Tensor &cu_
   dim3 grid = {grid_x, grid_y};
 
   if (lse_packed) {
-    transformer_engine::fused_attn::thd_lse_kernel<float, true, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<true, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
   } else {
-    transformer_engine::fused_attn::thd_lse_kernel<float, false, ReadLseFunctor>
+    transformer_engine::fused_attn::thd_lse_kernel<false, ReadLseFunctor>
         <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
             lse.data_ptr<float>(), half_lse.data_ptr<float>(), cu_seqlens.data_ptr<int>(), batch,
             num_heads, lse_seqlen, second_half_lse_seqlen);
