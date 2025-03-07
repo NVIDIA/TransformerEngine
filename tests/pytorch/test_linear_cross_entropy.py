@@ -5,7 +5,7 @@
 import typing
 import pytest
 import torch
-from transformer_engine.pytorch.linear_cross_entropy import linear_cross_entropy
+from transformer_engine.pytorch.linear_cross_entropy import linear_cross_entropy_with_token_entropy
 
 def run_torch_entropy(hidden: torch.Tensor,
                     weight: torch.Tensor,
@@ -109,7 +109,7 @@ def vanilla_test():
                     torch.testing.assert_close(d_torch_weight, d_kernel_weight, atol=1e-2, rtol=1e-3)
                     print(f"[INFO]: Backward pass: kernel implementation passed.")
 
-class TestLinearCrossEntropy:
+class TestLinearCrossEntropyWithTokenEntropy:
     def clearnup(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -164,7 +164,7 @@ class TestLinearCrossEntropy:
             torch_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
-            (kernel_logprobs, kernel_entropy) = linear_cross_entropy(hidden, weight, labels)
+            (kernel_logprobs, kernel_entropy) = linear_cross_entropy_with_token_entropy(hidden, weight, labels)
             end_event.record()
             torch.cuda.synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
@@ -235,7 +235,7 @@ class TestLinearCrossEntropy:
 
         print(end="\n")
         torch.cuda.reset_peak_memory_stats()
-        (kernel_logprobs, kernel_entropy) = linear_cross_entropy(hidden, weight, labels)
+        (kernel_logprobs, kernel_entropy) = linear_cross_entropy_with_token_entropy(hidden, weight, labels)
         torch.cuda.synchronize()
         kernel_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
         print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
