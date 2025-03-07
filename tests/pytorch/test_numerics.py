@@ -49,6 +49,7 @@ import transformer_engine_torch as tex
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = FP8GlobalStateManager.is_fp8_block_scaling_available()
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -101,6 +102,7 @@ fp8_recipes = [
     recipe.MXFP8BlockScaling(),
     recipe.DelayedScaling(),
     recipe.Float8CurrentScaling(),
+    recipe.Float8BlockScaling(),
 ]
 
 
@@ -559,6 +561,8 @@ def test_gpt_selective_activation_recompute(dtype, bs, model, fp8, recipe, fp8_m
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
@@ -671,8 +675,12 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for full recompute.")
+    if fp8 and recipe.fp8blockwise():
+        pytest.skip("Float8 Blockwise scaling unsupported for full recompute.")
 
     config = model_configs[model]
 
@@ -1487,6 +1495,8 @@ def test_grouped_linear_accuracy(
         pytest.skip("MXFP8 unsupported for grouped linear.")
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
+    if recipe.fp8blockwise():
+        pytest.skip("Grouped linear for FP8 blockwise unsupported.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1682,6 +1692,8 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip("MXFP8 unsupported for grouped linear.")
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
+    if recipe.fp8blockwise():
+        pytest.skip("Float8 block scaling unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1892,6 +1904,8 @@ def test_gpt_fp8_parameters(dtype, bs, model, recipe):
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if recipe.fp8blockwise() and not fp8_block_scaling_available:
+        pytest.skip(reason_for_no_fp8_block_scaling)
 
     config = model_configs[model]
 
