@@ -470,8 +470,8 @@ __launch_bounds__(unary_kernel_threads) __global__
 #if __CUDA_ARCH__ >= 800
         max = __hmax(__habs(val), max);
 #else  // Turing
-        max = static_cast<__nv_bfloat16>(fmaxf(fabsf(static_cast<float>(val)),
-                                               static_cast<float>(max)));
+        max = static_cast<__nv_bfloat16>(
+            fmaxf(fabsf(static_cast<float>(val)), static_cast<float>(max)));
 #endif
       } else if constexpr (std::is_same_v<InputType, __half>) {
         max = __hmax(__habs(val), max);
