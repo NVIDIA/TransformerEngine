@@ -9,9 +9,9 @@ Fuse cross entropy with linear layer.
 
 import typing
 import torch
-from transformer_engine.pytorch.triton import linear_cross_entropy as linear_cross_entropy_kernels
+from transformer_engine.pytorch.triton import linear_cross_entropy_with_token_entropy as linear_cross_entropy_with_token_entropy_kernels
 
-class LinearCrossEntropy(torch.autograd.Function):
+class LinearCrossEntropyWithTokenEntropy(torch.autograd.Function):
     """
     This class implements a custom autograd function for linear (matmul) and cross entropy, whose equivalent
     logic in PyTorch is:
@@ -45,10 +45,10 @@ class LinearCrossEntropy(torch.autograd.Function):
             entropy (torch.Tensor): The entropy of shape (num_tokens,).
         """
         with torch.cuda.nvtx.range("EfficientEntropy-forward"):
-            REDUCTION = linear_cross_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
+            REDUCTION = linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
 
             logprobs, entropy, _maximum, _maximum_indices, _acc =\
-                linear_cross_entropy_kernels.efficient_entropy_foward(hidden, weight, labels, REDUCTION)
+                linear_cross_entropy_with_token_entropy_kernels.efficient_entropy_foward(hidden, weight, labels, REDUCTION)
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _maximum_indices, _acc)
             ctx.REDUCTION = REDUCTION
@@ -72,7 +72,7 @@ class LinearCrossEntropy(torch.autograd.Function):
             (hidden, weight, labels, _maximum, _maximum_indices, _acc) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
 
-            d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
+            d_hidden, d_weight = linear_cross_entropy_with_token_entropy_kernels.efficient_entropy_backward(
                 dlogprobs, dentropy,
                 hidden, weight, labels,
                 _maximum, _maximum_indices, _acc,
@@ -81,6 +81,6 @@ class LinearCrossEntropy(torch.autograd.Function):
         return d_hidden, d_weight, None, None
 
 
-linear_cross_entropy = LinearCrossEntropy.apply
+linear_cross_entropy_with_token_entropy = LinearCrossEntropyWithTokenEntropy.apply
 
-__all__ = ["linear_cross_entropy", "LinearCrossEntropy"]
+__all__ = ["linear_cross_entropy_with_token_entropy", "LinearCrossEntropyWithTokenEntropy"]
