@@ -2693,7 +2693,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     if fp8:
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
-                        softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
+                        softmax_lse = torch.clone(softmax_lse_per_step[0])
                         if qkv_format == "thd":
                             out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
@@ -2723,7 +2723,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         if causal and rank < (cp_size - 1):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
-        softmax_lse = softmax_lse.to(torch.float)
         for i in range(cp_size):
             if i <= rank or not causal:
                 if qkv_format in ["bshd", "sbhd"]:
