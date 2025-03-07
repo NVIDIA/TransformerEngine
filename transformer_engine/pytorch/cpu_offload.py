@@ -373,7 +373,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 ):
                     if is_quantized_tensor:
                         self.tensor_tag_to_buf[tensor_tag].append(t)
-                        #Need to clear the internal data reference for the quantized tensors
+                        # Need to clear the internal data reference for the quantized tensors
                         tensor_object.clear()
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
@@ -483,10 +483,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                 )
                             else:
                                 tensor_list.append(state_tuple)
-                        _ = self.fp8_tensor_object_map[
+                        _ = self.fp8_tensor_object_map[tensor_label].restore_from_saved(tensor_list)
+                        self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(
                             tensor_label
-                        ].restore_from_saved(tensor_list)
-                        self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(tensor_label)
+                        )
 
     def on_group_commit_backward(self):
         # first decrement the current group.
