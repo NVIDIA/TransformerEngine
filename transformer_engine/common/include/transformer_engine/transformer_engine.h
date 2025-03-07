@@ -103,7 +103,7 @@ NVTEQuantizationParams nvte_create_quant_params(bool force_pow_2_scales, float a
  *
  *  \param[in] params TE quantization params to be destroyed.
  */
-void nvte_destroy_quant_params(NVTEQuantizationParams params);  
+void nvte_destroy_quant_params(NVTEQuantizationParams params);
 
 /*! \brief TE Tensor type
  *

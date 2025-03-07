@@ -61,8 +61,10 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
       allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
       process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
     }
-    QuantParamsWrapper quant_params(my_quantizer_cs->force_pow_2_scales, my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_params.data(), at::cuda::getCurrentCUDAStream());
+    QuantParamsWrapper quant_params(my_quantizer_cs->force_pow_2_scales,
+                                    my_quantizer_cs->amax_epsilon);
+    nvte_compute_scale_from_amax(te_output.data(), quant_params.data(),
+                                 at::cuda::getCurrentCUDAStream());
   }
   nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),
                      at::cuda::getCurrentCUDAStream());

@@ -33,7 +33,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
     // and then find the amax and scale of that and then do the quantization
     // get a NoneQuantizer to calculate amax of activation output
     auto my_quantizer_none = std::make_unique<NoneQuantizer>(py::none());
-    auto [te_output_act, out_act] = my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
+    auto [te_output_act, out_act] =
+        my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
     act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
     // use te_output_act as input to the compute amax and find the amax of activated tensor
     nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
@@ -43,8 +44,10 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
       NVTE_ERROR(
           "per-tensor current scaling amax reduction is not supported in activation functions.");
     }
-    QuantParamsWrapper quant_params(my_quantizer_cs->force_pow_2_scales, my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_params.data(), at::cuda::getCurrentCUDAStream());
+    QuantParamsWrapper quant_params(my_quantizer_cs->force_pow_2_scales,
+                                    my_quantizer_cs->amax_epsilon);
+    nvte_compute_scale_from_amax(te_output.data(), quant_params.data(),
+                                 at::cuda::getCurrentCUDAStream());
     nvte_quantize(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
   } else {
     act_func(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());

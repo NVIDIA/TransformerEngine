@@ -38,7 +38,8 @@ void nvte_compute_amax(const NVTETensor input, const NVTETensor output, cudaStre
   detail::compute_amax_helper(input, output, stream);
 }
 
-void nvte_compute_scale_from_amax(const NVTETensor output, NVTEQuantizationParams quant_params, cudaStream_t stream) {
+void nvte_compute_scale_from_amax(const NVTETensor output, NVTEQuantizationParams quant_params,
+                                  cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_scale_from_amax);
   using namespace transformer_engine;
   // suppose to handle per-tensor current scaling

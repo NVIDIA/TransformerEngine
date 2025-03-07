@@ -33,9 +33,7 @@ inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING;
 }
 
-inline bool is_block_scaling(const NVTEScalingMode &mode) {
-  return !is_tensor_scaling(mode);
-}
+inline bool is_block_scaling(const NVTEScalingMode &mode) { return !is_tensor_scaling(mode); }
 
 inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
@@ -99,7 +97,7 @@ struct QuantizationParams {
   float amax_epsilon = 0.0f;
 
   QuantizationParams() = default;
-  QuantizationParams(bool force_pow_2, float epsilon) 
+  QuantizationParams(bool force_pow_2, float epsilon)
       : force_pow_2_scales(force_pow_2), amax_epsilon(epsilon) {}
 
   bool get_force_pow_2_scales() const { return force_pow_2_scales; }

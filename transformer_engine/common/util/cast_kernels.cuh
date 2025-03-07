@@ -1186,7 +1186,7 @@ void fp8_quantize_arch_l_100(const Tensor &input, const Tensor *act_input, const
         CastVectorizedUnaryKernelLauncher<ParamOP, OP>(input, noop, output, stream);
       } else {
         NVTE_ERROR("Not implemented scaling mode or fusion: " + to_string(output->scaling_mode) +
-                  " on GPU with compute capability < 10.0.");
+                   " on GPU with compute capability < 10.0.");
       }
       break;
     }
@@ -1292,7 +1292,8 @@ inline void compute_amax_helper(const NVTETensor input, const NVTETensor output,
   }
 }
 
-inline void compute_scale_helper(const NVTETensor output, NVTEQuantizationParams quant_params, cudaStream_t stream) {
+inline void compute_scale_helper(const NVTETensor output, NVTEQuantizationParams quant_params,
+                                 cudaStream_t stream) {
   // this should only work for current scaling
   auto output_tensor = reinterpret_cast<Tensor *>(output);
   auto quant_params_ptr = reinterpret_cast<QuantizationParams *>(quant_params);
@@ -1302,7 +1303,7 @@ inline void compute_scale_helper(const NVTETensor output, NVTEQuantizationParams
                to_string(output_tensor->scaling_mode) +
                " because it's only for NVTE_CURRENT_TENSOR_SCALING.");
   }
-  
+
   float amax_epsilon = quant_params_ptr->amax_epsilon;
   bool force_pow_2_scales = quant_params_ptr->force_pow_2_scales;
   fp8_quantize_compute_scale_from_amax(output_tensor, amax_epsilon, force_pow_2_scales, stream);

@@ -392,7 +392,9 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         if self._quantizer is not None:
             return self._quantizer
         # Now the quantizer for Float8Tensor can be not just Float8Quantizer (delayed scaling)
-        raise ValueError("Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable")
+        raise ValueError(
+            "Float8Tensor's quantizer is None, cannot get a quantizer from Float8Tensor variable"
+        )
 
     def quantize_(
         self,

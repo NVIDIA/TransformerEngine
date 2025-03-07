@@ -59,7 +59,8 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
  *  \param[in,out] output           Output FP8 tensor (just finished nvte_compute_amax).
  *  \param[in]     stream           CUDA stream used for the operation.
  */
-void nvte_compute_scale_from_amax(const NVTETensor output, NVTEQuantizationParams quant_params, cudaStream_t stream);
+void nvte_compute_scale_from_amax(const NVTETensor output, NVTEQuantizationParams quant_params,
+                                  cudaStream_t stream);
 
 /*! \brief Casts input tensor to FP8/MXFP8.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
