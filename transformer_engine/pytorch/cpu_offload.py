@@ -421,10 +421,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         # if offload, return the reference to cpu copy
                         if self.tensor_need_offloading_checker(tensor_on_device):
                             state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
-                            if is_quantized_tensor:
-                                self.tensor_tag_to_state[tensor_tag].append(state)
-                            else:
-                                self.tensor_tag_to_state[tensor_tag] = state
+                        if is_quantized_tensor:
+                            self.tensor_tag_to_state[tensor_tag].append(state)
                         else:
                             self.tensor_tag_to_state[tensor_tag] = state
 
