@@ -91,6 +91,8 @@ class _GroupedLinear(torch.autograd.Function):
         # TODO Support Float8 Current Scaling  # pylint: disable=fixme
         if fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling():
             raise NotImplementedError("GroupedLinear does not yet support Float8 Current Scaling")
+        if fp8 and FP8GlobalStateManager.get_fp8_recipe().fp8blockwise():
+            raise NotImplementedError("GroupedLinear does not yet support Float8Blockwise scaling")
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
