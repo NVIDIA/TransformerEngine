@@ -13,11 +13,11 @@ import jax
 import jax.numpy as jnp
 from flax.linen import make_attention_mask
 
-from transformer_engine.transformer_engine_jax import NVTE_Bias_Type
-from transformer_engine.transformer_engine_jax import NVTE_Mask_Type
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Layout
-from transformer_engine.transformer_engine_jax import NVTE_QKV_Format
-from transformer_engine.transformer_engine_jax import nvte_get_qkv_format
+from transformer_engine_jax import NVTE_Bias_Type
+from transformer_engine_jax import NVTE_Mask_Type
+from transformer_engine_jax import NVTE_QKV_Layout
+from transformer_engine_jax import NVTE_QKV_Format
+from transformer_engine_jax import nvte_get_qkv_format
 
 from . import cpp_extensions as tex
 
@@ -135,6 +135,39 @@ class QKVLayout(Enum):
         """
         return self in [QKVLayout.T3HD, QKVLayout.THD_T2HD, QKVLayout.THD_THD_THD]
 
+    def to_qkvpacked(self):
+        """
+        Return the corresponding qkvpacked format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BS3HD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.T3HD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
+    def to_kvpacked(self):
+        """
+        Return the corresponding kvpacked format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BSHD_BS2HD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.THD_T2HD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
+    def to_separate(self):
+        """
+        Return the corresponding separate format, useful when adjusting q, k, v layout
+        """
+        qkv_format = self.get_qkv_format()
+        if qkv_format == QKVFormat.BSHD:
+            return QKVLayout.BSHD_BSHD_BSHD
+        if qkv_format == QKVFormat.THD:
+            return QKVLayout.THD_THD_THD
+        raise ValueError(f"Unsupported {qkv_format=}")
+
 
 class CPStrategy(Enum):
     """Defines the context parallel strategies of Jax fused attention.
@@ -147,6 +180,28 @@ class CPStrategy(Enum):
     DEFAULT = 0
     ALL_GATHER = 1
     RING = 2
+
+
+class ReorderStrategy(Enum):
+    """
+    Defines the tokens re-order strategy for context parallel load balancing for causal mask.
+
+    - DualChunkSwap: This strategy splits each query into two chunks and do the mirror swap between
+    GPUs. This is currently used for non-THD load balance. It requires the max_seqlens be the
+    mulitple of 2 * cp_size.
+      Examples:
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; GPU2: [8, 9, 10, 11]; GPU3: [12, 13, 14, 15];
+      - After reorder: GPU0: [0, 1, 14, 15]; GPU1: [4, 5, 10, 11]; GPU2: [8, 9, 6, 7]; GPU3: [12, 13, 2, 3]
+
+    - Striped: This strategy distributes the tokens in a striped (interleaved) manner across
+      the sequence. This is currently used for THD load balance.
+      Example: Consider 4 GPUs with seqlens=16.
+      - Before reorder: GPU0: [0, 1, 2, 3]; GPU1: [4, 5, 6, 7]; ...; GPU3: [12, 13, 14, 15]
+      - After reorder: GPU0: [0, 4, 8, 12]; GPU1: [1, 5, 9, 13]; ...; GPU3: [3, 7, 11, 15]
+    """
+
+    DualChunkSwap = 0
+    Striped = 1
 
 
 def make_swa_mask(
@@ -243,9 +298,9 @@ def is_fused_attn_kernel_available(
         return tex.FusedAttnHelper(
             q_dtype,
             kv_dtype,
-            qkv_layout.value,
-            attn_bias_type.value,
-            attn_mask_type.value,
+            qkv_layout,
+            attn_bias_type,
+            attn_mask_type,
             dropout_probability,
             q_num_heads,
             kv_num_heads,
@@ -276,16 +331,24 @@ def _obtain_batch_and_max_seqlen(qkv, qkv_layout):
     return batch, q_max_seqlen, kv_max_seqlen
 
 
-def reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+def reorder_causal_load_balancing(tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int):
     """Reorders a tensor for load balancing the compute of causal attention."""
-    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
-    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, False)
+    if strategy == ReorderStrategy.DualChunkSwap:
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, False)
+    if strategy == ReorderStrategy.Striped:
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, False)
+    raise ValueError(f"Unsupported {strategy=}")
 
 
-def inverse_reorder_causal_load_balancing(tensor, cp_size: int, tensor_format: QKVFormat):
+def inverse_reorder_causal_load_balancing(
+    tensor, strategy: ReorderStrategy, cp_size: int, seq_dim: int
+):
     """Inverse operation of `reorder_causal_load_balancing`."""
-    seq_dim = 1 if tensor_format == QKVFormat.BSHD else 0
-    return tex.attention.reorder_causal_load_balancing(tensor, cp_size, seq_dim, True)
+    if strategy == ReorderStrategy.DualChunkSwap:
+        return tex.attention.reorder_causal_dual_chunk_swap(tensor, cp_size, seq_dim, True)
+    if strategy == ReorderStrategy.Striped:
+        return tex.attention.reorder_causal_striped(tensor, cp_size, seq_dim, True)
+    raise ValueError(f"Unsupported {strategy=}")
 
 
 def _get_seqlens_and_offsets(segment_ids, max_segments_per_seq):
@@ -412,8 +475,6 @@ class SequenceDescriptor:
         """
         Acquire the seqlens/offsets for cuDNN backend
         """
-        attn_mask_type = AttnMaskType(attn_mask_type)
-        qkv_layout = QKVLayout(qkv_layout)
         q_segment_ids, kv_segment_ids = self.segment_ids
         q_segment_pos, kv_segment_pos = self.segment_pos
         assert q_segment_ids.shape == q_segment_pos.shape
@@ -589,9 +650,9 @@ def _legacy_fused_attn(
             Intra-sequence padding is not valid. The padded tokens can only on the right-most.
             Otherwise the results will be wrong.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
-        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
-        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
-        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        attn_bias_type (AttnBiasType): Type of attention bias.
+        attn_mask_type (AttnMaskType): Type of attention mask.
+        qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.
@@ -608,16 +669,18 @@ def _legacy_fused_attn(
 
     # Check inputs qkv
     match qkv_layout:
-        case NVTE_QKV_Layout.NVTE_BS3HD:
+        case QKVLayout.BS3HD:
             assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_BSHD_BS2HD:
+        case QKVLayout.BSHD_BS2HD:
             assert (
                 len(qkv) == 2
             ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_BSHD_BSHD_BSHD:
+        case QKVLayout.BSHD_BSHD_BSHD:
             assert (
                 len(qkv) == 3
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+        case _:
+            raise ValueError(f"Unknown {qkv_layout=}")
 
     # convert the mask to seqlens, mask doesn't support ragged offsets
     if not attn_mask_type.is_padding():
@@ -689,16 +752,18 @@ def fused_attn_thd(
 
     # Check inputs qkv
     match qkv_layout:
-        case NVTE_QKV_Layout.NVTE_T3HD:
+        case QKVLayout.T3HD:
             assert len(qkv) == 1, f"qkv=(packed_qkv,) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_THD_T2HD:
+        case QKVLayout.THD_T2HD:
             assert (
                 len(qkv) == 2
             ), f"qkv=(query, packed_kv) is expected with {qkv_layout=} but got {qkv=}"
-        case NVTE_QKV_Layout.NVTE_THD_THD_THD:
+        case QKVLayout.THD_THD_THD:
             assert (
                 len(qkv) == 3
             ), f"qkv=(query, key, value) is expected with {qkv_layout=} but got {qkv=}"
+        case _:
+            raise ValueError(f"Unknown {qkv_layout=}")
 
     batch, q_max_seqlen, kv_max_seqlen = _obtain_batch_and_max_seqlen(qkv, qkv_layout)
     assert q_seq_lens.shape == (batch, q_max_seqlen)
@@ -789,9 +854,9 @@ def _fused_attn_fwd_rule(
         bias,
         sequence_descriptor,
         seed,
-        attn_bias_type=attn_bias_type.value,
-        attn_mask_type=attn_mask_type.value,
-        qkv_layout=qkv_layout.value,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
@@ -845,9 +910,9 @@ def _fused_attn_bwd_rule(
         output,
         dz,
         sequence_descriptor,
-        attn_bias_type=attn_bias_type.value,
-        attn_mask_type=attn_mask_type.value,
-        qkv_layout=qkv_layout.value,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
         scaling_factor=scaling_factor,
         dropout_probability=dropout_probability,
         is_training=is_training,
@@ -903,9 +968,9 @@ def fused_attn(
         bias (Optional[jnp.ndarray]): An optional bias tensor to be added to the attention scores.
         sequence_descriptor (SequenceDescriptor): Descriptor for how to describe the sequence.
         seed (Optional[jnp.ndarray]): Optional random seed for dropout.
-        attn_bias_type (NVTE_Bias_Type): Type of attention bias.
-        attn_mask_type (NVTE_Mask_Type): Type of attention mask.
-        qkv_layout (NVTE_QKV_Layout): Layout of the QKV tensors.
+        attn_bias_type (AttnBiasType): Type of attention bias.
+        attn_mask_type (AttnMaskType): Type of attention mask.
+        qkv_layout (QKVLayout): Layout of the QKV tensors.
         scaling_factor (float): Scaling factor for the attention scores.
         dropout_probability (float): Dropout probability to apply during attention.
         is_training (bool): Flag indicating whether the model is in training mode.

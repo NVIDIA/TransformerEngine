@@ -261,7 +261,13 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
               }
             }
             in_compute[j] = elt;
-            if (!out_of_bounds) {
+
+            if constexpr (IS_ACT || IS_DACT) {
+              if (!out_of_bounds) {
+                thread_amax = fmaxf(thread_amax, fabsf(elt));
+              }
+            } else {
+              // If no activation, elt is 0 so we can safely do this
               thread_amax = fmaxf(thread_amax, fabsf(elt));
             }
           }
@@ -320,7 +326,12 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
             }
           }
           in_compute[i] = elt;
-          if (!out_of_bounds) {
+          if constexpr (IS_ACT || IS_DACT) {
+            if (!out_of_bounds) {
+              amax = fmaxf(amax, fabsf(elt));
+            }
+          } else {
+            // If no activation, elt is 0 so we can safely do this
             amax = fmaxf(amax, fabsf(elt));
           }
         }
