@@ -2,11 +2,11 @@
 #
 # See LICENSE for license information.
 
+set -x
 
 : ${TE_PATH:=/opt/transformerengine}
-: ${LIGHTNING_THUNDER_PATH:=/opt/pytorch/lightning-thunder}
 
-pip install pytest==8.2.1 pytest-benchmark==5.1.0
+pip install pytest==8.2.1
 
 FAIL=0
 
