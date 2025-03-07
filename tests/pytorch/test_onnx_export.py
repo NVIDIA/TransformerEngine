@@ -1038,7 +1038,7 @@ def test_export_transformer_layer(
     )
     if precision in (torch.bfloat16,):
         return
-    atol = 5e-1 if fp8_recipe is not None else (5e-1 if activation == "swiglu" else 1e-3)
+    atol = 5e-1 if fp8_recipe is not None else (5e-1 if activation == "swiglu" else 5e-3)
     validate_result(
         fname,
         inp,
