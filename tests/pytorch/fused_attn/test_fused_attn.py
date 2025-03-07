@@ -26,6 +26,7 @@ from transformer_engine.pytorch.attention import (
     check_set_window_size,
     AttentionParams,
     _attention_backends,
+    InferenceParams,
 )
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
@@ -96,6 +97,8 @@ class ModelConfig:
         num_layers: int = 1,
         bias_shape: str = "1hss",
         window_size: Tuple[int, int] = (-1, -1),
+        total_requests: int = None,
+        max_ctx_len: int = None,
     ):
         self.batch_size = batch_size
         self.num_heads = num_heads
@@ -114,6 +117,8 @@ class ModelConfig:
         self.num_layers = num_layers
         self.bias_shape = bias_shape
         self.window_size = window_size
+        self.total_requests = total_requests
+        self.max_ctx_len = max_ctx_len
 
 
 @contextmanager
@@ -136,6 +141,8 @@ def _get_attention_backends(
     deterministic: bool = False,
     fp8: bool = False,
     fp8_meta: Optional[Dict[str, Any]] = None,
+    is_training: bool = True,
+    inference_params: Optional[InferenceParams] = None,
 ) -> Tuple[List, List]:
     """Check if what attention backends support a model configuration"""
 
@@ -165,6 +172,7 @@ def _get_attention_backends(
 
     fused_attn_backends = []
     available_backends = None
+    flash_attention_backend = None
     fused_attention_backend = None
 
     def test():
@@ -190,21 +198,23 @@ def _get_attention_backends(
             deterministic=deterministic,
             fp8=fp8,
             fp8_meta=fp8_meta,
+            is_training=is_training,
+            inference_params=inference_params,
         )
-        _, _, fused_attention_backend, _, available_backends = get_attention_backend(
-            attention_params
+        _, _, flash_attention_backend, fused_attention_backend, _, available_backends = (
+            get_attention_backend(attention_params)
         )
-        return available_backends, fused_attention_backend
+        return available_backends, flash_attention_backend, fused_attention_backend
 
     backends = {0: "F16_max512_seqlen", 1: "F16_arbitrary_seqlen", 2: "FP8"}
     with logging_context():
         for i in range(3):
             os.environ["NVTE_FUSED_ATTN_BACKEND"] = str(i)
             _attention_backends["backend_selection_requires_update"] = True
-            available_backends, fused_attention_backend = test()
+            available_backends, flash_attention_backend, fused_attention_backend = test()
             if fused_attention_backend == FusedAttnBackend[backends[i]]:
                 fused_attn_backends.append(fused_attention_backend)
-    return available_backends, fused_attn_backends
+    return available_backends, flash_attention_backend, fused_attn_backends
 
 
 model_configs_base = {
@@ -256,7 +266,7 @@ def test_dot_product_attention(
     if config.window_size == (-1, -1) and swa:
         config.window_size = [2, 2]
     config.window_size = check_set_window_size(config.attn_mask_type, config.window_size)
-    available_backends, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout=qkv_layout,
@@ -1120,7 +1130,7 @@ def test_transformer_layer(
     workspace_opt = True
 
     # Test backend availability
-    available_backends, fused_attn_backends = _get_attention_backends(
+    available_backends, _, fused_attn_backends = _get_attention_backends(
         config,
         qkv_dtype=dtype,
         qkv_layout="sbh3d" if fused_qkv_params else "sb3hd",
