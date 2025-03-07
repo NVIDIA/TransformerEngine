@@ -446,10 +446,10 @@ def get_attention_backend(
     flash_attention_backend = None
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-    if (use_flash_attention_2 and _flash_attn_is_installed) or (
-        use_flash_attention_3 and _flash_attn_is_installed
-    ):
-        logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
+    if not use_flash_attention_2 and _flash_attn_is_installed:
+        logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0")
+    if not use_flash_attention_3 and _flash_attn_3_is_installed:
+        logger.debug("Disabling FlashAttention 3 due to NVTE_FLASH_ATTN=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
@@ -558,7 +558,7 @@ def get_attention_backend(
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
         if (use_flash_attention_2 and _flash_attn_is_installed) or (
-            use_flash_attention_3 and _flash_attn_is_installed
+            use_flash_attention_3 and _flash_attn_3_is_installed
         ):
             logger.debug("Disabling FlashAttention as it does not support MLA.")
         use_flash_attention = False
@@ -600,7 +600,7 @@ def get_attention_backend(
             use_unfused_attention = False
         if pad_between_seqs:
             if (use_flash_attention_2 and _flash_attn_is_installed) or (
-                use_flash_attention_3 and _flash_attn_is_installed
+                use_flash_attention_3 and _flash_attn_3_is_installed
             ):
                 logger.debug(
                     "Disabling FlashAttention for qkv_format = thd when there is "
@@ -636,28 +636,32 @@ def get_attention_backend(
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with FP8"
                 )
+                use_flash_attention = False
             if "bottom_right" in attn_mask_type:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal_bottom_right masking"
                 )
+                use_flash_attention = False
             elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal masking for cross-attention"
                 )
+                use_flash_attention = False
             elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with bias"
                     " type of %s",
                     core_attention_bias_type,
                 )
+                use_flash_attention = False
             elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " attention bias for THD format"
                 )
-            use_flash_attention = False
+                use_flash_attention = False
 
     if context_parallel and use_fused_attention:
         if "bottom_right" in attn_mask_type:
@@ -711,7 +715,7 @@ def get_attention_backend(
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
         if (use_flash_attention_2 and _flash_attn_is_installed) or (
-            use_flash_attention_3 and _flash_attn_is_installed
+            use_flash_attention_3 and _flash_attn_3_is_installed
         ):
             logger.debug("Disabling FlashAttention for arbitrary mask")
         use_flash_attention = False
