@@ -1590,24 +1590,6 @@ def flash_attn_p2p_communicate(
 
 
 @jit_fuser
-def flash_attn_fwd_out_correction(
-    out: torch.Tensor,
-    out_per_step: torch.Tensor,
-    softmax_lse: torch.Tensor,
-    softmax_lse_per_step: torch.Tensor,
-    movedim_src: int,
-    movedim_dst: int,
-):
-    """Merge partial outputs of each step in Attention with context parallelism"""
-    softmax_lse_corrected_exp = torch.exp(softmax_lse_per_step - softmax_lse).movedim(
-        movedim_src, movedim_dst
-    )
-    softmax_lse_corrected_exp = softmax_lse_corrected_exp.unsqueeze(-1)
-    out_corrected = out_per_step * softmax_lse_corrected_exp
-    out.add_(out_corrected)
-
-
-@jit_fuser
 def flash_attn_fwd_softmax_lse_correction(
     softmax_lse: torch.Tensor,
     softmax_lse_per_step: torch.Tensor,
@@ -2649,48 +2631,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             second_half_lse_seqlen = softmax_lse_per_step[-1].shape[-1]
 
         softmax_lse = softmax_lse.to(torch.float)
-        for i in range(cp_size):
-            if i <= rank or not causal:
-                if qkv_format in ["bshd", "sbhd"]:
-                    flash_attn_fwd_out_correction(
-                        out.view(*out_per_step[i].shape),
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        0 if softmax_lse_in_packed_format else 2,
-                        2 if softmax_lse_in_packed_format else seq_dim,
-                    )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        False,
-                        softmax_lse_in_packed_format,
-                    )
-            else:
-                if qkv_format in ["bshd", "sbhd"]:
-                    out_ = out.select(seq_dim, 1)
-                    flash_attn_fwd_out_correction(
-                        out_,
-                        out_per_step[i],
-                        softmax_lse_[..., 1, :],
-                        softmax_lse_per_step[i],
-                        0 if softmax_lse_in_packed_format else 2,
-                        2 if softmax_lse_in_packed_format else seq_dim,
-                    )
-                elif qkv_format == "thd":
-                    tex.thd_out_correction(
-                        out,
-                        out_per_step[i],
-                        softmax_lse,
-                        softmax_lse_per_step[i],
-                        cu_seqlens_q_padded,
-                        True,
-                        softmax_lse_in_packed_format,
-                    )
 
         kv = p2p_comm_buffers[-1]
         if qkv_format == "bshd":
@@ -2699,6 +2639,19 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         elif qkv_format == "sbhd":
             out = out.view(-1, *out.shape[-3:])
             ctx.batch_size = out.shape[1]
+
+        tex.fused_out_correction(
+            out,
+            out_per_step,
+            softmax_lse,
+            softmax_lse_per_step,
+            cu_seqlens_q_padded,
+            qkv_format,
+            cp_size,
+            rank,
+            causal,
+            softmax_lse_in_packed_format,
+        )
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering(cp_size_a2a, out.device, False)
