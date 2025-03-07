@@ -434,6 +434,7 @@ class _Linear(torch.autograd.Function):
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_output_quantizer is not None:
                 ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
                 grad_bias,
@@ -443,6 +444,7 @@ class _Linear(torch.autograd.Function):
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
             )
+            nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
             # Prepare input tensor
             # Note: Perform tensor-parallel communication if needed
@@ -630,7 +632,9 @@ class _Linear(torch.autograd.Function):
             wgrad = None
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
         if ctx.fp8 and not isinstance(weight, QuantizedTensor):
