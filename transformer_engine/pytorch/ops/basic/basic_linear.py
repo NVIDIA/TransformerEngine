@@ -523,9 +523,7 @@ class BasicLinear(BasicOperation):
 
         # Configure input tensor for backward pass
         if own_quantized_x_local:
-            ### TODO Restore once column-wise usage is supported by itself  # pylint: disable=fixme
-            # x_local.update_usage(rowwise_usage=False)
-            pass
+            x_local.update_usage(rowwise_usage=False)
 
         # Detach input tensor if needed
         # Note: PyTorch autograd produces esoteric errors if we save
