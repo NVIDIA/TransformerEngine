@@ -352,9 +352,11 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             assert tensor_tag not in self.tensor_tag_to_state
 
             if is_quantized_tensor:
-                tensor_list = tensor.prepare_for_saving()
+                tensor_list, tensor_object = tensor.prepare_for_saving()
+
                 self.tensor_tag_to_state[tensor_tag] = []
                 self.tensor_tag_to_buf[tensor_tag] = []
+
                 self.fp8_tensor_object_map[tensor_tag] = tensor
             else:
                 tensor_list = [tensor]
@@ -371,6 +373,8 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                 ):
                     if is_quantized_tensor:
                         self.tensor_tag_to_buf[tensor_tag].append(t)
+                        #Need to clear the internal data reference for the quantized tensors
+                        tensor_object.clear()
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
         else:
@@ -384,7 +388,14 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         """Tensor pop."""
         assert tensor_tag in self.tensor_tag_to_state
         tensor = self.tensor_tag_to_state.pop(tensor_tag)
+
+        # Handling the quantized tensor case specially here
+        if isinstance(tensor, list):
+            self.fp8_tensor_object_map[tensor_tag].restore_from_saved(tensor)
+            tensor = self.fp8_tensor_object_map.pop(tensor_tag)
+
         self.tensor_tag_to_buf.pop(tensor_tag, None)
+
         # the tensor should have been copied back in on_group_commit_backward()
         # which invokes bulk_reload_group.
         assert not isinstance(tensor, tuple)
@@ -472,10 +483,10 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                                 tensor_list.append(SynchronizedGroupOffloadHandler.reload(state_tuple))
                             else:
                                 tensor_list.append(state_tuple)
-                        _, recovered_tensor = self.fp8_tensor_object_map[
+                        _ = self.fp8_tensor_object_map[
                             tensor_label
                         ].restore_from_saved(tensor_list)
-                        self.tensor_tag_to_state[tensor_label] = recovered_tensor
+                        self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(tensor_label)
 
     def on_group_commit_backward(self):
         # first decrement the current group.
