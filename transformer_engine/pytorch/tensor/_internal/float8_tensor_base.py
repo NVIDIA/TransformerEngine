@@ -105,8 +105,6 @@ class Float8TensorBase:
 
         """
         tensors = [self._data, self._transpose]
-        self._data = None
-        self._transpose = None
         return tensors, self
 
     def restore_from_saved(
