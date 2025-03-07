@@ -6107,9 +6107,9 @@ class FlashAttention(torch.nn.Module):
                         fa_3_optional_forward_kwargs["q_descale"] = (
                             query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_q)
                         )
-                        fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
-                            0
-                        ).repeat(batch_size, num_heads_k)
+                        fa_3_optional_forward_kwargs["k_descale"] = (
+                            key_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
+                        )
                         fa_3_optional_forward_kwargs["v_descale"] = (
                             value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
@@ -7869,7 +7869,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 raise ValueError("No dot product attention support for the provided inputs!")
 
             # run attention
-            output = None
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
                     alibi_slopes, _ = get_alibi(
@@ -7878,7 +7877,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         max_seqlen_kv,
                         alibi_slopes=alibi_slopes,
                     )
-                output = self.flash_attention(
+                return self.flash_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -7917,8 +7916,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bias_dtype=query_layer.dtype,
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
+                #checkpoint_core_attention=False
                 if checkpoint_core_attention:
-                    output = self._checkpointed_attention_forward(
+                    return self._checkpointed_attention_forward(
                         self.fused_attention,
                         query_layer,
                         key_layer,
@@ -7943,9 +7943,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_comm_type=self.cp_comm_type,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
                         inference_params=inference_params,
                     )
-                output = self.fused_attention(
+                return self.fused_attention(
                     query_layer,
                     key_layer,
                     value_layer,
@@ -7983,7 +7984,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if use_unfused_attention:
                 if checkpoint_core_attention:
-                    output = self._checkpointed_attention_forward(
+                    return self._checkpointed_attention_forward(
                         self.unfused_attention,
                         query_layer,
                         key_layer,
@@ -7999,7 +8000,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         alibi_slopes=alibi_slopes,
                         inference_params=inference_params,
                     )
-                output = self.unfused_attention(
+                return self.unfused_attention(
                     query_layer,
                     key_layer,
                     value_layer,
