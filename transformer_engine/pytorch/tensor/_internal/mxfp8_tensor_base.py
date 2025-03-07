@@ -93,12 +93,7 @@ class MXFP8TensorBase:
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
-        """Prepare the tensor base for saving for backward
-
-        After calling this, the tensor instance does not hold any
-        data.
-
-        """
+        """Prepare the tensor base for saving for backward"""
         tensors = [self._rowwise_data, self._columnwise_data]
         return tensors, self
 
