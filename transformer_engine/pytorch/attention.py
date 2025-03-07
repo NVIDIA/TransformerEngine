@@ -2811,6 +2811,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             # [b, np, sq] -> [b, np, sq, 1] or
             # [t, np] -> [t, np, 1]
             softmax_lse.unsqueeze_(-1)
+            dout = dout.contiguous()
 
         dq = None
         dout_dtype = dout.dtype
