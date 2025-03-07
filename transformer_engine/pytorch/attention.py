@@ -8285,6 +8285,7 @@ class MultiheadAttention(torch.nn.Module):
         max_seqlen_q: Optional[int] = None,
         max_seqlen_kv: Optional[int] = None,
         fast_zero_fill: bool = True,
+        pad_between_seqs: Optional[bool] = None,
     ) -> Tuple[Union[torch.Tensor, None], ...]:
         """
         Forward propagation for MultiheadAttention layer.
@@ -8363,6 +8364,9 @@ class MultiheadAttention(torch.nn.Module):
                        Calculated from `cu_seqlens_kv` if not provided.
         fast_zero_fill: bool, default = `True`
                     Whether to set output tensors to 0 or not before use.
+        pad_between_seqs: Optional[bool], default = `None`
+            If None, inferred from qkv_format, cu_seqlens and cu_seqlens_padded.
+            If true, there are padding tokens between individual sequences in a packed batch.
         """
         # hidden_states: [sq, b, h]
 
@@ -8620,6 +8624,7 @@ class MultiheadAttention(torch.nn.Module):
             alibi_slopes=alibi_slopes,
             fast_zero_fill=fast_zero_fill,
             inference_params=inference_params,
+            pad_between_seqs=pad_between_seqs,
         )
 
         # ===================
