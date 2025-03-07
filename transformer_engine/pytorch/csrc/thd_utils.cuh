@@ -17,7 +17,7 @@ struct LseCorrectionFunctor {
     float val_per_step = half_lse[half_idx];
     float max_scale = max(val, val_per_step);
     float min_scale = min(val, val_per_step);
-    lse[idx] = max_scale + log(1.0 + exp(min_scale - max_scale));
+    lse[idx] = max_scale + log1pf(expf(min_scale - max_scale));
   }
 };
 
@@ -218,7 +218,7 @@ __global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float
         idx = row * lse_seqlen + col + seq_len * only_second_half;
         idx_per_step = row * lse_per_step_seqlen + col;
       }
-      float lse_corrected_exp = exp(lse_per_step[idx_per_step] - lse[idx]);
+      float lse_corrected_exp = expf(lse_per_step[idx_per_step] - lse[idx]);
 
       idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
       idx = (idx * num_heads + head_id) * dim_per_head;
