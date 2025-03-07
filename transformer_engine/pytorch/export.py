@@ -21,8 +21,10 @@ def onnx_export(enabled: bool = False) -> Generator[None, None, None]:
 
     .. code-block:: python
 
+        from transformer_engine.pytorch.export import onnx_export, te_translation_table
+
         with onnx_export(enabled=True):
-            torch.onnx.export(model, dynamo=True)
+            torch.onnx.export(model, dynamo=True, custom_translation_table=te_translation_table)
 
     Parameters
     ----------

@@ -774,8 +774,8 @@ def test_export_core_attention(
         qkv_format=qkv_format,
         attn_mask_type=attn_mask_type,
     ).to(device="cuda")
-    do_export(model, inp, fname, input_names=input_names)
-    te_outputs = te_infer(model, inp)
+    do_export(model, inp, fname, input_names=input_names, fp8_recipe=None)
+    te_outputs = te_infer(model, inp, is_fp8=False, fp8_recipe=None)
     serialize_inputs_outputs(fname, inp, te_outputs, input_names=input_names)
     if precision in (torch.bfloat16,):
         return
