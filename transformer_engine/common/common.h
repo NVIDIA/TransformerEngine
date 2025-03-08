@@ -88,21 +88,6 @@ struct SimpleTensor {
   }
 };
 
-struct QuantizationParams {
-  bool force_pow_2_scales = false;
-  float amax_epsilon = 0.0f;
-
-  QuantizationParams() = default;
-  QuantizationParams(bool force_pow_2, float epsilon)
-      : force_pow_2_scales(force_pow_2), amax_epsilon(epsilon) {}
-
-  bool get_force_pow_2_scales() const { return force_pow_2_scales; }
-  float get_amax_epsilon() const { return amax_epsilon; }
-
-  void set_force_pow_2_scales(bool force_pow_2) { force_pow_2_scales = force_pow_2; }
-  void set_amax_epsilon(float epsilon) { amax_epsilon = epsilon; }
-};
-
 struct Tensor {
   SimpleTensor data;
   SimpleTensor columnwise_data;
@@ -189,6 +174,16 @@ struct Tensor {
     if (data_shape.empty()) return 1;
     return data_shape.back();
   }
+};
+
+struct QuantizationConfig {
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0f;
+
+  static constexpr size_t attr_sizes[] = {
+    sizeof(bool),  // force_pow_2_scales
+    sizeof(float)  // amax_epsilon
+  };
 };
 
 template <typename T>

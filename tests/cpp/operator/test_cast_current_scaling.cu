@@ -120,8 +120,8 @@ void performTest(const std::vector<size_t>& shape) {
   float amax_to_check = 0.0f;
   if (is_out_fp8){
     nvte_compute_amax(input.data(), output_c.data(), 0);
-    QuantParamsWrapper quant_params(false, 0.0f);
-    nvte_compute_scale_from_amax(output_c.data(), quant_params.data(), 0);
+    QuantizationConfigWrapper config;
+    nvte_compute_scale_from_amax(output_c.data(), config, 0);
     // avoid atomic amax update in cuda cast kernels because of current per-tensor scaling
     amax_to_check = output_c.amax();
     output_c.set_tensor_amax_nullptr();

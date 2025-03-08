@@ -1214,62 +1214,7 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
   }
 }
 
-inline void fp8_quantize_compute_amax(const Tensor &input, Tensor *output, cudaStream_t stream) {
-  CheckInputTensor(input, "input_compute_amax");
-  CheckOutputTensor(*output, "output_compute_amax");
-  NVTE_CHECK(output->amax.numel() == 1,
-             "comp_amax_scale input amax doesn't have a single fp32 space");
-
-  NVTE_CHECK(!is_fp8_dtype(input.data.dtype), "Input must be in higher precision.");
-  const size_t N = product(input.data.shape);
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
-      VectorizedUnaryKernelAmaxLauncher<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                                              reinterpret_cast<fp32 *>(output->amax.dptr), N,
-                                              stream););  // NOLINT(*)
-}
-
-inline void fp8_quantize_compute_scale_from_amax(Tensor *output, const fp32 epsilon,
-                                                 const bool force_pow_2_scales,
-                                                 cudaStream_t stream) {
-  CheckOutputTensor(*output, "output_compute_amax");
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      output->data.dtype, OType,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-          force_pow_2_scales, kPow2Scale,
-
-          const fp32 max_fp8 = Quantized_Limits<OType>::max_norm;
-          ComputeScaleFromAmaxKernelLauncher<kPow2Scale>(
-              reinterpret_cast<fp32 *>(output->amax.dptr),
-              reinterpret_cast<fp32 *>(output->scale.dptr), max_fp8, epsilon,
-              stream););  // power of 2 scales
-  );                      // output type
-}
-
 namespace detail {
-
-inline void compute_amax_helper(const NVTETensor input, const NVTETensor output,
-                                cudaStream_t stream) {
-  const auto &input_tensor = *(reinterpret_cast<const Tensor *>(input));
-  auto output_tensor = reinterpret_cast<Tensor *>(output);
-  NVTE_CHECK(output_tensor->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Output tensor for amax computation must be FP8 tensor with per-tensor scaling, "
-             "but got scaling_mode=", to_string(output_tensor->scaling_mode));
-  fp8_quantize_compute_amax(input_tensor, output_tensor, stream);
-}
-
-inline void compute_scale_helper(const NVTETensor output, NVTEQuantizationParams quant_params,
-                                 cudaStream_t stream) {
-  auto output_tensor = reinterpret_cast<Tensor *>(output);
-  auto quant_params_ptr = reinterpret_cast<QuantizationParams *>(quant_params);
-  NVTE_CHECK(output_tensor->scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Output tensor for scale computation must be FP8 tensor with per-tensor scaling, "
-             "but got scaling_mode=", to_string(output_tensor->scaling_mode));
-  float amax_epsilon = quant_params_ptr->amax_epsilon;
-  bool force_pow_2_scales = quant_params_ptr->force_pow_2_scales;
-  fp8_quantize_compute_scale_from_amax(output_tensor, amax_epsilon, force_pow_2_scales, stream);
-}
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>

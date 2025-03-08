@@ -68,40 +68,20 @@ enum NVTETensorParam {
 };
 
 /*! \enum NVTEScalingMode
- * \brief Granularity of scaling:
+ * \brief Tensor data format.
  */
 enum NVTEScalingMode {
-  /*! Single scale per tensor, computed in delayed manner.
-      Used also for high precision data, without scaling */
+  /*! Either an unquantized tensor or an FP8 tensor with per-tensor scaling
+   *
+   * Not necessary used for delayed tensor scaling. The unintuitive
+   * name reflects legacy usage.
+   */
   NVTE_DELAYED_TENSOR_SCALING = 0,
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
   NVTE_INVALID_SCALING
 };
-
-/*! \brief TE Quantization Params
- *
- * NVTEQuantizationParams is a struct storing a pointer
- * to quantization params for fp8 quantization. It does not own the
- * memory it points to.
- */
-typedef void *NVTEQuantizationParams;
-
-/*! \brief Create a new TE quantization params.
- *
- *  \param[in] force_pow_2_scales Whether to force power of 2 scales
- *  \param[in] amax_epsilon Small value to add to amax for numerical stability
- *
- *  \return A new TE quantization params.
- */
-NVTEQuantizationParams nvte_create_quant_params(bool force_pow_2_scales, float amax_epsilon);
-
-/*! \brief Destroy a TE quantization params.
- *
- *  \param[in] params TE quantization params to be destroyed.
- */
-void nvte_destroy_quant_params(NVTEQuantizationParams params);
 
 /*! \brief TE Tensor type
  *
@@ -289,6 +269,60 @@ void nvte_tensor_pack_create(NVTETensorPack *pack);
  */
 void nvte_tensor_pack_destroy(NVTETensorPack *pack);
 
+/*! \brief Configuration for tensor quantization. */
+typedef void *NVTEQuantizationConfig;
+
+/*! \enum NVTEQuantizationConfigAttribute
+ * \brief Type of option for tensor quantization.
+ */
+enum NVTEQuantizationConfigAttribute {
+  /*! Whether to force power of 2 scales */
+  kNVTEQuantizationConfigForcePow2Scales = 0,
+  /*! Small value to add to amax for numerical stability */
+  kNVTEQuantizationConfigAmaxEpsilon = 1,
+  kNVTEQuantizationConfigNumAttributes
+};
+
+/*! \brief Create a new quantization config.
+ *  \return A new quantization config.
+ */
+NVTEQuantizationConfig nvte_create_quantization_config();
+
+/*! \brief Query an option in quantization config.
+ *
+ *  \param[in] config Quantization config.
+ *  \param[in] attr Option type.
+ *  \param[out] buf Memory address to write option value. Ignored if
+ *                  NULL.
+ *  \param[in] size_in_bytes Size of buf.
+ *  \param[out] size_written Number of bytes that have been written to
+ *                           buf. If buf is NULL, then the number of
+ *                           bytes that would have been written.
+ */
+void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr,
+                                            void *buf,
+                                            size_t size_in_bytes,
+                                            size_t *size_written);
+
+/*! \brief Set an option in quantization config.
+ *
+ *  \param[in] config Quantization config.
+ *  \param[in] attr Option type.
+ *  \param[out] buf Memory address to read option value.
+ *  \param[in] size_in_bytes Size of buf.
+ */
+void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr,
+                                            const void *buf,
+                                            size_t size_in_bytes);
+
+/*! \brief Destroy a quantization config.
+ *
+ *  \param[in] config Config to be destroyed.
+ */
+void nvte_destroy_quantization_config(NVTEQuantizationConfig config);
+
 #ifdef __cplusplus
 }  // extern "C"
 
@@ -313,39 +347,6 @@ enum class DType {
   kFloat8E5M2 = 7,
   kFloat8E8M0 = 8,
   kNumTypes
-};
-
-class QuantParamsWrapper {
- public:
-  /*! \brief Constructs new QuantParamsWrapper.
-   *
-   * Create a new TE quantization parameters wrapper with given values.
-   *
-   *  \param[in] force_pow_2_scales Whether to force power of 2 scales
-   *  \param[in] amax_epsilon Small value to add to amax for numerical stability
-   */
-  QuantParamsWrapper(bool force_pow_2_scales = false, float amax_epsilon = 0.0f) {
-    params_ = nvte_create_quant_params(force_pow_2_scales, amax_epsilon);
-  }
-
-  /*! \brief Destructor for QuantParamsWrapper.
-   */
-  ~QuantParamsWrapper() {
-    if (params_ != nullptr) {
-      nvte_destroy_quant_params(params_);
-      params_ = nullptr;
-    }
-  }
-
-  /*! \brief Get the underlying NVTEQuantParams.
-   *
-   *  \return NVTEQuantParams held by this QuantParamsWrapper.
-   */
-  NVTEQuantizationParams data() const noexcept { return params_; }
-
- private:
-  /*! \brief Wrapped NVTEQuantParams. */
-  NVTEQuantizationParams params_ = nullptr;
 };
 
 /*! \struct TensorWrapper
@@ -664,6 +665,64 @@ class TensorWrapper {
 
   /*! \brief Wrapped NVTETensor. */
   NVTETensor tensor_ = nullptr;
+};
+
+/*! \struct QuantizationConfigWrapper
+ *  \brief C++ wrapper for NVTEQuantizationConfigWrapper.
+ */
+class QuantizationConfigWrapper {
+ public:
+
+  QuantizationConfigWrapper() : config_{nvte_create_quantization_config()} {}
+
+  QuantizationConfigWrapper(const QuantizationConfigWrapper &) = delete;
+  QuantizationConfigWrapper& operator=(const QuantizationConfigWrapper &) = delete;
+
+  QuantizationConfigWrapper(QuantizationConfigWrapper &&other)
+    : config_{other.config_} {
+    other.config_ = nullptr;
+  }
+  QuantizationConfigWrapper& operator=(QuantizationConfigWrapper &&other) {
+    if (config_ != nullptr) {
+      nvte_destroy_quantization_config(config_);
+    }
+    config_ = other.config_;
+    other.config_ = nullptr;
+    return *this;
+  }
+
+  ~QuantizationConfigWrapper() {
+    if (config_ != nullptr) {
+      nvte_destroy_quantization_config(config_);
+      config_ = nullptr;
+    }
+  }
+
+  /*! \brief Get the underlying NVTEQuantizationConfig.
+   *
+   *  \return NVTEQuantizationConfig held by this QuantizationConfigWrapper.
+   */
+  operator NVTEQuantizationConfig() const noexcept { return config_; }
+
+  /*! \brief Set whether to force power of 2 scales */
+  void set_force_pow_2_scales(bool force_pow_2_scales) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigForcePow2Scales,
+                                           &force_pow_2_scales,
+                                           sizeof(bool));
+  }
+
+  /*! \brief Set small value to add to amax */
+  void set_amax_epsilon(float amax_epsilon) {
+    nvte_set_quantization_config_attribute(config_,
+                                           kNVTEQuantizationConfigAmaxEpsilon,
+                                           &amax_epsilon,
+                                           sizeof(float));
+  }
+
+ private:
+  /*! \brief Wrapped NVTEQuantizationConfig. */
+  NVTEQuantizationConfig config_ = nullptr;
 };
 
 }  // namespace transformer_engine
