@@ -540,6 +540,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if ctx.grad_output_quantizer is not None:
                 ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
                 grad_bias,
@@ -549,6 +550,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
             )
+            nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
             # Prepare GEMM input
             # Note: Perform tensor-parallel communication if needed
@@ -779,7 +781,9 @@ class _LayerNormLinear(torch.autograd.Function):
             wgrad = None
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
         # if ctx.fp8 and not isinstance(weight, QuantizedTensor):
