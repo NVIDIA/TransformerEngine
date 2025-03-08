@@ -39,6 +39,27 @@ class Format(Enum):
     HYBRID = _FormatHelper(max_fwd=E4M3.max_fwd, max_bwd=E5M2.max_bwd)
 
 
+@dataclass(frozen=True)
+class MMParams:
+    """for pytorch as an example, _scaled_mm use_fast_accum = (not use_split_accumulator)
+    apply split accumulator or not, turning it on will increase accuracy but impact gemm performance,
+    so only turn it on for certain gemms
+    """
+
+    use_split_accumulator: bool = True
+
+
+@dataclass(frozen=True)
+class QParams:
+    """Quantization parameters.
+    power_2_scale: use power of 2 scale parameter
+    amax_epsilon: optional minimum value of abs max
+    """
+
+    power_2_scale: bool = False
+    amax_epsilon: float = 0.0
+
+
 class Recipe:
     """
     Base recipe class.
@@ -51,6 +72,10 @@ class Recipe:
     def delayed(self):
         """Whether the given recipe is delayed scaling."""
         return isinstance(self, DelayedScaling)
+
+    def float8_current_scaling(self):
+        """Whether the given recipe is (per-tensor) current scaling."""
+        return isinstance(self, Float8CurrentScaling)
 
 
 @dataclass()
@@ -156,6 +181,75 @@ class DelayedScaling(Recipe):
             f"margin={self.margin}, "
             f"format={str(self.fp8_format).split('.')[1]}, "
             f"amax_history_len={self.amax_history_len}, "
+            f"fp8_dpa={self.fp8_dpa}, "
+            f"fp8_mha={self.fp8_mha}"
+        )
+
+
+@dataclass()
+class Float8CurrentScaling(Recipe):
+    """
+    Use the per-tensor current scaling factor strategy.
+    Parameters
+    ----------
+    fp8_format : {Format.E4M3, Format.HYBRID}, default = Format.HYBRID
+                Controls the FP8 data format used during forward and backward
+                pass.
+    fp8_quant_fwd_inp: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of input tensor x
+    fp8_quant_fwd_weight: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of weight tensor w
+    fp8_quant_bwd_grad: QParams, default QParams{power_2_scale=False, amax_epsilon=0.0}
+                    used for quantization of gradient tensor dY
+    fp8_gemm_fprop: MMParams, default MMParams.use_split_accumulator=False
+                    used for calculating output y in forward pass
+    fp8_gemm_dgrad: MMParams, default MMParams.use_split_accumulator=True
+                    use for calculating dgrad in backward pass
+    fp8_gemm_wgrad: MMParams, default MMParams.use_split_accumulator=True
+                    use for calculating dgrad in backward pass
+    fp8_dpa: bool, default = `False`
+             Whether to enable FP8 dot product attention (DPA). When the model is placed in an
+             `fp8_autocast(enabled=True)` region and `fp8_dpa` is set to `True`, DPA casts the
+             inputs from higher precision to FP8, performs attention in FP8, and casts tensors
+             back to higher precision as outputs. FP8 DPA currently is only supported in the
+             `FusedAttention` backend.
+    fp8_mha: bool, default = `False`
+            Whether to enable FP8 multi-head attention (MHA). When `True`, it removes the casting
+            operations mentioned above at the DPA boundaries. Currently only standard MHA modules
+            i.e. `LayerNormLinear/Linear + DPA + Linear`, are supported for this feature. When
+            `fp8_mha = False, fp8_dpa = True`, a typical MHA module works as
+            `LayerNormLinear (BF16 output) -> (cast to FP8 ) FP8 DPA (cast to BF16) -> Linear`.
+            When `fp8_mha = True, fp8_dpa = True`, it becomes
+            `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
+
+    Notes
+    -----
+    * `fp8_dpa` and `fp8_mha` are Beta features, and their API and functionality are
+      subject to change in future Transformer Engine releases.
+    """
+
+    fp8_format: Format = Format.HYBRID
+    fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
+    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
+    fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
+    fp8_dpa: bool = False
+    fp8_mha: bool = False
+
+    def __post_init__(self) -> None:
+        assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
+
+    def __repr__(self) -> str:
+        return (
+            f"format={str(self.fp8_format).split('.')[1]}, "
+            f"fp8_quant_fwd_inp={self.fp8_quant_fwd_inp}, "
+            f"fp8_quant_fwd_weight={self.fp8_quant_fwd_weight}, "
+            f"fp8_quant_bwd_grad={self.fp8_quant_bwd_grad}, "
+            f"fp8_gemm_fprop={self.fp8_gemm_fprop}, "
+            f"fp8_gemm_dgrad={self.fp8_gemm_dgrad}, "
+            f"fp8_gemm_wgrad={self.fp8_gemm_wgrad}, "
             f"fp8_dpa={self.fp8_dpa}, "
             f"fp8_mha={self.fp8_mha}"
         )
