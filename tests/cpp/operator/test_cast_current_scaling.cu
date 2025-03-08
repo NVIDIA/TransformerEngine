@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <transformer_engine/cast.h>
+#include <transformer_engine/recipe.h>
 #include "../test_common.h"
 
 using namespace transformer_engine;
