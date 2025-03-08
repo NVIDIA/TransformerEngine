@@ -356,7 +356,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
 
                 self.fp8_tensor_object_map[tensor_tag] = tensor
                 if isinstance(tensor, Float8Tensor):
-                    self.float8_transpose_cache_valid[tensor_tag] = getattr(tensor,"_transpose_invalid")
+                    self.float8_transpose_cache_valid[tensor_tag] = getattr(
+                        tensor, "_transpose_invalid"
+                    )
             else:
                 tensor_list = [tensor]
 
@@ -483,7 +485,9 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                             else:
                                 tensor_list.append(state_tuple)
                         _ = self.fp8_tensor_object_map[tensor_label].restore_from_saved(tensor_list)
-                        self.fp8_tensor_object_map[tensor_label]._transpose_invalid = self.float8_transpose_cache_valid[tensor_label]
+                        self.fp8_tensor_object_map[tensor_label]._transpose_invalid = (
+                            self.float8_transpose_cache_valid[tensor_label]
+                        )
                         self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(
                             tensor_label
                         )
