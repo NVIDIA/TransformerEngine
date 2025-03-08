@@ -86,6 +86,7 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
