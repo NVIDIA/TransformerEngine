@@ -310,15 +310,14 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                 rtc_manager.compile(kernel_label, "cast_transpose_optimized_kernel", code,
                                     "transformer_engine/common/transpose/rtc/cast_transpose.cu");
               }
-              rtc_manager.launch(
-                  kernel_label, num_blocks, block_size, 0, stream,
-                  static_cast<const InputType *>(input.data.dptr),
-                  reinterpret_cast<const CType *>(noop.data.dptr),
-                  static_cast<OutputType *>(output.data.dptr),
-                  static_cast<OutputType *>(output.columnwise_data.dptr),
-                  static_cast<const CType *>(output.scale.dptr),
-                  static_cast<CType *>(output.amax.dptr),
-                  static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
+              rtc_manager.launch(kernel_label, num_blocks, block_size, 0, stream,
+                                 static_cast<const InputType *>(input.data.dptr),
+                                 reinterpret_cast<const CType *>(noop.data.dptr),
+                                 static_cast<OutputType *>(output.data.dptr),
+                                 static_cast<OutputType *>(output.columnwise_data.dptr),
+                                 static_cast<const CType *>(output.scale.dptr),
+                                 static_cast<CType *>(output.amax.dptr),
+                                 static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
             } else {  // Statically-compiled general kernel
               constexpr size_t load_size = 4;
               constexpr size_t store_size = 4;
