@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from .tensor.quantized_tensor import QuantizedTensor
+from .tensor.float8_tensor import Float8Tensor
 
 __all__ = ["get_cpu_offload_context"]
 
@@ -233,18 +233,14 @@ class SynchronizedGroupOffloadHandler(OffloadHandler):
     @staticmethod
     def offload(src_tensor, pin_memory=True):
         """Offload."""
-        fp8_offload = isinstance(src_tensor, QuantizedTensor)
 
         cpu_backup = torch.empty(
             src_tensor.size(),
-            dtype=torch.uint8 if fp8_offload else src_tensor.dtype,
+            dtype=src_tensor.dtype,
             layout=src_tensor.layout,
             device="cpu",
             pin_memory=pin_memory,
         )
-
-        if fp8_offload:
-            cpu_backup = QuantizedTensor.make_like(src_tensor, data=cpu_backup)
 
         cpu_backup.copy_(src_tensor, non_blocking=pin_memory)
         state = (src_tensor.device, cpu_backup)
@@ -311,6 +307,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
         self.tensor_tag_to_buf = {}
         # Data structure to hold the FP8/MXFP8 tensor objects
         self.fp8_tensor_object_map = {}
+        self.float8_transpose_cache_valid = {}
         # Tracking the number of layers offloaded
         self.offloaded_group_count = 0
         # Core data structure that decides the window for offloading
@@ -352,12 +349,14 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
             assert tensor_tag not in self.tensor_tag_to_state
 
             if is_quantized_tensor:
-                tensor_list, tensor_object = tensor.prepare_for_saving()
+                tensor_list, _ = tensor.prepare_for_saving()
 
                 self.tensor_tag_to_state[tensor_tag] = []
                 self.tensor_tag_to_buf[tensor_tag] = []
 
                 self.fp8_tensor_object_map[tensor_tag] = tensor
+                if isinstance(tensor, Float8Tensor):
+                    self.float8_transpose_cache_valid[tensor_tag] = getattr(tensor,"_transpose_invalid")
             else:
                 tensor_list = [tensor]
 
@@ -374,7 +373,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                     if is_quantized_tensor:
                         self.tensor_tag_to_buf[tensor_tag].append(t)
                         # Need to clear the internal data reference for the quantized tensors
-                        tensor_object.clear()
+                        tensor.clear()
                     else:
                         self.tensor_tag_to_buf[tensor_tag] = t
         else:
@@ -484,6 +483,7 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                             else:
                                 tensor_list.append(state_tuple)
                         _ = self.fp8_tensor_object_map[tensor_label].restore_from_saved(tensor_list)
+                        self.fp8_tensor_object_map[tensor_label]._transpose_invalid = self.float8_transpose_cache_valid[tensor_label]
                         self.tensor_tag_to_state[tensor_label] = self.fp8_tensor_object_map.pop(
                             tensor_label
                         )
