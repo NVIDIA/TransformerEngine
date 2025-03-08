@@ -111,7 +111,7 @@ void performTest(const std::vector<size_t>& shape) {
   }
 
   Tensor input("input", shape, itype);
-  Tensor output_c("output_c", shape, otype, true, false, NVTE_CURRENT_TENSOR_SCALING);
+  Tensor output_c("output_c", shape, otype, true, false);
 
   std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(full_size);
 
