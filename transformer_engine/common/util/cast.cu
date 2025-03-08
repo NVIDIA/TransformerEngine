@@ -24,7 +24,6 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/transpose.h"
 
-
 void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize);
   using namespace transformer_engine;

@@ -58,7 +58,6 @@ __launch_bounds__(amax_kernel_threads) __global__
 
 template <int nvec, typename InputType>
 void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cudaStream_t stream) {
-
   // Zero out amax so we can update with atomic max
   cudaMemsetAsync(amax, 0, sizeof(float), stream);
 
@@ -79,21 +78,20 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 
   // Launch kernel
   switch (align) {
-  case Alignment::SAME_ALIGNED:
-    amax_kernel<nvec, true, InputType>
-      <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
-    break;
-  case Alignment::SAME_UNALIGNED:
-    amax_kernel<nvec, false, InputType>
-      <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
-    break;
-  case Alignment::DIFFERENT: {
-    // This case is a logic error, since there is only one pointer (input)
-    // in the alignment check. Still safe to process without vectorization.
-    amax_kernel<1, true, InputType>
-      <<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
-    break;
-  }
+    case Alignment::SAME_ALIGNED:
+      amax_kernel<nvec, true, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+      break;
+    case Alignment::SAME_UNALIGNED:
+      amax_kernel<nvec, false, InputType>
+          <<<num_blocks, threads, 0, stream>>>(input, amax, N, num_aligned_elements);
+      break;
+    case Alignment::DIFFERENT: {
+      // This case is a logic error, since there is only one pointer (input)
+      // in the alignment check. Still safe to process without vectorization.
+      amax_kernel<1, true, InputType><<<num_blocks, threads, 0, stream>>>(input, amax, N, N);
+      break;
+    }
   }
 
   // Check results
@@ -112,12 +110,12 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
   const auto &input = *reinterpret_cast<const Tensor *>(input_);
   NVTE_CHECK(input.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Input tensor for amax computation must unquantized, "
-             "but got scaling_mode=", to_string(input.scaling_mode));
+             "but got scaling_mode=",
+             to_string(input.scaling_mode));
   NVTE_CHECK(!is_fp8_dtype(input.data.dtype),
              "Input tensor for amax computation must be unquantized, but got dtype=",
              to_string(input.data.dtype));
-  NVTE_CHECK(input.data.dptr != nullptr,
-             "Input tensor for amax computation has no data");
+  NVTE_CHECK(input.data.dptr != nullptr, "Input tensor for amax computation has no data");
   CheckInputTensor(input, "input_compute_amax");
 
   // Check output tensor
@@ -125,23 +123,25 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
   auto &output = *reinterpret_cast<Tensor *>(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Output tensor for amax computation must be FP8 tensor with per-tensor scaling, "
-             "but got scaling_mode=", to_string(output.scaling_mode));
+             "but got scaling_mode=",
+             to_string(output.scaling_mode));
   NVTE_CHECK(output.amax.numel() == 1,
              "Output tensor for amax computation has invalid amax tensor "
-             "(expected 1 entry, got shape=", output.amax.shape, ")");
+             "(expected 1 entry, got shape=",
+             output.amax.shape, ")");
   NVTE_CHECK(output.amax.dptr != nullptr,
              "Output tensor for amax computation has amax tensor without data");
   NVTE_CHECK(output.amax.dtype == DType::kFloat32,
              "Output tensor for amax computation has invalid amax tensor  "
-             "(expected FP32, got dtype=", to_string(output.amax.dtype), ")");
+             "(expected FP32, got dtype=",
+             to_string(output.amax.dtype), ")");
   CheckOutputTensor(output, "output_compute_amax");
 
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType, constexpr int nvec = 32 / sizeof(IType);
       launch_amax_kernel<nvec>(reinterpret_cast<const IType *>(input.data.dptr),
-                               reinterpret_cast<float *>(output.amax.dptr),
-                               input.data.numel(),
+                               reinterpret_cast<float *>(output.amax.dptr), input.data.numel(),
                                stream););  // NOLINT(*)
 }
 
@@ -191,7 +191,6 @@ __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *sca
 }  // namespace
 }  // namespace transformer_engine
 
-
 void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConfig config_,
                                   cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_scale_from_amax);
@@ -202,19 +201,20 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
   auto &output = *reinterpret_cast<Tensor *>(output_);
   NVTE_CHECK(output.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Tensor must be FP8 tensor with per-tensor scaling, "
-             "but got scaling_mode=", to_string(output.scaling_mode));
+             "but got scaling_mode=",
+             to_string(output.scaling_mode));
   NVTE_CHECK(is_fp8_dtype(output.data.dtype),
              "Tensor must be FP8, but got dtype=", to_string(output.data.dtype));
   NVTE_CHECK(output.amax.numel() == 1,
-             "Tensor has invalid amax tensor (expected 1 entry, got shape=",
-             output.amax.shape, ")");
+             "Tensor has invalid amax tensor (expected 1 entry, got shape=", output.amax.shape,
+             ")");
   NVTE_CHECK(output.amax.dptr != nullptr, "Tensor has amax tensor without data");
   NVTE_CHECK(output.amax.dtype == DType::kFloat32,
              "Tensor has invalid amax tensor (expected FP32, got dtype=",
              to_string(output.amax.dtype), ")");
   NVTE_CHECK(output.scale.numel() == 1,
-             "Tensor has invalid scale tensor (expected 1 entry, got shape=",
-             output.scale.shape, ")");
+             "Tensor has invalid scale tensor (expected 1 entry, got shape=", output.scale.shape,
+             ")");
   NVTE_CHECK(output.scale.dptr != nullptr, "Tensor has scale tensor without data");
   NVTE_CHECK(output.scale.dtype == DType::kFloat32,
              "Tensor has invalid scale tensor (expected FP32, got dtype=",
@@ -226,14 +226,12 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
 
   // Maximum FP8 value
   float max_fp8 = 0.f;
-  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-      output.data.dtype, DType,
-      max_fp8 = Quantized_Limits<DType>::max_norm;
-  );
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(output.data.dtype, DType,
+                                         max_fp8 = Quantized_Limits<DType>::max_norm;);
 
   // Update scale
-  compute_scale_from_amax_kernel<<<1,1>>>(reinterpret_cast<const float*>(output.amax.dptr),
-                                          reinterpret_cast<float*>(output.scale.dptr),
-                                          max_fp8, config.force_pow_2_scales, config.amax_epsilon);
+  compute_scale_from_amax_kernel<<<1, 1>>>(reinterpret_cast<const float *>(output.amax.dptr),
+                                           reinterpret_cast<float *>(output.scale.dptr), max_fp8,
+                                           config.force_pow_2_scales, config.amax_epsilon);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }

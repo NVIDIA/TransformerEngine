@@ -181,8 +181,8 @@ struct QuantizationConfig {
   float amax_epsilon = 0.0f;
 
   static constexpr size_t attr_sizes[] = {
-    sizeof(bool),  // force_pow_2_scales
-    sizeof(float)  // amax_epsilon
+      sizeof(bool),  // force_pow_2_scales
+      sizeof(float)  // amax_epsilon
   };
 };
 

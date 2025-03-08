@@ -300,10 +300,8 @@ NVTEQuantizationConfig nvte_create_quantization_config();
  *                           bytes that would have been written.
  */
 void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
-                                            NVTEQuantizationConfigAttribute attr,
-                                            void *buf,
-                                            size_t size_in_bytes,
-                                            size_t *size_written);
+                                            NVTEQuantizationConfigAttribute attr, void *buf,
+                                            size_t size_in_bytes, size_t *size_written);
 
 /*! \brief Set an option in quantization config.
  *
@@ -313,8 +311,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
  *  \param[in] size_in_bytes Size of buf.
  */
 void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
-                                            NVTEQuantizationConfigAttribute attr,
-                                            const void *buf,
+                                            NVTEQuantizationConfigAttribute attr, const void *buf,
                                             size_t size_in_bytes);
 
 /*! \brief Destroy a quantization config.
@@ -672,17 +669,15 @@ class TensorWrapper {
  */
 class QuantizationConfigWrapper {
  public:
-
   QuantizationConfigWrapper() : config_{nvte_create_quantization_config()} {}
 
   QuantizationConfigWrapper(const QuantizationConfigWrapper &) = delete;
-  QuantizationConfigWrapper& operator=(const QuantizationConfigWrapper &) = delete;
+  QuantizationConfigWrapper &operator=(const QuantizationConfigWrapper &) = delete;
 
-  QuantizationConfigWrapper(QuantizationConfigWrapper &&other)
-    : config_{other.config_} {
+  QuantizationConfigWrapper(QuantizationConfigWrapper &&other) : config_{other.config_} {
     other.config_ = nullptr;
   }
-  QuantizationConfigWrapper& operator=(QuantizationConfigWrapper &&other) {
+  QuantizationConfigWrapper &operator=(QuantizationConfigWrapper &&other) {
     if (config_ != nullptr) {
       nvte_destroy_quantization_config(config_);
     }
@@ -706,18 +701,14 @@ class QuantizationConfigWrapper {
 
   /*! \brief Set whether to force power of 2 scales */
   void set_force_pow_2_scales(bool force_pow_2_scales) {
-    nvte_set_quantization_config_attribute(config_,
-                                           kNVTEQuantizationConfigForcePow2Scales,
-                                           &force_pow_2_scales,
-                                           sizeof(bool));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
+                                           &force_pow_2_scales, sizeof(bool));
   }
 
   /*! \brief Set small value to add to amax */
   void set_amax_epsilon(float amax_epsilon) {
-    nvte_set_quantization_config_attribute(config_,
-                                           kNVTEQuantizationConfigAmaxEpsilon,
-                                           &amax_epsilon,
-                                           sizeof(float));
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
+                                           &amax_epsilon, sizeof(float));
   }
 
  private:
