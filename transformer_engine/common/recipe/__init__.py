@@ -232,7 +232,7 @@ class Float8CurrentScaling(Recipe):
     fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
-    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=True)
+    fp8_gemm_fprop: MMParams = MMParams(use_split_accumulator=False)
     fp8_gemm_dgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_gemm_wgrad: MMParams = MMParams(use_split_accumulator=True)
     fp8_dpa: bool = False
