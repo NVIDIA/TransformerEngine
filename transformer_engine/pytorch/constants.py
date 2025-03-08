@@ -24,6 +24,22 @@ TE_DType = {
     torch.bfloat16: tex.DType.kBFloat16,
 }
 
+"""
+This is a map: int -> torch.dtype
+Used for resolving cuda extension types to torch.
+Has one to one mapping with enum in
+transformer_engine.h
+"""
+TE_DType_To_Torch = {
+    tex.DType.kByte: torch.uint8,
+    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+    tex.DType.kFloat8E5M2: torch.float8_e5m2,
+    tex.DType.kInt32: torch.int32,
+    tex.DType.kFloat32: torch.float32,
+    tex.DType.kFloat16: torch.half,
+    tex.DType.kBFloat16: torch.bfloat16,
+}
+
 AttnMaskTypes = (
     "no_mask",
     "padding",
