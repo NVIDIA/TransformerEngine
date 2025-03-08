@@ -251,7 +251,6 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
           output.dtype(), OutputType,
           if (is_tensor_scaling(output.scaling_mode)) {
             // delayed scaling and current scaling are two variants of per-tensor scaling
-            bool is_current_scaling = is_current_tensor_scaling(output.scaling_mode);
 
             constexpr const char *itype_name = TypeInfo<InputType>::name;
             constexpr const char *otype_name = TypeInfo<OutputType>::name;
@@ -318,7 +317,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                   static_cast<OutputType *>(output.data.dptr),
                   static_cast<OutputType *>(output.columnwise_data.dptr),
                   static_cast<const CType *>(output.scale.dptr),
-                  is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
+                  static_cast<CType *>(output.amax.dptr),
                   static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
             } else {  // Statically-compiled general kernel
               constexpr size_t load_size = 4;
@@ -335,7 +334,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                       static_cast<OutputType *>(output.data.dptr),
                       static_cast<OutputType *>(output.columnwise_data.dptr),
                       static_cast<const CType *>(output.scale.dptr),
-                      is_current_scaling ? nullptr : static_cast<CType *>(output.amax.dptr),
+                      static_cast<CType *>(output.amax.dptr),
                       static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
             }
           } else {

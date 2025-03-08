@@ -293,10 +293,12 @@ void Tensor::to_cpu() const {
   }
   if (isFp8Type(dtype())) {
     if (is_tensor_scaling(tensor_.scaling_mode())) {
-      cudaMemcpy(amax_cpu_data_.get(),
-                 tensor_.amax(),
-                 sizeof(float),
-                 cudaMemcpyDeviceToHost);
+      if (tensor_.amax() != nullptr){
+        cudaMemcpy(amax_cpu_data_.get(),
+                  tensor_.amax(),
+                  sizeof(float),
+                  cudaMemcpyDeviceToHost);
+      }
       cudaMemcpy(scale_cpu_data_.get(),
                  tensor_.scale(),
                  sizeof(float),
@@ -333,8 +335,10 @@ void Tensor::from_cpu() const {
   }
   if (isFp8Type(dtype())) {
     if (is_tensor_scaling(tensor_.scaling_mode())) {
-      cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
-                 cudaMemcpyHostToDevice);
+      if (tensor_.amax() != nullptr){
+        cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
+                  cudaMemcpyHostToDevice);
+      }
       cudaMemcpy(tensor_.scale(), scale_cpu_data_.get(), sizeof(float),
                  cudaMemcpyHostToDevice);
     }

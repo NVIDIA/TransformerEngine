@@ -1039,7 +1039,6 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
                                        cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input.data.shape);
-  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
@@ -1051,7 +1050,7 @@ void CastVectorizedUnaryKernelLauncher(const Tensor &input, const Tensor *noop, 
                 reinterpret_cast<const fp32 *>(noop->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                reinterpret_cast<fp32 *>(output->amax.dptr),
                 reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");
@@ -1064,7 +1063,6 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
                                            cudaStream_t stream) {
   constexpr float (*UnaryOP)(float, const ParamOP &) = (OP == nullptr) ? detail::identity : OP;
   const size_t N = product(input->data.shape);
-  const bool is_current_scaling = is_current_tensor_scaling(output->scaling_mode);
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input->data.dtype, IType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
@@ -1076,7 +1074,7 @@ void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *inp
                 reinterpret_cast<const IType *>(input->data.dptr),
                 reinterpret_cast<OType *>(output->data.dptr),
                 reinterpret_cast<const fp32 *>(output->scale.dptr),
-                is_current_scaling ? nullptr : reinterpret_cast<fp32 *>(output->amax.dptr),
+                reinterpret_cast<fp32 *>(output->amax.dptr),
                 reinterpret_cast<fp32 *>(output->scale_inv.dptr), N, {}, stream);
           } else {
             NVTE_ERROR("Not implemented scaling mode: " + to_string(output->scaling_mode) + ".");

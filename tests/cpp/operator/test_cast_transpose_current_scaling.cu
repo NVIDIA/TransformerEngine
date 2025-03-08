@@ -120,10 +120,14 @@ void performTest(const size_t N, const size_t H) {
   fillUniform(&input);
 
   // compute amax
+  float amax_to_check = 0.0f;
   if (is_out_fp8){
     nvte_compute_amax(input.data(), output.data(), 0);
     QuantParamsWrapper quant_params(false, 0.0f);
     nvte_compute_scale_from_amax(output.data(), quant_params.data(), 0);
+    // avoid atomic amax update in cuda cast kernels because of current per-tensor scaling
+    amax_to_check = output.amax();
+    output.set_tensor_amax_nullptr();
   }
   nvte_quantize(input.data(), output.data(), 0);
 
@@ -145,7 +149,7 @@ void performTest(const size_t N, const size_t H) {
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   if (isFp8Type(otype)) {
     auto [atol_fp32, rtol_fp32] = getTolerances(DType::kFloat32);
-    compareResults("amax", output.amax(), ref_amax, 0.0f, rtol_fp32);
+    compareResults("amax", amax_to_check, ref_amax, 0.0f, rtol_fp32);
     compareResults("scale", output.scale(), ref_scale, 0.0f, rtol_fp32);
     compareResults("scale_inv", output.rowwise_scale_inv(), ref_scale_inv, 0.0f, rtol_fp32);
     compareResults("scale_inv_columnwise", output.columnwise_cpu_scale_inv_ptr<float>()[0], ref_scale_inv, 0.0f, rtol_fp32);

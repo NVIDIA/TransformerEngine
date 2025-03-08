@@ -65,6 +65,8 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
                                     my_quantizer_cs->amax_epsilon);
     nvte_compute_scale_from_amax(te_output.data(), quant_params.data(),
                                  at::cuda::getCurrentCUDAStream());
+    // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+    te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
   }
   nvte_quantize_noop(te_input.data(), te_output.data(), te_noop.data(),
                      at::cuda::getCurrentCUDAStream());
