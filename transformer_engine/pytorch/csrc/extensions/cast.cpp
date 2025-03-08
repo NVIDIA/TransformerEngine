@@ -46,7 +46,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
 
   if (te_output.numel() == 0) return out;
 
-  if (nvte_tensor_scaling_mode(te_output.data()) == NVTE_CURRENT_TENSOR_SCALING) {
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
     nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());

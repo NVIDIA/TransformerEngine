@@ -153,7 +153,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
 
   explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
 
-  NVTEScalingMode get_scaling_mode() const override { return NVTE_CURRENT_TENSOR_SCALING; }
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
 
   void set_quantization_params(TensorWrapper* tensor) const override;
 

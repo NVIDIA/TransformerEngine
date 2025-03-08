@@ -115,7 +115,7 @@ NVTEShape convertShape(const std::vector<size_t>& shape) {
 
 std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
                                                      const NVTEScalingMode scaling_mode) {
-  if (is_tensor_scaling(scaling_mode)) {
+  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     scale_inv_meta ret;
     ret.shape = {1};
     ret.type = DType::kFloat32;
@@ -195,7 +195,7 @@ Tensor::Tensor(const std::string& name,
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
 
   std::vector<size_t> columnwise_shape_vec;
-  if (is_tensor_scaling(scaling_mode)) {
+  if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
     // Transpose when tensor scaling
     columnwise_shape_vec.emplace_back(shape.data[shape.ndim - 1]);
     for (size_t i = 0; i < shape.ndim - 1; ++i) {
@@ -229,7 +229,7 @@ Tensor::Tensor(const std::string& name,
   tensor_.set_columnwise_data(dptr_columnwise, type, columnwise_shape);
 
   if (isFp8Type(type)) {
-    if (is_tensor_scaling(scaling_mode)) {
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       cudaMalloc((void**)&amax, sizeof(float));  // NOLINT(*)
       cudaMemset(amax, 0, sizeof(float));
       cudaMalloc((void**)&scale, sizeof(float));  // NOLINT(*)
@@ -292,7 +292,7 @@ void Tensor::to_cpu() const {
                cudaMemcpyDeviceToHost);
   }
   if (isFp8Type(dtype())) {
-    if (is_tensor_scaling(tensor_.scaling_mode())) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(amax_cpu_data_.get(),
                   tensor_.amax(),
@@ -334,7 +334,7 @@ void Tensor::from_cpu() const {
                cpu_data_columnwise_.get(), size, cudaMemcpyHostToDevice);
   }
   if (isFp8Type(dtype())) {
-    if (is_tensor_scaling(tensor_.scaling_mode())) {
+    if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       if (tensor_.amax() != nullptr){
         cudaMemcpy(tensor_.amax(), amax_cpu_data_.get(), sizeof(float),
                   cudaMemcpyHostToDevice);
@@ -361,7 +361,7 @@ void Tensor::from_cpu() const {
 void Tensor::set_scale(float scale) {
   if (isFp8Type(dtype())) {
     NVTE_CHECK(scale_cpu_data_);
-  if (is_tensor_scaling(tensor_.scaling_mode())) {
+  if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING) {
       *scale_cpu_data_ = scale;
       from_cpu();
     }

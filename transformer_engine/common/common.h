@@ -30,17 +30,13 @@
 namespace transformer_engine {
 
 inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING || mode == NVTE_CURRENT_TENSOR_SCALING;
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
 
 inline bool is_block_scaling(const NVTEScalingMode &mode) { return !is_tensor_scaling(mode); }
 
 inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_current_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_CURRENT_TENSOR_SCALING;
 }
 
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }

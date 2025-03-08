@@ -77,8 +77,6 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  /*! Single scale per tensor, computed directly by getting amax from tensor */
-  NVTE_CURRENT_TENSOR_SCALING = 2,
   NVTE_INVALID_SCALING
 };
 

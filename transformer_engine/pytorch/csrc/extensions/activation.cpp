@@ -28,7 +28,7 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
   // for current scaling, we need to compute amax first and then quantize
   // because cache cannot fit in the entire tensor to compute amax and quantize
   // the quantizer should not need amax reduction, no process group needed here
-  if (nvte_tensor_scaling_mode(te_output.data()) == NVTE_CURRENT_TENSOR_SCALING) {
+  if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // activation function might change the input data range, we need to first call the activation function
     // and then find the amax and scale of that and then do the quantization
     // get a NoneQuantizer to calculate amax of activation output
