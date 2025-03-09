@@ -259,259 +259,6 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
             )
 
 
-@torch.no_grad()
-def get_full_mask(
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
-    attn_mask_type: str = "no_mask",
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
-    window_size: Tuple[int, int] = None,
-    attention_type: str = "self",
-    bottom_right_alignment: bool = True,
-) -> torch.Tensor:
-    """
-    Get full attention mask in [..., max_seqlen_q, max_seqlen_kv] shape, based on `attn_mask_type`,
-    `attention_mask`, and `window_size`. For sliding window attention, the diagonal alignment depends
-    on both `attn_mask_type` and `bottom_right_alignment`, as detailed below.::
-
-       attn_mask_type              output shape                                 diagonal alignment
-       --------------------------------------------------------------------------------------------
-       no_mask                     [1, 1, max_seqlen_q, max_seqlen_kv]          follow bottom_right_alignment
-       causal                      [1, 1, max_seqlen_q, max_seqlen_kv]          always top left
-       causal_bottom_right         [1, 1, max_seqlen_q, max_seqlen_kv]          always bottom right
-       padding                     [batch_size, 1, max_seqlen_q, max_seqlen_kv] follow bottom_right_alignment
-       padding_causal              [batch_size, 1, max_seqlen_q, max_seqlen_kv] always top left
-       padding_causal_bottom_right [batch_size, 1, max_seqlen_q, max_seqlen_kv] always bottom right
-       arbitrary                   same as attention_mask                       follow bottom_right_alignment
-
-    .. note::
-
-    For "padding_bottom_right" mask, or "padding" mask with `bottom_right_alignment` = True, the bottom right
-    diagonal comes from the bottom right corner of the [actual_seqlens_q[i], actual_seqlens_kv[i]] matrix,
-    i = 0,...,batch_size-1, not the [max_seqlen_q, max_seqlen_kv] matrix. For example, with max_seqlen_q = 4,
-    max_seqlen_kv = 4, attn_mask_type = "padding", attention_type = "cross", and attention_mask = (
-    [[False, False,  True, True], [False, False, False, False]],
-    [[False, False, False, True], [False,  True,  True,  True]]), the returned full attention mask has [2, 4, 4]
-    shape and is,::
-
-      [[[False, False, False, True],
-        [False, False, False, True],
-        [ True,  True,  True, True],
-        [ True,  True,  True, True]],
-       [[False,  True,  True, True],
-        [False,  True,  True, True],
-        [False,  True,  True, True],
-        [False,  True,  True, True]]]
-
-    Parameters
-    ----------
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    attn_mask_type: str, default = `no_mask`
-        Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
-        "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        default = `None`
-        Boolean tensor(s) used to mask out attention softmax input. Please see DotProductAttention
-        for the requirements of `attention_mask` for different `attn_mask_type`s.
-    window_size: Tuple[int, int], default = `None`
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-        `attn_mask_type`.
-    attention_type: str, default = "self"
-        Attention type, {"self", "cross"}
-    bottom_right_alignment: bool, default = `True`
-        Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
-        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
-        specifies "causal" or "causal_bottom_right".
-
-    Returns
-    ----------
-    attn_mask_type: str
-        For sliding window attention (>=0, >0), "arbitrary"; otherwise, the same as input `attn_mask_type`
-    attention_mask: torch.Tensor
-        The full attention mask based on `attn_mask_type`, `attention_mask` and `window_size`
-    actual_seqlens_q: torch.Tensor
-        For padding masks, the actual sequence lengths for queries, in shape [batch_size].
-        For other masks, `None`.
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
-        For other masks, `None`.
-    """
-    # perform basic checks
-    change_type = window_size is not None and (
-        window_size[0] != -1 or window_size[1] not in [-1, 0]
-    )
-    if window_size is None:
-        window_size = (-1, -1)
-    if "causal" in attn_mask_type:
-        window_size = (window_size[0], 0)
-    window_size = (
-        max_seqlen_kv if window_size[0] == -1 else window_size[0],
-        max_seqlen_q if window_size[1] == -1 else window_size[1],
-    )
-
-    # apply padding mask
-    actual_seqlens_q = None
-    actual_seqlens_kv = None
-    if "padding" in attn_mask_type:
-        if attention_type == "self":
-            attention_mask = torch.logical_or(
-                attention_mask.squeeze(1).unsqueeze(3), attention_mask
-            )
-        else:
-            attention_mask = torch.logical_or(
-                attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
-            )
-        m = attention_mask.logical_not()
-        actual_seqlens_q = m[:, 0, :, 0].sum(dim=1)
-        actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
-
-    # apply SWA mask
-    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-        1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
-    swa_left = None
-    swa_right = None
-    if attn_mask_type == "causal_bottom_right" or (
-        attn_mask_type in ["no_mask", "arbitrary"] and bottom_right_alignment
-    ):
-        swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
-        swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
-    elif attn_mask_type in ["causal", "padding_causal"] or (
-        attn_mask_type in ["no_mask", "padding", "arbitrary"] and not bottom_right_alignment
-    ):
-        swa_left = mask - window_size[0]
-        swa_right = mask + window_size[1]
-    elif attn_mask_type == "padding_causal_bottom_right" or (
-        attn_mask_type == "padding" and bottom_right_alignment
-    ):
-        batch_size = attention_mask.shape[0]
-        swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q - window_size[0]
-        ).view(batch_size, 1, 1, 1)
-        swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q + window_size[1]
-        ).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not(
-        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
-    )
-    if attention_mask is not None:
-        attention_mask = torch.logical_or(swa_mask, attention_mask)
-    else:
-        attention_mask = swa_mask
-
-    # change mask type
-    if change_type:
-        attn_mask_type = "arbitrary"
-
-    return attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv
-
-
-@torch.no_grad()
-def get_alibi(
-    num_heads: int,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
-    actual_seqlens_q: Optional[torch.Tensor] = None,
-    actual_seqlens_kv: Optional[torch.Tensor] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    bias_dtype: Optional[torch.dtype] = None,
-    bottom_right_alignment: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Parameters
-    ----------
-    num_heads: int
-        Number of heads.
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    actual_seqlens_q: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for queries, in shape [batch_size].
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for keys and values, in shape [batch_size].
-    alibi_slopes: Optional[torch.Tensor], default = `None`
-        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
-    bias_dtype: Optional[torch.dtype], default = `None`
-        Dtype of the generated ALiBi bias. If None, use torch.float32.
-    bottom_right_alignment: bool, default = `True`
-        Whether to align the diagonal of the ALiBi bias to the bottom right corner of
-        the matrix (`True`) or top left (`False`).
-
-    Returns
-    ----------
-    alibi_slopes: torch.Tensor
-        ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
-    alibi_bias: torch.Tensor
-        ALiBi bias in FP32 or `bias_dtype`. Its shape is
-        (1) [1, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in [num_heads] shape,
-        and `actual_seqlens_q` and `actual_seqlens_kv` are `None`; or
-        (2) [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in
-        [batch_size, num_heads] shape, or, if `alibi_slopes` is in [num_heads] shape and
-        `actual_seqlens_q` and `actual_seqlens_kv` are not `None`.
-    """
-    global _alibi_cache
-    if _alibi_cache["_alibi_slopes_require_update"]:
-        if alibi_slopes is not None:
-            _alibi_cache["_alibi_slopes"] = alibi_slopes
-        else:
-            n = 2 ** math.floor(math.log2(num_heads))
-            m_0 = 2.0 ** (-8.0 / n)
-            m = torch.pow(m_0, torch.arange(1, 1 + n))
-
-            if n < num_heads:
-                m_hat_0 = 2.0 ** (-4.0 / n)
-                m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
-                m = torch.cat([m, m_hat])
-
-            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
-        _alibi_cache["_num_heads"] = num_heads
-        _alibi_cache["_alibi_slopes_require_update"] = False
-
-    if _alibi_cache["_alibi_bias_require_update"]:
-        assert _alibi_cache["_alibi_slopes"] is not None, "ALiBi slopes can not be None!"
-        if _alibi_cache["_alibi_slopes"].dim() == 1:
-            slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
-        elif _alibi_cache["_alibi_slopes"].dim() == 2:
-            slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
-        else:
-            raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
-
-        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-            1, 1, max_seqlen_q, 1
-        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-            1, 1, 1, max_seqlen_kv
-        )
-        if actual_seqlens_q is None and actual_seqlens_kv is None:
-            if bottom_right_alignment:
-                bias = bias + max_seqlen_kv - max_seqlen_q
-        elif actual_seqlens_q is not None and actual_seqlens_kv is not None:
-            batch_size = actual_seqlens_q.shape[0]
-            bias = bias.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
-            if bottom_right_alignment:
-                bias = bias + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
-        else:
-            assert (
-                False
-            ), "actual_seqlens_q and actual_seqlens_kv need to be both None or torch.Tensors!"
-        bias = bias.abs().mul(-1)
-        bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
-        _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
-        _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
-        bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
-        _alibi_cache["_alibi_bias_require_update"] = False
-
-    return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
-
-
 def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
     Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
@@ -1028,50 +775,6 @@ def flash_attn_a2a_communicate(
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
-
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
-    """Get the list of quantizers used in attention from the quantizers list."""
-    if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
-    QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
-    QKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    O_quantizer = quantizers["scaling_fwd"][META_O]
-    O_quantizer.set_usage(rowwise=True, columnwise=False)
-    S_quantizer = quantizers["scaling_fwd"][META_S]
-    S_quantizer.internal = True
-    S_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = True
-    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer = quantizers["scaling_bwd"][META_DO]
-    dO_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer.internal = True
-    dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
-
-    return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
-
-
 _cu_seqlens_info_with_cp_cache = {}
 
 
@@ -1206,7 +909,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_CP_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
 
         if fp8:
             if use_fused_attention:
@@ -3578,7 +3281,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         is_output_fp8 = False
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
         if fp8:
             if use_fused_attention:
@@ -4530,7 +4233,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.shape[0],
         )
 
-        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = get_full_mask(
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = dpa_utils.get_full_mask(
             max_seqlen_q,
             max_seqlen_kv,
             attn_mask_type=attn_mask_type,
@@ -4602,7 +4305,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
-                _, core_attention_bias = get_alibi(
+                _, core_attention_bias = dpa_utils.get_alibi(
+                    _alibi_cache,
                     output_size[1],
                     output_size[2],
                     output_size[3],
@@ -4709,158 +4413,6 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
-
-
-def get_qkv_layout(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    qkv_format: str = "sbhd",
-) -> str:
-    """Get qkv layout.
-
-    Parameters
-    ----------
-    q: torch.Tensor
-        Query tensor.
-    k: torch.Tensor
-        Key tensor.
-    v: torch.Tensor
-        Value tensor.
-    qkv_format: str, default = `sbhd`
-        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
-        the sequence length dimension, `b` batch size, `h` the number of attention heads,
-        `d` head size, and `t` the total number of tokens in a batch, i.e.
-        `t = sum(s_i) for i = 0...b-1`.
-
-    Returns
-    ----------
-    qkv_layout: str
-       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped to one of five
-       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk
-       of memory and that they are interleaved in the `2`nd dimension. `sbhd_sbh2d` means
-       `q` and `kv` are created in two chunks and that `q` itself is contiguous and `k`, `v`
-       are interleaved with each other in the `3`rd dimension, `k = kv[:,:,:,0,:]` and
-       `v = kv[:,:,:,1,:]`.
-       Mapping:
-       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
-       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
-       `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
-    q: torch.Tensor
-        Query tensor. It may be different from input `q` as we try to fit tensors to
-        a supported layout.
-    k: torch.Tensor
-        Key tensor. It may be different from input `k` as we try to fit tensors to
-        a supported layout.
-    v: torch.Tensor
-        Value tensor. It may be different from input `v` as we try to fit tensors to
-        a supported layout.
-    """
-
-    check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
-    assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
-
-    def run_iteratively(q, k, v):
-        # check data pointers
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
-        data_ptr = k.untyped_storage().data_ptr()
-        check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
-
-        # check tensor shapes
-        shape = q.shape
-        check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
-        shape = k.shape
-        check_shapes_kv = shape[:-1] == v.shape[:-1]
-
-        # check tensor strides
-        stride = q.stride()
-        check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
-        check_strides_kv = tuple(sk / k.shape[-1] for sk in k.stride()[:-1]) == tuple(
-            sv / v.shape[-1] for sv in v.stride()[:-1]
-        )
-
-        # check tensor offsets for h3d and 3hd layouts
-        prod_h_d = q.shape[-1] * q.shape[-2]
-        check_3hd_offsets = all(x.storage_offset() == i * prod_h_d for i, x in enumerate([q, k, v]))
-        check_h3d_offsets = all(
-            x.storage_offset() == i * q.shape[-1] for i, x in enumerate([q, k, v])
-        )
-
-        # check tensor offsets for hd_h2d and hd_2hd layouts
-        prod_all_dims = [np.prod(x.shape) for x in [q, k]]
-        offset = prod_all_dims[0] if check_ptrs_qkv else 0
-        prod_h_d = k.shape[-1] * k.shape[-2]
-        check_2hd_offsets = all(
-            x.storage_offset() == (offset + i * prod_h_d) for i, x in enumerate([k, v])
-        )
-        check_h2d_offsets = all(
-            x.storage_offset() == (offset + i * k.shape[-1]) for i, x in enumerate([k, v])
-        )
-
-        # check tensor offsets for hd_hd_hd layouts
-        check_hd_offsets_qkv = (
-            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k, v]))
-            if check_ptrs_qkv
-            else all(x.storage_offset() == 0 for i, x in enumerate([q, k, v]))
-        )
-        check_hd_offsets_qk = (
-            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k]))
-            if not check_ptrs_qkv and check_ptrs_qk
-            else all(x.storage_offset() == 0 for i, x in enumerate([q, k]))
-        )
-        check_hd_offsets_kv = (
-            all(x.storage_offset() == sum(prod_all_dims[1 : i + 1]) for i, x in enumerate([k, v]))
-            if not check_ptrs_qkv and check_ptrs_kv
-            else all(x.storage_offset() == 0 for i, x in enumerate([k, v]))
-        )
-
-        if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_3hd_offsets:
-            # sb3hd, bs3hd, t3hd
-            # one chunk of memory, qkv, with q, k, v interleaved at dim=-3 in qkv
-            qkv_layout = qkv_format[:-2] + "3" + qkv_format[-2:]
-        elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_h3d_offsets:
-            # sbh3d, bsh3d, th3d
-            # one chunk of memory, qkv, with q, k, v interleaved at dim=-2 in qkv
-            qkv_layout = qkv_format[:-1] + "3" + qkv_format[-1:]
-        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_2hd_offsets:
-            # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
-            # two chunks of memory, q and kv, with k, v interleaved at dim=-3 in kv
-            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
-            # have the same data pointer, i.e. check_ptrs_qkv=True
-            qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
-        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_h2d_offsets:
-            # sbhd_sbh2d, bshd_bsh2d, thd_th2d
-            # two chunks of memory, q and kv, with k, v interleaved at dim=-2 in kv
-            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
-            # have the same data pointer, i.e. check_ptrs_qkv=True
-            qkv_layout = qkv_format + "_" + qkv_format[:-1] + "2" + qkv_format[-1:]
-        elif (
-            check_strides_kv
-            and check_shapes_kv
-            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
-        ):
-            # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
-            # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
-            # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
-            # check_ptrs_qk=True or check_ptrs_kv=True
-            qkv_layout = "_".join(list([qkv_format]) * 3)
-        else:
-            qkv_layout = "not_supported"
-
-        return qkv_layout
-
-    qkv_layout = run_iteratively(q, k, v)
-    if qkv_layout == "not_supported":
-        # force q,k,v to be contiguous and run get_layout again
-        q, k, v = [x.contiguous() for x in [q, k, v]]
-        qkv_layout = run_iteratively(q, k, v)
-    if qkv_layout == "not_supported":
-        raise RuntimeError("The provided qkv memory layout is not supported!")
-
-    return qkv_layout, q, k, v
-
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
@@ -5285,7 +4837,7 @@ class FusedAttnFunc(torch.autograd.Function):
         fake_dtype = q.dtype
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
@@ -6737,11 +6289,11 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and isinstance(key_layer, Float8Tensor)
                 and isinstance(value_layer, Float8Tensor)
             ):
-                qkv_layout, query_layer._data, key_layer._data, value_layer._data = get_qkv_layout(
+                qkv_layout, query_layer._data, key_layer._data, value_layer._data = dpa_utils.get_qkv_layout(
                     query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
                 )
             else:
-                qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
+                qkv_layout, query_layer, key_layer, value_layer = dpa_utils.get_qkv_layout(
                     query_layer, key_layer, value_layer, qkv_format=qkv_format
                 )
 
@@ -6873,7 +6425,8 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
-                    alibi_slopes, _ = get_alibi(
+                    alibi_slopes, _ = dpa_utils.get_alibi(
+                        _alibi_cache,
                         query_layer.shape[-2],
                         max_seqlen_q,
                         max_seqlen_kv,
@@ -6908,7 +6461,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
                 ):
                     fu_core_attention_bias_type = "post_scale_bias"
-                    _, fu_core_attention_bias = get_alibi(
+                    _, fu_core_attention_bias = dpa_utils.get_alibi(
+                        _alibi_cache,
                         query_layer.shape[-2],
                         max_seqlen_q,
                         max_seqlen_kv,
