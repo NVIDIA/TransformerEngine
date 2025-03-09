@@ -1034,6 +1034,7 @@ def get_full_mask(
 
     return attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv
 
+
 @torch.no_grad()
 def get_alibi(
     _alibi_cache: Dict[str, Any],
@@ -1079,7 +1080,7 @@ def get_alibi(
         [batch_size, num_heads] shape, or, if `alibi_slopes` is in [num_heads] shape and
         `actual_seqlens_q` and `actual_seqlens_kv` are not `None`.
     """
-    #global _alibi_cache
+    # global _alibi_cache
     if _alibi_cache["_alibi_slopes_require_update"]:
         if alibi_slopes is not None:
             _alibi_cache["_alibi_slopes"] = alibi_slopes
@@ -1132,7 +1133,10 @@ def get_alibi(
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
-#--------
+
+
+# --------
+
 
 def get_qkv_layout(
     q: torch.Tensor,
@@ -1283,7 +1287,10 @@ def get_qkv_layout(
         raise RuntimeError("The provided qkv memory layout is not supported!")
 
     return qkv_layout, q, k, v
-#--------
+
+
+# --------
+
 
 def check_set_window_size(
     attn_mask_type: str,
@@ -1328,7 +1335,10 @@ def check_set_window_size(
     else:
         assert False, "Invalid attn_mask_type: " + attn_mask_type
     return window_size
-#--------
+
+
+# --------
+
 
 def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     """Get the list of quantizers used in attention from the quantizers list."""
@@ -1371,4 +1381,6 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
         )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
-#--------
+
+
+# --------

@@ -775,6 +775,7 @@ def flash_attn_a2a_communicate(
     torch.cuda.current_stream().wait_stream(cp_stream)
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
+
 _cu_seqlens_info_with_cp_cache = {}
 
 
@@ -4233,13 +4234,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.shape[0],
         )
 
-        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = dpa_utils.get_full_mask(
-            max_seqlen_q,
-            max_seqlen_kv,
-            attn_mask_type=attn_mask_type,
-            attention_mask=attention_mask,
-            window_size=window_size,
-            attention_type=self.attention_type,
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
+            dpa_utils.get_full_mask(
+                max_seqlen_q,
+                max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                window_size=window_size,
+                attention_type=self.attention_type,
+            )
         )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -4413,6 +4416,7 @@ class _PrepareQKVForFA(torch.autograd.Function):
         dqkv = tex.fa_prepare_bwd(dq, dk, dv)
         dq, dk, dv = split_tensor_along_dim(dqkv, -1, 3)
         return dq, dk, dv
+
 
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
@@ -6289,8 +6293,10 @@ class DotProductAttention(TransformerEngineBaseModule):
                 and isinstance(key_layer, Float8Tensor)
                 and isinstance(value_layer, Float8Tensor)
             ):
-                qkv_layout, query_layer._data, key_layer._data, value_layer._data = dpa_utils.get_qkv_layout(
-                    query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
+                qkv_layout, query_layer._data, key_layer._data, value_layer._data = (
+                    dpa_utils.get_qkv_layout(
+                        query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
+                    )
                 )
             else:
                 qkv_layout, query_layer, key_layer, value_layer = dpa_utils.get_qkv_layout(
