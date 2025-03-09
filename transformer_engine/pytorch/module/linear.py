@@ -304,7 +304,6 @@ class _Linear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
-            ctx.is_input_fp8 = not own_quantized_input
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()

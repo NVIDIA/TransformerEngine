@@ -106,9 +106,12 @@ struct Tensor {
     return acc;
   }
 
-  bool has_data() const noexcept { return data.dptr != nullptr; }
+  // Check for size (not just pointer) for 0-dim or no token cases.
+  bool has_data() const noexcept { return data.dptr != nullptr || data.shape.size() != 0; }
 
-  bool has_columnwise_data() const noexcept { return columnwise_data.dptr != nullptr; }
+  bool has_columnwise_data() const noexcept {
+    return columnwise_data.dptr != nullptr || columnwise_data.shape.size() != 0;
+  }
 
   DType dtype() const {
     if (has_data()) return data.dtype;

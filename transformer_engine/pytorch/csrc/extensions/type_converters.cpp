@@ -17,15 +17,21 @@ namespace detail {
 TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer) {
   auto ret = TensorWrapper(quantizer->get_scaling_mode());
 
+  bool data_exists = !tensor.attr("_data").is_none();
+  bool transpose_exists =
+      !tensor.attr("_transpose_invalid").cast<bool>() && !tensor.attr("_transpose").is_none();
+
+  NVTE_CHECK(data_exists || transpose_exists, "No data found for FP8 Tensor.");
+
   // FP8 data
   const DType fp8_dtype = tensor.attr("_fp8_dtype").cast<DType>();
-  if (!tensor.attr("_data").is_none()) {
+  if (data_exists) {
     const auto &data = tensor.attr("_data").cast<at::Tensor>();
     ret.set_rowwise_data(data.data_ptr(), fp8_dtype, getTensorShape(data));
   }
 
   // FP8 data transpose
-  if (!tensor.attr("_transpose_invalid").cast<bool>() && !tensor.attr("_transpose").is_none()) {
+  if (transpose_exists) {
     const auto &data_transpose = tensor.attr("_transpose").cast<at::Tensor>();
     ret.set_columnwise_data(data_transpose.data_ptr(), fp8_dtype, getTensorShape(data_transpose));
   }
@@ -49,9 +55,14 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
 TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer) {
   auto ret = TensorWrapper(NVTE_MXFP8_1D_SCALING);
 
+  bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
+  bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+
+  NVTE_CHECK(rowwise_usage || columnwise_usage, "No data found for MXFP8 Tensor.");
+
   // Row-scaled data
   const DType fp8_dtype = tensor.attr("_fp8_dtype").cast<DType>();
-  if (!tensor.attr("_rowwise_data").is_none()) {
+  if (rowwise_usage) {
     const auto &data = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
     ret.set_rowwise_data(data.data_ptr(), fp8_dtype, getTensorShape(data));
@@ -59,7 +70,7 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
   }
 
   // Column-scaled data
-  if (!tensor.attr("_columnwise_data").is_none()) {
+  if (columnwise_usage) {
     const auto &data = tensor.attr("_columnwise_data").cast<at::Tensor>();
     const auto &scale_inv = tensor.attr("_columnwise_scale_inv").cast<at::Tensor>();
     ret.set_columnwise_data(data.data_ptr(), fp8_dtype, getTensorShape(data));
