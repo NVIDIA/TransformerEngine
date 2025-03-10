@@ -1,5 +1,4 @@
 #!/usr/bin/python3
-# UB_SKIPMC=1 torchrun --nproc_per_node 2 run_layer_with_overlap.py --seq-length=1024 --batch-size=1 --num-heads=8 --head-dim=64 --layer-type=linear --fp8 --fp8-recipe=tensorwise
 
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
