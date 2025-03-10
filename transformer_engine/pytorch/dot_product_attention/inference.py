@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+
 class InferenceParams:  # pylint: disable=too-few-public-methods
     """
     Inference parameters that are passed to the main model in order
