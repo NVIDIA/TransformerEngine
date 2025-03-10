@@ -34,7 +34,7 @@ TEST_ROOT = Path(__file__).parent.resolve()
 NUM_PROCS: int = torch.cuda.device_count()
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
-    LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python"]
+    LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
