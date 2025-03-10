@@ -1358,7 +1358,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         grad_output_quantizer = None
         output_quantizer = None
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-        input_quantizer.internal = True
+        input_quantizer.internal = False
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         if fp8_output:
