@@ -223,7 +223,7 @@ class Tensor {
   T *rowwise_cpu_scale_inv_ptr(){
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING) {
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
@@ -236,7 +236,7 @@ class Tensor {
   T *columnwise_cpu_scale_inv_ptr(){
     if (tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING){
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
-    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING) {
+    } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");

@@ -1262,27 +1262,28 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
           workspace_tensor, stream);
       break;
     }
-    case NVTE_BLOCK_SCALING: {
+    case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
-                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING");
-      if (output_tensor->block_scaling_dim == 2) {
-        quantize_transpose_square_blockwise(
-            input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
-            output_tensor->data, output_tensor->columnwise_data,
-            /*epsilon=*/output_tensor->amax_epsilon,
-            /*return_transpose=*/output_tensor->has_columnwise_data(),
-            output_tensor->force_pow_2_scales, stream);
-      } else if (output_tensor->block_scaling_dim == 1) {
-        quantize_transpose_vector_blockwise(
-            input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
-            output_tensor->data, output_tensor->columnwise_data,
-            /*epsilon=*/output_tensor->amax_epsilon,
-            /*return_transpose=*/output_tensor->has_columnwise_data(),
-            output_tensor->force_pow_2_scales, stream);
-      } else {
-        NVTE_ERROR("Not supported block scaling dim.");
-      }
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_2D");
+      quantize_transpose_square_blockwise(input_tensor->data, output_tensor->scale_inv,
+                                          output_tensor->columnwise_scale_inv, output_tensor->data,
+                                          output_tensor->columnwise_data,
+                                          /*epsilon=*/output_tensor->amax_epsilon,
+                                          /*return_transpose=*/output_tensor->has_columnwise_data(),
+                                          output_tensor->force_pow_2_scales, stream);
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D: {
+      // TODO(kwyss): IS_BIAS, IS_DACT, IS_ACT, ParamOP, OP parameters support.
+      NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
+                 "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
+      quantize_transpose_vector_blockwise(input_tensor->data, output_tensor->scale_inv,
+                                          output_tensor->columnwise_scale_inv, output_tensor->data,
+                                          output_tensor->columnwise_data,
+                                          /*epsilon=*/output_tensor->amax_epsilon,
+                                          /*return_transpose=*/output_tensor->has_columnwise_data(),
+                                          output_tensor->force_pow_2_scales, stream);
       break;
     }
     default:

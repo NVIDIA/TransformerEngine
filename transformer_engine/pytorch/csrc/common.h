@@ -181,7 +181,9 @@ class Float8BlockQuantizer : public Quantizer {
   // Initializes from a python handle to a Float8BlockQuantizer
   explicit Float8BlockQuantizer(const py::handle& quantizer);
 
-  NVTEScalingMode get_scaling_mode() const override { return NVTE_BLOCK_SCALING; }
+  NVTEScalingMode get_scaling_mode() const override {
+    return (block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D;
+  }
 
   // Gets rowwise and columnwise_data from tensor and sets them on wrapper
   void set_quantization_params(TensorWrapper* tensor) const override;

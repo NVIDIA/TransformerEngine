@@ -61,6 +61,7 @@ class TestFloat8BlockwiseTensor:
         dims: DimsType = 1,
         fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
         dtype: torch.dtype = torch.float32,
+        is_2D_scaled: bool = True,
     ) -> None:
         """Call constructor and perform sanity checks"""
         dims = _to_list(dims)
@@ -68,7 +69,10 @@ class TestFloat8BlockwiseTensor:
         rowwise = True
         columnwise = True
         quantizer = Float8BlockQuantizer(
-            fp8_dtype=fp8_dtype, rowwise=rowwise, columnwise=columnwise
+            fp8_dtype=fp8_dtype,
+            rowwise=rowwise,
+            columnwise=columnwise,
+            block_scaling_dim=2 if is_2D_scaled else 1,
         )
 
         scale_dims = quantizer.get_scale_shape(dims, columnwise=False)
@@ -84,6 +88,7 @@ class TestFloat8BlockwiseTensor:
                 columnwise_scale_dims, device="cuda", dtype=torch.float32
             ),
             fp8_dtype=fp8_dtype,
+            is_2D_scaled=is_2D_scaled,
             quantizer=quantizer,
         )
         assert list(tensor.size()) == dims, "Incorrect dims"

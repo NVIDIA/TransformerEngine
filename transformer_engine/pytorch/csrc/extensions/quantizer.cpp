@@ -281,7 +281,6 @@ void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const 
   // Set options on TensorWrapper from quantization.
   tensor->set_qopt_force_pow_2_scales(force_pow_2_scales);
   tensor->set_qopt_amax_epsilon(amax_epsilon);
-  tensor->set_qopt_block_scaling_dim(block_scaling_dim);
 }
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
@@ -294,7 +293,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     numel *= s;
   }
 
-  TensorWrapper tensor(NVTE_BLOCK_SCALING);
+  TensorWrapper tensor((block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
   at::TensorOptions opts;
   at::TensorOptions scale_opts;
   at::Tensor data_rowwise, data_colwise, scale_inv_rowwise, scale_inv_colwise;
@@ -369,7 +368,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     ret = Float8BlockwiseQTensorClass(
         "rowwise_data"_a = data_rowwise, "columnwise_data"_a = data_colwise,
         "rowwise_scale_inv"_a = scale_inv_rowwise, "columnwise_scale_inv"_a = scale_inv_colwise,
-        "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer);
+        "fp8_dtype"_a = this->dtype, "quantizer"_a = this->quantizer,
+        "is_2D_scaled"_a = (block_scaling_dim == 2));
   } else {
     py::handle Float8BlockwiseQTensorClass(
         reinterpret_cast<PyObject*>(Float8BlockwiseQTensorPythonClass));
@@ -377,7 +377,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
         "shape"_a = torch_shape, "dtype"_a = GetATenDType(dtype), "rowwise_data"_a = data_rowwise,
         "columnwise_data"_a = data_colwise, "rowwise_scale_inv"_a = scale_inv_rowwise,
         "columnwise_scale_inv"_a = scale_inv_colwise, "fp8_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer);
+        "quantizer"_a = this->quantizer, "is_2D_scaled"_a = (block_scaling_dim == 2));
   }
 
   return {std::move(tensor), std::move(ret)};

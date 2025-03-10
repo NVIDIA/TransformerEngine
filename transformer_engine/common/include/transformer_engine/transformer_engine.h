@@ -84,7 +84,8 @@ enum NVTEScalingMode {
     which each yield a scale. The block_scaling_dim property of the quantizer
     selects the granularity.
    */
-  NVTE_BLOCK_SCALING = 2,
+  NVTE_BLOCK_SCALING_1D = 2,
+  NVTE_BLOCK_SCALING_2D = 3,
   NVTE_INVALID_SCALING
 };
 
@@ -258,17 +259,6 @@ int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false);
  *   call had no effect.
  */
 int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon);
-
-/*! \brief Set a quantization option to use 1D or 2D quantization blocks
- *   to scale the tensor.
- *
- *  \param[in/out] tensor Tensor.
- *  \param[in] block_scaling_dim, 1D or 2D.
- *
- *  \return zero if the tensor supports this option and it was set. non-zero if
- *   call had no effect or the number of dims is not supported.
- */
-int nvte_set_qopt_block_scaling_dim(NVTETensor tensor, int block_scaling_dim);
 
 /*! \brief Get a quantization option for whether to force power of 2 scales.
  *
@@ -720,17 +710,11 @@ class TensorWrapper {
 
   int set_qopt_amax_epsilon(float eps) { return nvte_set_qopt_amax_epsilon(tensor_, eps); }
 
-  int set_qopt_block_scaling_dim(int block_scaling_dim) {
-    return nvte_set_qopt_block_scaling_dim(tensor_, block_scaling_dim);
-  }
-
   bool get_qopt_force_pow_2_scales() const {
     return nvte_get_qopt_force_pow_2_scales(tensor_) != 0;
   }
 
   float get_qopt_amax_epsilon() const { return nvte_get_qopt_amax_epsilon(tensor_); }
-
-  int get_qopt_block_scaling_dim() const { return nvte_get_qopt_block_scaling_dim(tensor_); }
 
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {&defaultData, 1};
