@@ -349,6 +349,7 @@ def _get_full_cu_seqlens(
         )
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -4410,7 +4411,9 @@ class FlashAttention(torch.nn.Module):
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
                     query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = dpa_utils.PackTensors.apply(indices_kv, key_layer, value_layer)
+                    key_layer, value_layer = dpa_utils.PackTensors.apply(
+                        indices_kv, key_layer, value_layer
+                    )
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:

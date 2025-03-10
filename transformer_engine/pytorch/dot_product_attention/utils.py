@@ -1163,6 +1163,7 @@ def pack_tensor(
         packed = torch.gather(tensor, 0, indices)
     return packed
 
+
 @jit_fuser
 def pack_2_tensors(
     indices: torch.Tensor,
@@ -1175,6 +1176,7 @@ def pack_2_tensors(
     t1_packed = pack_tensor(indices, t1)
     t2_packed = pack_tensor(indices, t2)
     return t1_packed, t2_packed
+
 
 @jit_fuser
 def pack_3_tensors(
@@ -1190,6 +1192,7 @@ def pack_3_tensors(
     t2_packed = pack_tensor(indices, t2)
     t3_packed = pack_tensor(indices, t3)
     return t1_packed, t2_packed, t3_packed
+
 
 @jit_fuser
 def unpack_tensor(
@@ -1247,7 +1250,7 @@ def unpack_3_tensors(
 
 
 class PackTensors(torch.autograd.Function):
-    
+
     @staticmethod
     def forward(
         ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]
@@ -1294,7 +1297,10 @@ class UnpackTensor(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         return None, None, pack_tensor(indices, grad_output)
-#--------
+
+
+# --------
+
 
 def get_qkv_layout(
     q: torch.Tensor,
