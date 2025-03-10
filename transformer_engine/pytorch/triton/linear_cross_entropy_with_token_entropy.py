@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """
-Implementations of the linear cross entropy kernel.
+Implementations of the linear cross entropy with token entropy kernel.
 """
 
 import typing
