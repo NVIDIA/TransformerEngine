@@ -1135,7 +1135,10 @@ def get_alibi(
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
+
+
 # --------
+
 
 def get_cumul_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
@@ -1205,6 +1208,7 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
 
 _cumul_seqlens_cache = {}
 
+
 def get_full_cumul_seqlens(
     batch_size: int,
     max_seqlen: int,
@@ -1225,6 +1229,7 @@ def get_full_cumul_seqlens(
             device=device,
         )
     return _cumul_seqlens_cache[(batch_size, max_seqlen)]
+
 
 @jit_fuser
 def _pack_tensor(
@@ -1383,7 +1388,10 @@ class UnpackTensor(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         return None, None, _pack_tensor(indices, grad_output)
-#--------
+
+
+# --------
+
 
 def get_qkv_layout(
     q: torch.Tensor,
