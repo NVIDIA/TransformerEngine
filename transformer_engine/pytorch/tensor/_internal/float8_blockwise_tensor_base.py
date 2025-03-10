@@ -69,10 +69,11 @@ class Float8BlockwiseQTensorBase:
     ) -> Tuple[list[Optional[torch.Tensor]], Float8BlockwiseQTensorBase]:
         """Prepare the tensor base for saving for backward
 
-        FIXME(kwyss): Should this clear out data?
-        FIXME(kwyss): What about dq scales?
+        FIXME(kwyss): Set data tensors to None and consider saving/restoring scales.
+        test_numerics.py fails when tensors are cleared at the moment in C++ shape logic.
         """
-        tensors = [self._rowwise_data, self._columnwise_data]
+        tensors = [self._rowwise_data,
+                   self._columnwise_data]
         return tensors, self
 
     def restore_from_saved(
