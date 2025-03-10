@@ -150,10 +150,10 @@ class _LayerNormLinear(torch.autograd.Function):
         if fp8:
             if (
                 any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and not (FP8GlobalStateManager.get_fp8_recipe().delayed() or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling())
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
                 )
 
             if input_quantizer is None:
@@ -172,14 +172,18 @@ class _LayerNormLinear(torch.autograd.Function):
                 if isinstance(input_quantizer, MXFP8Quantizer):
                     with_quantized_norm = False
             else:
-                input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=backward_needs_input,
-                )
+                if fp8 and ub_bulk_dgrad:
+                    # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    input_quantizer.set_usage(
+                        rowwise=True,
+                        columnwise=backward_needs_input,
+                    )
 
         ub_obj_fprop = None
         ln_out = None
-        if ub_overlap_ag_fprop:
+        if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
         elif with_quantized_norm:
@@ -207,6 +211,17 @@ class _LayerNormLinear(torch.autograd.Function):
         )
         ln_out_return = ln_out if return_layernorm_output else None
         nvtx_range_pop(f"{nvtx_label}.norm")
+
+        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
+        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
+        if ub_overlap_ag_fprop and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
+            if ub_bulk_dgrad:
+                # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+                input_quantizer.set_usage(rowwise=True, columnwise=False)
+            ub_obj_fprop = get_ub(ub_name + "_fprop")
+            ln_out_tmp = ln_out
+            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
+            input_quantizer.quantize(ln_out_tmp, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -464,9 +479,9 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.delayed():
+                if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors

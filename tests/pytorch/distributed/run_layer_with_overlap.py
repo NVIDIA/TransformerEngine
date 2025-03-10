@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+# UB_SKIPMC=1 torchrun --nproc_per_node 2 run_layer_with_overlap.py --seq-length=1024 --batch-size=1 --num-heads=8 --head-dim=64 --layer-type=linear --fp8 --fp8-recipe=tensorwise
 
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
@@ -17,7 +18,7 @@ import torch
 import torch.distributed as dist
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -141,6 +142,14 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+    )
+    parser.add_argument(
+        "--fp8-recipe", 
+        type=str.lower, 
+        default="delayed", 
+        choices=["delayed", "tensorwise"], 
+        help='Which fp8 recipe to use for FP8 tensors in the forward and backward pass',
+        dest='fp8_recipe'
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -379,7 +388,10 @@ def _train(opts):
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
-    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+    if opts.fp8_recipe == "delayed":
+        fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+    elif opts.fp8_recipe == "tensorwise":
+        fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
 
     # Prepare random input tensors
     test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)

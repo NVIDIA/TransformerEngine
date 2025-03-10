@@ -192,10 +192,10 @@ class _LayerNormMLP(torch.autograd.Function):
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
             if (
                 any([ub_overlap_ag, ub_overlap_rs])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and not (FP8GlobalStateManager.get_fp8_recipe().delayed() or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling())
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
                 )
 
         activation_func = _act_func(
@@ -239,7 +239,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         ub_obj_lnout = None
         ln_out = None
-        if ub_overlap_ag:
+        if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
         elif not with_quantized_norm:
@@ -262,6 +262,14 @@ class _LayerNormMLP(torch.autograd.Function):
         )
 
         ln_out_return = ln_out if return_layernorm_output else None
+
+        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
+        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
+        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+            ub_obj_lnout = get_ub("fc1_fprop")
+            ln_out_tmp = ln_out
+            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
+            fc1_input_quantizer.quantize(ln_out_tmp, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -589,9 +597,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.delayed():
+                if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors

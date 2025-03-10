@@ -83,7 +83,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8):
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8):
+def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -104,6 +104,7 @@ def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, 
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
         test_cmd.append("--fp8")
+        test_cmd.append(f"--fp8-recipe={fp8_recipe}")
 
     os.environ["PYTORCH_JIT"] = "0"
     os.environ["NVTE_TORCH_COMPILE"] = "0"
@@ -195,7 +196,7 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         _run_gemm_with_overlap(comm_type, True, False, False, fp8)
 
 
-@pytest.mark.parametrize("fp8", (False, True), ids=[" BF16 ", " FP8  "])
+@pytest.mark.parametrize("fp8", (False,), ids=[" BF16 ",])
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
     [
@@ -229,8 +230,49 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         )
     ],
 )
-def test_layers_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8):
+def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None)
+
+@pytest.mark.parametrize("fp8_recipe", ["delayed", "tensorwise"], ids=[" DELAYED SCALING ", " CURRENT SCALING "])
+@pytest.mark.parametrize("fp8", (True, ), ids=[" FP8  ",])
+@pytest.mark.parametrize(
+    "layer_type,linear_parallel_mode,overlap_rs_dgrad",
+    [
+        (te.Linear.__name__, "row", False),
+        (te.Linear.__name__, "column", False),
+        (te.Linear.__name__, "column", True),
+        (te.LayerNormLinear.__name__, "row", False),
+        (te.LayerNormLinear.__name__, "column", False),
+        (te.LayerNormLinear.__name__, "column", True),
+    ]
+    + list(
+        zip(
+            [layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
+            [None] * len(TE_LAYERS[2:]) * 2,
+            [False, True] * len(TE_LAYERS[2:]),
+        )
+    ),
+    ids=[
+        f" {te.Linear.__name__} - ROW-PARALLEL ",
+        f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
+        f" {te.Linear.__name__} - COL-PARLALEL - DGRAD+RS ",
+        f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
+        f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
+        f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",
+    ]
+    + [
+        " " + " - ".join(test_name_parts) + " "
+        for test_name_parts in zip(
+            [layer.__name__ for layer in TE_LAYERS[2:] for _ in range(2)],
+            ["BULK DGRAD/WGRAD", "DGRAD+RS"] * len(TE_LAYERS[2:]),
+        )
+    ],
+)
+def test_layers_with_overlap_fp8(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe):
+    """
+    Test Transformer Engine layers with comm+GEMM overlap.
+    """
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe)
