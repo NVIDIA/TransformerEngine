@@ -21,7 +21,7 @@ from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_module
 from .utils import safely_set_viewless_tensor_data
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
-from .tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
 from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
@@ -859,7 +859,10 @@ def _all_gather_fp8(
 
     # Quantize input tensor if needed
     if not isinstance(input_, Float8TensorBase):
-        assert isinstance(quantizer, Float8Quantizer)
+        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+        # we cannot directly gather the transposed fp8 tensor
+        # so we need to disable columnwise usage for the quantizer
+        # and then set it back to the original value after quantizing
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(columnwise=False)
         input_ = quantizer(input_)
@@ -867,7 +870,7 @@ def _all_gather_fp8(
 
     # Construct output tensor
     out: Float8TensorBase
-    if isinstance(quantizer, Float8Quantizer):
+    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
         dtype = torch.float32
         device = "cuda"
         if isinstance(input_, Float8Tensor):
@@ -885,6 +888,9 @@ def _all_gather_fp8(
         out._transpose_invalid = True
     else:
         raise RuntimeError("FP8TensorBase is not supported yet without Quantizer")
+    # For delayed scaling, scale_inv is from history, so we can pass it from input_ to out
+    # For current scaling, scale_inv is from doing amax reduction in C++ code, so each rank should have same scale_inv,
+    #                      so we can just pass it from input_ to out
     out._scale_inv = input_._scale_inv
 
     # Perform communication
@@ -1020,8 +1026,10 @@ def gather_along_first_dim(
     out_shape = list(input_.size())
     out_shape[0] *= world_size
 
-    # FP8 case
-    if isinstance(input_, Float8TensorBase) or isinstance(quantizer, Float8Quantizer):
+    # FP8 case: delayed scaling or current scaling
+    if isinstance(input_, Float8TensorBase) or isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+    ):
         return _all_gather_fp8(
             input_,
             process_group,
