@@ -144,12 +144,12 @@ def _parse_args(argv=None, namespace=None):
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
     )
     parser.add_argument(
-        "--fp8-recipe", 
-        type=str.lower, 
-        default="delayed", 
-        choices=["delayed", "tensorwise"], 
-        help='Which fp8 recipe to use for FP8 tensors in the forward and backward pass',
-        dest='fp8_recipe'
+        "--fp8-recipe",
+        type=str.lower,
+        default="delayed",
+        choices=["delayed", "tensorwise"],
+        help="Which fp8 recipe to use for FP8 tensors in the forward and backward pass",
+        dest="fp8_recipe",
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -389,7 +389,9 @@ def _train(opts):
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
     if opts.fp8_recipe == "delayed":
-        fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+        fp8_recipe = DelayedScaling(
+            fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max"
+        )
     elif opts.fp8_recipe == "tensorwise":
         fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
 

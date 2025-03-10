@@ -63,7 +63,6 @@ from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 __all__ = ["Linear"]
 
 
-
 class _Linear(torch.autograd.Function):
     """Linear semi-top level module
     Calls custom cuda extensions.
@@ -130,12 +129,13 @@ class _Linear(torch.autograd.Function):
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
-            if (
-                any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
-                and not (FP8GlobalStateManager.get_fp8_recipe().delayed() or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling())
+            if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().delayed()
+                or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
             if input_quantizer is None:
@@ -371,7 +371,8 @@ class _Linear(torch.autograd.Function):
             ):
                 if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors

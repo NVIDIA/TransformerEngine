@@ -196,7 +196,13 @@ def test_bulk_overlaps(comm_type, fp8, connections):
         _run_gemm_with_overlap(comm_type, True, False, False, fp8)
 
 
-@pytest.mark.parametrize("fp8", (False,), ids=[" BF16 ",])
+@pytest.mark.parametrize(
+    "fp8",
+    (False,),
+    ids=[
+        " BF16 ",
+    ],
+)
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
     [
@@ -236,8 +242,17 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
     """
     _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None)
 
-@pytest.mark.parametrize("fp8_recipe", ["delayed", "tensorwise"], ids=[" DELAYED SCALING ", " CURRENT SCALING "])
-@pytest.mark.parametrize("fp8", (True, ), ids=[" FP8  ",])
+
+@pytest.mark.parametrize(
+    "fp8_recipe", ["delayed", "tensorwise"], ids=[" DELAYED SCALING ", " CURRENT SCALING "]
+)
+@pytest.mark.parametrize(
+    "fp8",
+    (True,),
+    ids=[
+        " FP8  ",
+    ],
+)
 @pytest.mark.parametrize(
     "layer_type,linear_parallel_mode,overlap_rs_dgrad",
     [
@@ -271,7 +286,9 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         )
     ],
 )
-def test_layers_with_overlap_fp8(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe):
+def test_layers_with_overlap_fp8(
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe
+):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """

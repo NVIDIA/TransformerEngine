@@ -148,12 +148,13 @@ class _LayerNormLinear(torch.autograd.Function):
         with_input_all_gather = parallel_mode == "column" and sequence_parallel
 
         if fp8:
-            if (
-                any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
-                and not (FP8GlobalStateManager.get_fp8_recipe().delayed() or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling())
+            if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().delayed()
+                or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
             if input_quantizer is None:
@@ -481,7 +482,8 @@ class _LayerNormLinear(torch.autograd.Function):
             ):
                 if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor current scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors
