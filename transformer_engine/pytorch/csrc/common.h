@@ -160,8 +160,8 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   void set_quantization_params(TensorWrapper* tensor) const override;
 
   std::pair<TensorWrapper, py::object> create_tensor(
-                                                     const std::vector<size_t>& shape, DType dtype,
-                                                     std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
 };
 
 class Float8BlockQuantizer : public Quantizer {

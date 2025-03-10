@@ -284,7 +284,6 @@ void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const 
   tensor->set_qopt_block_scaling_dim(block_scaling_dim);
 }
 
-
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
   using namespace pybind11::literals;
