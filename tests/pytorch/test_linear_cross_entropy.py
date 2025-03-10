@@ -260,8 +260,51 @@ class TestLinearCrossEntropy:
         print(f"[INFO]: Forward pass: Kernel implementation average time: {sum(kernel_forward_latency) / len(kernel_forward_latency):.2f} ms")
         print(f"[INFO]: Backward pass: kernel implementation average time: {sum(kernel_backward_latency) / len(kernel_backward_latency):.2f} ms")
 
-            
+    def test_torch_storage(self):
+        cleanup()
 
+        self.generate_hyper()
+        hidden, weight, labels = self.generate_forward_input()
+
+        print()
+        torch.cuda.reset_peak_memory_stats()
+        torch_logprobs = run_torch_entropy(hidden, weight, labels)
+        torch.cuda.synchronize()
+        torch_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        print(f"[INFO]: Torch Forward pass peak memory: {torch_max_memory:.2f} MB")
+
+        torch.cuda.reset_peak_memory_stats()
+        g_logprobs = self.generate_backward_input()
+        (d_torch_hidden, d_torch_weight) = torch.autograd.grad((torch_logprobs,),
+                                                                (hidden, weight),
+                                                                (g_logprobs,),
+                                                                retain_graph=False)
+        torch.cuda.synchronize()
+        torch_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        print(f"[INFO]: Torch Backward pass peak memory: {torch_backward_max_memory:.2f} MB")
+
+    def test_kernel_storage(self):
+        cleanup()
+
+        self.generate_hyper()
+        hidden, weight, labels = self.generate_forward_input()
+
+        print()
+        torch.cuda.reset_peak_memory_stats()
+        kernel_logprobs = linear_cross_entropy(hidden, weight, labels)
+        torch.cuda.synchronize()
+        kernel_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
+
+        torch.cuda.reset_peak_memory_stats()
+        g_logprobs = self.generate_backward_input()
+        (d_kernel_hidden, d_kernel_weight) = torch.autograd.grad((kernel_logprobs,),
+                                                                (hidden, weight),
+                                                                (g_logprobs,),
+                                                                retain_graph=False)
+        torch.cuda.synchronize()
+        kernel_backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        print(f"[INFO]: Kernel Backward pass peak memory: {kernel_backward_max_memory:.2f} MB")
         
         
         
