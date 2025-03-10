@@ -256,6 +256,10 @@ class Tensor {
     return columnwise_;
   }
 
+  void set_tensor_amax_nullptr(){
+    tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
