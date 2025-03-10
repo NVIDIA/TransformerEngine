@@ -52,6 +52,12 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
         # currently.
         model_weight._reset_caches()
 
+        quantizer = model_weight._get_quantizer()
+
+        amaxes.append(quantizer.amax.view(1))
+        scales.append(quantizer.scale.view(1))
+        scale_invs.append(model_weight._scale_inv.view(1))
+
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
         if master_weight is None:
@@ -66,7 +72,6 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
         shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
-        quantizer = model_weight._get_quantizer()
         shard_model_weight_fp8 = quantizer.create_tensor_from_data(
             shard_model_weight_raw.view(1, -1),
             model_weight.dtype,
@@ -78,10 +83,6 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
         # master_weight to model_weight.dtype.
         master_weight = master_weight.to(model_weight.dtype)
         quantizer.update_quantized(master_weight.view(1, -1), shard_model_weight_fp8)
-
-        amaxes.append(quantizer.amax.view(1))
-        scales.append(quantizer.scale.view(1))
-        scale_invs.append(model_weight._scale_inv.view(1))
 
     if len(amaxes) > 0:
         dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=amaxes[0].device)
