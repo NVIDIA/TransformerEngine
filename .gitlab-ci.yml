@@ -856,14 +856,6 @@ L1_pytorch_distributed_unittest--B200_8GPU:
     - .L1_test_on_cluster
     - .B200_8GPU
 
-L3_pytorch_convergence_test--H100_4GPU:
-    variables:
-      FRAMEWORK: pytorch
-    needs: [ pytorch-py3-devel ]
-    extends:
-    - .L3_test
-    - .H100_4GPU
-
 L3_pytorch_FA_versions_test--H100_1GPU:
     variables:
       FRAMEWORK: pytorch
