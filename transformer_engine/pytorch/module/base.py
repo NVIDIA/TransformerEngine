@@ -927,6 +927,17 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             param = torch.nn.Parameter(param)
             if high_precision_init_val is not None:
 
+                # - Master weights are initialized from model weights, if we use fp8 primary
+                #   weights to initialize master weights, the numerical values of master weights
+                #   are not consistent with the numerical values when we initialize them from
+                #   bf16/fp16 weights.
+                # - So we add a `_high_precision_init_val` attribute to each model weight to store
+                #   the original bf16/fp16 weight on cpu before casting it to fp8. And users can
+                #   use `get_high_precision_init_val` to get this cpu tensor.
+                # - This cpu tensor is not needed once the master weight is initialized, so users
+                #   should call `clear_high_precision_init_val` to remove it after master weight
+                #   is initialized.
+
                 def get(self):
                     if hasattr(self, "_high_precision_init_val"):
                         return self._high_precision_init_val

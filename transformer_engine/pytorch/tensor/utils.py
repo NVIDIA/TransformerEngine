@@ -20,6 +20,21 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
     for model_weight, master_weight, start_offset in zip(
         model_weights, master_weights, start_offsets
     ):
+        # Clear `_high_precision_init_val` of model_weight automatically.
+        # - Master weights are initialized from model weights, if we use fp8 primary weights to
+        #   initialize master weights, the numerical values of master weights are not consistent
+        #   with the numerical values when we initialize them from bf16/fp16 weights.
+        # - So we add a `_high_precision_init_val` attribute to each model weight to store the
+        #   original bf16/fp16 weight on cpu before casting it to fp8. And users can use
+        #   `get_high_precision_init_val` to get this cpu tensor.
+        # - This cpu tensor is not needed once the master weight is initialized, so users should
+        #   call `clear_high_precision_init_val` to remove it after master weight is initialized.
+        # - In case users don't call `clear_high_precision_init_val`, we will clear it automatically
+        #   here. It's safe to clear the `_high_precision_init_val` at this time because this
+        #   function is supposed to be called after the master weights are initialized and updated.
+        if hasattr(model_weight, "clear_high_precision_init_val"):
+            model_weight.clear_high_precision_init_val()
+
         quantizer = model_weight._get_quantizer()
         if isinstance(quantizer, Float8Quantizer):
             delayed_scaling_params.append((model_weight, master_weight, start_offset))
