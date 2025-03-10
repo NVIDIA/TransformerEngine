@@ -94,8 +94,10 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 int A0, int A1, int B0, int B1) {
   using namespace transformer_engine;
-  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
-             "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(A.scaling_mode == B.scaling_mode ||
+             (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
+             (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
+             "Inputs A and B to GEMM need to have compatible scaling modes!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret(transA, transB);
@@ -104,7 +106,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   bool transb_bool = transB == CUBLAS_OP_T;
 
   int arch = cuda::sm_arch(cuda::current_device());
-  if (A.scaling_mode == NVTE_BLOCK_SCALING) {
+  int a_major_dim;
+  int b_major_dim;
+  if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // For this scaling mode, the quantizer stores
     // rowwise data and transposes the data for columnwise
     // data so the physical layout is always row major
@@ -201,7 +205,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // For MXF8, we leave the transA/B values as is, since Blackwell supports transposes
     // but for NVTE_BLOCK_SCALING, we force transA/B to TN since the quantizers
     // store data in that manner and the GEMM requires that layout.
-    if (A.scaling_mode == NVTE_BLOCK_SCALING) {
+    if (A.scaling_mode == NVTE_BLOCK_SCALING_1D || A.scaling_mode == NVTE_BLOCK_SCALING_2D) {
       if (transA == CUBLAS_OP_T) {
         NVTE_CHECK(A.has_data(), "Input A is not suitable for rowwise usage!");
       } else {
@@ -221,7 +225,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK((ret.a_major_dim % 8) == 0,
                  "Outer dimension requirement on A for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
       // Observed this requirement only present for B tensor is 1D quantized.
-      if (B.block_scaling_dim == 1) {
+      if (B.scaling_mode == NVTE_BLOCK_SCALING_1D) {
         NVTE_CHECK(
             (ret.b_major_dim % 8) == 0,
             "Outer dimension requirement on B for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
@@ -389,8 +393,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             sizeof(dummy_a_vec_stride)));
       }
 #if CUDA_VERSION >= 12080
-    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING) &&
-               (inputB->scaling_mode == NVTE_BLOCK_SCALING)) {
+    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D || inputA->scaling_mode == inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
+               (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D || inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -399,17 +403,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
-      int block_scaling_dim_a = inputA->block_scaling_dim;
-      int block_scaling_dim_b = inputB->block_scaling_dim;
-      NVTE_CHECK((block_scaling_dim_a == 1 && block_scaling_dim_b == 1) ||
-                     (block_scaling_dim_a == 1 && block_scaling_dim_b == 2) ||
-                     (block_scaling_dim_a == 2 && block_scaling_dim_b == 1),
-                 "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported got " +
-                     std::to_string(block_scaling_dim_a) + " x " +
-                     std::to_string(block_scaling_dim_b));
-      scaling_mode_a = block_scaling_dim_a == 1 ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+      NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
+                   inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
+                 "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported got 2D by 2D");
+      scaling_mode_a = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
                                                 : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
-      scaling_mode_b = block_scaling_dim_b == 1 ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+      scaling_mode_b = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
                                                 : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
 #endif
 #endif
