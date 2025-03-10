@@ -1267,14 +1267,14 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
           "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING");
       if (output_tensor->block_scaling_dim == 2) {
-        nvte_quantize_transpose_square_blockwise(
+        quantize_transpose_square_blockwise(
             input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
             output_tensor->data, output_tensor->columnwise_data,
             /*epsilon=*/output_tensor->amax_epsilon,
             /*return_transpose=*/output_tensor->has_columnwise_data(),
             output_tensor->force_pow_2_scales, stream);
       } else if (output_tensor->block_scaling_dim == 1) {
-        nvte_quantize_transpose_vector_blockwise(
+        quantize_transpose_vector_blockwise(
             input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
             output_tensor->data, output_tensor->columnwise_data,
             /*epsilon=*/output_tensor->amax_epsilon,

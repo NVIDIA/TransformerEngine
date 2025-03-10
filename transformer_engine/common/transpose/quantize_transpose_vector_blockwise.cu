@@ -400,12 +400,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 namespace transformer_engine::detail {
 
-void nvte_quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
-                                              SimpleTensor& scale_inv_t, SimpleTensor& output,
-                                              SimpleTensor& output_t, const float epsilon,
-                                              const bool return_transpose, const bool pow2_scale,
-                                              cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_transpose_vector_blockwise);
+void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
+                                         SimpleTensor& scale_inv_t, SimpleTensor& output,
+                                         SimpleTensor& output_t, const float epsilon,
+                                         const bool return_transpose, const bool pow2_scale,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(quantize_transpose_vector_blockwise);
   NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
