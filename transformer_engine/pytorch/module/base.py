@@ -10,6 +10,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
+from types import MethodType
 
 import torch
 import torch.nn.functional as F
@@ -406,6 +407,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.sequence_parallel = False
         self.param_init_meta = {}
         self.primary_weights_in_fp8 = FP8GlobalStateManager.with_fp8_parameters()
+        self.preserve_high_precision_init_val = FP8GlobalStateManager.with_high_precision_init_val()
         self.fsdp_wrapped = False
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
@@ -906,7 +908,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
             # If primary weights are in fp8, wrap the parameter as FP8Tensor
             fp8_meta_index = self.param_init_meta[name].fp8_meta_index
+            high_precision_init_val = None
             if self.primary_weights_in_fp8 and fp8_meta_index is not None:
+                if self.preserve_high_precision_init_val:
+                    high_precision_init_val = param.detach().cpu()
+
                 quantizer = self.quantizers["scaling_fwd"][fp8_meta_index]
                 assert (
                     quantizer is not None
@@ -918,7 +924,24 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            setattr(self, name, torch.nn.Parameter(param))
+            param = torch.nn.Parameter(param)
+            if high_precision_init_val is not None:
+
+                def get(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        return self._high_precision_init_val
+                    else:
+                        return None
+
+                def clear(self):
+                    if hasattr(self, "_high_precision_init_val"):
+                        del self._high_precision_init_val
+
+                param._high_precision_init_val = high_precision_init_val
+                param.get_high_precision_init_val = MethodType(get, param)
+                param.clear_high_precision_init_val = MethodType(clear, param)
+
+            setattr(self, name, param)
 
     @abstractmethod
     def forward(self):
@@ -956,6 +979,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fsdp_group: bool, default = None
             FSDP process group that the weights are distributed over.
         """
+
+        # FP8 primary weights
+        if isinstance(tensor, QuantizedTensor):
+            if update_workspace and quantizer is not None:
+                tensor.update_usage(
+                    rowwise_usage=quantizer.rowwise_usage,
+                    columnwise_usage=quantizer.columnwise_usage,
+                )
+            return tensor
 
         # Try getting workspace from cache
         out = None

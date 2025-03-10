@@ -300,6 +300,19 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement update_usage function"
         )
 
+    def replace_raw_data(self, new_raw_data: torch.Tensor):
+        """Replace the original raw data with the new raw data passed in
+
+        Replace the original raw data with the incoming new_raw_data. This
+        is useful when we need to place multiple different tensors in a
+        continuous buffer, such as in data parallel zero-1 scenarios. This
+        method modifies only the address space of the underlying raw data
+        and should not alter any attributes or values of this tensor.
+        """
+        raise NotImplemented(
+            f"{self.__class__.__name__} class does not implement replace_raw_data function"
+        )
+
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully"""
 
