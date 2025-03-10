@@ -1528,7 +1528,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ) = [None] * 8
         if self.fp8:
             fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
-            fc1_input_quantizer.internal = False  # temporary
+            fc1_input_quantizer.internal = True
             fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
             fc1_weight_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
