@@ -1135,13 +1135,99 @@ def get_alibi(
         _alibi_cache["_alibi_bias_require_update"] = False
 
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
-
-
 # --------
 
+def get_cumul_seqlens(mask: torch.Tensor) -> torch.Tensor:
+    """
+    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
+    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
+    the samples in a batch.
+    """
+    mask = mask.squeeze(1).squeeze(1)
+    reduced_mask = mask.logical_not().sum(dim=1)
+    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
+    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.cat((zero, cu_seqlens))
+
+    return cu_seqlens
+
+
+def get_cumul_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
+    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
+    the samples in a batch, and another int32 tensor of shape [batch_size * max_seqlen, 1, 1]
+    containing the indices for the valid tokens.
+    """
+    mask = mask.squeeze(1).squeeze(1)
+    bs, seqlen = mask.shape
+
+    reduced_mask = mask.logical_not().sum(dim=1)
+    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
+    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.cat((zero, cu_seqlens))
+
+    mask = mask.reshape(-1)
+    indices = mask.logical_not().nonzero()
+    indices = indices.unsqueeze(-1)
+
+    num_nonzeros = indices.shape[0]
+    pad_amount = bs * seqlen - num_nonzeros
+    indices = F.pad(
+        input=indices, pad=(0, 0, 0, 0, 0, pad_amount), mode="constant", value=float(bs * seqlen)
+    )
+
+    return cu_seqlens, indices
+
+
+def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    """
+    Given max_seqlen and cu_seqlens of shape [batch_size + 1], returns an int32
+    tensor of shape [batch_size * max_seqlen, 1, 1] containing the indices for
+    the valid tokens in a batch.
+    """
+    bs = len(cu_seqlens) - 1
+    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+    indices = [i * max_seqlen + ii for i, j in enumerate(seqlens) for ii in range(j)]
+    indices = torch.Tensor(indices).unsqueeze(1).unsqueeze(1).to(dtype=torch.int64, device="cuda")
+
+    num_nonzeros = indices.shape[0]
+    pad_amount = bs * max_seqlen - num_nonzeros
+    indices = F.pad(
+        input=indices,
+        pad=(0, 0, 0, 0, 0, pad_amount),
+        mode="constant",
+        value=float(bs * max_seqlen),
+    )
+
+    return indices
+
+
+_cumul_seqlens_cache = {}
+
+def get_full_cumul_seqlens(
+    batch_size: int,
+    max_seqlen: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Cumulative sequence lengths in full data batch
+
+    All sequences in batch have the maximum sequence length.
+
+    """
+    global _cumul_seqlens_cache
+    if (batch_size, max_seqlen) not in _cumul_seqlens_cache:
+        _cumul_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+            0,
+            (batch_size + 1) * max_seqlen,
+            step=max_seqlen,
+            dtype=torch.int32,
+            device=device,
+        )
+    return _cumul_seqlens_cache[(batch_size, max_seqlen)]
 
 @jit_fuser
-def pack_tensor(
+def _pack_tensor(
     indices: torch.Tensor,
     tensor: torch.Tensor,
 ) -> torch.Tensor:
@@ -1165,7 +1251,7 @@ def pack_tensor(
 
 
 @jit_fuser
-def pack_2_tensors(
+def _pack_2_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
     t2: torch.Tensor,
@@ -1173,13 +1259,13 @@ def pack_2_tensors(
     """
     Packs the given 2 tensors using the `indices`.
     """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
+    t1_packed = _pack_tensor(indices, t1)
+    t2_packed = _pack_tensor(indices, t2)
     return t1_packed, t2_packed
 
 
 @jit_fuser
-def pack_3_tensors(
+def _pack_3_tensors(
     indices: torch.Tensor,
     t1: torch.Tensor,
     t2: torch.Tensor,
@@ -1188,20 +1274,20 @@ def pack_3_tensors(
     """
     Packs the given 3 tensors using the `indices`.
     """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
-    t3_packed = pack_tensor(indices, t3)
+    t1_packed = _pack_tensor(indices, t1)
+    t2_packed = _pack_tensor(indices, t2)
+    t3_packed = _pack_tensor(indices, t3)
     return t1_packed, t2_packed, t3_packed
 
 
 @jit_fuser
-def unpack_tensor(
+def _unpack_tensor(
     indices: torch.Tensor,
     dim0: int,
     tensor: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Inverse of `pack_tensor`.
+    Inverse of `_pack_tensor`.
     """
     indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
     unpacked = torch.zeros(
@@ -1218,22 +1304,22 @@ def unpack_tensor(
 
 
 @jit_fuser
-def unpack_2_tensors(
+def _unpack_2_tensors(
     indices: torch.Tensor,
     dim0: int,
     t1: torch.Tensor,
     t2: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Inverse of `pack_2_tensors`.
+    Inverse of `_pack_2_tensors`.
     """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
+    t1_unpacked = _unpack_tensor(indices, dim0, t1)
+    t2_unpacked = _unpack_tensor(indices, dim0, t2)
     return t1_unpacked, t2_unpacked
 
 
 @jit_fuser
-def unpack_3_tensors(
+def _unpack_3_tensors(
     indices: torch.Tensor,
     dim0: int,
     t1: torch.Tensor,
@@ -1241,11 +1327,11 @@ def unpack_3_tensors(
     t3: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Inverse of `pack_3_tensors`.
+    Inverse of `_pack_3_tensors`.
     """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
-    t3_unpacked = unpack_tensor(indices, dim0, t3)
+    t1_unpacked = _unpack_tensor(indices, dim0, t1)
+    t2_unpacked = _unpack_tensor(indices, dim0, t2)
+    t3_unpacked = _unpack_tensor(indices, dim0, t3)
     return t1_unpacked, t2_unpacked, t3_unpacked
 
 
@@ -1260,20 +1346,20 @@ class PackTensors(torch.autograd.Function):
         ctx.save_for_backward(indices)
         ctx.dim0 = tensors[0].shape[0]
         if len(tensors) == 1:
-            return pack_tensor(indices, *tensors)
+            return _pack_tensor(indices, *tensors)
         if len(tensors) == 2:
-            return pack_2_tensors(indices, *tensors)
-        return pack_3_tensors(indices, *tensors)
+            return _pack_2_tensors(indices, *tensors)
+        return _pack_3_tensors(indices, *tensors)
 
     @staticmethod
     def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
         # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
         if len(grad_outputs) == 1:
-            return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
+            return None, _unpack_tensor(indices, ctx.dim0, *grad_outputs)
         if len(grad_outputs) == 2:
-            return None, *unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
-        return None, *unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
+            return None, *_unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
+        return None, *_unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
 
 
 class UnpackTensor(torch.autograd.Function):
@@ -1290,17 +1376,14 @@ class UnpackTensor(torch.autograd.Function):
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
         ctx.save_for_backward(indices)
-        return unpack_tensor(indices, dim0, tensor)
+        return _unpack_tensor(indices, dim0, tensor)
 
     @staticmethod
     def backward(ctx, grad_output):
         # pylint: disable=missing-function-docstring
         (indices,) = ctx.saved_tensors
-        return None, None, pack_tensor(indices, grad_output)
-
-
-# --------
-
+        return None, None, _pack_tensor(indices, grad_output)
+#--------
 
 def get_qkv_layout(
     q: torch.Tensor,
