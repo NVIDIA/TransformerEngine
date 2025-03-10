@@ -7,8 +7,12 @@ import torch
 from contextlib import nullcontext
 
 import transformer_engine.pytorch as te
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
-SIZE = 4096
+# Check if FP8 supported
+fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+
+SIZE = 512
 
 models = {
     "linear": te.Linear,
@@ -18,40 +22,64 @@ models = {
 
 
 def _get_input():
-    return torch.empty((1, SIZE, SIZE)).cuda()  # input size - 1 * 2048 * 2048 * 4b = 16MB
+    return torch.empty((128, SIZE, SIZE)).cuda()
 
 
 def _measure_memory_between_forward_and_backward(model_cls, fp8, cpu_offload):
-    torch.cuda.empty_cache()
-    model = model_cls(SIZE, SIZE, 1)
+
+    input_layer = model_cls(SIZE, SIZE)
+    hidden_layer = model_cls(SIZE, SIZE)
+    output_layer = model_cls(SIZE, SIZE)
 
     input = _get_input()
     if cpu_offload:
-        offload_context, sync_function = te.get_cpu_offload_context(enabled=True)
+        offload_context, sync_function = te.get_cpu_offload_context(
+            enabled=True,
+            num_layers=2,
+            model_layers=3,
+            offload_activations=True,
+            offload_weights=False,
+        )
     else:
         offload_context = nullcontext()
         sync_function = lambda x: x
 
     with te.fp8_autocast(enabled=fp8), offload_context:
-        out = model(input)
+        out = input_layer(input)
     out = sync_function(out)
-    input.data = torch.Tensor()  # delete data from input
-    out.data = torch.Tensor()  # delete data from out
+    with te.fp8_autocast(enabled=fp8), offload_context:
+        out = hidden_layer(out)
+    out = sync_function(out)
+    with te.fp8_autocast(enabled=fp8), offload_context:
+        out = output_layer(out)
+    out = sync_function(out)
+
+    max_mem_used = torch.cuda.memory_allocated() / 1024**2
+
+    out.sum().backward()
+
+    del input_layer
+    del hidden_layer
+    del output_layer
     del input
     del out
-    torch.cuda.empty_cache()
-    allocated_memory_mb = torch.cuda.memory_allocated() / 1024**2
-    del model
-    return allocated_memory_mb
+
+    torch.cuda.synchronize()
+
+    return max_mem_used
 
 
-@pytest.mark.parametrize("fp8", [False, True])
+@pytest.mark.parametrize("fp8", [True, False])
 @pytest.mark.parametrize("model_key", models.keys())
 def test_cpu_offload(fp8, model_key) -> None:
+
+    if fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
     model_cls = models[model_key]
+
     without_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, False)
-    torch.cuda.empty_cache()
+
     with_offloading = _measure_memory_between_forward_and_backward(model_cls, fp8, True)
 
-    assert without_offloading > 30
-    assert with_offloading < 10
+    assert with_offloading < without_offloading

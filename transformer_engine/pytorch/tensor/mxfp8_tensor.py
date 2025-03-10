@@ -285,10 +285,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
-        """Prepare the tensor base for saving for backward"""
-        return [self], None
-
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
