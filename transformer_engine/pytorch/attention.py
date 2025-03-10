@@ -349,169 +349,6 @@ def _get_full_cu_seqlens(
         )
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
-
-@jit_fuser
-def pack_tensor(
-    indices: torch.Tensor,
-    tensor: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Packs the given tensor using the `indices`.
-    """
-    padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
-    )
-    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    if isinstance(tensor, Float8Tensor):
-        tensor_data = torch.cat((tensor._data, padding_indice), dim=0)
-        gathered_data = torch.gather(tensor_data, 0, indices)
-
-        packed = Float8Tensor.make_like(tensor, data=gathered_data, shape=gathered_data.shape)
-    else:
-        tensor = torch.cat((tensor, padding_indice), dim=0)
-
-        packed = torch.gather(tensor, 0, indices)
-    return packed
-
-
-@jit_fuser
-def pack_2_tensors(
-    indices: torch.Tensor,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Packs the given 2 tensors using the `indices`.
-    """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
-    return t1_packed, t2_packed
-
-
-@jit_fuser
-def pack_3_tensors(
-    indices: torch.Tensor,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Packs the given 3 tensors using the `indices`.
-    """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
-    t3_packed = pack_tensor(indices, t3)
-    return t1_packed, t2_packed, t3_packed
-
-
-@jit_fuser
-def unpack_tensor(
-    indices: torch.Tensor,
-    dim0: int,
-    tensor: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Inverse of `pack_tensor`.
-    """
-    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
-    )
-    if isinstance(tensor, Float8Tensor):
-        unpacked.scatter_(0, indices, tensor._data)
-        unpacked_data = unpacked[0:-1, :, :]
-        unpacked = Float8Tensor.make_like(tensor, data=unpacked_data, shape=unpacked_data.shape)
-    else:
-        unpacked.scatter_(0, indices, tensor)
-        unpacked = unpacked[0:-1, :, :]
-    return unpacked
-
-
-@jit_fuser
-def unpack_2_tensors(
-    indices: torch.Tensor,
-    dim0: int,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Inverse of `pack_2_tensors`.
-    """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
-    return t1_unpacked, t2_unpacked
-
-
-@jit_fuser
-def unpack_3_tensors(
-    indices: torch.Tensor,
-    dim0: int,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Inverse of `pack_3_tensors`.
-    """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
-    t3_unpacked = unpack_tensor(indices, dim0, t3)
-    return t1_unpacked, t2_unpacked, t3_unpacked
-
-
-class PackTensors(torch.autograd.Function):
-    """
-    Autograd function to pack tensors.
-    """
-
-    @staticmethod
-    def forward(
-        ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
-        # pylint: disable=missing-function-docstring
-        assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
-        ctx.save_for_backward(indices)
-        ctx.dim0 = tensors[0].shape[0]
-        if len(tensors) == 1:
-            return pack_tensor(indices, *tensors)
-        if len(tensors) == 2:
-            return pack_2_tensors(indices, *tensors)
-        return pack_3_tensors(indices, *tensors)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
-        # pylint: disable=missing-function-docstring
-        (indices,) = ctx.saved_tensors
-        if len(grad_outputs) == 1:
-            return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
-        if len(grad_outputs) == 2:
-            return None, *unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
-        return None, *unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
-
-
-class UnpackTensor(torch.autograd.Function):
-    """
-    Autograd function to unpack a tensor.
-    """
-
-    @staticmethod
-    def forward(
-        ctx,
-        indices: torch.Tensor,
-        dim0: int,
-        tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        # pylint: disable=missing-function-docstring
-        ctx.save_for_backward(indices)
-        return unpack_tensor(indices, dim0, tensor)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # pylint: disable=missing-function-docstring
-        (indices,) = ctx.saved_tensors
-        return None, None, pack_tensor(indices, grad_output)
-
-
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -4559,7 +4396,7 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                     cu_seqlens_kv = cu_seqlens_q
-                    query_layer, key_layer, value_layer = PackTensors.apply(
+                    query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
                         indices_q, query_layer, key_layer, value_layer
                     )
                 else:
@@ -4572,8 +4409,8 @@ class FlashAttention(torch.nn.Module):
                     else:
                         indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer = PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
+                    query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
+                    key_layer, value_layer = dpa_utils.PackTensors.apply(indices_kv, key_layer, value_layer)
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
@@ -4740,7 +4577,7 @@ class FlashAttention(torch.nn.Module):
                     )
 
         if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type:
-            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+            output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
 
         if qkv_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
