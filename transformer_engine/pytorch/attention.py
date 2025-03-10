@@ -258,6 +258,7 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
 
+
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -4301,7 +4302,9 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(attention_mask)
+                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(
+                            attention_mask
+                        )
                     else:
                         indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
                     cu_seqlens_kv = cu_seqlens_q
@@ -4313,8 +4316,12 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(attention_mask[0])
-                        cu_seqlens_kv, indices_kv = dpa_utils.get_cumul_seqlens_and_indices(attention_mask[1])
+                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(
+                            attention_mask[0]
+                        )
+                        cu_seqlens_kv, indices_kv = dpa_utils.get_cumul_seqlens_and_indices(
+                            attention_mask[1]
+                        )
                     else:
                         indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
                         indices_kv = dpa_utils.get_indices(max_seqlen_kv, cu_seqlens_kv)
