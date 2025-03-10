@@ -21,13 +21,10 @@ def prepare_for_saving(
     """Prepare tensors for saving. Needed because save_for_backward accepts only
     torch.Tensor/torch.nn.Parameter types, while we want to be able to save
     the internal TensorBase types too."""
-    # pylint: disable=unidiomatic-typecheck  # Using type instead of isinstance to check exact type
+
     tensor_list, tensor_objects_list = [], []
     for tensor in tensors:
-        if tensor is None:
-            tensor_list.append(None)
-            tensor_objects_list.append(None)
-        elif isinstance(tensor, torch.Tensor):
+        if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_list.append(tensor)
             tensor_objects_list.append(None)
         else:
@@ -44,7 +41,7 @@ def restore_from_saved(
     """Recombine the tensor data and metadata during backward pass."""
     tensor_objects = []
     for tensor in tensors:
-        if tensor is None:
+        if tensor is None or isinstance(tensor, torch.Tensor):
             tensor_objects.append(saved_tensors[0])
             saved_tensors = saved_tensors[1:]
         else:
@@ -289,7 +286,11 @@ class QuantizedTensor(torch.Tensor):
             f"{self.__class__.__name__} class does not implement detach function"
         )
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
         """Indicate to the tensor how it is going to be used
 
         This enables optimizations to memory usage in some cases

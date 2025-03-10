@@ -555,7 +555,7 @@ class TensorWrapper {
    *  \return Number of elements in the tensor.
    */
   size_t numel() const noexcept {
-    if (tensor_ == nullptr || this->dptr() == nullptr) return 0;
+    if (tensor_ == nullptr) return 0;
     return nvte_tensor_numel(tensor_);
   }
 
