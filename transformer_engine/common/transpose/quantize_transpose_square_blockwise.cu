@@ -446,14 +446,6 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
-PFN_cuTensorMapEncodeTiled get_cuTensorMapEncodeTiled() {
-  void* driver_ptr = nullptr;
-  cudaDriverEntryPointQueryResult driver_status;
-  NVTE_CHECK_CUDA(cudaGetDriverEntryPoint("cuTensorMapEncodeTiled", &driver_ptr, cudaEnableDefault,
-                                          &driver_status));
-  return reinterpret_cast<PFN_cuTensorMapEncodeTiled>(driver_ptr);
-}
-
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -465,44 +457,9 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
   }
 
   CUtensorMap tensor_map_output_trans{};
-  // create_2D_tensor_map(tensor_map_output_trans, tensor,
-  //                      global_dim_y, global_dim_x, /*shmemY=*/ BLOCK_TILE_DIM, /*shmemX=*/ BLOCK_TILE_DIM, /*stride_elems=*/ global_dim_x, /*offset_elems=*/ 0, sizeof(OutputType));
-  // return tensor_map_output_trans;
-  // rank is the number of dimensions of the array.
-  constexpr uint32_t rank = 2;
-  uint64_t size[rank] = {global_dim_x, global_dim_y};  // x, y
-  // The stride is the number of bytes to traverse from the first element of one row to the next.
-  // It must be a multiple of 16.
-  uint64_t stride[rank - 1] = {global_dim_x * sizeof(OutputType)};
-  // The box_size is the size of the shared memory buffer that is used as the
-  // destination of a TMA transfer.
-  uint32_t box_size[rank] = {BLOCK_TILE_DIM, BLOCK_TILE_DIM};
-  // The distance between elements in units of sizeof(element). A stride of 2
-  // can be used to load only the real component of a complex-valued tensor, for instance.
-  uint32_t elem_stride[rank] = {1, 1};
-
-  // Get a function pointer to the cuTensorMapEncodeTiled driver API.
-  auto cuTensorMapEncodeTiled = get_cuTensorMapEncodeTiled();
-
-
-
-  // Create the tensor descriptor.
-  CUresult res = cuTensorMapEncodeTiled(
-      &tensor_map_output_trans,  // CUtensorMap *tensorMap,
-      dataType,
-      rank,                                        // cuuint32_t tensorRank,
-      reinterpret_cast<OutputType*>(tensor.dptr),  // void *globalAddress,
-      size,                                        // const cuuint64_t *globalDim,
-      stride,                                      // const cuuint64_t *globalStrides,
-      box_size,                                    // const cuuint32_t *boxDim,
-      elem_stride,                                 // const cuuint32_t *elementStrides,
-      CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-      // Swizzling can be used to avoid shared memory bank conflicts.
-      CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
-      CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
-      // Any element that is outside of bounds will be set to zero by the TMA transfer.
-      CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-
+  create_2D_tensor_map(tensor_map_output_trans, tensor, global_dim_y, global_dim_x,
+                       /*shmemY=*/BLOCK_TILE_DIM, /*shmemX=*/BLOCK_TILE_DIM,
+                       /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType));
   return tensor_map_output_trans;
 }
 
