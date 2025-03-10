@@ -455,9 +455,19 @@ PFN_cuTensorMapEncodeTiled get_cuTensorMapEncodeTiled() {
 }
 
 template <typename OutputType>
-CUtensorMap get_tensor_map(SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
-  // example-begin create-tensor-map
+CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
+  CUtensorMapDataType dataType;
+  if constexpr (std::is_same_v<OutputType, __nv_fp8_e4m3> ||
+                std::is_same_v<OutputType, __nv_fp8_e5m2>) {
+    dataType = CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8;
+  } else {
+    NVTE_CHECK(false, "Invalid Output type (must be FP8).");
+  }
+
   CUtensorMap tensor_map_output_trans{};
+  // create_2D_tensor_map(tensor_map_output_trans, tensor,
+  //                      global_dim_y, global_dim_x, /*shmemY=*/ BLOCK_TILE_DIM, /*shmemX=*/ BLOCK_TILE_DIM, /*stride_elems=*/ global_dim_x, /*offset_elems=*/ 0, sizeof(OutputType));
+  // return tensor_map_output_trans;
   // rank is the number of dimensions of the array.
   constexpr uint32_t rank = 2;
   uint64_t size[rank] = {global_dim_x, global_dim_y};  // x, y
@@ -473,14 +483,8 @@ CUtensorMap get_tensor_map(SimpleTensor& tensor, size_t global_dim_x, size_t glo
 
   // Get a function pointer to the cuTensorMapEncodeTiled driver API.
   auto cuTensorMapEncodeTiled = get_cuTensorMapEncodeTiled();
-  CUtensorMapDataType dataType;
 
-  if constexpr (std::is_same_v<OutputType, __nv_fp8_e4m3> ||
-                std::is_same_v<OutputType, __nv_fp8_e5m2>) {
-    dataType = CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT8;
-  } else {
-    NVTE_CHECK(false, "Invalid Output type (must be FP8).");
-  }
+
 
   // Create the tensor descriptor.
   CUresult res = cuTensorMapEncodeTiled(
@@ -507,12 +511,12 @@ CUtensorMap get_tensor_map(SimpleTensor& tensor, size_t global_dim_x, size_t glo
 
 namespace transformer_engine::detail {
 
-void nvte_quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
-                                              SimpleTensor& scale_inv_t, SimpleTensor& output,
-                                              SimpleTensor& output_t, const float epsilon,
-                                              const bool return_transpose, const bool pow_2_scale,
-                                              cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_transpose_square_blockwise);
+void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor& scale_inv,
+                                         SimpleTensor& scale_inv_t, SimpleTensor& output,
+                                         SimpleTensor& output_t, const float epsilon,
+                                         const bool return_transpose, const bool pow_2_scale,
+                                         cudaStream_t stream) {
+  NVTE_API_CALL(quantize_transpose_square_blockwise);
   NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_rows = 1;
