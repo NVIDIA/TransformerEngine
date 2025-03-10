@@ -45,7 +45,7 @@ extern "C" {
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8.
  *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
  *         the MXFP8 block quantization of the specified shape of the block will be used.
- *         If the scaling mode of the output tensor is set to NVTE_BLOCK_SCALING,
+ *         If the scaling mode of the output tensor is set to NVTE_BLOCK_SCALING_1D or NVTE_BLOCK_SCALING_2D,
  *         blockwise float8 scaling will be used.
  *
  *  \param[in]     input            Input tensor to be cast.
