@@ -12,8 +12,12 @@ import torch
 
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
 from transformer_engine.pytorch.attention import (
-    InferenceParams,
     MultiheadAttention,
+)
+from transformer_engine.pytorch.dot_product_attention.inference import (
+    InferenceParams,
+)
+from transformer_engine.pytorch.dot_product_attention.utils import (
     check_set_window_size,
 )
 from transformer_engine.pytorch.jit import (

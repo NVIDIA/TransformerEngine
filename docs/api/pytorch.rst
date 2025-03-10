@@ -31,7 +31,7 @@ pyTorch
 .. autoapiclass:: transformer_engine.pytorch.TransformerLayer(hidden_size, ffn_hidden_size, num_attention_heads, **kwargs)
   :members: forward, set_context_parallel_group, set_tensor_parallel_group
 
-.. autoapiclass:: transformer_engine.pytorch.InferenceParams(max_batch_size, max_sequence_length)
+.. autoapiclass:: transformer_engine.pytorch.dot_product_attention.inference.InferenceParams(max_batch_size, max_sequence_length)
 
 .. autoapiclass:: transformer_engine.pytorch.CudaRNGStatesTracker()
   :members: reset, get_states, set_states, add, fork
