@@ -38,7 +38,6 @@ from .misc import (
     get_padded_spec,
     get_cudnn_version,
     is_ffi_enabled,
-    get_xla_flag,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -1607,14 +1606,7 @@ class _FusedAttnCPWithP2PHelper:
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
         use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "1")))
-
-        # nvbug(4675071): Disable the HLO verifier for channel ID checks.
-        # A WAR was added to XLA: https://github.com/openxla/xla/pull/16779
-        def truthy(val):
-            return val.lower() in ["1", "true"]
-
-        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
-        return x
+        return use_scan
 
     def check_supported(self):
         """Checks if the context parallel implementation is supported by the given arguments."""
@@ -1659,8 +1651,7 @@ class _FusedAttnCPWithP2PHelper:
         if not self.use_scanloop():
             warnings.warn(
                 "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment and"
-                " add --xla_experimental_ignore_channel_id=true to XLA_FLAGS."
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
             )
 
     def get_step_config(self, attn_mask_type) -> _FusedAttnConfig:
