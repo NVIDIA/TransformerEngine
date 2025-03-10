@@ -258,98 +258,6 @@ class InferenceParams:  # pylint: disable=too-few-public-methods
                 new_inference_value_memory,
             )
 
-
-def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
-    """
-    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
-    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
-    the samples in a batch.
-    """
-    mask = mask.squeeze(1).squeeze(1)
-    reduced_mask = mask.logical_not().sum(dim=1)
-    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.cat((zero, cu_seqlens))
-
-    return cu_seqlens
-
-
-def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
-    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
-    the samples in a batch, and another int32 tensor of shape [batch_size * max_seqlen, 1, 1]
-    containing the indices for the valid tokens.
-    """
-    mask = mask.squeeze(1).squeeze(1)
-    bs, seqlen = mask.shape
-
-    reduced_mask = mask.logical_not().sum(dim=1)
-    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.cat((zero, cu_seqlens))
-
-    mask = mask.reshape(-1)
-    indices = mask.logical_not().nonzero()
-    indices = indices.unsqueeze(-1)
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices, pad=(0, 0, 0, 0, 0, pad_amount), mode="constant", value=float(bs * seqlen)
-    )
-
-    return cu_seqlens, indices
-
-
-def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
-    """
-    Given max_seqlen and cu_seqlens of shape [batch_size + 1], returns an int32
-    tensor of shape [batch_size * max_seqlen, 1, 1] containing the indices for
-    the valid tokens in a batch.
-    """
-    bs = len(cu_seqlens) - 1
-    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    indices = [i * max_seqlen + ii for i, j in enumerate(seqlens) for ii in range(j)]
-    indices = torch.Tensor(indices).unsqueeze(1).unsqueeze(1).to(dtype=torch.int64, device="cuda")
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * max_seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices,
-        pad=(0, 0, 0, 0, 0, pad_amount),
-        mode="constant",
-        value=float(bs * max_seqlen),
-    )
-
-    return indices
-
-
-_cu_seqlens_cache = {}
-
-
-def _get_full_cu_seqlens(
-    batch_size: int,
-    max_seqlen: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Cumulative sequence lengths in full data batch
-
-    All sequences in batch have the maximum sequence length.
-
-    """
-    global _cu_seqlens_cache
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
-            0,
-            (batch_size + 1) * max_seqlen,
-            step=max_seqlen,
-            dtype=torch.int32,
-            device=device,
-        )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
-
-
 def flash_attn_p2p_communicate(
     rank, send_tensor, send_dst, recv_tensor, recv_src, cp_group, batch_p2p_comm
 ):
@@ -2701,7 +2609,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     )
                     max_seqlen_kv_ = seq_end_idx - seq_start_idx
                     if use_fused_attention or qkv_format == "thd":
-                        cu_seqlens_kv_per_step[i] = _get_full_cu_seqlens(
+                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cumul_seqlens(
                             k.shape[1], max_seqlen_kv_, k.device
                         )
                     k_, v_ = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
@@ -4393,9 +4301,9 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(attention_mask)
                     else:
-                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
+                        indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
                     cu_seqlens_kv = cu_seqlens_q
                     query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
                         indices_q, query_layer, key_layer, value_layer
@@ -4405,11 +4313,11 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
-                        cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
+                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(attention_mask[0])
+                        cu_seqlens_kv, indices_kv = dpa_utils.get_cumul_seqlens_and_indices(attention_mask[1])
                     else:
-                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                        indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
+                        indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                        indices_kv = dpa_utils.get_indices(max_seqlen_kv, cu_seqlens_kv)
                     query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
                     key_layer, value_layer = dpa_utils.PackTensors.apply(
                         indices_kv, key_layer, value_layer
@@ -4417,13 +4325,13 @@ class FlashAttention(torch.nn.Module):
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
-                    cu_seqlens_q = _get_full_cu_seqlens(
+                    cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
                         batch_size,
                         max_seqlen_q,
                         query_layer.device,
                     )
                 if cu_seqlens_kv is None:
-                    cu_seqlens_kv = _get_full_cu_seqlens(
+                    cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
                         batch_size,
                         max_seqlen_kv,
                         key_layer.device,
@@ -5238,20 +5146,20 @@ class FusedAttention(torch.nn.Module):
                             "Please provide attention_mask or cu_seqlens for padding!"
                         )
                     if self.attention_type == "self":
-                        cu_seqlens_q = get_cu_seqlens(attention_mask)
+                        cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask)
                         cu_seqlens_kv = cu_seqlens_q
                     else:
-                        cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                        cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                        cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask[0])
+                        cu_seqlens_kv = dpa_utils.get_cumul_seqlens(attention_mask[1])
             else:
                 if cu_seqlens_q is None:
-                    cu_seqlens_q = _get_full_cu_seqlens(
+                    cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
                         batch_size,
                         max_seqlen_q,
                         query_layer.device,
                     )
                 if cu_seqlens_kv is None:
-                    cu_seqlens_kv = _get_full_cu_seqlens(
+                    cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
                         batch_size,
                         max_seqlen_kv,
                         key_layer.device,
@@ -5777,7 +5685,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             and should be used with care.
 
         .. note::
-            .. _cu_seqlens note:
+            .. _cumul_seqlens note:
 
             When training data has variable sequence lengths, users have two options.
 
@@ -6111,18 +6019,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
-                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask)
                             cu_seqlens_kv = cu_seqlens_q
                         else:
-                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                            cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask[0])
+                            cu_seqlens_kv = dpa_utils.get_cumul_seqlens(attention_mask[1])
                     else:
-                        cu_seqlens_q = _get_full_cu_seqlens(
+                        cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
                             batch_size,
                             max_seqlen_q,
                             query_layer.device,
                         )
-                        cu_seqlens_kv = _get_full_cu_seqlens(
+                        cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
                             batch_size,
                             max_seqlen_kv,
                             key_layer.device,
