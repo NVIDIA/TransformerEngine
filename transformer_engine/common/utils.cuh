@@ -844,7 +844,7 @@ __device__ __forceinline__ compute_t reduce_max(const compute_t m, const int war
     staging[warpid] = my_warp_max;
   }
   __syncthreads();
-  compute_t result = 0;
+  compute_t result = 0.f;
   if (warpid == 0) {
     const float my_max = threadIdx.x < num_warps ? staging[threadIdx.x] : 0;
     result = warp_reduce_max<num_warps>(my_max);

@@ -12,8 +12,16 @@ import torch
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8Tensor,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.constants import TE_DType, TE_DType_To_Torch
+from transformer_engine.pytorch.utils import non_tn_fp8_gemm_supported
 import transformer_engine_torch as tex
+
+from references.ref_per_tensor_cs import ref_per_tensor_cs_cast
 
 # PyTorch tensor dtypes
 _dtypes: List[torch.dtype] = [torch.float32, torch.float16, torch.bfloat16]
@@ -42,6 +50,7 @@ DimsType = Union[Iterable[int], int]
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 
+# delayed scaling
 def to_float8(
     tensor: torch.Tensor,
     fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
@@ -54,6 +63,29 @@ def to_float8(
         fp8_dtype=fp8_dtype,
     )
     return quantizer(tensor.cuda())
+
+
+# current scaling
+def to_float8_CS(
+    tensor: torch.Tensor,
+    fp8_dtype: tex.DType = tex.DType.kFloat8E4M3,
+    return_transpose: bool = False,
+    force_pow_2_scales: bool = False,
+    amax_epsilon: float = 0.0,
+) -> Float8Tensor:
+    """Cast tensor to FP8"""
+    tensor = tensor.cuda()
+    quantizer = Float8CurrentScalingQuantizer(
+        fp8_dtype=fp8_dtype,
+        device=tensor.device,
+        force_pow_2_scales=force_pow_2_scales,
+        amax_epsilon=amax_epsilon,
+    )
+    if return_transpose:
+        quantizer.set_usage(rowwise=True, columnwise=True)
+    else:
+        quantizer.set_usage(rowwise=True, columnwise=False)
+    return quantizer(tensor)
 
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
@@ -310,3 +342,89 @@ class TestFloat8Tensor:
         assert x.size() == y.size()
         assert x.dtype == y.dtype
         assert x.device == y.device
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+class TestCurrentScalingFloat8Tensor:
+
+    @staticmethod
+    def setup_class(cls) -> None:
+        # Configure RNG
+        seed = 1234
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
+    @pytest.mark.parametrize("fp8_dtype", _fp8_dtypes)
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize(
+        "dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3], [128, 128], [611, 782]]
+    )
+    @pytest.mark.parametrize("return_transpose", [True, False], ids=str)
+    @pytest.mark.parametrize("force_pow_2_scales", [True, False], ids=str)
+    @pytest.mark.parametrize("amax_epsilon", [0.0, 1e-6], ids=str)
+    def test_quantize(
+        self,
+        fp8_dtype: tex.DType,
+        dtype: torch.dtype,
+        dims: DimsType,
+        return_transpose: bool,
+        force_pow_2_scales: bool,
+        amax_epsilon: float,
+    ) -> None:
+        """Check numerical error when casting to FP8"""
+
+        # Skip invalid configurations
+        if non_tn_fp8_gemm_supported() and return_transpose:
+            pytest.skip("FP8 transpose is neither needed nor supported on current system")
+
+        # Initialize random high precision data
+        device = "cuda"
+        x_hp = 2 * torch.rand(_to_list(dims), dtype=dtype, device=device) - 1
+
+        # Cast to FP8 and back
+        x_fp8 = to_float8_CS(
+            x_hp,
+            fp8_dtype=fp8_dtype,
+            return_transpose=return_transpose,
+            force_pow_2_scales=force_pow_2_scales,
+            amax_epsilon=amax_epsilon,
+        )
+
+        # get reference implementation of current scaling
+        x_fp8_ref, sx_ref, x_fp8_t_ref, _ = ref_per_tensor_cs_cast(
+            x_hp,
+            fp8_dtype=fp8_dtype,
+            return_transpose=return_transpose,
+            force_pow_2_scales=force_pow_2_scales,
+            amax_epsilon=amax_epsilon,
+        )
+
+        torch.testing.assert_close(x_fp8._data, x_fp8_ref.view(torch.uint8), atol=0.0, rtol=0.0)
+        torch.testing.assert_close(x_fp8._scale_inv, sx_ref, atol=0.0, rtol=0.0)
+        if return_transpose:
+            torch.testing.assert_close(
+                x_fp8._transpose, x_fp8_t_ref.view(torch.uint8), atol=0.0, rtol=0.0
+            )
+
+    @pytest.mark.parametrize("fp8_dtype", [tex.DType.kFloat8E4M3], ids=str)
+    @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=str)
+    @pytest.mark.parametrize("dims", [[], 1, 311, [7, 11], [7, 5, 3], [2, 3, 5, 3]])
+    def test_quantize_dequantize(
+        self, fp8_dtype: tex.DType, dtype: torch.dtype, dims: DimsType
+    ) -> None:
+        """Check numerical error when casting to FP8 and back"""
+
+        # Initialize random high precision data
+        device = "cuda"
+        x_hp = 2 * torch.rand(_to_list(dims), dtype=dtype, device=device) - 1
+
+        # Cast to FP8 and back
+        x_fp8 = to_float8_CS(x_hp, fp8_dtype=fp8_dtype)
+        x_fp8_dequantized = x_fp8.dequantize()
+
+        # Check results
+        torch.testing.assert_close(x_fp8_dequantized, x_hp, **_tols[fp8_dtype])
+
+        # Make sure we are not trivially passing the test
+        with pytest.raises(AssertionError):
+            torch.testing.assert_close(x_fp8_dequantized, -x_hp, **_tols[fp8_dtype])

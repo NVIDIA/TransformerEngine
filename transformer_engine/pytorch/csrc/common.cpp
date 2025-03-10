@@ -46,15 +46,22 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
   NVTE_CHECK(!tensor.is_none(), "Tensor is not allocated!");
   std::unique_ptr<Quantizer> my_quantizer = convert_quantizer(quantizer);
+  // check for both quantizer & tensor type:
+  // mxfp8 tensor -> mxfp8 quantizer
+  // float8 tensor -> delayed scaling quantizer OR current scaling quantizer
+  // also during dequantize, the quantizer param is unknown -> so quantizer is NoneQuantizer
   for (auto [check_type, check_quantizer_type, create_tensor, _] :
        detail::custom_types_converters) {
     if (check_type(tensor.ptr())) {
-      NVTE_CHECK(quantizer.is_none() || check_quantizer_type(quantizer.ptr()),
-                 "Unexpected quantization params type.");
+      if (!(quantizer.is_none() || check_quantizer_type(quantizer.ptr()))) {
+        continue;
+      }
       auto x = create_tensor(tensor, my_quantizer.get());
       return x;
     }
   }
+  NVTE_CHECK(dynamic_cast<NoneQuantizer*>(my_quantizer.get()) != nullptr,
+             "Unexpected quantization params type.");
 
   // Regular pyTorch tensor
   at::Tensor torch_tensor = tensor.cast<at::Tensor>();

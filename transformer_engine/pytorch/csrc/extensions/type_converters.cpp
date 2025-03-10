@@ -23,7 +23,8 @@ TensorWrapper NVTETensorFromFloat8Tensor(py::handle tensor, Quantizer *quantizer
   if (transpose_valid) {
     transpose = tensor.attr("_transpose").cast<std::optional<at::Tensor>>();
   }
-
+  // In the case of being called under tex.dequantize, the quantizer will be NoneQuantizer
+  // whose scaling mode is defaulted to NVTE_DELAYED_TENSOR_SCALING
   auto ret = TensorWrapper(quantizer->get_scaling_mode());
 
   ret.set_rowwise_data(data.data_ptr(), dtype, shape);
