@@ -128,12 +128,13 @@ class _Linear(torch.autograd.Function):
         own_quantized_input = False
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
-            if (
-                any([ub_overlap_ag_fprop, ub_overlap_rs_fprop])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+            if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().delayed()
+                or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
             if input_quantizer is None:
@@ -149,10 +150,14 @@ class _Linear(torch.autograd.Function):
                     quantizer=input_quantizer,
                 )
             else:
-                input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=backward_needs_input,
-                )
+                if ub_bulk_dgrad:
+                    # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    input_quantizer.set_usage(
+                        rowwise=True,
+                        columnwise=backward_needs_input,
+                    )
                 if not isinstance(inputmat, QuantizedTensor):
                     inputmat = input_quantizer(inputmat)
                 elif backward_needs_input:
@@ -354,9 +359,10 @@ class _Linear(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.delayed():
+                if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors
@@ -424,6 +430,7 @@ class _Linear(torch.autograd.Function):
                     ub_obj_dgrad = ctx.ub_obj_gradout
                     ub_type_dgrad = tex.CommOverlapType.AG
                     ub_obj_dgrad.copy_into_buffer(inputmat, ctx.input_quantizer, local_chunk=True)
+                    inputmat = ub_obj_dgrad.get_buffer(ctx.input_quantizer)
 
                 if ctx.ub_bulk_wgrad:
                     # Overlap dgrad reduce-scatter with wgrad compute
