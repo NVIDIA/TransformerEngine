@@ -88,6 +88,9 @@ class _GroupedLinear(torch.autograd.Function):
         # TODO Support MXFP8  # pylint: disable=fixme
         if fp8 and FP8GlobalStateManager.get_fp8_recipe().mxfp8():
             raise NotImplementedError("GroupedLinear does not yet support MXFP8")
+        # TODO Support Float8 Current Scaling  # pylint: disable=fixme
+        if fp8 and FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling():
+            raise NotImplementedError("GroupedLinear does not yet support Float8 Current Scaling")
 
         # Make sure input dimensions are compatible
         in_features = weights[0].shape[-1]
@@ -178,7 +181,6 @@ class _GroupedLinear(torch.autograd.Function):
 
         if is_grad_enabled:
 
-            saved_inputs, saved_weights = [], []
             ctx.weights_shape_1 = weights[0].shape[1]
 
             tensors_to_save, tensor_objects = prepare_for_saving(*inputmats, *weights_fp8, *biases)
@@ -186,9 +188,11 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.weights_requires_grad = weights[0].requires_grad
+            if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+                ctx.main_grads = [weights[i].main_grad for i in range(num_gemms)]
+            else:
+                ctx.main_grads = [None] * num_gemms
             ctx.device = device
-            ctx.saved_inputs = saved_inputs
-            ctx.saved_weights = saved_weights
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.m_splits = m_splits
             ctx.num_gemms = num_gemms
@@ -220,7 +224,7 @@ class _GroupedLinear(torch.autograd.Function):
             inputmats = saved_tensors[:N]
             weights = saved_tensors[N : 2 * N]
             biases = saved_tensors[2 * N : 3 * N]
-            main_grads = saved_tensors[3 * N :]
+            main_grads = ctx.main_grads
 
             if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:  # TOSO
                 for i in ctx.num_gemms:
@@ -269,9 +273,10 @@ class _GroupedLinear(torch.autograd.Function):
                 general_grouped_gemm(
                     weights,
                     grad_output,
-                    torch.split(dgrad, ctx.m_splits),
+                    [dgrad],
                     ctx.activation_dtype,
                     get_multi_stream_cublas_workspace(),
+                    single_output=True,
                     layout="NN",
                     m_splits=ctx.m_splits,
                     grad=True,
@@ -280,31 +285,31 @@ class _GroupedLinear(torch.autograd.Function):
 
             if ctx.weights_requires_grad:
                 if ctx.fuse_wgrad_accumulation:
-                    wgrad_list = [w.main_grad for w in weights]
+                    wgrad_list = main_grads
                 else:
                     wgrad_list = [
                         torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
                         for w in weights
                     ]
-                    # WGRAD
-                    _, grad_biases_, _ = general_grouped_gemm(
-                        inputmats,
-                        grad_output,
-                        wgrad_list,
-                        ctx.activation_dtype,
-                        get_multi_stream_cublas_workspace(),
-                        layout="NT",
-                        grad=True,
-                        m_splits=ctx.m_splits,
-                        use_bias=ctx.use_bias if grad_biases[0] is None else None,
-                        bias=biases,
-                        use_split_accumulator=_2X_ACC_WGRAD,
-                        accumulate=accumulate_wgrad_into_param_main_grad,
-                    )
-                    for i in range(ctx.num_gemms):
-                        if grad_biases[i] is None:
-                            grad_biases[i] = grad_biases_[i]
-                    del grad_biases_
+                # WGRAD
+                _, grad_biases_, _ = general_grouped_gemm(
+                    inputmats,
+                    grad_output,
+                    wgrad_list,
+                    ctx.activation_dtype,
+                    get_multi_stream_cublas_workspace(),
+                    layout="NT",
+                    grad=True,
+                    m_splits=ctx.m_splits,
+                    use_bias=ctx.use_bias if grad_biases[0] is None else None,
+                    bias=biases,
+                    use_split_accumulator=_2X_ACC_WGRAD,
+                    accumulate=accumulate_wgrad_into_param_main_grad,
+                )
+                for i in range(ctx.num_gemms):
+                    if grad_biases[i] is None:
+                        grad_biases[i] = grad_biases_[i]
+                del grad_biases_
 
                 # Deallocate input tensor
                 clear_tensor_data(*inputmats)

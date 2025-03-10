@@ -65,7 +65,6 @@ list(APPEND transformer_engine_SOURCES
      activation/swiglu.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/fused_attn.cpp
-     fused_attn/thd_utils.cu
      fused_attn/utils.cu
      gemm/cublaslt_gemm.cu
      normalization/common.cpp
@@ -79,14 +78,15 @@ list(APPEND transformer_engine_SOURCES
      util/cast.cu
      util/padding.cu
      util/cuda_driver.cpp
+     util/cuda_nvml.cpp
      util/cuda_runtime.cpp
      util/rtc.cpp
-     util/system.cpp
      swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp

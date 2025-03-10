@@ -35,6 +35,8 @@ void compute_ref(const InputType *data, OutputType *output_c,
   *amax = current_max;
 }
 
+
+// delayed tensor scaling test
 template <typename InputType, typename OutputType>
 void performTest(const std::vector<size_t>& shape) {
   using namespace test;
@@ -55,6 +57,7 @@ void performTest(const std::vector<size_t>& shape) {
   nvte_quantize(input.data(), output_c.data(), 0);
 
   float ref_amax;
+
   compute_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
                                      full_size, &ref_amax, output_c.scale());
 
@@ -105,6 +108,7 @@ TEST_P(CastTestSuite, TestCast) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+      // delayed tensor scaling
       performTest<InputType, OutputType>(size);
     );
   );

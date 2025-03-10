@@ -329,16 +329,29 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     at::Tensor out_tensor;
     auto size_t_shape =
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
+    bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
     for (size_t t : size_t_shape) {
       D_shape.push_back(t);
+      if (t == 0) {
+        D_numel_is_zero = true;
+      }
     }
     auto dtype = GetATenDType(D_type);
     auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
     if (single_output) {
-      out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+      if (output_data_ptr == nullptr) {
+        out_tensor = at::empty(D_shape, opts);
+      } else {
+        // We need to check !D_numel_is_zero because if the final input portion has zero elements,
+        // output_data_ptr would point beyond the allocated memory of D. This would cause
+        // at::from_blob to fail as it would reference memory not allocated by CUDA.
+        if (!D_numel_is_zero) {
+          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        }
+      }
       char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
-      char_ptr += m_splits[i] * te_A.size(0) * (*D)[0].element_size();
+      char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();
       output_data_ptr = reinterpret_cast<void*>(char_ptr);
       D_vectors.emplace_back(out_tensor);
     } else {

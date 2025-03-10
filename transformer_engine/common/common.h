@@ -14,6 +14,7 @@
 #include <cuda_runtime_api.h>
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstdint>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -27,6 +28,18 @@
 #include "./util/logging.h"
 
 namespace transformer_engine {
+
+inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
+}
+
+inline bool is_block_scaling(const NVTEScalingMode &mode) { return !is_tensor_scaling(mode); }
+
+inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_DELAYED_TENSOR_SCALING;
+}
+
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
@@ -131,7 +144,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      if (is_tensor_scaling(scaling_mode)) {
         return product(data_shape, 1, data_shape.size());
       } else {
         return product(data_shape, 0, data_shape.size() - 1);
@@ -151,7 +164,7 @@ struct Tensor {
     if (!has_data() && has_columnwise_data()) {
       const auto &data_shape = columnwise_data.shape;
       if (data_shape.empty()) return 1;
-      if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      if (is_tensor_scaling(scaling_mode)) {
         return data_shape.front();
       } else {
         return data_shape.back();
@@ -161,6 +174,16 @@ struct Tensor {
     if (data_shape.empty()) return 1;
     return data_shape.back();
   }
+};
+
+struct QuantizationConfig {
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0f;
+
+  static constexpr size_t attr_sizes[] = {
+      sizeof(bool),  // force_pow_2_scales
+      sizeof(float)  // amax_epsilon
+  };
 };
 
 template <typename T>
@@ -395,6 +418,15 @@ struct TypeInfo {
     }                                                               \
   }
 
+#define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \
+  if (CONDITION) {                                                \
+    constexpr bool FLAG = true;                                   \
+    { __VA_ARGS__ }                                               \
+  } else {                                                        \
+    constexpr bool FLAG = false;                                  \
+    { __VA_ARGS__ }                                               \
+  }
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 inline int log2_ceil(int value) {
@@ -426,6 +458,17 @@ constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 
+// Alignment requirements for the Tensor Memory Accelerator (TMA)
+constexpr int TMA_gmem_alignment = 16;  // global memory address alignment
+
+inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
+  return reinterpret_cast<uintptr_t>(ptr) % alignment == 0;
+}
+
+inline bool is_aligned_tensor_data(const Tensor &t, size_t alignment) {
+  return is_aligned_ptr(static_cast<const void *>(t.data.dptr), alignment);
+}
+
 size_t typeToSize(const DType type);
 
 void CheckNoopTensor(const Tensor &t, const std::string &name);
@@ -436,20 +479,6 @@ bool is_fp8_dtype(const DType t);
 
 std::string to_string(const DType type);
 std::string to_string(const NVTEScalingMode &type);
-
-inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
-  return mode == NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_block_scaling(const NVTEScalingMode &mode) {
-  return mode != NVTE_DELAYED_TENSOR_SCALING;
-}
-
-inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
-  return is_tensor_scaling(mode);
-}
-
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
 /*! \brief Update a tensor's FP8 scale-inverse
  *
@@ -464,8 +493,6 @@ void update_tensor_scale_inv(Tensor *t, cudaStream_t stream);
 void checkCuDriverContext(CUstream stream);
 
 CUtensorMapDataType get_CUtensorMapDataType(DType dtype);
-
-inline bool isPointerAligned(const void *const ptr, const int alignment);
 
 // Set up parameters to create TMA descriptor.
 void create_2D_tensor_map(CUtensorMap &tensorMap, const SimpleTensor &tensor,
