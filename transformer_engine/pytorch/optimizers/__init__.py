@@ -16,4 +16,3 @@ from transformer_engine_torch import (
 from .fused_adam import FusedAdam
 from .fused_sgd import FusedSGD
 from .multi_tensor_apply import MultiTensorApply, multi_tensor_applier
-from .utils import fp8_primary_weights_cast_helper
