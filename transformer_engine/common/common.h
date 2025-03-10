@@ -103,7 +103,6 @@ struct Tensor {
 
   float amax_epsilon;
   bool force_pow_2_scales;
-  int block_scaling_dim;
 
   Tensor()
       : data(),
@@ -114,8 +113,7 @@ struct Tensor {
         columnwise_scale_inv(nullptr, {1}, DType::kFloat32),
         scaling_mode(NVTE_DELAYED_TENSOR_SCALING),
         amax_epsilon(0.0),
-        force_pow_2_scales(false),
-        block_scaling_dim(scaling_mode == NVTE_BLOCK_SCALING ? 2 : 0) {}
+        force_pow_2_scales(false) {}
 
   int numel() const {
     size_t acc = 1;
@@ -134,7 +132,8 @@ struct Tensor {
 
   bool supports_force_pow_2_scales_qopt() const noexcept {
     switch (scaling_mode) {
-      case NVTE_BLOCK_SCALING:
+      case NVTE_BLOCK_SCALING_2D:
+      case NVTE_BLOCK_SCALING_1D:
         return true;
       default:
         return false;
@@ -143,17 +142,9 @@ struct Tensor {
 
   bool supports_amax_epsilon_qopt() const noexcept {
     switch (scaling_mode) {
-      case NVTE_BLOCK_SCALING:
+      case NVTE_BLOCK_SCALING_2D:
+      case NVTE_BLOCK_SCALING_1D:
         return true;
-      default:
-        return false;
-    }
-  }
-
-  bool supports_block_scaling_dim(int block_scaling_dim) const noexcept {
-    switch (scaling_mode) {
-      case NVTE_BLOCK_SCALING:
-        return block_scaling_dim == 1 || block_scaling_dim == 2;
       default:
         return false;
     }

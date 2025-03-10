@@ -31,6 +31,7 @@ class Float8BlockwiseQTensorBase:
     _fp8_dtype: TE_DType
     _rowwise_scale_inv: Optional[torch.Tensor]
     _columnwise_scale_inv: Optional[torch.Tensor]
+    _is_2D_scaled: bool
 
     def __new__(
         cls,
@@ -41,6 +42,7 @@ class Float8BlockwiseQTensorBase:
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,
         quantizer: Quantizer,
+        is_2D_scaled: bool,
         **kwargs,
     ):
         instance = super().__new__(cls, *args, **kwargs)
@@ -50,6 +52,7 @@ class Float8BlockwiseQTensorBase:
         instance._fp8_dtype = fp8_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
+        instance._is_2D_scaled = is_2D_scaled
 
         return instance
 
@@ -62,6 +65,7 @@ class Float8BlockwiseQTensorBase:
             "columnwise_scale_inv": self._columnwise_scale_inv,
             "fp8_dtype": self._fp8_dtype,
             "quantizer": self._quantizer,
+            "is_2D_scaled": self._is_2D_scaled,
         }
 
     def prepare_for_saving(
@@ -150,9 +154,7 @@ class Float8BlockwiseQTensorBase:
         Construct plain PyTorch tensor from Float8BlockwiseQTensor
         """
         block_len = 128
-        assert self._quantizer is not None
-        if self._quantizer.block_scaling_dim != 2:
-            assert self._quantizer.block_scaling_dim == 1
+        if not self._is_2D_scaled:
             return self._dequantize_vectorwise(dtype=dtype)
 
         def format_scale_as_logical_shape(q_K, scales, block_len):
