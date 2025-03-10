@@ -12,9 +12,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
-import functools
 
-from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
@@ -22,7 +20,6 @@ import torch
 import torch.nn.functional as F
 
 import transformer_engine_torch as tex
-import transformer_engine as te
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
@@ -31,18 +28,9 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
-    QKVLayout,
-    AttnBiasType,
-    AttnMaskType,
     FusedAttnBackend,
     META_QKV,
-    META_DQKV,
     META_O,
-    META_DO,
-    META_S,
-    META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
