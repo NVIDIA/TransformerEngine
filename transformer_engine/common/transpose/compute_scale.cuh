@@ -114,9 +114,9 @@ __device__ __forceinline__ float ComputeScale(const float amax, const float eps)
     return scale;
   }
   if constexpr (Power2Scaling) {
-    // NOTE: using bit fiddling based on advice of Asit in this
-    // thread: https://nvidia.slack.com/archives/C06EDT7LZEW/p1738274404153439
-
+    // NOTE: using bit fiddling rather than pow2, exp to
+    // be exact.
+    //
     // inf scales already early returned, as did nan scales.
     // The cases to consider here are normals, zero, and subnormals.
     // zero is not possible with current math as
