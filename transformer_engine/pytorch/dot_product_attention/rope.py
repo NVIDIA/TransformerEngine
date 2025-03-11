@@ -6,6 +6,7 @@ import torch
 from typing import Optional, Tuple, Union
 import transformer_engine_torch as tex
 
+
 class RotaryPositionEmbedding(torch.nn.Module):
     """
     Implements Rotary Position Embedding from https://arxiv.org/abs/2104.09864.
