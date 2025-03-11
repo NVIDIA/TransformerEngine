@@ -724,8 +724,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # 5 high-precision unfused: gemm, activation, FC1_bias + FC1_gemm
             # 6 fp8 unfused: gemm, activation, FC1_bias + FC1_gemm
             fc2_dgrad_gemm_gelu_fusion = (
-                not ctx.fp8 and (ctx.activation == "gelu")
-                and (not ctx.bias_gelu_fusion)
+                not ctx.fp8 and (ctx.activation == "gelu") and (not ctx.bias_gelu_fusion)
             )
 
             # FC2 DGRAD; Unconditional
@@ -820,7 +819,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     # TODO zhongboz: per-tensor current scaling has no bgrad fusion for now
                     # float8 blockwise current scaling has no bgrad fusion for now
 
-                    if isinstance(ctx.grad_fc1_output_quantizer, (Float8CurrentScalingQuantizer, Float8BlockQuantizer)):
+                    if isinstance(
+                        ctx.grad_fc1_output_quantizer,
+                        (Float8CurrentScalingQuantizer, Float8BlockQuantizer),
+                    ):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
                         dact = ctx.grad_fc1_output_quantizer(dact)
                     else:

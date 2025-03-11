@@ -49,13 +49,17 @@ def check_mxfp8_support() -> Tuple[bool, str]:
         return True, ""
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
+
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
-    if (get_device_compute_capability() >= (9, 0)
+    if (
+        get_device_compute_capability() >= (9, 0)
         and get_device_compute_capability() < (10, 0)
-        and float(torch.version.cuda) >= 12.8):
+        and float(torch.version.cuda) >= 12.9
+    ):
         return True, ""
     return False, "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
+
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
@@ -175,7 +179,9 @@ class FP8GlobalStateManager:
     def is_fp8_block_scaling_available(cls) -> Tuple[bool, str]:
         """Return if Float8 block scaling support is available."""
         if cls.fp8_block_scaling_available is None:
-            cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling = check_fp8_block_scaling_support()
+            cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling = (
+                check_fp8_block_scaling_support()
+            )
         return cls.fp8_block_scaling_available, cls.reason_for_no_fp8_block_scaling
 
     @staticmethod
@@ -449,7 +455,6 @@ class FP8GlobalStateManager:
             if isinstance(fp8_recipe, Float8BlockScaling):
                 fp8_block_available, reason_for_no_fp8_block = cls.is_fp8_block_scaling_available()
                 assert fp8_block_available, reason_for_no_fp8_block
-
 
     @classmethod
     def fp8_autocast_exit(cls, enabled: bool, _graph: bool) -> None:
@@ -968,7 +973,7 @@ class Float8BlockScalingRecipeState(RecipeState):
             # The index convention (coming from base.py set_meta_tensor)
             # is somewhat awkward, and doesn't play nicely with QuantizeOp,
             # which is not associated with a GEMM.
-            assert self.num_quantizers % 3 == 0 # x, w, output per gemm
+            assert self.num_quantizers % 3 == 0  # x, w, output per gemm
             return [
                 Float8BlockQuantizer(
                     fp8_dtype=self.qx_dtype,
@@ -997,7 +1002,7 @@ class Float8BlockScalingRecipeState(RecipeState):
             ] * (self.num_quantizers // 3)
 
         assert self.mode == "backward", f"Unexpected mode {self.mode}"
-        assert self.num_quantizers % 2 == 0 # grad_output and grad_input per gemm
+        assert self.num_quantizers % 2 == 0  # grad_output and grad_input per gemm
         return [
             Float8BlockQuantizer(
                 fp8_dtype=self.qgrad_dtype,
