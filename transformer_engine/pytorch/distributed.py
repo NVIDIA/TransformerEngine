@@ -945,7 +945,7 @@ def _all_gather_mxfp8(
         input_ = quantizer(input_.dequantize())
 
     # Construct MXFP8 output tensor
-    out = quantizer.make_empty(out_shape, dtype=input_.dtype, device=input._device)
+    out = quantizer.make_empty(out_shape, dtype=input_.dtype, device=input_._device)
 
     # Async op handle
     handle = None
