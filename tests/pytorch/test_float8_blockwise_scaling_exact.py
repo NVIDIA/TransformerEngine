@@ -23,7 +23,7 @@ from tests.pytorch.references.blockwise_quantizer_reference import (
 )
 from tests.pytorch.test_float8_current_scaling_exact import (
     TestFP8RecipeLinearBase,
-    TestFP8RecipeLayerNormLinearBase
+    TestFP8RecipeLayerNormLinearBase,
 )
 
 # read env variable NVTE_TEST_FLOAT8_BLOCK_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -32,6 +32,7 @@ tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DU
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
 recipe_available, reason_for_no_recipe = FP8GlobalStateManager.is_fp8_block_scaling_available()
+
 
 class GetRecipes:
 
@@ -85,6 +86,7 @@ def initialize_for_many_scales(
                 : max_src_vals[0], : max_src_vals[1]
             ]
     return result
+
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(

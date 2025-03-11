@@ -17,6 +17,7 @@ def fp8_blockwise_gemm_supported() -> bool:
     supported, _ = FP8GlobalStateManager.is_fp8_block_scaling_available()
     return supported
 
+
 def cublas_gemm_fp8_blockwise_case(
     x_dtype,
     w_dtype,
