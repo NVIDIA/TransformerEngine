@@ -18,7 +18,6 @@ from transformer_engine.pytorch import TransformerLayer, fp8_autocast, fp8_model
 from transformer_engine.pytorch.attention import (
     DotProductAttention,
     MultiheadAttention,
-    RotaryPositionEmbedding,
     _attention_backends,
 )
 from transformer_engine.pytorch.dot_product_attention.utils import (
@@ -27,6 +26,7 @@ from transformer_engine.pytorch.dot_product_attention.utils import (
     check_set_window_size,
     AttentionParams,
 )
+from transformer_engine.pytorch.dot_product_attention.rope import RotaryPositionEmbedding
 from transformer_engine.pytorch.constants import TE_DType
 import transformer_engine.pytorch.cpp_extensions as ext
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
