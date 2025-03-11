@@ -270,20 +270,20 @@ template <typename dtype, int tile_size, bool causal, QKVFormat out_format, QKVF
           int max_tensors>
 __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> tensors, float *lse,
                                             int *cu_seqlens, int batch, int num_heads,
-                                            int dim_per_head, int lse_seqlen, int cp_size, int rank,
-                                            int start) {
+                                            int dim_per_head, int lse_seqlen, int num_total_tokens,
+                                            int cp_size, int rank, int start) {
   extern __shared__ int cu_seqlens_s[];
   int full_num;
-  int num_total_tokens;
+  int valid_total_tokens;  // Number of total tokens actually involved in the computation
 
   if constexpr (out_format == QKVFormat::TH) {
     for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
       cu_seqlens_s[i] = cu_seqlens[i];
     }
     __syncthreads();
-    num_total_tokens = cu_seqlens_s[batch];
+    valid_total_tokens = cu_seqlens_s[batch];
   } else if constexpr (out_format == QKVFormat::SBH || out_format == QKVFormat::BSH) {
-    num_total_tokens = lse_seqlen * batch;
+    valid_total_tokens = lse_seqlen * batch;
   }
 
   if constexpr (causal) {
@@ -322,11 +322,19 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
 
     // calculate the address using the index
     idx_out_full = out_full.compute_address(id);
-    idx_lse_full = lse_full.compute_address(id);
-
     dtype *cur_out = out + idx_out_full * dim_per_head;
-    float lse_temp = lse[idx_lse_full];
 
+    if (token_id >= valid_total_tokens) {
+      // padding zeros
+      for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
+        float4 data = {0.0f, 0.0f, 0.0f, 0.0f};
+        reinterpret_cast<float4 *>(cur_out)[j] = data;
+      }
+      continue;
+    }
+
+    idx_lse_full = lse_full.compute_address(id);
+    float lse_temp = lse[idx_lse_full];
     int end = full_num;
 
     // The number of times the current thread participates in the computation is determined by start and end
@@ -344,7 +352,7 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
     }
 
     for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
-      float4 data = reinterpret_cast<float4 *>(cur_out)[j];
+      float4 data = {0.0f, 0.0f, 0.0f, 0.0f};
       dtype *p = reinterpret_cast<dtype *>(&data);
 
       for (int i = start; i < end; i++) {

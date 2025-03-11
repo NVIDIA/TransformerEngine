@@ -499,7 +499,7 @@ std::vector<py::object> fused_attn_bwd(
  **************************************************************************************************/
 
 template <typename dtype, bool causal>
-void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
+void fused_out_correction_helper(at::Tensor &out, const std::vector<at::Tensor> &out_per_step,
                                  const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
                                  const py::object &cu_seqlens, std::string qkv_format, int cp_size,
                                  int rank, bool softmax_lse_in_packed_format) {
@@ -555,7 +555,7 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
           transformer_engine::fused_attn::QKVFormat::BHS, max_tensors>
           <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
               out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), nullptr, batch, num_heads,
-              dim_per_head, lse_seqlen, cp_size, rank, i);
+              dim_per_head, lse_seqlen, total_tokens, cp_size, rank, i);
 
     } else if (qkv_format == "bshd") {
       if (softmax_lse_in_packed_format) {
@@ -564,14 +564,14 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
             transformer_engine::fused_attn::QKVFormat::HBS, max_tensors>
             <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), nullptr, batch, num_heads,
-                dim_per_head, lse_seqlen, cp_size, rank, i);
+                dim_per_head, lse_seqlen, total_tokens, cp_size, rank, i);
       } else {
         transformer_engine::fused_attn::fused_out_correction_kernel<
             dtype, tile, causal, transformer_engine::fused_attn::QKVFormat::BSH,
             transformer_engine::fused_attn::QKVFormat::BHS, max_tensors>
             <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(), nullptr, batch, num_heads,
-                dim_per_head, lse_seqlen, cp_size, rank, i);
+                dim_per_head, lse_seqlen, total_tokens, cp_size, rank, i);
       }
 
     } else if (qkv_format == "thd") {
@@ -582,7 +582,7 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
             <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(),
                 cu_seqlens.cast<at::Tensor>().data_ptr<int>(), batch, num_heads, dim_per_head,
-                lse_seqlen, cp_size, rank, i);
+                lse_seqlen, total_tokens, cp_size, rank, i);
       } else {
         transformer_engine::fused_attn::fused_out_correction_kernel<
             dtype, tile, causal, transformer_engine::fused_attn::QKVFormat::TH,
@@ -590,17 +590,20 @@ void fused_out_correction_helper(at::Tensor out, const std::vector<at::Tensor> &
             <<<grid, block, sizeof(int) * (batch + 1), at::cuda::getCurrentCUDAStream()>>>(
                 out.data_ptr<dtype>(), tensors, lse.data_ptr<float>(),
                 cu_seqlens.cast<at::Tensor>().data_ptr<int>(), batch, num_heads, dim_per_head,
-                lse_seqlen, cp_size, rank, i);
+                lse_seqlen, total_tokens, cp_size, rank, i);
       }
     }
   }
 }
 
 // fused out correction after qkv calculation
-void fused_out_correction(at::Tensor out, const std::vector<at::Tensor> &out_per_step,
-                          const at::Tensor &lse, const std::vector<at::Tensor> &lse_per_step,
-                          const py::object &cu_seqlens, std::string qkv_format, int cp_size,
-                          int rank, bool causal, bool softmax_lse_in_packed_format) {
+at::Tensor fused_out_correction(std::vector<at::Tensor> &out_per_step, const at::Tensor &lse,
+                                const std::vector<at::Tensor> &lse_per_step,
+                                const py::object &cu_seqlens, std::string qkv_format, int cp_size,
+                                int rank, bool causal, bool softmax_lse_in_packed_format) {
+  // in-place optimization: use out_per_step[0] as the final output to avoid extra allocation
+  at::Tensor &out = out_per_step[0];
+
   if (out.scalar_type() == at::ScalarType::Half) {
     using dtype = at::Half;
     if (causal) {
@@ -639,6 +642,7 @@ void fused_out_correction(at::Tensor out, const std::vector<at::Tensor> &out_per
   } else {
     NVTE_ERROR("Unsupported dtype of out\n");
   }
+  return out;
 }
 
 namespace flash_attention {

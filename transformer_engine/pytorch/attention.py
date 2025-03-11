@@ -2648,8 +2648,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         out_per_step[i - 1] = out_per_step[i - 1].dequantize(dtype=torch.float32)
                     if i == 1:
                         softmax_lse = torch.clone(softmax_lse_per_step[0]).to(torch.double)
-                        if qkv_format == "thd":
-                            out = torch.zeros_like(q if not fp8 else out_per_step[0]).view(q.shape)
                     elif (i - 1) <= rank or not causal:
                         flash_attn_fwd_softmax_lse_correction(
                             softmax_lse, softmax_lse_per_step[i - 1]
@@ -2679,16 +2677,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         softmax_lse = softmax_lse.to(torch.float)
 
-        kv = p2p_comm_buffers[-1]
-        if qkv_format == "bshd":
-            out = out.view(out.shape[0], -1, *out.shape[-2:])
-            ctx.batch_size = out.shape[0]
-        elif qkv_format == "sbhd":
-            out = out.view(-1, *out.shape[-3:])
-            ctx.batch_size = out.shape[1]
-
-        tex.fused_out_correction(
-            out,
+        out = tex.fused_out_correction(
             out_per_step,
             softmax_lse,
             softmax_lse_per_step,
@@ -2699,6 +2688,14 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             causal,
             softmax_lse_in_packed_format,
         )
+
+        kv = p2p_comm_buffers[-1]
+        if qkv_format == "bshd":
+            out = out.view(out.shape[0], -1, *out.shape[-2:])
+            ctx.batch_size = out.shape[0]
+        elif qkv_format == "sbhd":
+            out = out.view(-1, *out.shape[-3:])
+            ctx.batch_size = out.shape[1]
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)
