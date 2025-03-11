@@ -173,14 +173,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 if isinstance(input_quantizer, MXFP8Quantizer):
                     with_quantized_norm = False
             else:
-                if fp8 and ub_bulk_dgrad:
-                    # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-                    input_quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    input_quantizer.set_usage(
-                        rowwise=True,
-                        columnwise=backward_needs_input,
-                    )
+                input_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=backward_needs_input,
+                )
+        
+        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+        if fp8 and FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling() and ub_bulk_dgrad:
+            input_quantizer.set_usage(rowwise=True, columnwise=False)
 
         ub_obj_fprop = None
         ln_out = None
@@ -216,13 +216,10 @@ class _LayerNormLinear(torch.autograd.Function):
         # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
         if ub_overlap_ag_fprop and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            if ub_bulk_dgrad:
-                # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
             ub_obj_fprop = get_ub(ub_name + "_fprop")
-            ln_out_tmp = ln_out
+            ln_out_local = ln_out
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
-            input_quantizer.quantize(ln_out_tmp, out=ln_out)
+            input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -570,7 +567,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     dgrad_bulk = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer)
 
             if ctx.grad_output_quantizer is not None:
-                ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,

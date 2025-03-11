@@ -452,7 +452,11 @@ class _Linear(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_output_quantizer is not None:
-                ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,

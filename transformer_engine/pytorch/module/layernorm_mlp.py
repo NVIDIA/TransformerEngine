@@ -238,6 +238,10 @@ class _LayerNormMLP(torch.autograd.Function):
                     columnwise=backwards_needs_fc1_input,
                 )
 
+        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+        if fp8 and FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling() and ub_bulk_dgrad:
+            fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+
         ub_obj_lnout = None
         ln_out = None
         if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
@@ -268,9 +272,9 @@ class _LayerNormMLP(torch.autograd.Function):
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
         if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out_tmp = ln_out
+            ln_out_local = ln_out
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-            fc1_input_quantizer.quantize(ln_out_tmp, out=ln_out)
+            fc1_input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -668,10 +672,11 @@ class _LayerNormMLP(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_fc2_output_quantizer is not None:
-                ctx.grad_fc2_output_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=True,
-                )
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=True)
 
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
