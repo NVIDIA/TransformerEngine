@@ -234,7 +234,7 @@ class _Linear(torch.autograd.Function):
             ub_obj = get_ub(ub_name + "_fprop")
             ub_type = tex.CommOverlapType.RS
             out_shape = [reduce(multiply_op, inp_shape[:-1]) // tp_world_size, out_features]
-            rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inputmat_total.device)
+            rs_out = torch.empty(out_shape, dtype=activation_dtype, device=inp.device)
 
         elif ub_overlap_ag_fprop:
             ub_obj = get_ub(ub_name + "_fprop")
