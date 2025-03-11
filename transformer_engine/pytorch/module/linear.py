@@ -130,8 +130,7 @@ class _Linear(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
-                FP8GlobalStateManager.get_fp8_recipe().delayed()
-                or FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling()
+                FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling()
             ):
                 raise NotImplementedError(
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
@@ -369,7 +368,7 @@ class _Linear(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not (ctx.fp8_recipe.delayed() or ctx.fp8_recipe.float8_current_scaling()):
+                if not (ctx.fp8_recipe.per_tensor_scaling()):
                     raise NotImplementedError(
                         "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
                         " current scaling"
