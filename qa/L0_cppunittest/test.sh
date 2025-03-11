@@ -5,7 +5,7 @@
 set -e
 
 # Find TE
-: ${TE_PATH:=/workspace/TransformerEngine}
+: ${TE_PATH:=/opt/transformerengine}
 TE_LIB_PATH=`pip show transformer-engine | grep Location | cut -d ' ' -f 2`
 export LD_LIBRARY_PATH=$TE_LIB_PATH:$LD_LIBRARY_PATH
 
