@@ -89,10 +89,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 int A0, int A1, int B0, int B1) {
   using namespace transformer_engine;
-  NVTE_CHECK(A.scaling_mode == B.scaling_mode ||
-             (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
-             (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
-             "Inputs A and B to GEMM need to have compatible scaling modes!");
+  NVTE_CHECK(
+      A.scaling_mode == B.scaling_mode ||
+          (A.scaling_mode == NVTE_BLOCK_SCALING_1D && B.scaling_mode == NVTE_BLOCK_SCALING_2D) ||
+          (A.scaling_mode == NVTE_BLOCK_SCALING_2D && B.scaling_mode == NVTE_BLOCK_SCALING_1D),
+      "Inputs A and B to GEMM need to have compatible scaling modes!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret(transA, transB);
@@ -388,8 +389,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             sizeof(dummy_a_vec_stride)));
       }
 #if CUDA_VERSION >= 12090
-    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D || inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
-               (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D || inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
+    } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
+               (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -399,12 +402,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
       NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
-                   inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
+                    inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
                  "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported got 2D by 2D");
-      scaling_mode_a = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
-                                                : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
-      scaling_mode_b = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
-                                                : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
+      scaling_mode_a = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D
+                           ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+                           : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
+      scaling_mode_b = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D
+                           ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
+                           : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
 #endif
 #endif
     } else {
@@ -485,12 +490,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
         operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE_AUX_LD, &ld_gelumat, sizeof(ld_gelumat)));
   }
 
-  if ((inputA->scaling_mode == NVTE_BLOCK_SCALING) &&
-      (inputB->scaling_mode == NVTE_BLOCK_SCALING)) {
+  if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D) ||
+      (inputA->scaling_mode == NVTE_BLOCK_SCALING_2D)) {
     NVTE_CHECK((epilogue == CUBLASLT_EPILOGUE_DEFAULT || epilogue == CUBLASLT_EPILOGUE_BIAS ||
-                epilogue == CUBLASLT_EPILOGUE_BGRADB),
-               "Epilogue (gelu fusion) not supported for NVTE_BLOCK_SCALING until further "
-               "numerical verification.");
+                epilogue == CUBLASLT_EPILOGUE_DGELU),
+               "Epilogue requested outside of the available and tested cuBLAS functionality for "
+               "float8 block scaled GEMM");
   }
 
   NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_EPILOGUE,
