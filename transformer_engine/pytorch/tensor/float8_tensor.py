@@ -342,14 +342,17 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer=self,
         )
 
-    
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Function using primitives with ONNX defined translations."""
-        raise NotImplementedError("Float8CurrentScalingQuantizer does not support ONNX quantization yet.")
-    
+        raise NotImplementedError(
+            "Float8CurrentScalingQuantizer does not support ONNX quantization yet."
+        )
+
     def onnx_dequantize(self, tensor: QuantizedTensor) -> torch.Tensor:
         """Function using primitives with ONNX defined translations."""
-        raise NotImplementedError("Float8CurrentScalingQuantizer does not support ONNX dequantization yet.")
+        raise NotImplementedError(
+            "Float8CurrentScalingQuantizer does not support ONNX dequantization yet."
+        )
 
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
