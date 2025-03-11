@@ -301,10 +301,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
            py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
       .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlap::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlap::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer,
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt);
 
   py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
              transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
@@ -319,8 +318,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false)
       .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
-           py::arg("quantizer"), py::arg("local_chunk") = false)
-      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
-           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
-      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
+           py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer,
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt);
 }

@@ -15,6 +15,7 @@ from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import (
+    fill_userbuffers_buffer_for_all_gather,
     get_ub,
     get_workspace,
     _2X_ACC_FPROP,
@@ -227,36 +228,31 @@ class UserbuffersForwardLinear(FusedOperation):
         with_ub_reduce_scatter = tensor_parallel_mode == "row"
         ub_type = CommOverlapType.AG if with_ub_all_gather else CommOverlapType.RS
 
-        # Cast input tensor to correct dtype
+        # Initialize input tensor
         x_local = input
-        own_quantized_x_local = False
-        if with_quantized_compute:
-            if not isinstance(x_local, QuantizedTensor):
-                input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=(not with_ub_all_gather),
-                )
-                x_local = input_quantizer(x_local)
-                own_quantized_x_local = True
-        else:
-            if isinstance(x_local, QuantizedTensor):
-                x_local = x_local.dequantize(dtype=dtype)
-                own_quantized_x_local = True
-            if x_local.dtype != dtype:
-                x_local = x_local.to(dtype=dtype)
-                own_quantized_x_local = True
-
-        # Initialize buffers for UB all-gather if needed
-        x = x_local
+        x = None
         if with_ub_all_gather:
-            if with_quantized_compute != ub_comm.is_fp8_ubuf():
-                raise RuntimeError(
-                    "All-gather overlap with FP8 GEMM inputs requires FP8 buffer"
-                )
-            ub_comm.copy_into_buffer(x_local, input_quantizer, local_chunk=True)
-            x = ub_comm.get_buffer(input_quantizer)
+            if isinstance(x_local, QuantizedTensor):
+                x_local = x_local.dequantize()
+            x, x_local = fill_userbuffers_buffer_for_all_gather(
+                ub_comm,
+                x_local,
+                input_quantizer,
+                tensor_parallel_group,
+            )
+        else:
+            if with_quantized_compute:
+                if not isinstance(x_local, QuantizedTensor):
+                    input_quantizer.set_usage(rowwise=True, columnwise=True)
+                    x_local = input_quantizer(x_local)
+            else:
+                if isinstance(x_local, QuantizedTensor):
+                    x_local = x_local.dequantize(dtype=dtype)
+                if x_local.dtype != dtype:
+                    x_local = x_local.to(dtype=dtype)
+            x = x_local
 
-        # Check weight tensor
+        # Initialize weight tensor
         w = weight
         w_is_quantized = isinstance(w, QuantizedTensor)
         if with_quantized_compute and not w_is_quantized:

@@ -35,6 +35,8 @@ from ..distributed import (
 )
 from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
+from ..tensor.float8_tensor import Float8Tensor, Float8Quantizer
+from ..tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
@@ -439,6 +441,72 @@ def destroy_ub():
     _ub_communicators = None
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
+
+
+def fill_userbuffers_buffer_for_all_gather(
+    comm,
+    local_tensor: torch.Tensor,
+    quantizer: Optional[Quantizer],
+    process_group,
+) -> tuple[torch.Tensor, torch.Tensor]:
+
+    # Tensor dimensions
+    local_shape = local_tensor.size()
+    if not local_shape:
+        raise ValueError(f"Invalid local tensor (shape={tuple(local_shape)})")
+    global_shape = list(local_shape)
+    global_shape[0] *= torch.distributed.get_world_size(process_group)
+
+    # All-gather output tensor
+    global_tensor: Optional[torch.Tensor] = None
+
+    if quantizer is None:
+        # Unquantized data
+        if isinstance(local_tensor, QuantizedTensor):
+            local_tensor = local_tensor.dequantize()
+        if comm.is_fp8_ubuf():
+            raise RuntimeError(
+                "Attempting to all-gather unquantized tensor, "
+                "but Userbuffers is initialized with FP8 buffers"
+            )
+        comm.copy_into_buffer(local_tensor, local_chunk=True)
+        global_tensor = comm.get_buffer(shape=global_shape)
+
+    elif isinstance(quantizer, Float8Quantizer):
+        # FP8 data
+        if not isinstance(local_tensor, Float8TensorBase):
+            if isinstance(local_tensor, QuantizedTensor):
+                local_tensor.dequantize()
+            quantizer.set_usage(rowwise=True, columnwise=False)
+            local_tensor = quantizer(local_tensor)
+        if not comm.is_fp8_ubuf():
+            raise RuntimeError(
+                "Attempting to all-gather FP8 tensor, "
+                "but Userbuffers is not initialized with FP8 buffers"
+            )
+        comm.copy_into_buffer(local_tensor._data, local_chunk=True)
+        global_tensor_data = comm.get_buffer(shape=global_shape)
+        global_tensor = Float8Tensor(
+            shape=global_shape,
+            dtype=local_tensor.dtype,
+            data=global_tensor_data,
+            fp8_scale_inv=local_tensor._scale_inv,
+            fp8_dtype=local_tensor._fp8_dtype,
+            requires_grad=False,
+            quantizer=quantizer,
+        )
+
+    elif isinstance(quantizer, MXFP8Quantizer):
+        # MXFP8 data
+        raise NotImplementedError("TODO")
+
+    else:
+        # Unsupported data format
+        raise ValueError(f"Unsupported quantizer ({quantizer})")
+
+    if global_tensor is None:
+        raise RuntimeError("Could not construct all-gather output tensor")
+    return global_tensor, local_tensor
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
