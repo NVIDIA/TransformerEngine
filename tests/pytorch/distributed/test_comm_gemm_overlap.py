@@ -244,8 +244,9 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
 
 
 @pytest.mark.parametrize(
-    "quantization", ["fp8_delayed_scaling", "fp8_current_scaling"], 
-    ids=[" DELAYED SCALING ", " CURRENT SCALING "]
+    "quantization",
+    ["fp8_delayed_scaling", "fp8_current_scaling"],
+    ids=[" DELAYED SCALING ", " CURRENT SCALING "],
 )
 @pytest.mark.parametrize(
     "fp8",
