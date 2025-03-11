@@ -1205,6 +1205,7 @@ class Linear(TransformerEngineBaseModule):
             return output, bias_tensor
 
         return output
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + linear."""
         assert (

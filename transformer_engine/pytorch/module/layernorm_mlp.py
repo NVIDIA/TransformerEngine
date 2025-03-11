@@ -1643,6 +1643,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if self.return_bias:
             return fc2_out, fc2_bias.to(inp_dtype)
         return fc2_out
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + layernorm_mlp."""
         assert (
