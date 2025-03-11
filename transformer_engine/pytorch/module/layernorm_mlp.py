@@ -1680,7 +1680,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             ]
 
         return tuple(make_debug("fc1", 0) + make_debug("fc2", 6))
-    
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + layernorm_mlp."""
         assert (
