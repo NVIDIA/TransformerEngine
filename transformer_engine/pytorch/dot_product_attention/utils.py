@@ -131,6 +131,7 @@ class FlashAttentionUtils:
 # Typedef/alias for code readibility
 FAUtils: TypeAlias = FlashAttentionUtils
 
+
 @dataclass(eq=True)
 class AttentionParams:
     """
