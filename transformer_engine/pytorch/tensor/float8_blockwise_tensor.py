@@ -213,7 +213,7 @@ class Float8BlockQuantizer(Quantizer):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
-            is_2D_scaled==self.block_scaling_dim==2,
+            is_2D_scaled=self.block_scaling_dim == 2,
             requires_grad=requires_grad,
         )
 
