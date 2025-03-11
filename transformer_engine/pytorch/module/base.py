@@ -22,6 +22,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -35,6 +36,7 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..utils import needs_quantized_gemm
 from ...common.recipe import Recipe
 from ...debug.pytorch.debug_state import TEDebugState
@@ -439,7 +441,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
-        """Increase or decrease size of amax history based on given `length`.
+        """
+        Delayed scaling only.
+
+        Increase or decrease size of amax history based on given `length`.
 
         .. warning::
             This changes the underlying amax memory location.
@@ -497,6 +502,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if recipe.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -878,6 +887,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
+            elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+                # FP8 current scaling does not support fused cast + dbias
+                grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
         if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase)):

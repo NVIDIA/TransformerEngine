@@ -140,6 +140,123 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   return {std::move(tensor), std::move(ret)};
 }
 
+Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& quantizer)
+    : Quantizer(quantizer) {
+  const at::Tensor& scale = quantizer.attr("scale").cast<at::Tensor>();
+  const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
+  const DType type = quantizer.attr("dtype").cast<DType>();
+  // For current scaling, need several other components:
+  // 1. with_amax_reduction: bool
+  // 2. amax_reduction_group: torch.distributed.ProcessGroup or None
+  // 3. amax_reduction_size: int
+  const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
+  const py::object amax_reduction_group_obj = quantizer.attr("amax_reduction_group");
+  const c10::intrusive_ptr<dist_group_type> amax_reduction_group =
+      amax_reduction_group_obj.is_none()
+          ? nullptr
+          : amax_reduction_group_obj.cast<c10::intrusive_ptr<dist_group_type>>();
+  const int amax_reduction_size = quantizer.attr("amax_reduction_size").cast<int>();
+
+  this->amax = amax;
+  this->scale = scale;
+  this->dtype = type;
+  this->with_amax_reduction = with_amax_reduction;
+  this->amax_reduction_group = amax_reduction_group;
+  this->amax_reduction_size = amax_reduction_size;
+
+  // fp8 current scaling specific quantization params
+  this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
+  this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
+}
+
+void Float8CurrentScalingQuantizer::set_quantization_params(TensorWrapper* tensor) const {
+  // transfer amax and scale pointer from quantizer to output tensor (only as gpu buffer, no meaningful data in them)
+  tensor->set_scale(scale.data_ptr(), GetTransformerEngineDType(scale.scalar_type()),
+                    getTensorShape(scale));
+  at::TensorOptions opts = opts.dtype(torch::kFloat32).device(torch::kCUDA);
+  tensor->set_amax(amax.data_ptr(), GetTransformerEngineDType(amax.scalar_type()),
+                   getTensorShape(amax));
+  // quantize output and its transpose
+  auto rowwise_data = tensor->get_rowwise_data();
+  rowwise_data.dtype = static_cast<NVTEDType>(dtype);
+
+  auto columnwise_data = tensor->get_columnwise_data();
+  columnwise_data.dtype = static_cast<NVTEDType>(dtype);
+
+  tensor->set_rowwise_data(rowwise_data.data_ptr, static_cast<DType>(rowwise_data.dtype),
+                           rowwise_data.shape);
+  tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
+                              columnwise_data.shape);
+}
+
+std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Tensor> rowwise_data) const {
+  using namespace pybind11::literals;
+  std::vector<int64_t> rowwise_torch_shape;
+  std::vector<int64_t> columnwise_torch_shape;
+  std::vector<int64_t> scale_inv_torch_shape = {1};  // Shape of 1 element for scale_inv
+
+  if (!shape.empty()) {
+    columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape.back()));
+  }
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i < shape.size() - 1) {
+      columnwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+    }
+    rowwise_torch_shape.emplace_back(static_cast<int64_t>(shape[i]));
+  }
+  at::TensorOptions opts;
+  opts = opts.dtype(torch::kUInt8).device(torch::kCUDA);
+  at::Tensor data;
+  if (rowwise_usage) {
+    if (rowwise_data.has_value()) {
+      data = std::move(*rowwise_data);
+    } else {
+      data = at::empty(rowwise_torch_shape, opts);
+    }
+  }
+  const py::object py_data = rowwise_usage ? py::cast(data) : py::none();
+  at::Tensor columnwise_data;
+  bool create_transpose = columnwise_usage && !non_tn_fp8_gemm_supported();
+  if (create_transpose) {
+    columnwise_data = at::empty(columnwise_torch_shape, opts);
+  }
+  const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
+
+  //unlike delayed scaling, in current scaling, scale is not known, so scale_inv should be empty buffer
+  opts = opts.dtype(torch::kFloat32).device(torch::kCUDA);
+  at::Tensor scale_inv = at::empty(scale_inv_torch_shape, opts);
+
+  py::object ret;
+  if (internal) {
+    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorBasePythonClass));
+    ret = Float8TensorClass("data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
+                            "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
+                            "quantizer"_a = this->quantizer);
+  } else {
+    py::handle Float8TensorClass(reinterpret_cast<PyObject*>(Float8TensorPythonClass));
+    ret = Float8TensorClass("shape"_a = rowwise_torch_shape, "dtype"_a = GetATenDType(dtype),
+                            "data"_a = py_data, "fp8_scale_inv"_a = scale_inv,
+                            "fp8_dtype"_a = this->dtype, "data_transpose"_a = py_columnwise_data,
+                            "quantizer"_a = this->quantizer);
+  }
+  TensorWrapper tensor(this->get_scaling_mode());
+  if (rowwise_usage) {
+    tensor.set_rowwise_data(data.data_ptr(), this->dtype, shape);
+    tensor.set_rowwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
+  }
+  if (create_transpose) {
+    std::vector<size_t> transposed_shape;
+    for (auto s : columnwise_torch_shape) {
+      transposed_shape.emplace_back(static_cast<size_t>(s));
+    }
+    tensor.set_columnwise_data(columnwise_data.data_ptr(), this->dtype, transposed_shape);
+    tensor.set_columnwise_scale_inv(scale_inv.data_ptr(), DType::kFloat32, std::vector<size_t>{1});
+  }
+  this->set_quantization_params(&tensor);
+  return {std::move(tensor), std::move(ret)};
+}
+
 MXFP8Quantizer::MXFP8Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
 }

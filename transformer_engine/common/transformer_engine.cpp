@@ -6,6 +6,7 @@
 
 #include <transformer_engine/transformer_engine.h>
 
+#include <cstring>
 #include <iostream>
 
 #include "common.h"
@@ -150,8 +151,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
   const DType type = t.dtype();
   if (is_fp8_dtype(type)) {
     // FP8 output needs to have scale, scale_inv and (if delayed scaling) amax
-    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
-      NVTE_CHECK(t.amax.dptr != nullptr, "FP8 output ", name, " must have amax tensor");
+    if (t.scaling_mode == NVTE_DELAYED_TENSOR_SCALING && t.amax.dptr != nullptr) {
       NVTE_CHECK(t.amax.dtype == DType::kFloat32, "Invalid amax dtype (expected ",
                  to_string(DType::kFloat32), ", got ", to_string(t.amax.dtype), ")");
       NVTE_CHECK(product(t.amax.shape) == 1, "Invalid shape of amax in output ", name,
@@ -408,5 +408,81 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream) {
   // Set amax to 0 if allocated
   if (t.amax.dptr != nullptr) {
     cudaMemsetAsync(t.amax.dptr, 0, sizeof(float), stream);
+  }
+}
+
+NVTEQuantizationConfig nvte_create_quantization_config() {
+  return new transformer_engine::QuantizationConfig;
+}
+
+void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr, void *buf,
+                                            size_t size_in_bytes, size_t *size_written) {
+  // Write attribute size
+  NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
+             "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  NVTE_CHECK(size_written != nullptr, "Invalid size_written (got NULL)");
+  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  *size_written = attr_size;
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for quantization config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+
+  // Write to buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
+  const auto &config_ = *reinterpret_cast<const transformer_engine::QuantizationConfig *>(config);
+  switch (attr) {
+    case kNVTEQuantizationConfigForcePow2Scales:
+      std::memcpy(buf, &config_.force_pow_2_scales, attr_size);
+      break;
+    case kNVTEQuantizationConfigAmaxEpsilon:
+      std::memcpy(buf, &config_.amax_epsilon, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
+                                            NVTEQuantizationConfigAttribute attr, const void *buf,
+                                            size_t size_in_bytes) {
+  // Check attribute and buffer
+  NVTE_CHECK(attr < kNVTEQuantizationConfigNumAttributes,
+             "Invalid NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  const auto &attr_size = transformer_engine::QuantizationConfig::attr_sizes[attr];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for quantization config attribute "
+             "(attribute ",
+             static_cast<int>(attr), " needs ", attr_size, " bytes, but buffer has ", size_in_bytes,
+             " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  NVTE_CHECK(config != nullptr, "Invalid NVTEQuantizationConfig (got NULL)");
+  auto &config_ = *reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
+  switch (attr) {
+    case kNVTEQuantizationConfigForcePow2Scales:
+      std::memcpy(&config_.force_pow_2_scales, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigAmaxEpsilon:
+      std::memcpy(&config_.amax_epsilon, buf, attr_size);
+      break;
+    default:
+      NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
+  }
+}
+
+void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
+  if (config != nullptr) {
+    delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
 }
