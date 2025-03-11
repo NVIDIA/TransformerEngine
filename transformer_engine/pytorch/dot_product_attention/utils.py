@@ -56,6 +56,7 @@ class AttentionLogging:
     """
     Manage logging for attention module
     """
+
     _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
@@ -87,8 +88,9 @@ def _get_supported_versions(version_min, version_max):
 
 class FlashAttentionUtils:
     """
-    Manage Flash Attention versioning information 
+    Manage Flash Attention versioning information
     """
+
     # Detect flash-attn v2 in the environment
     is_installed = False
     version = PkgVersion("0")
