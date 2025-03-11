@@ -177,7 +177,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     rowwise=True,
                     columnwise=backward_needs_input,
                 )
-        
+
         # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
         if fp8 and FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling() and ub_bulk_dgrad:
             input_quantizer.set_usage(rowwise=True, columnwise=False)
