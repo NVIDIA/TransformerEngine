@@ -58,11 +58,8 @@ from ..tensor.quantized_tensor import (
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-<<<<<<< HEAD
 from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_layernorm, onnx_gemm
 
-=======
->>>>>>> upstream/main
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -1437,6 +1434,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if self.return_bias:
             return output, bias_tensor.to(inp_dtype)
         return output
+
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + layernorm_linear."""
         assert (
