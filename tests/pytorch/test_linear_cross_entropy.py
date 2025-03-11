@@ -89,8 +89,8 @@ class TestLinearCrossEntropyWithTokenEntropy:
             torch.cuda.synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
 
-            torch.testing.assert_close(torch_logprobs, kernel_logprobs, atol=1e-3, rtol=1e-3)
-            torch.testing.assert_close(torch_entropy, kernel_entropy, atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(torch_logprobs, kernel_logprobs, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(torch_entropy, kernel_entropy, atol=1e-4, rtol=1e-4)
 
             start_event.record()
             (d_torch_hidden, d_torch_weight) = torch.autograd.grad((torch_entropy, torch_logprobs),
@@ -110,8 +110,8 @@ class TestLinearCrossEntropyWithTokenEntropy:
             torch.cuda.synchronize()
             kernel_backward_latency.append(start_event.elapsed_time(end_event))
 
-            torch.testing.assert_close(d_torch_hidden, d_kernel_hidden, atol=1e-2, rtol=1e-3)
-            torch.testing.assert_close(d_torch_weight, d_kernel_weight, atol=1e-2, rtol=1e-3)
+            torch.testing.assert_close(d_torch_hidden, d_kernel_hidden, atol=1e-2, rtol=1e-4)
+            torch.testing.assert_close(d_torch_weight, d_kernel_weight, atol=1e-2, rtol=1e-4)
         
         # remove first latency
         torch_forward_latency = torch_forward_latency[1:]
@@ -224,7 +224,7 @@ class TestLinearCrossEntropy:
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
 
             # forward result verification
-            torch.testing.assert_close(torch_logprobs, kernel_logprobs)
+            torch.testing.assert_close(torch_logprobs, kernel_logprobs, atol=1e-4, rtol=1e-4)
 
             start_event.record()
             (d_torch_hidden, d_torch_weight) = torch.autograd.grad((torch_logprobs,),
