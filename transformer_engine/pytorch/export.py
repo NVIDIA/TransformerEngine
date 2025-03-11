@@ -34,7 +34,7 @@ def onnx_export(enabled: bool = False) -> Generator[None, None, None]:
 
     global _IN_ONNX_EXPORT_MODE
     onnx_export_state = _IN_ONNX_EXPORT_MODE
-    if TORCH_MAJOR == 2 and TORCH_MINOR < 4 or TORCH_MAJOR < 2:
+    if (TORCH_MAJOR, TORCH_MINOR) < (2, 4):
         raise RuntimeError("ONNX export is not supported for PyTorch versions less than 2.4")
     try:
         _IN_ONNX_EXPORT_MODE = enabled
