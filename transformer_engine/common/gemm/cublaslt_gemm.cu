@@ -114,8 +114,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.transA = CUBLAS_OP_T;
     ret.transB = CUBLAS_OP_N;
 
-    NVTE_CHECK(ret.lda == ret.ldb,
-               "Minor dimension must be equal for NVTE_BLOCK_SCALING Gemm.");
+    NVTE_CHECK(ret.lda == ret.ldb, "Minor dimension must be equal for NVTE_BLOCK_SCALING Gemm.");
 
   } else {
     // In these scaling modes, the physical layout of
@@ -130,7 +129,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
     if (transa_bool && transb_bool) {  // TT
       NVTE_ERROR("TT layout not allowed.");
-    } 
+    }
   }
 
   if (is_tensor_scaling(A.scaling_mode)) {
@@ -296,12 +295,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
 
   // Create matrix descriptors. Not setting any extra attributes.
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
-      &Adesc, A_type, param.transA == CUBLAS_OP_N ? m : k,
-      param.transA == CUBLAS_OP_N ? k : m, param.lda));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
-      &Bdesc, B_type, param.transB == CUBLAS_OP_N ? k : n,
-      param.transB == CUBLAS_OP_N ? n : k, param.ldb));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Adesc, A_type, param.transA == CUBLAS_OP_N ? m : k,
+                                               param.transA == CUBLAS_OP_N ? k : m, param.lda));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Bdesc, B_type, param.transB == CUBLAS_OP_N ? k : n,
+                                               param.transB == CUBLAS_OP_N ? n : k, param.ldb));
 
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
@@ -362,7 +359,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
             operationDesc, CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE, &dummy_a_vec_stride,
             sizeof(dummy_a_vec_stride)));
       }
-#if CUDA_VERSION >= 12080
+#if CUDA_VERSION >= 12090
     } else if ((inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
                 inputA->scaling_mode == NVTE_BLOCK_SCALING_2D) &&
                (inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||

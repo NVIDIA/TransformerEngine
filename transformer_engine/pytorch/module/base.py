@@ -500,9 +500,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8CurrentScalingRecipeState
             ):
                 return
-            if recipe.fp8blockwise() and isinstance(
-                recipe_state, Float8BlockScalingRecipeState
-            ):
+            if recipe.fp8blockwise() and isinstance(recipe_state, Float8BlockScalingRecipeState):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
@@ -846,7 +844,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if ctx.ub_overlap_ag:
                 # Quantize the gradient if needed
                 if not isinstance(
-                    grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase)
+                    grad_output,
+                    (
+                        QuantizedTensor,
+                        Float8TensorBase,
+                        MXFP8TensorBase,
+                        Float8BlockwiseQTensorBase,
+                    ),
                 ):
                     grad_output = quantizer(grad_output)
 
@@ -864,7 +868,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # FP8 without all-gather: fused bgrad + cast + transpose
         grad_bias = None
         if ctx.use_bias:
-            if isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase)):
+            if isinstance(
+                grad_output,
+                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+            ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
                 if isinstance(quantizer, Float8BlockQuantizer):
@@ -872,7 +879,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(grad_output, (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase)):
+        if not isinstance(
+            grad_output,
+            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+        ):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 

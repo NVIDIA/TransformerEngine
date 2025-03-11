@@ -85,6 +85,7 @@ class Recipe:
         """Whether the given recipe is float8 blockwise scaling."""
         return isinstance(self, Float8BlockScaling)
 
+
 @dataclass()
 class DelayedScaling(Recipe):
     """
@@ -299,7 +300,6 @@ class MXFP8BlockScaling(Recipe):
         return f"margin={self.margin}, format={str(self.fp8_format).split('.')[1]},"
 
 
-
 @dataclass()
 class Float8BlockScaling(Recipe):
     """
@@ -355,7 +355,6 @@ class Float8BlockScaling(Recipe):
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
     """
 
-
     fp8_format: Format = Format.HYBRID
     fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
@@ -373,9 +372,15 @@ class Float8BlockScaling(Recipe):
         assert self.x_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for x"
         assert self.w_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for w"
         assert self.grad_block_scaling_dim in [1, 2], "Only 1D or 2D blocks supported for grad"
-        assert not (self.x_block_scaling_dim == 2 and self.w_block_scaling_dim == 2), "2D by 2D block gemm not supported."
-        assert not (self.x_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2), "2D by 2D block gemm not supported."
-        assert not (self.w_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2), "2D by 2D block gemm not supported."
+        assert not (
+            self.x_block_scaling_dim == 2 and self.w_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
+        assert not (
+            self.x_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
+        assert not (
+            self.w_block_scaling_dim == 2 and self.grad_block_scaling_dim == 2
+        ), "2D by 2D block gemm not supported."
         assert self.fp8_gemm_fprop.use_split_accumulator, "Split accumulator required for fprop."
         assert self.fp8_gemm_dgrad.use_split_accumulator, "Split accumulator required for dgrad."
         assert self.fp8_gemm_wgrad.use_split_accumulator, "Split accumulator required for wgrad."

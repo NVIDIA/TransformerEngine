@@ -739,8 +739,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # 5 high-precision unfused: gemm, activation, FC1_bias + FC1_gemm
             # 6 fp8 unfused: gemm, activation, FC1_bias + FC1_gemm
             fc2_dgrad_gemm_gelu_fusion = (
-                not ctx.fp8 and (ctx.activation == "gelu")
-                and (not ctx.bias_gelu_fusion)
+                not ctx.fp8 and (ctx.activation == "gelu") and (not ctx.bias_gelu_fusion)
             )
 
             # FC2 DGRAD; Unconditional
