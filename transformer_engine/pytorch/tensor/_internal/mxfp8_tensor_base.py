@@ -129,3 +129,35 @@ class MXFP8TensorBase:
             f"rowwise_scale_inv={self._rowwise_scale_inv}, "
             ")"
         )
+
+    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+        """
+        For MXFP8, columnwise scaled output is only produced by x2
+        scaling kernels, so this function only disables usages.
+        """
+        assert rowwise_usage or columnwise_usage, "Could not disable all usages of the tensor."
+
+        if columnwise_usage and rowwise_usage:
+            assert (
+                self._rowwise_data is not None
+                and self._rowwise_scale_inv is not None
+                and self._columnwise_data is not None
+                and self._columnwise_scale_inv is not None
+            ), "Cannot update to rowwise and columnwise usage."
+            return
+
+        if rowwise_usage:
+            assert (
+                self._rowwise_data is not None and self._rowwise_scale_inv is not None
+            ), "Cannot update to rowwise usage."
+            self._columnwise_data = None
+            self._columnwise_scale_inv = None
+            return
+
+        assert (
+            self._columnwise_data is not None and self._columnwise_scale_inv is not None
+        ), "Cannot update to columnwise usage."
+        self._rowwise_data = None
+        self._rowwise_scale_inv = None
+        return
+
