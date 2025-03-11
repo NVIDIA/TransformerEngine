@@ -5053,9 +5053,8 @@ class _SplitAlongDim(torch.autograd.Function):
         squeeze=False,
     ) -> Tuple[torch.Tensor, ...]:
         # pylint: disable=missing-function-docstring
-        if torch.is_grad_enabled() and not is_in_onnx_export_mode():
-            ctx.split_dim = split_dim
-            ctx.split_size_or_sections = split_size_or_sections
+        ctx.split_dim = split_dim
+        ctx.split_size_or_sections = split_size_or_sections
         if isinstance(mixed_x_layer, Float8TensorBase) and not isinstance(
             mixed_x_layer, Float8Tensor
         ):
@@ -8391,9 +8390,6 @@ class MultiheadAttention(torch.nn.Module):
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
             fn = _SplitAlongDim.apply
             n = []
-            if is_in_onnx_export_mode():
-                fn = _SplitAlongDim.forward
-                n = [None]
             query_layer, key_layer, value_layer = fn(
                 *n, mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
             )
