@@ -79,11 +79,12 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
 import transformer_engine.pytorch.dot_product_attention.inference as dpa_infer
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as att_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
 
 
 # Setup Attention Logging
-dpa_utils.AttentionLogging.setup_logging()
+att_log.setup_logging()
 
 # Global vars for flash attn imports
 flash_attn_cuda_bwd = None
@@ -101,7 +102,7 @@ except PackageNotFoundError:
         and get_device_compute_capability() >= (8, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
-        dpa_utils.AttentionLogging.fa_logger.debug(
+        att_log.fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
             """ "pip3 install flash-attn".""",
         )
@@ -131,7 +132,7 @@ else:
         and get_device_compute_capability() >= (8, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
-        dpa_utils.AttentionLogging.fa_logger.warning(
+        att_log.fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
             dpa_utils._get_supported_versions(
                 (
@@ -155,7 +156,7 @@ except PackageNotFoundError:
         and get_device_compute_capability() >= (9, 0)
         and dpa_utils._NVTE_FLASH_ATTN
     ):
-        dpa_utils.AttentionLogging.fa_logger.debug(
+        att_log.fa_logger.debug(
             "flash-attn v3 is not installed. To use, please install it by \n%s",
             fa_utils.v3_installation_steps,
         )
@@ -3926,9 +3927,9 @@ class FlashAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.logger = logging.getLogger("FlashAttention")
-        self.logger.setLevel(dpa_utils.AttentionLogging._log_level)
+        self.logger.setLevel(att_log._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(dpa_utils.AttentionLogging._stream_handler)
+            self.logger.addHandler(att_log._stream_handler)
 
     def forward(
         self,
@@ -4032,7 +4033,7 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(
+                        cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
                             attention_mask
                         )
                     else:
@@ -4046,10 +4047,10 @@ class FlashAttention(torch.nn.Module):
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = dpa_utils.get_cumul_seqlens_and_indices(
+                        cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
                             attention_mask[0]
                         )
-                        cu_seqlens_kv, indices_kv = dpa_utils.get_cumul_seqlens_and_indices(
+                        cu_seqlens_kv, indices_kv = dpa_utils.get_cu_seqlens_and_indices(
                             attention_mask[1]
                         )
                     else:
@@ -4062,13 +4063,13 @@ class FlashAttention(torch.nn.Module):
             else:
                 # Cumulative sequence lengths for unpadded data
                 if cu_seqlens_q is None:
-                    cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
+                    cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                         batch_size,
                         max_seqlen_q,
                         query_layer.device,
                     )
                 if cu_seqlens_kv is None:
-                    cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
+                    cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                         batch_size,
                         max_seqlen_kv,
                         key_layer.device,
@@ -4883,20 +4884,20 @@ class FusedAttention(torch.nn.Module):
                             "Please provide attention_mask or cu_seqlens for padding!"
                         )
                     if self.attention_type == "self":
-                        cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask)
+                        cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
                         cu_seqlens_kv = cu_seqlens_q
                     else:
-                        cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask[0])
-                        cu_seqlens_kv = dpa_utils.get_cumul_seqlens(attention_mask[1])
+                        cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
+                        cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
             else:
                 if cu_seqlens_q is None:
-                    cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
+                    cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                         batch_size,
                         max_seqlen_q,
                         query_layer.device,
                     )
                 if cu_seqlens_kv is None:
-                    cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
+                    cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                         batch_size,
                         max_seqlen_kv,
                         key_layer.device,
@@ -5157,9 +5158,9 @@ class DotProductAttention(TransformerEngineBaseModule):
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")
-        self.logger.setLevel(dpa_utils.AttentionLogging._log_level)
+        self.logger.setLevel(att_log._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(dpa_utils.AttentionLogging._stream_handler)
+            self.logger.addHandler(att_log._stream_handler)
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",", "_")
         if attn_mask_type == "causal_padding":
@@ -5422,7 +5423,7 @@ class DotProductAttention(TransformerEngineBaseModule):
             and should be used with care.
 
         .. note::
-            .. _cumul_seqlens note:
+            .. _cu_seqlens note:
 
             When training data has variable sequence lengths, users have two options.
 
@@ -5756,18 +5757,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
-                            cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask)
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
                             cu_seqlens_kv = cu_seqlens_q
                         else:
-                            cu_seqlens_q = dpa_utils.get_cumul_seqlens(attention_mask[0])
-                            cu_seqlens_kv = dpa_utils.get_cumul_seqlens(attention_mask[1])
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
                     else:
-                        cu_seqlens_q = dpa_utils.get_full_cumul_seqlens(
+                        cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_q,
                             query_layer.device,
                         )
-                        cu_seqlens_kv = dpa_utils.get_full_cumul_seqlens(
+                        cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
                             key_layer.device,

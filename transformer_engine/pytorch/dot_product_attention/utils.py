@@ -6,14 +6,14 @@ import math
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union, TypeAlias
 import warnings
-import logging  # for get_attention_backend()
+import logging
 import functools
 
 from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
-import torch  # for get_attention_backend()
+import torch
 import torch.nn.functional as F
 import transformer_engine_torch as tex
 import transformer_engine as te
@@ -31,7 +31,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O_CP,
     META_DQKV_CP,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor  # for AttentionParams
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -51,8 +51,7 @@ _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
 
-# ----Helper/Util classes-----
-# --K: Used by get_attention_backend(), DPA and FA classes--
+# ----Helper/Util classes and methods-----
 class AttentionLogging:
     _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
@@ -72,15 +71,11 @@ class AttentionLogging:
             AttentionLogging.fa_logger.addHandler(AttentionLogging._stream_handler)
 
 
-# --------
-
-
 @functools.lru_cache(maxsize=None)
 def _get_supported_versions(version_min, version_max):
     return ">= " + str(version_min) + ", " + "<= " + str(version_max)
 
 
-# --K: Used by get_attention_backend(), DPA and FA classes--
 class FlashAttentionUtils:
     # Detect flash-attn v2 in the environment
     is_installed = False
@@ -133,10 +128,8 @@ class FlashAttentionUtils:
         FlashAttentionUtils.use_v3 = True
 
 
-# Create a typedef/alias for code readibility
+# Typedef/alias for code readibility
 FAUtils: TypeAlias = FlashAttentionUtils
-# --------
-
 
 @dataclass(eq=True)
 class AttentionParams:
@@ -238,9 +231,6 @@ class AttentionParams:
         return True
 
 
-# --------
-
-
 def get_attention_backend(
     attention_params: AttentionParams = None,
 ):
@@ -265,6 +255,9 @@ def get_attention_backend(
         All available backends that could support the provided input. A list of Booleans
         in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
     """
+    # NOTE: As part of refactoring attention.py, populating the _attention_backends cache in attention
+    # is no longer performed at the end of get_attention_backend(), but the responsibility of doing so
+    # is shifted over to the caller of this function
     qkv_type = attention_params.qkv_type
     qkv_dtype = attention_params.qkv_dtype
     qkv_layout = attention_params.qkv_layout
@@ -878,9 +871,6 @@ def get_attention_backend(
     )
 
 
-# --------
-
-
 @torch.no_grad()
 def get_full_mask(
     max_seqlen_q: int,
@@ -1080,7 +1070,8 @@ def get_alibi(
         [batch_size, num_heads] shape, or, if `alibi_slopes` is in [num_heads] shape and
         `actual_seqlens_q` and `actual_seqlens_kv` are not `None`.
     """
-    # global _alibi_cache
+    # NOTE: As part of refactoring attention.py, get_alibi() now receives the alibi cache from the caller
+    # as an additional input arg
     if _alibi_cache["_alibi_slopes_require_update"]:
         if alibi_slopes is not None:
             _alibi_cache["_alibi_slopes"] = alibi_slopes
@@ -1135,10 +1126,7 @@ def get_alibi(
     return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
 
 
-# --------
-
-
-def get_cumul_seqlens(mask: torch.Tensor) -> torch.Tensor:
+def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
     """
     Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
     tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
@@ -1153,7 +1141,7 @@ def get_cumul_seqlens(mask: torch.Tensor) -> torch.Tensor:
     return cu_seqlens
 
 
-def get_cumul_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
     tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
@@ -1204,10 +1192,10 @@ def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
     return indices
 
 
-_cumul_seqlens_cache = {}
+_cu_seqlens_cache = {}
 
 
-def get_full_cumul_seqlens(
+def get_full_cu_seqlens(
     batch_size: int,
     max_seqlen: int,
     device: torch.device,
@@ -1217,22 +1205,22 @@ def get_full_cumul_seqlens(
     All sequences in batch have the maximum sequence length.
 
     """
-    global _cumul_seqlens_cache
-    if (batch_size, max_seqlen) not in _cumul_seqlens_cache:
-        _cumul_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+    global _cu_seqlens_cache
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
             0,
             (batch_size + 1) * max_seqlen,
             step=max_seqlen,
             dtype=torch.int32,
             device=device,
         )
-    return _cumul_seqlens_cache[(batch_size, max_seqlen)]
+    return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
 @jit_fuser
 def _pack_tensor(
     indices: torch.Tensor,
-    tensor: torch.Tensor,
+    *tensor: torch.Tensor,
 ) -> torch.Tensor:
     """
     Packs the given tensor using the `indices`.
@@ -1388,9 +1376,6 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
-# --------
-
-
 def get_qkv_layout(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1542,9 +1527,6 @@ def get_qkv_layout(
     return qkv_layout, q, k, v
 
 
-# --------
-
-
 def check_set_window_size(
     attn_mask_type: str,
     window_size: Tuple[int, int] = None,
@@ -1590,9 +1572,6 @@ def check_set_window_size(
     return window_size
 
 
-# --------
-
-
 def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
@@ -1634,6 +1613,3 @@ def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
         )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
-
-
-# --------

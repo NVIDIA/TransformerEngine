@@ -3,4 +3,3 @@
 # See LICENSE for license information.
 
 """Python interface for dot product attention"""
-# from transformer_engine_torch import *
