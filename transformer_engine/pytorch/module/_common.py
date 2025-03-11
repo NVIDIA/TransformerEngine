@@ -86,24 +86,14 @@ def apply_normalization(
 
     inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
 
-    split_mxfp8_cast = False
-    if not _use_cudnn_mxfp8_norm and isinstance(output_quantizer, MXFP8Quantizer):
-        split_mxfp8_cast = True
-
-    output = normalization_func(
+    return normalization_func(
         *inputs,
         eps,
-        None if split_mxfp8_cast else ln_out,
-        None if split_mxfp8_cast else output_quantizer,
+        ln_out,
+        output_quantizer,
         TE_DType[output_dtype] if output_dtype in TE_DType else output_dtype,
         fwd_ln_sm_margin,
         zero_centered_gamma,
-    )
-
-    return (
-        (output_quantizer.quantize(output[0], out=ln_out), *output[1:])
-        if split_mxfp8_cast
-        else output
     )
 
 
