@@ -34,6 +34,8 @@ def cublas_gemm_fp8_blockwise_case(
     x_columnwise: bool = False,
     w_columnwise: bool = False,
     use_bias: bool = False,
+    use_gelu: bool = False,
+    use_grad: bool = False,
     atol: float = 0.0,
     rtol: float = 0.0
 ):
@@ -67,6 +69,7 @@ def cublas_gemm_fp8_blockwise_case(
     else:
         out = None
 
+    assert not (use_bias and use_grad), "Bias grad not supported by GEMM"
     # Set quantize_op and quantization parameters
     x_quant_tile_shape = (1, 128) if is_x_1d_scaled else (128, 128)
     w_quant_tile_shape = (1, 128) if is_w_1d_scaled else (128, 128)
@@ -142,9 +145,9 @@ def cublas_gemm_fp8_blockwise_case(
     transa = True if not w_columnwise else False
     transb = False if not x_columnwise else True
     out_quantizer = None
-    grad = False
-    gelu = False
-    gelu_in = None
+    assert not (use_gelu and use_bias), "Bias and GELU not supported by GEMM"
+    aux_tensor = torch.randn((M, N), dtype=out_dtype, device=device) if use_gelu else None
+    aux_tensor_ref = aux_tensor.clone() if use_gelu else None
 
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
     # cuBLAS GEMM
@@ -160,9 +163,9 @@ def cublas_gemm_fp8_blockwise_case(
         TE_DType[out_dtype],
         bias,
         bias_dtype,
-        gelu,
-        gelu_in,
-        grad,
+        use_gelu,
+        aux_tensor,
+        use_grad,
         workspace,
         workspace.shape[0],
         accumulate,
@@ -176,8 +179,25 @@ def cublas_gemm_fp8_blockwise_case(
     y_ref = torch.where(y_ref.isnan(), torch.zeros_like(y_ref), y_ref)
     y = torch.where(y.isnan(), torch.zeros_like(y), y)
 
-    # Check
-    torch.testing.assert_close(y, y_ref, atol=atol, rtol=rtol)
+    if use_gelu:
+        # Check
+        if use_grad:
+            # With use_grad, GEMM should use aux tensor to calculate
+            # gradient
+            gelu_ref = tex.dgelu(y_ref, aux_tensor_ref, None)
+            # TODO: How do we decide whether this is acceptably close?
+            # Could also try to put the activation inside the reference
+            # before the output cast to see different tolerances.
+            torch.testing.assert_close(y, gelu_ref, atol=1e-3, rtol=1e-2)
+        else:
+            # aux tensor is pre-gelu aux output. Verify against y_ref.
+            torch.testing.assert_close(aux_tensor, y_ref, atol=atol, rtol=rtol)
+            act = torch.nn.GELU()
+            gelu_ref = act(y_ref)
+            # gelu_ref = tex.gelu(y_ref, None)
+            torch.testing.assert_close(y, gelu_ref, atol=atol, rtol=rtol)
+    else:
+        torch.testing.assert_close(y, y_ref, atol=atol, rtol=rtol)
 
 
 def cublas_gemm_test_constraint_enforced(
@@ -514,6 +534,84 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
     [
         # k = 128
         (256, 128, 256),
+        # non 128x128 divisible input shapes
+        (16, 128, 128),
+        (320, 64, 336),
+        # k > 128
+        (256, 256, 256),
+        (4096, 128, 4096),
+    ],
+)
+@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+@pytest.mark.parametrize("noise_type", ["normal"], ids=str)
+@pytest.mark.parametrize("x_magnitude", [1], ids=str)
+@pytest.mark.parametrize("w_magnitude", [1], ids=str)
+@pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
+@pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
+@pytest.mark.parametrize(
+    "is_x_1d_scaled, is_w_1d_scaled",
+    [
+        (True, False),
+        (True, True),
+        (False, True),
+    ],
+    ids=["1Dx2D", "1Dx1D", "2Dx1D"],
+)
+@pytest.mark.parametrize(
+    "use_grad",
+    [
+        True,
+    ],
+    ids=["grad"],
+)
+def test_cublas_gemm_fp8_gelu(
+    x_dtype,
+    w_dtype,
+    out_dtype,
+    M,
+    K,
+    N,
+    noise_type,
+    x_magnitude,
+    w_magnitude,
+    accumulate,
+    use_split_accumulator,
+    is_x_1d_scaled,
+    is_w_1d_scaled,
+    use_grad,
+):
+    # NOTE: cuBLAS doesn't complain with not use_grad, but the tests don't succeed
+    # so the epilogue is disabled on the transformer engine side.
+    if not use_grad and not (is_x_1d_scaled and not is_w_1d_scaled):
+        pytest.skip(
+            "CUBLASLT_EPILOGUE_GELU_AUX epilogue is only supported for 1Dx2D (cuBLAS 2Dx1D)."
+        )
+    cublas_gemm_fp8_blockwise_case(
+        x_dtype,
+        w_dtype,
+        out_dtype,
+        M,
+        K,
+        N,
+        noise_type,
+        x_magnitude,
+        w_magnitude,
+        accumulate,
+        use_split_accumulator,
+        is_x_1d_scaled,
+        is_w_1d_scaled,
+        use_gelu=True,
+        use_grad=use_grad,
+    )
+
+
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        # k = 128
+        (256, 128, 256),
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
@@ -577,7 +675,7 @@ def test_split_accumulator_enforced(
     ],
     ids=["1Dx2D", "1Dx1D", "2Dx1D"],
 )
-def test_bgrad_not_supported_until_tested(
+def test_bgrad_not_supported(
     x_dtype,
     w_dtype,
     out_dtype,
@@ -589,8 +687,7 @@ def test_bgrad_not_supported_until_tested(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
-    # NOTE: This may work, but until it is tested thoroughly,
-    # testing that the implementation errors.
+    # NOTE: BGRAD epilogue is not supported for fp8.
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -604,6 +701,7 @@ def test_bgrad_not_supported_until_tested(
         is_w_1d_scaled,
         use_grad=True,
         use_bias=True,
+        expected_err_msg="Epilogue requested outside of the available",
     )
 
 
@@ -630,7 +728,7 @@ def test_bgrad_not_supported_until_tested(
     ],
     ids=["1Dx2D", "1Dx1D", "2Dx1D"],
 )
-def test_gelu_not_supported_until_tested(
+def test_gelu_unsupported_cases_error(
     x_dtype,
     w_dtype,
     out_dtype,
@@ -644,8 +742,8 @@ def test_gelu_not_supported_until_tested(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
-    # NOTE: This may work, but until it is tested thoroughly,
-    # testing that the implementation errors.
+    if use_grad and not use_bias:
+        pytest.skip("DGELU epilogue is supported.")
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -660,9 +758,7 @@ def test_gelu_not_supported_until_tested(
         use_grad=use_grad,
         use_bias=use_bias,
         use_gelu=True,
-        expected_err_msg=(
-            "not supported for NVTE_BLOCK_SCALING until further numerical verification"
-        ),
+        expected_err_msg="Epilogue requested outside of the available",
     )
 
 
