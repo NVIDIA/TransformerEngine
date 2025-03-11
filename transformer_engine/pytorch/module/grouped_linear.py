@@ -555,10 +555,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         # customize quantizers based on each recipe & layer configs
         recipe = FP8GlobalStateManager.get_fp8_recipe()
         if recipe.float8_current_scaling():
-            assert (
-                not self.tp_size > 1
-            ), "GroupedLinear doesn't support TP > 1 with Float8 current scaling. " \
-               "Because the TP communication is handled outside of this module."
+            assert not self.tp_size > 1, (
+                "GroupedLinear doesn't support TP > 1 with Float8 current scaling. "
+                "Because the TP communication is handled outside of this module."
+            )
             self._customize_quantizers_float8_current_scaling(fwd, recipe)
 
     def reset_parameters(self, defer_init=False):
