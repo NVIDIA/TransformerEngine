@@ -53,6 +53,9 @@ _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
 # ----Helper/Util classes and methods-----
 class AttentionLogging:
+    """
+    Manage logging for attention module
+    """
     _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
@@ -61,6 +64,9 @@ class AttentionLogging:
 
     @staticmethod
     def setup_logging():
+        """
+        Set up log levels, logger and handlers
+        """
         _log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
         AttentionLogging._log_level = _log_levels[
             AttentionLogging._log_level if AttentionLogging._log_level in [0, 1, 2] else 2
@@ -73,10 +79,16 @@ class AttentionLogging:
 
 @functools.lru_cache(maxsize=None)
 def _get_supported_versions(version_min, version_max):
+    """
+    Calculate version info based on min and max numbers
+    """
     return ">= " + str(version_min) + ", " + "<= " + str(version_max)
 
 
 class FlashAttentionUtils:
+    """
+    Manage Flash Attention versioning information 
+    """
     # Detect flash-attn v2 in the environment
     is_installed = False
     version = PkgVersion("0")
@@ -106,6 +118,9 @@ class FlashAttentionUtils:
 
     @staticmethod
     def set_flash_attention_version():
+        """
+        Setup version info for FA v2.x
+        """
         FlashAttentionUtils.is_installed = True
         FlashAttentionUtils.v2_plus = FlashAttentionUtils.version >= PkgVersion("2")
         FlashAttentionUtils.v2_1_plus = FlashAttentionUtils.version >= PkgVersion("2.1")
@@ -121,6 +136,9 @@ class FlashAttentionUtils:
     # i.e. flashattn-hopper 3.0.0 as flash-attn 3.0.0
     @staticmethod
     def set_flash_attention_3_params():
+        """
+        Setup version info for FA v3.x
+        """
         FlashAttentionUtils.v3_is_installed = True
         FlashAttentionUtils.v3_0_0_beta = (
             PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")

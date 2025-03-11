@@ -2,8 +2,8 @@
 #
 # See LICENSE for license information.
 
-import torch
 from typing import Optional, Tuple, Union
+import torch
 import transformer_engine_torch as tex
 
 
