@@ -91,7 +91,7 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         "packaging",
         (
             "nvdlfw-inspect @"
-            " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@6b60eb0e675606fb2fbbfcb12667ecbec75eaf87#egg=nvdlfw-inspect"
+            " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
         ),
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
