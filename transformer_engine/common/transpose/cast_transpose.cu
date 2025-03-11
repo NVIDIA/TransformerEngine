@@ -249,7 +249,9 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
       input.dtype(), InputType,
       TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
           output.dtype(), OutputType,
-          if (is_delayed_tensor_scaling(output.scaling_mode)) {
+          if (is_tensor_scaling(output.scaling_mode)) {
+            // delayed scaling and current scaling are two variants of per-tensor scaling
+
             constexpr const char *itype_name = TypeInfo<InputType>::name;
             constexpr const char *otype_name = TypeInfo<OutputType>::name;
             constexpr size_t itype_size = sizeof(InputType);
@@ -323,6 +325,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               constexpr size_t col_tile_size = store_size / otype_size * THREADS_PER_WARP;
               const int num_blocks =
                   (DIVUP(row_length, row_tile_size) * DIVUP(num_rows, col_tile_size));
+
               cast_transpose_general_kernel<load_size, store_size, InputType, OutputType>
                   <<<num_blocks, block_size, 0, stream>>>(
                       static_cast<const InputType *>(input.data.dptr),
