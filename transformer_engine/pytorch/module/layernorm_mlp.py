@@ -309,23 +309,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 # or fused into the layernorm kernel
                 # ln_out_total represents the full fp8 tensor, in this case, it's the same as ln_out
                 ln_out_total = ln_out
-        # If residual connection is after LN, we need `ln_out`
-        # tensor in higher precision, this comes at the cost
-        # of an extra fp8 cast.
-        ln_out_return = None
-        if return_layernorm_output:
-            ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
-            if (fp8 or debug) and not with_quantized_all_gather:
-                ln_out_total = fc1_input_quantizer(ln_out_total)
-                if ln_out_gathered:
-                    rank = torch.distributed.get_rank(tp_group)
-                    slice_start = rank * ln_out.size(0)
-                    slice_end = (rank + 1) * ln_out.size(0)
-                    ln_out = ln_out_total[
-                        slice_start:slice_end, ...
-                    ]  # TODO(pgadzinski) - check this  # pylint: disable=fixme
-                else:
-                    ln_out = ln_out_total
 
         # Cast weights to expected dtype
         fc1_weight_final = fc1_weight
@@ -538,6 +521,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
             ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
@@ -827,9 +811,6 @@ class _LayerNormMLP(torch.autograd.Function):
                 dact = dact_func(fc2_dgrad, fc1_out.to(ctx.activation_dtype), None)
                 fc1_bias_grad = dact.sum(dim=0)
                 dact = ctx.fc1_grad_output_quantizer(dact)
-            elif _act_func(ctx.activation)[2] is not None and ctx.fp8 and not ctx.debug:
-                if ctx.grad_fc1_output_quantizer is not None:
-                    dact = ctx.grad_fc1_output_quantizer(dact)
             elif (
                 _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
                 and ctx.fp8
@@ -853,12 +834,12 @@ class _LayerNormMLP(torch.autograd.Function):
 
                 if ctx.fp8:
                     # TODO zhongboz: per-tensor current scaling has no bgrad fusion for now
-                    if isinstance(ctx.grad_fc1_output_quantizer, Float8CurrentScalingQuantizer):
+                    if isinstance(ctx.fc1_grad_output_quantizer, Float8CurrentScalingQuantizer):
                         fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
-                        dact = ctx.grad_fc1_output_quantizer(dact)
+                        dact = ctx.fc1_grad_output_quantizer(dact)
                     else:
                         fc1_bias_grad, dact = tex.bgrad_quantize(
-                            dact, ctx.grad_fc1_output_quantizer
+                            dact, ctx.fc1_grad_output_quantizer
                         )
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
@@ -1728,14 +1709,14 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     tex.FP8FwdTensors.GEMM1_INPUT
                 ].amax_reduction_size = self.tp_size
         else:
-            # grad_fc2_output_quantizer: set configs about amax epsilon and power_2_scale for grad_fc2_output_quantizer
+            # fc2_grad_output_quantizer: set configs about amax epsilon and power_2_scale for fc2_grad_output_quantizer
             self.quantizers["scaling_bwd"][
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
                 tex.FP8BwdTensors.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
-            # grad_fc1_output_quantizer: also set numerical configs for grad_fc1_output_quantizer
+            # fc1_grad_output_quantizer: also set numerical configs for fc1_grad_output_quantizer
             self.quantizers["scaling_bwd"][
                 tex.FP8BwdTensors.GRAD_INPUT1
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
@@ -1743,7 +1724,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 tex.FP8BwdTensors.GRAD_INPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             if self.sequence_parallel and self.set_parallel_mode:
-                # grad_fc2_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
+                # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].with_amax_reduction = True
