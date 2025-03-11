@@ -407,6 +407,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 columnwise_data=tensor._columnwise_data,
                 columnwise_scale_inv=tensor._columnwise_scale_inv,
                 quantizer=tensor._quantizer,
+                is_2D_scaled=tensor._is_2D_scaled,
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
             )
@@ -424,6 +425,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
         quantizer: Quantizer,
+        is_2D_scaled: bool,
     ) -> Float8BlockwiseQTensor:
         """Build Float8BlockwiseQTensor, for use in __reduce__
 
@@ -439,6 +441,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
             quantizer=quantizer,
+            is_2D_scaled=is_2D_scaled,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -453,6 +456,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 self._fp8_dtype,
                 self.dtype,
                 self._quantizer,
+                self._is_2D_scaled,
             ),
         )
 
