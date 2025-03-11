@@ -99,13 +99,9 @@ class TestFP8RecipeLinearBase:
 
         # Expected tensor names based on the naming template
         if recipe.float8_current_scaling():
-            scaling_type = (
-                "ScalingType.PER_TENSOR"
-            )
+            scaling_type = "ScalingType.PER_TENSOR"
         elif recipe.fp8blockwise():
-            scaling_type = (
-                "ScalingType.BLOCKWISE"
-            )
+            scaling_type = "ScalingType.BLOCKWISE"
         else:
             scaling_type = "Unknown"
         current_seed = torch.initial_seed()  # Get the current seed

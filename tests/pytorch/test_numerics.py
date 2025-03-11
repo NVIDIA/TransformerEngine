@@ -50,7 +50,9 @@ import transformer_engine_torch as tex
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
-fp8_block_scaling_available, reason_for_no_fp8_block_scaling = FP8GlobalStateManager.is_fp8_block_scaling_available()
+fp8_block_scaling_available, reason_for_no_fp8_block_scaling = (
+    FP8GlobalStateManager.is_fp8_block_scaling_available()
+)
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
