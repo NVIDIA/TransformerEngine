@@ -83,7 +83,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8):
         raise AssertionError(result.stderr.decode())
 
 
-def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe):
+def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization):
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [
         str(test_path),
@@ -104,7 +104,7 @@ def _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, 
         if not fp8_available:
             pytest.skip(reason_for_no_fp8)
         test_cmd.append("--fp8")
-        test_cmd.append(f"--fp8-recipe={fp8_recipe}")
+        test_cmd.append(f"--quantization={quantization}")
 
     os.environ["PYTORCH_JIT"] = "0"
     os.environ["NVTE_TORCH_COMPILE"] = "0"
@@ -244,7 +244,8 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
 
 
 @pytest.mark.parametrize(
-    "fp8_recipe", ["delayed", "tensorwise"], ids=[" DELAYED SCALING ", " CURRENT SCALING "]
+    "quantization", ["fp8_delayed_scaling", "fp8_current_scaling"], 
+    ids=[" DELAYED SCALING ", " CURRENT SCALING "]
 )
 @pytest.mark.parametrize(
     "fp8",
@@ -287,9 +288,9 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
     ],
 )
 def test_layers_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, fp8_recipe)
+    _run_layer_with_overlap(layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization)
