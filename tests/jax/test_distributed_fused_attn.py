@@ -290,11 +290,8 @@ class TestDistributedContextParallelSelfAttn:
         use_shardy,
         use_scan_ring=False,
     ):
-        if qkv_layout.is_thd():
-            if cp_strategy == CPStrategy.ALL_GATHER:
-                pytest.skip("THD doesn't support all gather context parallelism.")
-            if not load_balanced and cp_strategy == CPStrategy.RING:
-                pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+        if qkv_layout.is_thd() and cp_strategy == CPStrategy.ALL_GATHER:
+            pytest.skip("THD doesn't support all gather context parallelism.")
 
         assert not use_scan_ring or cp_strategy == CPStrategy.RING
 
