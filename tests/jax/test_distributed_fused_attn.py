@@ -379,8 +379,8 @@ class TestDistributedContextParallelSelfAttn:
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
 
-        if qkv_layout.is_thd() and not load_balanced:
-            pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
+        # if qkv_layout.is_thd() and not load_balanced:
+        #     pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
         return self.impl_test_context_parallel_attn(
             device_count,

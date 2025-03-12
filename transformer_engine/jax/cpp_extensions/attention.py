@@ -2194,6 +2194,7 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             batch, q_max_seqlen, head, _ = q.shape
@@ -2213,6 +2214,12 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 kv_next = helper.permute_kv(kv, cp_perm)
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
+
+                if not config.context_parallel_causal_load_balanced and cp_rank >= idx:
+                    if config.attn_mask_type == AttnMaskType.CAUSAL_PADDING_MASK:
+                        subblock_config = replace(
+                            subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK
+                        )
 
                 output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
                     q,
@@ -2331,6 +2338,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 subblock_config = config
 
             cp_size = get_mesh_axis_size(config.cp_axis, mesh)
+            cp_rank = get_mesh_axis_rank(config.cp_axis, mesh)
             cp_perm = [(i, (i + 1) % cp_size) for i in range(cp_size)]
 
             dq = jnp.zeros_like(q)
@@ -2346,6 +2354,12 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 kv_dkv = helper.permute_kv(kv_dkv, cp_perm)
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
+
+                if not config.context_parallel_causal_load_balanced and cp_rank >= _idx:
+                    if config.attn_mask_type == AttnMaskType.CAUSAL_PADDING_MASK:
+                        subblock_config = replace(
+                            subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK
+                        )
 
                 def compute():
                     dq_per_step, dkv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
