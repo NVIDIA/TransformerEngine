@@ -66,6 +66,16 @@ class MXFP8Quantizer(Quantizer):
 
         return dst
 
+    def is_quantizable(self, inp: torch.Tensor) -> bool:
+        """Returns whether or not given inp can be quantized"""
+        if inp.ndim < 2:
+            return False
+        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        return True
+
     def make_empty(
         self,
         shape: Iterable[int],

@@ -929,6 +929,26 @@ def _all_gather_mxfp8(
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
+    # For cases where inp has dimensions that cannot be quantized,
+    # we gather in high precision followed by a cast to FP8.
+    if (
+        not isinstance(inp, MXFP8TensorBase)
+        and quantizer is not None
+        and not quantizer.is_quantizable(inp)
+    ):
+        out = torch.empty(
+            out_shape,
+            dtype=inp.dtype,
+            device=inp.device,
+            memory_format=torch.contiguous_format,
+        )
+        torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
+        out = quantizer(out)
+        return out, None
+
+    inp_dtype = inp.dtype
+    inp_device = inp.device
+
     # Cast input tensor to MXFP8 with required data
     if not isinstance(inp, MXFP8TensorBase):
         inp = quantizer(inp)
@@ -945,7 +965,7 @@ def _all_gather_mxfp8(
         inp = quantizer(inp.dequantize())
 
     # Construct MXFP8 output tensor
-    out = quantizer.make_empty(out_shape, dtype=inp.dtype, device=inp.device)
+    out = quantizer.make_empty(out_shape, dtype=inp_dtype, device=inp_device)
 
     # Async op handle
     handle = None
