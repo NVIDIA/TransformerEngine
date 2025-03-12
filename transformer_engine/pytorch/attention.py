@@ -142,7 +142,7 @@ except PackageNotFoundError:
     if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
         fa_logger.debug(
             "flash-attn v2 is not installed. To use, please install it by"
-            """ "pip install flash-attn".""",
+            """ "pip3 install flash-attn".""",
         )
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
@@ -197,8 +197,8 @@ _use_flash_attn_3 = False
 # TODO(cyang): update FA to 2.7.3 when its FA3 compilation issue is resolved
 # https://github.com/Dao-AILab/flash-attention/issues/1452
 _flash_attn_3_installation_steps = """\
-(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
-(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(1) pip3 install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python3 -c "import site; print(site.getsitepackages()[0])"`
 (3) mkdir -p $python_path/flashattn_hopper
 (4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
 try:
