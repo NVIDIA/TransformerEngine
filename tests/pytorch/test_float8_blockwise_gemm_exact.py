@@ -15,7 +15,6 @@ from tests.pytorch.references.blockwise_fp8_gemm_reference import CuBLASRefBlock
 def fp8_blockwise_gemm_supported() -> bool:
     return float(torch.version.cuda) >= 12.9
 
-
 def cublas_gemm_fp8_blockwise_case(
     x_dtype,
     w_dtype,
@@ -432,8 +431,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ):
-    rtol = 1e-3
-    atol = 0.0
     cublas_gemm_fp8_blockwise_case(
         x_dtype,
         w_dtype,
@@ -449,8 +446,6 @@ def test_cublas_gemm_fp8_blockwise_bias(
         is_x_1d_scaled,
         is_w_1d_scaled,
         use_bias=True,
-        atol=atol,
-        rtol=rtol,
     )
 
 
