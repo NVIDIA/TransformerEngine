@@ -52,8 +52,6 @@ fi
 if $BUILD_PYTORCH ; then
 	cd /TransformerEngine/transformer_engine/pytorch
 	/opt/python/cp38-cp38/bin/pip install torch
-	/opt/python/cp38-cp38/bin/pip install onnx
-	/opt/python/cp38-cp38/bin/pip install onnxscript
 	/opt/python/cp38-cp38/bin/python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
 	cp dist/* /wheelhouse/
 fi
