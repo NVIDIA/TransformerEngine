@@ -2,6 +2,9 @@
 #
 # See LICENSE for license information.
 
+"""
+Rotary Position Embedding implementation of different types along with hlper functions
+"""
 from typing import Optional, Tuple, Union
 import torch
 import transformer_engine_torch as tex

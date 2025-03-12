@@ -2,6 +2,9 @@
 #
 # See LICENSE for license information.
 
+"""
+Utils/Helper classes and methods for attention
+"""
 import math
 import os
 from typing import Any, Dict, List, Optional, Tuple, Union, TypeAlias
@@ -60,7 +63,6 @@ class AttentionLogging:
     _log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
     _formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
     _stream_handler = logging.StreamHandler()
-    # TODO: Move fa_logger to FAUtils
     fa_logger = logging.getLogger(__name__)
 
     @staticmethod
@@ -1348,7 +1350,10 @@ def _unpack_3_tensors(
 
 
 class PackTensors(torch.autograd.Function):
-
+    """
+    Autograd function to pack a tensor.
+    """
+    
     @staticmethod
     def forward(
         ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]

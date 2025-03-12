@@ -2,6 +2,10 @@
 #
 # See LICENSE for license information.
 
+"""
+Inference classes for attention
+"""
+
 
 class InferenceParams:  # pylint: disable=too-few-public-methods
     """
