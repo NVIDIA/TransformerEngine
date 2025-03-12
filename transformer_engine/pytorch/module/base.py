@@ -4,6 +4,7 @@
 
 """Base modules and utilities for TransformerEngine PyTorch API"""
 import io
+import math
 import os
 import pickle
 import warnings
@@ -454,14 +455,12 @@ def fill_userbuffers_buffer_for_all_gather(
     local_shape = local_tensor.size()
     if not local_shape:
         raise ValueError(f"Invalid local tensor (shape={tuple(local_shape)})")
+    process_group_size = torch.distributed.get_world_size(process_group)
     global_shape = list(local_shape)
-    global_shape[0] *= torch.distributed.get_world_size(process_group)
+    global_shape[0] *= process_group_size
 
-    # All-gather output tensor
-    global_tensor: Optional[torch.Tensor] = None
-
+    # Unquantized data
     if quantizer is None:
-        # Unquantized data
         if isinstance(local_tensor, QuantizedTensor):
             local_tensor = local_tensor.dequantize()
         if comm.is_fp8_ubuf():
@@ -471,9 +470,10 @@ def fill_userbuffers_buffer_for_all_gather(
             )
         comm.copy_into_buffer(local_tensor, local_chunk=True)
         global_tensor = comm.get_buffer(shape=global_shape)
+        return global_tensor, local_tensor
 
-    elif isinstance(quantizer, Float8Quantizer):
-        # FP8 data
+    # FP8 data
+    if isinstance(quantizer, Float8Quantizer):
         if not isinstance(local_tensor, Float8TensorBase):
             if isinstance(local_tensor, QuantizedTensor):
                 local_tensor.dequantize()
@@ -494,19 +494,86 @@ def fill_userbuffers_buffer_for_all_gather(
             fp8_dtype=local_tensor._fp8_dtype,
             requires_grad=False,
             quantizer=quantizer,
+        )  ### TODO Consider internal tensor
+        return global_tensor, local_tensor
+
+    # MXFP8 data
+    if isinstance(quantizer, MXFP8Quantizer):
+
+        # Cast to MXFP8 if needed
+        if not isinstance(local_tensor, MXFP8TensorBase):
+            if isinstance(local_tensor, QuantizedTensor):
+                local_tensor.dequantize()
+            local_tensor = quantizer(local_tensor)
+        if not comm.is_fp8_ubuf():
+            raise RuntimeError(
+                "Attempting to all-gather MXFP8 tensor, "
+                "but Userbuffers is not initialized with FP8 buffers"
+            )
+
+        # Check which MXFP8 buffer to communicate
+        if quantizer.rowwise_usage == quantizer.columnwise_usage:
+            raise ValueError(
+                "Userbuffers can only communicate one MXFP8 buffer at a time, "
+                f"but quantizer has rowwise_usage={quantizer.rowwise_usage}, "
+                f"columnwise_usage={quantizer.columnwise_usage}"
+            )
+        with_rowwise_data = quantizer.rowwise_usage
+
+        # Copy MXFP8 data to local chunk of Userbuffers buffer
+        local_data = (
+            local_tensor._rowwise_data
+            if with_rowwise_data
+            else local_tensor._columnwise_data
+        )
+        comm.copy_into_buffer(local_data, local_chunk=True)
+
+        # Gather scaling-inverses
+        if math.prod(local_shape[:-1]) % 128 != 0:
+            raise ValueError(
+                "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
+                f"but got MXFP8 tensor with shape={tuple(local_shape)}"
+            )
+        local_scale_inv = (
+            local_tensor._rowwise_scale_inv
+            if with_rowwise_data
+            else local_tensor._columnwise_scale_inv
+        )
+        local_scale_inv_size = list(local_scale_inv.size())
+        global_scale_inv = torch.empty(
+            [process_group_size * local_scale_inv_size[0]] + local_scale_inv_size[1:],
+            dtype=local_scale_inv.dtype,
+            device=local_scale_inv.device,
+        )
+        torch.distributed.all_gather_into_tensor(
+            global_scale_inv,
+            local_scale_inv,
+            group=process_group,
         )
 
-    elif isinstance(quantizer, MXFP8Quantizer):
-        # MXFP8 data
-        raise NotImplementedError("TODO")
+        # Construct MXFP8 tensor with Userbuffers buffer
+        rowwise_data, rowwise_scale_inv = None, None
+        columnwise_data, columnwise_scale_inv = None, None
+        global_data = comm.get_buffer(shape=global_shape)
+        if with_rowwise_data:
+            rowwise_data, rowwise_scale_inv = global_data, global_scale_inv
+        else:
+            columnwise_data, columnwise_scale_inv = global_data, global_scale_inv
+        global_tensor = MXFP8Tensor(
+            shape=global_shape,
+            dtype=local_tensor.dtype,
+            rowwise_data=rowwise_data,
+            rowwise_scale_inv=rowwise_scale_inv,
+            columnwise_data=columnwise_data,
+            columnwise_scale_inv=columnwise_scale_inv,
+            fp8_dtype=local_tensor._fp8_dtype,
+            quantizer=quantizer,
+            requires_grad=False,
+        )  ### TODO Consider internal tensor
+        return global_tensor, local_tensor
 
-    else:
-        # Unsupported data format
-        raise ValueError(f"Unsupported quantizer ({quantizer})")
-
-    if global_tensor is None:
-        raise RuntimeError("Could not construct all-gather output tensor")
-    return global_tensor, local_tensor
+    # Unsupported data format
+    raise ValueError(f"Unsupported quantizer ({quantizer})")
 
 
 class TransformerEngineBaseModule(torch.nn.Module, ABC):

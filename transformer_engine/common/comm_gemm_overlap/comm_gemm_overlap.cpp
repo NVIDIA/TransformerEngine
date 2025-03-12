@@ -204,7 +204,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
       } else if (source.scaling_mode() == NVTEScalingMode::NVTE_MXFP8_1D_SCALING &&
                  (param_type == NVTETensorParam::kNVTERowwiseScaleInv ||
                   param_type == NVTETensorParam::kNVTEColumnwiseScaleInv)) {
-        // Calculate block scaling offset and size
+        // Calculate offset and size for MXFP8 scale-invs
         auto scaled_tensor_dim_size = (param_type == NVTETensorParam::kNVTERowwiseScaleInv)
                                           ? height
                                           : width;

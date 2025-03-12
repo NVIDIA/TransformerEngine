@@ -22,7 +22,8 @@ from ...module.base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ...tensor.quantized_tensor import QuantizedTensor
+from ...tensor.quantized_tensor import QuantizedTensor, Quantizer
+from ...tensor.float8_tensor import Float8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import (
@@ -232,8 +233,13 @@ class UserbuffersForwardLinear(FusedOperation):
         x_local = input
         x = None
         if with_ub_all_gather:
-            if isinstance(x_local, QuantizedTensor):
-                x_local = x_local.dequantize()
+            if input_quantizer is not None:
+                if not isinstance(x_local, QuantizedTensor):
+                    input_quantizer.set_usage(rowwise=True)
+                    if isinstance(input_quantizer, Float8Quantizer):
+                        input_quantizer.set_usage(columnwise=False)
+                    x_local = input_quantizer(x_local)
+                input_quantizer.set_usage(rowwise=True, columnwise=False)
             x, x_local = fill_userbuffers_buffer_for_all_gather(
                 ub_comm,
                 x_local,
