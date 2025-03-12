@@ -1241,7 +1241,7 @@ def get_full_cu_seqlens(
 @jit_fuser
 def _pack_tensor(
     indices: torch.Tensor,
-    *tensor: torch.Tensor,
+    tensor: torch.Tensor,
 ) -> torch.Tensor:
     """
     Packs the given tensor using the `indices`.

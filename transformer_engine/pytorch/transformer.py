@@ -15,9 +15,7 @@ from transformer_engine.pytorch.attention import (
     MultiheadAttention,
 )
 from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
-from transformer_engine.pytorch.dot_product_attention.utils import (
-    check_set_window_size,
-)
+from transformer_engine.pytorch.dot_product_attention.utils import check_set_window_size
 from transformer_engine.pytorch.jit import (
     set_jit_fusion_options,
     warmup_jit_bias_dropout_add_all_dtypes,
