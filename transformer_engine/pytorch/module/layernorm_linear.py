@@ -163,8 +163,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 raise ValueError("Missing quantizer for input tensor")
 
         # Configure quantizer for normalization output
-        if fp8 and input_quantizer is None:
-            raise ValueError("Missing quantizer for input tensor")
         with_quantized_norm = fp8 and not return_layernorm_output and not debug
         # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
         # so we need to set with_quantized_norm to False
