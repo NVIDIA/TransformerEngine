@@ -187,8 +187,8 @@ class _LayerNormLinear(torch.autograd.Function):
 
         ub_obj_fprop = None
         ln_out = None
-        # For Delay scaling, output of normalization can be in fp8.
-        # For CurrentScaling, it will be fused in the future, but currently we need the output of normalization in high precision.
+        # For DelayScaling, output of normalization will be in fp8.
+        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
         if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
