@@ -150,13 +150,14 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   if (force_unfused_kernel) {
     if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
-      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
-        c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
+        c10::intrusive_ptr<dist_group_type> process_group_ptr =
+            my_quantizer_cs->amax_reduction_group;
         // construct torch tesnor from NVTEBasicTensor without reallocating memory
-        at::Tensor& amax_tensor_torch = my_quantizer_cs->amax;
+        at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
         std::vector<at::Tensor> tensors = {amax_tensor_torch};
         // allreduce amax tensor
         c10d::AllreduceOptions allreduce_opts;
@@ -291,13 +292,14 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   if (force_unfused_kernel) {
     if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
-      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
+      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
       // check if we need to do amax reudction (depending on model parallel configs)
       if (my_quantizer_cs->with_amax_reduction) {
-        c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
+        c10::intrusive_ptr<dist_group_type> process_group_ptr =
+            my_quantizer_cs->amax_reduction_group;
         // construct torch tesnor from NVTEBasicTensor without reallocating memory
-        at::Tensor& amax_tensor_torch = my_quantizer_cs->amax;
+        at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
         std::vector<at::Tensor> tensors = {amax_tensor_torch};
         // allreduce amax tensor
         c10d::AllreduceOptions allreduce_opts;
