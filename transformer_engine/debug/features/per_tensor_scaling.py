@@ -40,8 +40,17 @@ def per_tensor_cast(
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
     }, "[NVTORCH INSPECT ERROR] Only 2 FP8 types: E4M3 and E5M2 are supported in TE."
+    tensor = tensor.contiguous()
+    if fp8_dtype == tex.DType.kFloat8E4M3:
+        fp8_max = Format.E4M3.value.max_fwd
+    else:
+        fp8_max = Format.E5M2.value.max_fwd
+    amax = tensor.abs().max().float()
+    one = torch.ones(1, device=tensor.device)
 
-    quantizer = Float8CurrentScalingQuantizer(fp8_dtype, device=tensor.device)
+    scale = _default_sf_compute(amax, one, fp8_max, margin)
+
+    quantizer = Float8Quantizer(scale, amax, fp8_dtype)
 
     if out is not None:
         quantizer.update_quantized(tensor, out)

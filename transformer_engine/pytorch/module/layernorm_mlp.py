@@ -268,10 +268,10 @@ class _LayerNormMLP(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
+        ln_out_return = ln_out if return_layernorm_output else None
         if debug and not return_layernorm_output:
             ln_out = fc1_input_quantizer(ln_out)
 
-        ln_out_return = ln_out if return_layernorm_output else None
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -297,7 +297,7 @@ class _LayerNormMLP(torch.autograd.Function):
             if ub_overlap_ag:
                 ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer, False)
             else:
-                if fp8:
+                if fp8 or debug:
                     if not isinstance(ln_out, QuantizedTensor):
                         fc1_input_quantizer.set_usage(
                             rowwise=True, columnwise=backwards_needs_fc1_input
