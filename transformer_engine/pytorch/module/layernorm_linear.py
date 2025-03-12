@@ -312,7 +312,7 @@ class _LayerNormLinear(torch.autograd.Function):
             get_workspace(),
             quantization_params=output_quantizer,
             out_dtype=activation_dtype,
-            bias=bias,
+            bias=bias if use_bias else None,
             use_split_accumulator=fprop_gemm_use_split_accumulator,
             ub=ub_obj,
             ub_type=ub_type,

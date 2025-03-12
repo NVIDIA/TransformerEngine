@@ -424,7 +424,7 @@ class _LayerNormMLP(torch.autograd.Function):
             act_out,
             get_workspace(),
             out_dtype=activation_dtype,
-            bias=fc2_bias,
+            bias=fc2_bias if use_fc2_bias else None,
             quantization_params=output_quantizer,
             out=fc2_out,
             use_split_accumulator=_2X_ACC_FPROP,
