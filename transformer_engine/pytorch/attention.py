@@ -6280,8 +6280,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
-        ctx.fake_dtype = fake_dtype
-        ctx.qkv_dtype = qkv_dtype
         ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
@@ -6304,6 +6302,7 @@ class FusedAttnFunc(torch.autograd.Function):
             assert isinstance(
                 d_out, Float8Tensor
             ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
+        fake_dtype = d_out.dtype
 
         d_out = d_out.contiguous()
         (
@@ -6364,6 +6363,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8 = d_out
                     else:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
+                    dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6374,8 +6374,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         v_fp8,
                         out_fp8,
                         d_out_fp8,
-                        ctx.fake_dtype,
-                        ctx.qkv_dtype,
+                        fake_dtype,
+                        dqkv_dtype,
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
@@ -6423,6 +6423,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
+                    dqkv_dtype = TE_DType[d_out.dtype]
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6433,8 +6434,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         v,
                         out,
                         d_out,
-                        ctx.fake_dtype,
-                        ctx.qkv_dtype,
+                        fake_dtype,
+                        dqkv_dtype,
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
