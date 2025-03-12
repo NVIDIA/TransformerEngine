@@ -28,7 +28,6 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
                                               weight_ptr, stride_weight_k, stride_weight_n,
                                               labels_ptr, stride_labels,
                                               max_ptr, stride_max_m, stride_max_n,
-                                              max_indices_ptr, stride_max_indices_m, stride_max_indices_n,
                                               accu_ptr, stride_accu_m, stride_accu_n,
                                               global_logprobs_ptr, stride_global_logprobs,
                                               global_logprobs_scalar_ptr,
@@ -59,7 +58,6 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
 
     # traverse over N dimension
     _max = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-    _max_indices = tl.zeros((BLOCK_SIZE_M,), dtype=tl.int64)
     _accu = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     _logprobs = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
     for n in range(0, num_pid_n):
@@ -86,9 +84,6 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
         _max_old = _max
         m_pid_n, m_pid_n_idx = tl.max(logits, axis=1, return_indices=True)
         _max = tl.maximum(_max_old, m_pid_n)
-        # update indices when we find a new maximum
-        local_indices = pid_n * vocab_per_split + n * BLOCK_SIZE_N + m_pid_n_idx
-        _max_indices = tl.where(_max > _max_old, local_indices, _max_indices)
 
         exp_logits = tl.exp(logits - _max[:,None])
         coeff = tl.exp(_max_old - _max)
@@ -100,8 +95,6 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
     # store maximum
     maximum_ptrs = max_ptr + pid_n * stride_max_n + offs_am * stride_max_m
     tl.store(maximum_ptrs, _max, mask=(offs_am < num_tokens) & (pid_n < num_splits))
-    maximum_indices_ptrs = max_indices_ptr + pid_n * stride_max_indices_n + offs_am * stride_max_indices_m
-    tl.store(maximum_indices_ptrs, _max_indices, mask=(offs_am < num_tokens) & (pid_n < num_splits))
     accu_ptrs = accu_ptr + pid_n * stride_accu_n + offs_am * stride_accu_m
     tl.store(accu_ptrs, _accu, mask=(offs_am < num_tokens) & (pid_n < num_splits))
 
@@ -121,10 +114,8 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
 @triton.jit
 def efficient_entropy_triton_kernel_epilogue(num_tokens, num_splits,
                                              max_ptr, stride_max_m, stride_max_n,
-                                             max_indices_ptr, stride_max_indices_m, stride_max_indices_n,
                                              accu_ptr, stride_accu_m, stride_accu_n,
                                              global_max_ptr, stride_global_max,
-                                             global_max_indices_ptr, stride_global_max_indices,
                                              global_accu_ptr, stride_global_accu,
                                              global_logprobs_ptr, stride_global_logprobs,
                                              global_logprobs_scalar_ptr,
@@ -154,8 +145,6 @@ def efficient_entropy_triton_kernel_epilogue(num_tokens, num_splits,
         _max_old = global_max
         _local_max, _local_indices = tl.max(_max, axis=1, return_indices=True)
         global_max = tl.maximum(global_max, _local_max)
-        _local_indices += pid_n * BLOCK_SIZE_N
-        global_max_indices = tl.where(global_max > _max_old, _local_indices, global_max_indices)
 
         _scale = tl.exp(_max - global_max[:,None])
         _coeff = tl.exp(_max_old - global_max)
@@ -164,13 +153,6 @@ def efficient_entropy_triton_kernel_epilogue(num_tokens, num_splits,
     # store maximum
     tl.store(global_max_ptr + offs_m * stride_global_max,
              global_max, mask=offs_m < num_tokens)
-    
-    # gather values from max_indices_ptr using global_max_indices
-    offs_n = global_max_indices
-    final_indices = tl.load(max_indices_ptr + offs_m * stride_max_indices_m + offs_n * stride_max_indices_n, 
-                            mask=(offs_m < num_tokens) & (offs_n < num_splits))
-    tl.store(global_max_indices_ptr + offs_m * stride_global_max_indices,
-             final_indices, mask=offs_m < num_tokens)
 
     # store accumulate
     tl.store(global_accu_ptr + offs_m * stride_global_accu,
@@ -226,9 +208,8 @@ def efficient_entropy_forward(hidden: torch.Tensor,
 
     # buffers need for backward
     maximum = torch.empty((num_tokens,), device=hidden.device, dtype=torch.float32)
-    maximum_indices = torch.empty_like(maximum, dtype=torch.int64)
     accumulate = torch.empty_like(maximum, dtype=torch.float32)
-    assert maximum.is_contiguous() and maximum_indices.is_contiguous() and accumulate.is_contiguous()
+    assert maximum.is_contiguous() and accumulate.is_contiguous()
 
     # intermediate buffers
     vocab_per_split = 1024
@@ -236,7 +217,6 @@ def efficient_entropy_forward(hidden: torch.Tensor,
     num_splits = (vocab_size + vocab_per_split - 1) // vocab_per_split
 
     _max = torch.empty((num_tokens, num_splits), device=hidden.device, dtype=torch.float32)
-    _max_indices = torch.empty((num_tokens, num_splits), device=hidden.device, dtype=torch.int64)
     _accu = torch.empty((num_tokens, num_splits), device=hidden.device, dtype=torch.float32)
 
     if REDUCTION == EntropyReductionEnum._None:
@@ -244,8 +224,8 @@ def efficient_entropy_forward(hidden: torch.Tensor,
     else:
         _logprobs = torch.empty((num_tokens,), device=hidden.device, dtype=torch.float32)
 
-    assert _max.is_contiguous() and _max_indices.is_contiguous() and _accu.is_contiguous()
-    assert _max.is_cuda and _max_indices.is_cuda and _accu.is_cuda
+    assert _max.is_contiguous() and _accu.is_contiguous()
+    assert _max.is_cuda and _accu.is_cuda
     assert _logprobs.is_contiguous() and _logprobs.is_cuda
     
     def mainloop_grid(meta):
@@ -257,7 +237,6 @@ def efficient_entropy_forward(hidden: torch.Tensor,
         weight, weight.stride(0), weight.stride(1),
         labels, labels.stride(0),
         _max, _max.stride(0), _max.stride(1),
-        _max_indices, _max_indices.stride(0), _max_indices.stride(1),
         _accu, _accu.stride(0), _accu.stride(1),
         _logprobs, _logprobs.stride(0),
         logprobs
@@ -268,17 +247,15 @@ def efficient_entropy_forward(hidden: torch.Tensor,
     efficient_entropy_triton_kernel_epilogue[epilogue_grid](
         num_tokens, num_splits,
         _max, _max.stride(0), _max.stride(1),
-        _max_indices, _max_indices.stride(0), _max_indices.stride(1),
         _accu, _accu.stride(0), _accu.stride(1),
         maximum, maximum.stride(0),
-        maximum_indices, maximum_indices.stride(0),
         accumulate, accumulate.stride(0),
         _logprobs, _logprobs.stride(0),
         logprobs,
         REDUCTION,
     )
 
-    return logprobs, maximum, maximum_indices, accumulate
+    return logprobs, maximum, accumulate
     
 @triton.autotune(
     configs=[triton.Config({"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64},
@@ -375,7 +352,6 @@ def efficient_entropy_backward(dlogprobs: torch.Tensor,
                                weight: torch.Tensor,
                                labels: torch.Tensor,
                                maximum: torch.Tensor,
-                               maximum_indices: torch.Tensor,
                                accu: torch.Tensor,
                                reduction: typing.Optional[int] = 2) -> typing.List[torch.Tensor]:
     """
@@ -402,10 +378,10 @@ def efficient_entropy_backward(dlogprobs: torch.Tensor,
     assert dlogprobs.is_contiguous() and dlogprobs.is_cuda
     assert dlogprobs.device == hidden.device
 
-    assert maximum.is_contiguous() and maximum_indices.is_contiguous() and accu.is_contiguous()
-    assert maximum.device == hidden.device and maximum_indices.device == hidden.device and accu.device == hidden.device
-    assert maximum.shape == maximum_indices.shape == labels.shape == accu.shape
-    assert maximum.is_cuda and maximum_indices.is_cuda and accu.is_cuda
+    assert maximum.is_contiguous() and accu.is_contiguous()
+    assert maximum.device == hidden.device and accu.device == hidden.device
+    assert maximum.shape == labels.shape == accu.shape
+    assert maximum.is_cuda and accu.is_cuda
 
     # FIXME: whether should upcast to fp32???
     d_hidden = torch.empty_like(hidden, dtype=hidden.dtype, device=hidden.device)
