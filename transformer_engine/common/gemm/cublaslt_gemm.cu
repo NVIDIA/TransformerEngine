@@ -62,16 +62,10 @@ struct GemmParam {
   transformer_engine::DType Btype;
   void *A_scale_inv;
   void *B_scale_inv;
-  // Element stride for A
+  // ld are leading dimensions or minor dimensions
+  // in storage
   int lda;
-  // Element stride for B
   int ldb;
-  // major and minor number of elements for the
-  // storage of A, and B of GemmParam
-  int a_major_dim;
-  int a_minor_dim;
-  int b_major_dim;
-  int b_minor_dim;
 
   GemmParam(cublasOperation_t transA, cublasOperation_t transB)
       : A(nullptr),
@@ -83,11 +77,7 @@ struct GemmParam {
         A_scale_inv(nullptr),
         B_scale_inv(nullptr),
         lda(0),
-        ldb(0),
-        a_major_dim(0),
-        a_minor_dim(0),
-        b_major_dim(0),
-        b_minor_dim(0) {}
+        ldb(0) {}
 };
 
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
@@ -116,18 +106,15 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // and the transA and transB values to pass to cublas
     // should always be TN.
 
-    ret.a_major_dim = transa_bool ? A0 : A1;
-    ret.a_minor_dim = transa_bool ? A1 : A0;
-    ret.b_major_dim = transb_bool ? B1 : B0;
-    ret.b_minor_dim = transb_bool ? B0 : B1;
+    a_major_dim = transa_bool ? A0 : A1;
+    b_major_dim = transb_bool ? B1 : B0;
+    ret.lda = transa_bool ? A1 : A0;
+    ret.ldb = transb_bool ? B0 : B1;
 
     ret.transA = CUBLAS_OP_T;
     ret.transB = CUBLAS_OP_N;
-    ret.lda = ret.a_minor_dim;
-    ret.ldb = ret.b_minor_dim;
 
-    NVTE_CHECK(ret.a_minor_dim == ret.b_minor_dim,
-               "Inner dimension must be equal for NVTE_BLOCK_SCALING Gemm.");
+    NVTE_CHECK(ret.lda == ret.ldb, "Minor dimension must be equal for NVTE_BLOCK_SCALING Gemm.");
 
   } else {
     // In these scaling modes, the physical layout of
@@ -135,29 +122,14 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // transB, which are passed along to cuBLAS.
     // NOTE: There is some logic below that may edit this
     // decision for A and B depending on dtype and arch.
-    const int m = transa_bool ? A0 : A1;
-    const int k = transa_bool ? A1 : A0;
-    const int n = transb_bool ? B1 : B0;
-    ret.a_major_dim = A0;
-    ret.a_minor_dim = A1;
-    ret.b_major_dim = B0;
-    ret.b_minor_dim = B1;
+    a_major_dim = A0;
+    b_major_dim = B0;
+    ret.lda = A1;
+    ret.ldb = B1;
 
-    int lda, ldb;
-    if (transa_bool && !transb_bool) {  // TN
-      lda = k;
-      ldb = k;
-    } else if (!transa_bool && !transb_bool) {  // NN
-      lda = m;
-      ldb = k;
-    } else if (!transa_bool && transb_bool) {  // NT
-      lda = m;
-      ldb = n;
-    } else {  // TT
+    if (transa_bool && transb_bool) {  // TT
       NVTE_ERROR("TT layout not allowed.");
     }
-    ret.lda = lda;
-    ret.ldb = ldb;
   }
 
   if (is_tensor_scaling(A.scaling_mode)) {
@@ -174,8 +146,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
           ret.A = A.columnwise_data.dptr;
           ret.transA = CUBLAS_OP_T;
           ret.A_scale_inv = A.columnwise_scale_inv.dptr;
-          ret.a_major_dim = A1;
-          ret.a_minor_dim = A0;
+          a_major_dim = A1;
           ret.lda = A0;
         }
       }
@@ -191,9 +162,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
           ret.B = B.columnwise_data.dptr;
           ret.transB = CUBLAS_OP_N;
           ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+          b_major_dim = B1;
           ret.ldb = B0;
-          ret.b_major_dim = B1;
-          ret.b_minor_dim = B0;
         }
       }
     } else {
@@ -219,20 +189,18 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
       // Requirements from
       // https://docs.nvidia.com/cuda/cublas/#tensor-core-usage
-      NVTE_CHECK((ret.a_minor_dim % 16) == 0,
+      NVTE_CHECK((ret.lda % 16) == 0,
                  "Inner dimension requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
       // Divisibility of 8 derived from FP8 (m * CTypeSize) % 16 == 0 requirement.
       // Smallest supported CType is 2 bytes in this scaling mode.
-      NVTE_CHECK((ret.a_major_dim % 8) == 0,
+      NVTE_CHECK((a_major_dim % 8) == 0,
                  "Outer dimension requirement on A for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
       // Observed this requirement only present for B tensor is 1D quantized.
       if (B.scaling_mode == NVTE_BLOCK_SCALING_1D) {
         NVTE_CHECK(
-            (ret.b_major_dim % 8) == 0,
+            (b_major_dim % 8) == 0,
             "Outer dimension requirement on B for NVTE_BLOCK_SCALING GEMM. Caller must pad.");
       }
-      NVTE_CHECK((ret.lda % 16) == 0,
-                 "A tensor stride requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
       NVTE_CHECK((ret.ldb % 16) == 0,
                  "B tensor stride requirement on NVTE_BLOCK_SCALING GEMM. Caller must pad.");
     }
@@ -327,12 +295,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
 
   // Create matrix descriptors. Not setting any extra attributes.
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
-      &Adesc, A_type, param.transA == CUBLAS_OP_N ? param.a_major_dim : param.a_minor_dim,
-      param.transA == CUBLAS_OP_N ? param.a_minor_dim : param.a_major_dim, param.lda));
-  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(
-      &Bdesc, B_type, param.transB == CUBLAS_OP_N ? param.b_minor_dim : param.b_major_dim,
-      param.transB == CUBLAS_OP_N ? param.b_major_dim : param.b_minor_dim, param.ldb));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Adesc, A_type, param.transA == CUBLAS_OP_N ? m : k,
+                                               param.transA == CUBLAS_OP_N ? k : m, param.lda));
+  NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Bdesc, B_type, param.transB == CUBLAS_OP_N ? k : n,
+                                               param.transB == CUBLAS_OP_N ? n : k, param.ldb));
 
   NVTE_CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&Ddesc, D_type, m, n, ldd));
 
