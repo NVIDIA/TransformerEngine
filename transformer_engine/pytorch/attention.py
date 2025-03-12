@@ -6095,7 +6095,6 @@ class FusedAttnFunc(torch.autograd.Function):
         q,
         k,
         v,
-        qkv_dtype,
         attn_bias,
         attn_scale,
         dropout_p,
@@ -6712,8 +6711,6 @@ class FusedAttention(torch.nn.Module):
             cu_seqlens_q_padded = cu_seqlens_q
             cu_seqlens_kv_padded = cu_seqlens_kv
 
-        qkv_dtype = TE_DType[query_layer.dtype]
-
         use_FAv2_bwd = (
             self.use_FAv2_bwd
             and (core_attention_bias_type == "no_bias")
@@ -6785,7 +6782,6 @@ class FusedAttention(torch.nn.Module):
                     query_layer,
                     key_layer,
                     value_layer,
-                    qkv_dtype,
                     core_attention_bias,
                     self.softmax_scale,
                     self.attention_dropout if self.training else 0.0,
