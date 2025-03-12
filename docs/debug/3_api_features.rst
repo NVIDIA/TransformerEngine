@@ -65,7 +65,7 @@ example_tensor_stat_collection:
 This feature handles logging of FP8 tensor stats. 
 
 
-For a distributed setting, the auxiliary stats are computed for each node and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!  
+In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
 
 `LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.  
 

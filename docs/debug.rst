@@ -8,7 +8,7 @@ Precision debug tools
 .. toctree::
    :caption: Precision debug tools
 
-   debug/1_getting_started.ipynb
-   debug/2_config_file_structure.ipynb
+   debug/1_getting_started.rst
+   debug/2_config_file_structure.rst
    debug/api
-   debug/4_distributed.ipynb
+   debug/4_distributed.rst

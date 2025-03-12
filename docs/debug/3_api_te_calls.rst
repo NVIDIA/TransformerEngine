@@ -30,7 +30,7 @@ There are 3 categories of API calls, each is used for different purposes:
 - routing calls - invoked at the beginning of the forward pass - they indicate whether a feature is going to use `modify_tensor()`, ... etc.
 
 If all routing calls for the layer return `False`, then the layer is invoked in an optimized version with Transformer Engine fusions.
-If any of the routing calls return `True`, layers are run without the fusion. It is necessary because some tensors cannot be accessed
+If any of the routing calls return `True`, layers are run without the fusion. It is necessary because otherwise some tensors cannot be accessed
 if fusion happens. An important remark is that if no feature is used for the layer, then it should perform as fast as the layer without initializing `debug_api`.
 
 

@@ -5,7 +5,7 @@
 
 # Distributed training
 
-Nvidia-Pytorch-Inspect with Transformer Engine support multi-GPU training. This guide describes how to run them and how the supported features work in the distributed setting.
+Nvidia-Pytorch-Inspect with Transformer Engine supports multi-GPU training. This guide describes how to run it and how the supported features work in the distributed setting.
 
 To use precision debug tools in multi-GPU training, one needs to:
 

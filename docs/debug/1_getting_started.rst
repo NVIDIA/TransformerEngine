@@ -85,7 +85,7 @@ for epoch in range(5):
 We will demonstrate two debug features on the code above:
 
 1. Disabling FP8 precision for specific GEMM operations, such as the FC1 and FC2 forward propagation GEMM.
-2. Logging statistics for other GEMM operations, such as gradient statistics for data gradient GEMM within the LayerNormLinear layer.
+2. Logging statistics for other GEMM operations, such as gradient statistics for data gradient GEMM within the LayerNormLinear layer, which is contained in the TransformerLayer.
 
 #### Config file
 
@@ -154,10 +154,13 @@ In the modified code above, the following changes were made:
 
 Let's look at the files with the logs. Two files will be created:
 
-1. First for main debug logs.
-2. Second for statistics logs.
+1. debug logs.
+2. statistics logs.
 
 Let's look inside them!
+
+
+In the main log file, you can find detailed information about the transformer's layer GEMMs behavior. You can see that `fc1` and `fc2` fprop GEMMs are run in high precision, as intended.
 
 ```
 # log/nvdlfw_inspect_logs/nvdlfw_inspect_globalrank-0.log
@@ -194,7 +197,7 @@ INFO - transformer_layer.self_attention.layernorm_qkv: Feature=LogTensorStats, A
 ....
 ```
 
-In the main log file, you can find detailed information about the transformer's layer GEMMs behavior. You can see that `fc1` and `fc2` fprop GEMMs are run in high precision, as intended.
+The second log file (`nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log`) contains statistics for tensors we requested in `config.yaml`.
 
 ```
 # log/nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log
@@ -217,7 +220,6 @@ INFO - transformer_layer.self_attention.layernorm_qkv_activation_l1_norm 	      
 
 ```
 
-The second log file (`nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-0.log`) contains statistics for tensors we requested in `config.yaml`.
 
 
 #### Logging using TensorBoard

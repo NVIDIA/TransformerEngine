@@ -28,10 +28,9 @@ section_name_2:
   enabled: ...
   layers:
     # Specify layers here...
-  transformer_engine:
-    Feature1Name: # If feature has no namespace, then it is in the default namespace.
-      enabled: ...
-      # Feature details...
+  Feature1Name: # If feature has no namespace, then it is in the default namespace.
+    enabled: ...
+    # Feature details...
 
 section_name_3:
   enabled: ...
@@ -46,7 +45,7 @@ section_name_3:
       # Feature details...
 ```
 
-Each section can have any name and must contain:
+Sections may have any name and must contain:
 
 1. An `enabled` field that specifies whether the features in that section will be active.
 2. A `layers` field specifying which layers the section applies to. Each layer can belong to only one section.
@@ -62,13 +61,13 @@ linear = transformer_engine.debug.pytorch.Linear(in_features, out_features, name
 
 This name is used in the config file to identify the layer. To specify the `layers` field, you can use one of the following methods:
 
-1. **`layer_name_regex_pattern`**: Use a regex to match layer names.
+1. **`layer_name_regex_pattern`**: Use a regular expression to match layer names. This expression must adhere to the Python `re` module syntax.
 2. **`layer_types`**: Provide a list of strings, where a layer will be selected if any string matches part of its name.
 
 Examples:
 
 ```yaml
-# Example 1: Using regex to select layers
+# Example 1: Using regular expression to select layers
 my_section:
   enabled: ...
   layers:
@@ -148,7 +147,7 @@ section3:
 ```
 
 
-## Gemms_struct and tensors_struct
+## Structured Configuration for GEMMs and Tensors
 
 Sometimes a feature is parameterized by a list of tensors or by a list of GEMMs.
 There are multiple ways of describing this parameterization.
@@ -180,7 +179,7 @@ Similarly, we can use struct for GEMMs.
 
 <b>Warning</b>
 
-If we want to use structs both for tensors and GEMMs,
+When using structs for both tensors and GEMMs,
 tensors_struct should be inside gemms_struct.
 
 </div>
