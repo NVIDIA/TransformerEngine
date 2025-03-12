@@ -196,7 +196,6 @@ def _emulate_linear(
             grad=True,
             use_split_accumulator=_2X_ACC_WGRAD,
         )
-        
 
     return {"activation": activation, "wgrad": wgrad, "dgrad": dgrad}
 
