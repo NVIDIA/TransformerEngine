@@ -8,6 +8,6 @@ API
 .. toctree::
    :caption: Precision debug tools API
 
-   3_api_debug_setup.ipynb
-   3_api_features.ipynb
-   3_api_te_calls.ipynb
+   3_api_debug_setup.rst
+   3_api_features.rst
+   3_api_te_calls.rst
