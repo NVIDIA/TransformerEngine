@@ -103,6 +103,13 @@ fp8_recipes = [
     recipe.Float8CurrentScaling(),
 ]
 
+# param_types = [torch.bfloat16]
+# batch_sizes = [2]
+# all_boolean = [False]
+# mask_types = ["causal"]
+# fp8_recipes = [
+#     recipe.Float8CurrentScaling(),
+# ]
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
@@ -1404,7 +1411,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
 
 
 def _test_grouped_linear_accuracy(
-    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+    block, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw=False
 ):
     reset_rng_states()
     if fp8:
@@ -1447,10 +1454,15 @@ def _test_grouped_linear_accuracy(
             )
     loss = out.sum()
     loss.backward()
+    if split_bw:
+        block.wgrad_comp()
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    for p in block.parameters():
+    # breakpoint()
+    for name, p in block.named_parameters():
+        # print(f"参数名称: {name}, 参数形状: {p.shape}", {p.main_grad})
+        # breakpoint()
         if p.requires_grad:
             if getattr(p, "main_grad", None) is not None:
                 outputs.append(p.main_grad)
@@ -1467,7 +1479,9 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("fp8", all_boolean)
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
-@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("split_bw", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,
     num_gemms,
@@ -1477,6 +1491,8 @@ def test_grouped_linear_accuracy(
     recipe,
     fp8_model_params,
     fuse_wgrad_accumulation,
+    bias,
+    split_bw,
     parallel_mode=None,
 ):
     if fp8 and not fp8_available:
@@ -1497,18 +1513,19 @@ def test_grouped_linear_accuracy(
             num_gemms,
             config.hidden_size,
             4 * config.hidden_size,
-            bias=True,
+            bias=bias,
             params_dtype=dtype,
             parallel_mode=parallel_mode,
             device="cuda",
             fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            split_bw=split_bw,
         ).eval()
         sequential_linear = torch.nn.ModuleList(
             [
                 Linear(
                     config.hidden_size,
                     4 * config.hidden_size,
-                    bias=True,
+                    bias=bias,
                     params_dtype=dtype,
                     parallel_mode=parallel_mode,
                     device="cuda",
@@ -1522,7 +1539,8 @@ def test_grouped_linear_accuracy(
     with torch.no_grad():
         for i in range(num_gemms):
             sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
-            sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
             if fuse_wgrad_accumulation:
                 weight_i = getattr(grouped_linear, f"weight{i}")
                 weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
@@ -1532,7 +1550,7 @@ def test_grouped_linear_accuracy(
         sequential_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
     )
     outputs = _test_grouped_linear_accuracy(
-        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw
     )
 
     # Shoule be bit-wise match

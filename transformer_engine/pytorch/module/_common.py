@@ -11,6 +11,7 @@ from functools import reduce
 from operator import mul as multiply_op
 
 import torch
+import queue
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
@@ -230,3 +231,41 @@ class _ParameterInitMeta:
         """Safeguard reference to the parameter's parent module and initialization function."""
         if self.init_fn is None:
             self.init_fn = get_default_init_method()
+
+
+class WeightGradStore:
+
+    def __init__(self, split_bw = False):
+        self.context = queue.Queue()
+        self.enabled = split_bw
+
+    def is_supported(self):
+        # doesn't support use_bias
+        return True
+
+    def split_bw(self):
+        if not self.is_supported():
+            return False
+        return self.enabled
+
+    def enable_split_bw(self):
+        self.enabled = True
+
+    def disable_split_bw(self):
+        self.enabled = False    
+    
+    def put(self, tensor_list, func):
+        self.context.put([tensor_list, func])
+        return
+
+    def pop(self):
+        if self.context.qsize() > 0:
+            tensor_list, func = self.context.get()
+            func(*tensor_list)
+        else:
+            rank = torch.distributed.get_rank()
+            raise Exception(f"Pop empty queue. rank {rank}")
+
+    def assert_empty(self):
+        rank = torch.distributed.get_rank()
+        assert self.context.empty(), f"Queue is not empty. rank {rank}"

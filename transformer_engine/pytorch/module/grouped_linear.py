@@ -6,6 +6,7 @@
 from typing import Union, Optional, Callable, Tuple, List
 
 import torch
+import functools
 
 import transformer_engine_torch as tex
 
@@ -16,6 +17,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
+from ._common import WeightGradStore
 from ..fp8 import FP8GlobalStateManager
 from ..utils import (
     divide,
@@ -65,6 +67,7 @@ class _GroupedLinear(torch.autograd.Function):
         is_first_microbatch: Union[bool, None],
         fp8: bool,
         fp8_calibration: bool,
+        wgrad_store: WeightGradStore,
         input_quantizers: List[Quantizer],
         weight_quantizers: List[Quantizer],
         output_quantizers: List[Quantizer],
@@ -211,6 +214,7 @@ class _GroupedLinear(torch.autograd.Function):
                     ctx.reduce_and_update_bwd_fp8_tensors
                     or FP8GlobalStateManager.is_first_fp8_module()
                 )
+            ctx.wgrad_store = wgrad_store
 
         # [*, in_features] -> [*, out_features] except first dimension changes for SP
         return out.view(-1, *inp.shape[1:-1], out.shape[-1])
@@ -291,13 +295,9 @@ class _GroupedLinear(torch.autograd.Function):
                         torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
                         for w in weights
                     ]
-                # WGRAD
-                _, grad_biases_, _ = general_grouped_gemm(
-                    inputmats,
-                    grad_output,
-                    wgrad_list,
-                    ctx.activation_dtype,
-                    get_multi_stream_cublas_workspace(),
+                grouped_gemm_wgrad = functools.partial(general_grouped_gemm,
+                    out_dtype=ctx.activation_dtype,
+                    workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
                     grad=True,
                     m_splits=ctx.m_splits,
@@ -306,13 +306,20 @@ class _GroupedLinear(torch.autograd.Function):
                     use_split_accumulator=_2X_ACC_WGRAD,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                 )
-                for i in range(ctx.num_gemms):
-                    if grad_biases[i] is None:
-                        grad_biases[i] = grad_biases_[i]
-                del grad_biases_
+                # WGRAD
+                if ctx.wgrad_store.split_bw():
+                # if True:
+                    ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
+                else:
+                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
 
-                # Deallocate input tensor
-                clear_tensor_data(*inputmats)
+                    for i in range(ctx.num_gemms):
+                        if grad_biases[i] is None:
+                            grad_biases[i] = grad_biases_[i]
+                    del grad_biases_
+
+                    # Deallocate input tensor
+                    clear_tensor_data(*inputmats)
 
                 def handle_custom_ddp_from_mcore(w, wgrad):
                     if ctx.weights_requires_grad:
@@ -351,6 +358,7 @@ class _GroupedLinear(torch.autograd.Function):
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
         return (
             dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+            None,
             None,
             None,
             None,
@@ -438,6 +446,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         ub_overlap_rs: bool = False,
         ub_overlap_ag: bool = False,
         ub_name: Optional[str] = None,
+        split_bw: bool = False,
     ) -> None:
         super().__init__()
 
@@ -457,6 +466,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         ), "GroupedLinear doesn't support Userbuffer overlap."
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
+
+        self.wgrad_store = WeightGradStore(split_bw)
 
         self._offsets = {"input": 0, "weight": num_gemms, "output": 2 * num_gemms, "grad_output": 0}
 
@@ -640,6 +651,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 is_first_microbatch,
                 self.fp8,
                 self.fp8_calibration,
+                self.wgrad_store,
                 input_quantizers,
                 weight_quantizers,
                 output_quantizers,
@@ -670,3 +682,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
+    def wgrad_comp(self):
+        with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
+            self.wgrad_store.pop()
