@@ -2,12 +2,13 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-from dataclasses import dataclass, replace
-from functools import partial, reduce
 import operator
 import os
-from typing import Optional, Tuple
 import warnings
+from dataclasses import dataclass, replace
+from functools import partial, reduce
+from typing import Optional, Tuple
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -15,8 +16,6 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
-
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -49,6 +48,12 @@ from ..sharding import (
     get_all_mesh_axes,
     num_of_devices,
 )
+
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
