@@ -11,16 +11,31 @@ from transformer_engine.debug.features.api import TEConfigAPIMapper
 @Registry.register_feature(namespace="transformer_engine")
 class DisableFp8Gemm(TEConfigAPIMapper):
     """
-    Feature to disable FP8 GEMM in Transformer Engine.
+    GEMM operations are executed in higher precision, even when FP8 autocast is enabled.
 
-    Config:
+    Parameters
+    ----------
 
-    To enable the feature in yaml config:
-    transformer_engine:
-      disable_fp8_gemm:
-        enabled: True
-        gemms: gemms list - please look into the Transformer Engine Precision Debug Tools documentation for more information.
-    """
+    gemms: List[str] 
+        list of gemms to disable
+
+            - fprop
+            - dgrad
+            - wgrad
+
+    Example
+    -------
+    .. code-block:: yaml
+
+        example_disable_fp8_gemm:
+            enabled: True
+            layers:
+                layer_types: [fc1]
+            transformer_engine:
+                DisableFp8Gemm:
+                enabled: True
+                gemms: [dgrad, wgrad]
+   """
 
     @api_method
     def fp8_gemm_enabled(

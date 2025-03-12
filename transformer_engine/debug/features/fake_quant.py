@@ -64,23 +64,56 @@ def fake_quantize(tensor: torch.Tensor, fp8_format: tex.DType, margin=0, out=Non
 @append_parent_docstring(parent=TEConfigAPIMapper)
 class FakeQuant(TEConfigAPIMapper):
     """
-    Fake Quantization feature in Transformer engine.
 
-    Fake quantization in this case refers to casting a tensor to low precision and back to original dtype.
+    Disables FP8 GEMM. Fake quantizes chosen tensors to FP8 - using per-tensor scaling factor, not delayed scaling - and runs high-precision GEMM.
 
-    Config:
-    To enable the feature in yaml config:
-    transformer_engine:
-      fake_quant:
-        enabled: True
-        ...
+    .. figure:: ./img/fake_quant.svg
+        :align: center
 
-    Config fields:
-    This feature works at a tensor level, you can set the following properties for each tensor:
-    - quant_format: Dictionary containing tensor names to low precision formats. Options: {'FP8E4M3', 'FP8E5M2', 'MXFP8E4M3', 'MXFP8E5M2'}
-    - margin: int, default is 0
-    - tensors/tensors_struct: tensors list or tensors_struct - please look into the Transformer Engine Precision Debug Tools documentation for more information.
+        Fig 1: Comparison of FP8 FPROP GEMM with the same GEMM in BF16 with fake quantization of activation tensor. Green tensors have the same values, but different dtypes.
 
+    
+
+    Parameters
+    ----------
+
+    gemms/gemms_struct: List[str] 
+        list of gemms to fake quantize
+
+            - fprop
+            - dgrad
+            - wgrad
+    tensors/tensors_struct: List[str] 
+        list of tensors to fake quantize
+
+            - activation
+            - gradient
+            - weight
+    quant_format: str, default = "FP8E5M2"
+        specifies the FP8 format to use: 
+
+            - FP8E5M2
+            - FP8E4M3
+    margin: int, default = 0
+        impacts the computation of scaling factors, default is 0, `amax = amax * (2^margin)`.
+
+    Example
+    -------
+    .. code-block:: yaml
+
+        example_fake_quant_fp8:
+            enabled: True
+            layers:
+                layer_types: [transformer_layer.layernorm_mlp.fc1]
+            transformer_engine:
+                FakeQuant:
+                    enabled: True
+                    quant_format: FP8E5M2
+                    gemms_struct:
+                    - gemm: fprop
+                        tensors: [activation, weight]
+                    - gemm: dgrad
+                        tensors: [gradient]
     """
 
     def _supported_formats(self):

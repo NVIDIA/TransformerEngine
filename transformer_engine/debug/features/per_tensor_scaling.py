@@ -15,7 +15,7 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 from transformer_engine.pytorch.tensor import Quantizer
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Tensor, Float8Quantizer
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 
@@ -37,16 +37,8 @@ def per_tensor_cast(
         tex.DType.kFloat8E5M2,
     }, "[NVTORCH INSPECT ERROR] Only 2 FP8 types: E4M3 and E5M2 are supported in TE."
 
-    if fp8_dtype == tex.DType.kFloat8E4M3:
-        fp8_max = Format.E4M3.value.max_fwd
-    else:
-        fp8_max = Format.E5M2.value.max_fwd
-    amax = tensor.abs().max().float()
-    one = torch.ones(1, device=tensor.device)
 
-    scale = _default_sf_compute(amax, one, fp8_max, margin)
-
-    quantizer = Float8Quantizer(scale, amax, fp8_dtype)
+    quantizer = Float8CurrentScalingQuantizer(fp8_dtype, device=tensor.device)
 
     if out is not None:
         quantizer.update_quantized(tensor, out)
@@ -57,23 +49,42 @@ def per_tensor_cast(
 @Registry.register_feature(namespace="transformer_engine")
 class PerTensorScaling(TEConfigAPIMapper):
     """
-    Per Tensor Current Scaling feature for FP8 tensor in Transformer engine.
+    It allows to use per tensor current scaling for the specific tensors.
 
-    If this feature is enabled, delayed scaling is disabled for the specified FP8 Tensor and GEMM.
+    Can be used only within `DelayedScaling` recipe autocast.
 
-    Config:
-    To enable the feature in yaml config:
-    transformer_engine:
-        per_tensor_scaling:
-        enabled: True
-        ...
+    Parameters
+    ----------
 
-    Config fields:
-    This feature works at a tensor level, you can set the following properties for each tensor:
-    - margin: int, default is 0, amax = amax * (2^margin)
-    - tensors/tensors_struct: tensors list or tensors_struct - please look into the Transformer Engine Precision Debug Tools documentation for more information.
+    gemms/gemms_struct: List[str] 
+        list of gemms to enable per-tensor scaling for
 
-    Gemm and Tensor structure is described below:
+            - fprop
+            - dgrad
+            - wgrad
+    tensors/tensors_struct: List[str] 
+        list of tensors to enable per-tensor scaling for
+
+            - activation
+            - gradient
+            - weight
+    margin: int, default = 0
+        impacts the computation of scaling factors, default is 0, `amax = amax * (2^margin)`.
+
+    Example
+    -------
+    .. code-block:: yaml
+
+        example_per_tensor_scaling:
+            enabled: True
+            layers:
+                layer_types: [transformer_layer.self_attn.layernorm_q]
+            transformer_engine:
+                PerTensorScaling:
+                    enabled: True
+                    margin: 1
+                    gemms: [dgrad]
+                    tensors: [weight, activation]
     """
 
     def _get_margin_default(self):
@@ -112,9 +123,9 @@ class PerTensorScaling(TEConfigAPIMapper):
             if key not in ["gemm", "tensor", "margin"]:
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
-        assert default_quantizer is not None, (
+        assert isinstance(default_quantizer, Float8Quantizer), (
             f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor:"
-            f" Provide FP8 dtype when using process_tensor for per_tensor_scaling. {layer_name}"
+            f" Per tensor current scaling can be used only within `DelayedScaling` recipe autocast. {layer_name}"
         )
 
         debug_api.log_message(

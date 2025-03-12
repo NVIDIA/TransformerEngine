@@ -24,23 +24,58 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """
-    Log FP8 tensor statistics in Transformer engine.
+    This feature handles logging of FP8 tensor stats. 
 
-    Config:
 
-    To enable the feature in yaml config:
-    transformer_engine:
-      log_fp8_tensor_stats:
+In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
+
+`LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.  
+
+`LogFp8TensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogFp8TensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.  
+
+Parameters
+----------
+
+    stats: List[str] 
+        list of statistics to log
+
+            - underflows%
+            - overflows%
+    tensors/tensors_struct: List[str] 
+        list of tensors to log
+
+            - activation
+            - gradient
+            - weight
+    freq: Optional[int], default = 1
+        frequency of logging stats, stats will be logged every `freq` steps
+    start_step: Optional[int], default = None
+        start step of logging stats
+    end_step: Optional[int], default = None
+        end step of logging stats
+    start_end_list: Optional[list([int, int])], default = None
+        non-overlapping list of (start, end) pairs in incremental order. If not None, will ignore start_step and end_step
+
+Example
+-------
+.. code-block:: yaml
+
+    example_fp8_tensor_stat_collection:
         enabled: True
-        ...
-
-    Config fields:
-    This feature works at a tensor level, you can set the following properties for each tensor:
-    - stats: List[str], type of statistics to log. Options: {min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range}
-    - freq: int, logging frequency in training steps. Default = 1.
-    - start_step: int, train step to start logging. Default = 0.
-    - end_step: int, train step to end logging. Default = -1 (don't stop logging once started).
-    - tensors/tensors_struct: tensors list or tensors_struct - please look into the Transformer Engine Precision Debug Tools documentation for more information.
+        layers:
+            layer_types: [layernorm_linear]
+        transformer_engine:
+            LogFp8TensorStats:
+                enabled: True
+                tensors_struct: 
+                - tensor: activation
+                stats: [underflows%, overflows%]
+                freq: 1
+                - tensor: gradient
+                stats: [overflows%]
+                freq: 5
+                start_step: 0
+                end_step: 80
     """
 
     def _get_supported_stats_list(self):
@@ -49,7 +84,7 @@ class LogFp8TensorStats(BaseLogTensorStats):
 
     @api_method
     def inspect_tensor_postquantize_enabled(
-        self, config: Dict, layer_name: str, tensor_name: str, iteration: int
+        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
     ):  # pylint: disable=unused-argument
         """API call used to determine whether to run inspect_tensor_postquantize() in the forward."""
         # check whether logging should happen in this iteration

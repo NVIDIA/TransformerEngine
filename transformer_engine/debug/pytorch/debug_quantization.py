@@ -78,7 +78,8 @@ class DebugQuantizer(Quantizer):
                 self.get_plans_for_output_tensors()
             )
         else:
-            self.inspect_tensor_enabled, self.inspect_tensor_postquantize_enabled = (
+            self.inspect_tensor_enabled, self.inspect_tensor_postquantize_enabled_rowwise,\
+                self.inspect_tensor_postquantize_enabled_columnwise = (
                 self.get_enabled_look_at_tensors()
             )
             self.rowwise_tensor_plan, self.columnwise_tensor_plan = self.get_tensors_plan()
@@ -115,13 +116,18 @@ class DebugQuantizer(Quantizer):
         inspect_tensor_enabled = debug_api.transformer_engine.inspect_tensor_enabled(
             layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
         )
-        inspect_tensor_postquantize_enabled = (
+        inspect_tensor_postquantize_enabled_rowwise = (
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-                layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration
+                layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration, gemm=self.rowwise_gemm_name
+            )
+        )
+        inspect_tensor_postquantize_enabled_columnwise = (
+            debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
+                layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration, gemm=self.columnwise_gemm_name
             )
         )
 
-        return inspect_tensor_enabled, inspect_tensor_postquantize_enabled
+        return inspect_tensor_enabled, inspect_tensor_postquantize_enabled_rowwise, inspect_tensor_postquantize_enabled_columnwise
 
     def get_tensors_plan(self):
         """
@@ -208,17 +214,19 @@ class DebugQuantizer(Quantizer):
             "iteration": debug_api.DEBUG_MANAGER._trainer_iteration_count,
             "tp_group": self.tp_group,
         }
-        if tensor is not None:
+        if tensor is not None and self.inspect_tensor_enabled:
             debug_api.transformer_engine.inspect_tensor(**args)
 
         if self.output_tensor:
             return
 
-        if self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]:
+        if self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE] and \
+                self.inspect_tensor_postquantize_enabled_rowwise:
             args["tensor"] = rowwise_gemm_tensor
             args["rowwise"] = True
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
-        if self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]:
+        if self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE] and \
+                self.inspect_tensor_postquantize_enabled_columnwise:
             args["tensor"] = columnwise_gemm_tensor
             args["rowwise"] = False
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
@@ -417,7 +425,8 @@ class DebugQuantizer(Quantizer):
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
         if (
             self.inspect_tensor_enabled
-            or self.inspect_tensor_postquantize_enabled
+            or self.inspect_tensor_postquantize_enabled_rowwise 
+            or self.inspect_tensor_postquantize_enabled_columnwise
             or self.rowwise_tensor_plan == API_CALL_MODIFY
             or self.columnwise_tensor_plan == API_CALL_MODIFY
         ):
@@ -502,6 +511,13 @@ class DebugQuantizedTensor(QuantizedTensor):
 
     def update_usage(self, rowwise_usage=True, columnwise_usage=True):
         pass
+
+    def detach(self):
+        if isinstance(self.rowwise_gemm_tensor, torch.Tensor):
+            self.rowwise_gemm_tensor = self.rowwise_gemm_tensor.detach()
+        if isinstance(self.columnwise_gemm_tensor, torch.Tensor):
+            self.columnwise_gemm_tensor = self.columnwise_gemm_tensor.detach()
+        return self 
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

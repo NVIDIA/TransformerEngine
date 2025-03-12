@@ -11,15 +11,20 @@ from nvdlfw_inspect.registry import Registry, api_method
 @Registry.register_feature(namespace="transformer_engine")
 class DisableFp8Layer:
     """
-    Feature to disable FP8 for entire layer or set of layers in Transformer Engine.
+    Disables all FP8 GEMMs in the layer.
 
-    Config:
 
-    To enable the feature in yaml config:
-    transformer_engine:
-      disable_fp8_layer:
-        enabled: True
+    Example
+    -------
+    .. code-block:: yaml
 
+        example_disable_fp8_layer:
+            enabled: True
+        layers:
+            layer_types: [fc1]
+        transformer_engine:
+            DisableFp8Layer:
+            enabled: True
     """
 
     @api_method

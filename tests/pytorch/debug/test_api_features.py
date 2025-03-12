@@ -22,21 +22,21 @@ def test_transformer_engine_no_config(feature_dirs):
         tensor = torch.rand(24, 2046).cuda()
 
         # FP8 enabled - true by the default
-        assert debug_api.transformer_engine.fp8_gemm_enabled("decoder.1.attn.qkv", gemm="fprop")
+        assert debug_api.transformer_engine.fp8_gemm_enabled("decoder.1.attn.qkv", gemm="fprop", iteration=0)
 
         # modify_tensor_enabled - False by default
         assert not debug_api.transformer_engine.modify_tensor_enabled(
-            "decoder.1.attn.qkv", tensor=tensor, gemm="fprop", tensor_name="activation"
+            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
         )
 
         # inspect_tensor_enabled - False by default
         assert not debug_api.transformer_engine.inspect_tensor_enabled(
-            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation"
+            "decoder.1.attn.qkv", tensor_name="activation", iteration=0
         )
 
         # inspect_tensor_postquantize - False by default
-        assert not debug_api.transformer_engine.inspect_tensor_postquantize(
-            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation"
+        assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
+            "decoder.1.attn.qkv", gemm="fprop", tensor_name="activation", iteration=0
         )
 
     finally:
@@ -164,18 +164,14 @@ def test_per_tensor_scaling(configs_dir, feature_dirs):
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc1",
             gemm="wgrad",
-            tensor=tensor,
             tensor_name="gradient",
-            default_quantizer=default_quantizer2,
             iteration=0,
         )
 
         assert not debug_api.transformer_engine.modify_tensor_enabled(
             "decoder.1.mlp.fc4",
             gemm="fprop",
-            tensor=tensor,
             tensor_name="activation",
-            fp8_dtype=tex.DType.kFloat8E4M3,
             iteration=0,
         )
     finally:
@@ -280,7 +276,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
 
         # TE FP8 tensor stats --
         assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="gradient", iteration=200
+            "decoder.1.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
         )
         debug_api.transformer_engine.inspect_tensor_postquantize(
             "decoder.1.mlp.fc1",
@@ -299,10 +295,10 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )
 
         assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.1.mlp.fc1", tensor_name="activation", iteration=201
+            "decoder.1.mlp.fc1", tensor_name="activation", gemm="fprop", iteration=201
         )
         assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-            "decoder.2.mlp.fc1", tensor_name="gradient", iteration=200
+            "decoder.2.mlp.fc1", tensor_name="gradient", gemm="wgrad", iteration=200
         )
 
         # Second config in same yaml

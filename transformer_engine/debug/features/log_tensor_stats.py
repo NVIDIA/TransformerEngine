@@ -24,23 +24,65 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 @Registry.register_feature(namespace="transformer_engine")
 class LogTensorStats(BaseLogTensorStats):
     """
-    Log tensor statistics in transformer engine.
+    This feature handles the logging of basic tensor statistics.  
 
-    Config:
+    For a distributed setting, the auxiliary stats are computed for each node and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!  
 
-    To enable the feature in yaml config:
-    transformer_engine:
-      log_tensor_stats:
-        enabled: True
-        ...
+    `LogTensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.  
 
-    Config fields:
-    This feature works at a tensor level, you can set the following properties for each tensor:
-    - stats: List[str], type of statistics to log. Options: {min, max, mean, std, l1_norm, l2_norm, cur_amax, dynamic_range}
-    - freq: int, logging frequency in training steps. Default = 1.
-    - start_step: int, train step to start logging. Default = 0.
-    - end_step: int, train step to end logging. Default = -1 (don't stop logging once started).
-    - tensors/tensors_struct: tensors list or tensors_struct - please look into the Transformer Engine Precision Debug Tools documentation for more information.
+    `LogTensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogTensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.  
+   
+    Parameters
+    ----------
+    stats: List[str] 
+        list of statistics to log
+
+            - "min"
+            - "max"
+            - "mean"
+            - "std"
+            - "l1_norm"
+            - "l2_norm"
+            - "cur_amax" – maximal absolute value of a tensor,
+            - "dynamic_range" – equal to `torch.log2(amax) - torch.log2(amin)`
+    tensors/tensors_struct: List[str] 
+        list of tensors to log
+        
+            - "activation"
+            - "gradient"
+            - "weight"
+    freq: Optional[int], default = 1
+        frequency of logging stats, stats will be logged every `freq` steps
+    start_step: Optional[int], default = None
+        start step of logging stats
+    end_step: Optional[int], default = None
+        end step of logging stats
+    start_end_list: Optional[list([int, int])], default = None
+        non-overlapping list of (start, end) pairs in incremental order. If not None, will ignore start_step and end_step
+
+    Example
+    -------
+    .. code-block:: yaml
+
+        example_tensor_stat_collection:
+            enabled: True
+            layers:
+                layer_name_regex_pattern: .*(fc1|self_attention).*
+            transformer_engine:
+                LogTensorStats:
+                    enabled: True
+                    tensors_struct:
+                        - tensor: activation
+                          stats: [mean]
+                          freq: 10
+                          start_step: 5
+                          end_step: 100
+                        - tensor: gradient
+                          stats: [mean, max, min]
+                          freq: 2
+                          start_end_list: [[0, 20], [80, 100]]
+                        - tensor: weight
+                          stats: [dynamic_range]
     """
 
     def _get_supported_stats_list(self):
