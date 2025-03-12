@@ -235,7 +235,7 @@ class _ParameterInitMeta:
 
 class WeightGradStore:
 
-    def __init__(self, split_bw = False):
+    def __init__(self, split_bw=False):
         self.context = queue.Queue()
         self.enabled = split_bw
 
@@ -252,8 +252,8 @@ class WeightGradStore:
         self.enabled = True
 
     def disable_split_bw(self):
-        self.enabled = False    
-    
+        self.enabled = False
+
     def put(self, tensor_list, func):
         self.context.put([tensor_list, func])
         return

@@ -111,6 +111,7 @@ fp8_recipes = [
 #     recipe.Float8CurrentScaling(),
 # ]
 
+
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 

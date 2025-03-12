@@ -295,7 +295,8 @@ class _GroupedLinear(torch.autograd.Function):
                         torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
                         for w in weights
                     ]
-                grouped_gemm_wgrad = functools.partial(general_grouped_gemm,
+                grouped_gemm_wgrad = functools.partial(
+                    general_grouped_gemm,
                     out_dtype=ctx.activation_dtype,
                     workspaces=get_multi_stream_cublas_workspace(),
                     layout="NT",
@@ -308,7 +309,7 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 # WGRAD
                 if ctx.wgrad_store.split_bw():
-                # if True:
+                    # if True:
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
@@ -682,6 +683,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.return_bias:
             return out, [cast_if_needed(b, self.activation_dtype) for b in bias_tensors]
         return out
+
     def wgrad_comp(self):
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             self.wgrad_store.pop()
