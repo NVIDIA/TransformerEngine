@@ -5,6 +5,7 @@ Implementations of the linear cross entropy kernel.
 
 import typing
 import torch
+import torch.distributed as dist
 import triton
 import triton.language as tl
 from transformer_engine.pytorch.triton.linear_cross_entropy_with_token_entropy import (
@@ -22,6 +23,7 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
                                               hidden_size,
                                               vocab_size,
                                               vocab_per_split,
+                                              rank, world_size,
                                               hidden_ptr, stride_hidden_m, stride_hidden_k,
                                               weight_ptr, stride_weight_k, stride_weight_n,
                                               labels_ptr, stride_labels,
@@ -92,7 +94,7 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
         coeff = tl.exp(_max_old - _max)
         _accu = coeff * _accu + tl.sum(exp_logits, axis=1)
 
-        label_mask = offs_bn[None,:] == labels[:,None]
+        label_mask = (offs_bn + rank * vocab_size)[None,:] == labels[:,None]
         _logprobs += tl.sum(logits * label_mask, axis=1)
 
     # store maximum
@@ -104,7 +106,9 @@ def efficient_entropy_kernel_general_mainloop(num_tokens,
     tl.store(accu_ptrs, _accu, mask=(offs_am < num_tokens) & (pid_n < num_splits))
 
     # store logprobs
-    mask = (labels >= pid_n * vocab_per_split) & (labels < min((pid_n + 1) * vocab_per_split, vocab_size))
+    vocab_left_idx = pid_n * vocab_per_split + rank * vocab_size
+    vocab_right_idx = min((pid_n + 1) * vocab_per_split, vocab_size) + rank * vocab_size
+    mask = (labels >= vocab_left_idx) & (labels < vocab_right_idx)
     mask &= (offs_am < num_tokens)
     global_logprobs_ptrs = global_logprobs_ptr + offs_am * stride_global_logprobs
     tl.store(global_logprobs_ptrs, _logprobs, mask=mask)
@@ -190,7 +194,9 @@ def efficient_entropy_triton_kernel_epilogue(num_tokens, num_splits,
 def efficient_entropy_forward(hidden: torch.Tensor,
                               weight: torch.Tensor,
                               labels: torch.Tensor,
-                              reduction: typing.Optional[int] = 2) -> typing.List[torch.Tensor]:
+                              reduction: typing.Optional[int] = 2,
+                              dist_process_group: typing.Optional[dist.ProcessGroup] = None
+                              ) -> typing.List[torch.Tensor]:
     """
     forward host function
     """
@@ -199,6 +205,9 @@ def efficient_entropy_forward(hidden: torch.Tensor,
     assert hidden.dim() == 2 and weight.dim() == 2 and labels.dim() == 1
     assert hidden.is_contiguous() and weight.is_contiguous() and labels.is_contiguous()
     assert hidden.shape[0] == labels.shape[0] and hidden.shape[1] == weight.shape[0]
+
+    _rank = 0 if dist_process_group is None else dist.get_rank(dist_process_group)
+    _world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
 
     num_tokens, hidden_size = hidden.shape
     num_tokens = labels.shape[0]
@@ -243,6 +252,7 @@ def efficient_entropy_forward(hidden: torch.Tensor,
         return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * num_splits,)
     efficient_entropy_kernel_general_mainloop[mainloop_grid](
         num_tokens, hidden_size, vocab_size, vocab_per_split,
+        _rank, _world_size,
         hidden, hidden.stride(0), hidden.stride(1),
         weight, weight.stride(0), weight.stride(1),
         labels, labels.stride(0),
