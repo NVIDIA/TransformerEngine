@@ -38,3 +38,17 @@ repos:
         entry: clang-format -i
         args: ["-style=file"]
         files: ^transformer_engine.*\.(c|cc|cxx|cpp|cu|cuh|h|hpp)$
+
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: [
+          "--profile=black",
+          "--line-length=100",
+          # known first party packages
+          "--project=transformer_engine",
+          "--project=transformer_engine_torch",
+          "--project=transformer_engine_jax",
+          "--extend-skip=setup.py"
+        ]
