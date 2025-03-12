@@ -101,7 +101,7 @@ class TestFP8RecipeLinearBase:
         if recipe.float8_current_scaling():
             scaling_type = "ScalingType.PER_TENSOR"
         elif recipe.fp8blockwise():
-            scaling_type = "ScalingType.BLOCKWISE"
+            scaling_type = "ScalingType.VECTOR_TILED_X_AND_G_BLOCK_TILED_W"
         else:
             scaling_type = "Unknown"
         current_seed = torch.initial_seed()  # Get the current seed
@@ -441,9 +441,13 @@ class TestFP8RecipeLayerNormLinearBase(TestFP8RecipeLinearBase):
         fp8_type_g = get_fp8_torch_dtype(recipe, fprop_tensor=False)
 
         # Expected tensor names based on the naming template
-        scaling_type = (  # Assuming the scaling type is PER_TENSOR for this example
-            "ScalingType.PER_TENSOR"
-        )
+        if recipe.float8_current_scaling():
+            scaling_type = "ScalingType.PER_TENSOR"
+        elif recipe.fp8blockwise():
+            scaling_type = "ScalingType.VECTOR_TILED_X_AND_G_BLOCK_TILED_W"
+        else:
+            scaling_type = "Unknown"
+
         current_seed = torch.initial_seed()  # Get the current seed
 
         expected_tensor_names = {
