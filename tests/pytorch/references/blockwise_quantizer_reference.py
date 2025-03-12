@@ -6,9 +6,7 @@ import dataclasses
 import math
 import torch
 from typing import Optional, Protocol, Tuple
-from tests.pytorch.references.quantize_scale_calc import (
-    scale_from_amax_tensor
-)
+from tests.pytorch.references.quantize_scale_calc import scale_from_amax_tensor
 
 
 @dataclasses.dataclass()
@@ -17,6 +15,7 @@ class QuantizeResult:
     scale: torch.Tensor
     data_t: Optional[torch.Tensor]
     scale_t: Optional[torch.Tensor]
+
 
 @dataclasses.dataclass()
 class CuBLASScaleMunger:
