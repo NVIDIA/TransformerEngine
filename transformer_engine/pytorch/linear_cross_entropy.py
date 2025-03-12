@@ -101,9 +101,14 @@ class LinearCrossEntropy(torch.autograd.Function):
                 hidden: torch.Tensor,
                 weight: torch.Tensor,
                 labels: torch.Tensor,
-                reduction: typing.Optional[str] = "mean") -> torch.Tensor:
+                reduction: typing.Optional[str] = "mean",
+                dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None) -> torch.Tensor:
         """
         The forward pass of the Linear Cross Entropy.
+        If dist_process_group is passed for distributed loss calculation,
+        the weight tensor to each distributed rank should be (*, vocab_size / world_size).
+        Note that each of the ranks should get equal shards along the vocab_size dimension.
+
         Args:
             hidden (torch.Tensor): The input tensor of shape (num_tokens, hidden_size).
             weight (torch.Tensor): The weight tensor of shape (hidden_size, vocab_size).
@@ -117,7 +122,9 @@ class LinearCrossEntropy(torch.autograd.Function):
             REDUCTION = linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
 
             logprobs, _maximum, _maximum_indices, _acc =\
-                linear_cross_entropy_kernels.efficient_entropy_forward(hidden, weight, labels, REDUCTION)
+                linear_cross_entropy_kernels.efficient_entropy_forward(
+                    hidden, weight, labels, REDUCTION,
+                    dist_process_group)
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _maximum_indices, _acc)
             ctx.REDUCTION = REDUCTION
@@ -145,7 +152,7 @@ class LinearCrossEntropy(torch.autograd.Function):
                 _maximum, _maximum_indices, _acc,
                 REDUCTION
             )
-        return d_hidden, d_weight, None, None
+        return d_hidden, d_weight, None, None, None
     
 
 linear_cross_entropy = LinearCrossEntropy.apply
