@@ -49,7 +49,9 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-    nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    if (my_quantizer_cs->with_computing_amax) {
+      nvte_compute_amax(te_input.data(), te_output.data(), false, at::cuda::getCurrentCUDAStream());
+    }
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
@@ -61,10 +63,12 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
       allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
       process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
     }
-    QuantizationConfigWrapper quant_config;
-    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
-    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    if (my_quantizer_cs->with_computing_scale) {
+      QuantizationConfigWrapper quant_config;
+      quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
+      quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
+      nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    }
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
   }
@@ -90,6 +94,24 @@ py::object dequantize(const py::handle& input, transformer_engine::DType otype) 
   nvte_dequantize(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
 
   return out;
+}
+
+void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
+  init_extension();
+
+  auto input_tensor = tensor.contiguous();
+  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
+
+  TORCH_CHECK(amax.scalar_type() == at::kFloat, "amax must be a float tensor");
+  TORCH_CHECK(amax.numel() == 1, "amax can only has one element");
+  TensorWrapper fake_te_output(
+    nullptr,
+    te_input.shape(),
+    transformer_engine::DType::kFloat8E4M3, // It doesn't matter because we only compute amax.
+    amax.data_ptr<float>()
+  );
+
+  nvte_compute_amax(te_input.data(), fake_te_output.data(), true, at::cuda::getCurrentCUDAStream());
 }
 
 template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,

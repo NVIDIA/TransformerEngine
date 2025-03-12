@@ -13,6 +13,7 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../util/vectorized_pointwise.h"
+#include "recipe_common.cuh"
 
 namespace transformer_engine {
 namespace {
@@ -101,7 +102,8 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 }  // namespace
 }  // namespace transformer_engine
 
-void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
+void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, bool allow_empty_output,
+                       cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_amax);
   using namespace transformer_engine;
 
@@ -135,7 +137,7 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
              "Output tensor for amax computation has invalid amax tensor  "
              "(expected FP32, got dtype=",
              to_string(output.amax.dtype), ")");
-  CheckOutputTensor(output, "output_compute_amax");
+  CheckOutputTensor(output, "output_compute_amax", allow_empty_output);
 
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -151,41 +153,7 @@ namespace {
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
                                                const float epsilon) {
-  float amax = *amax_ptr;
-  if (amax < epsilon) {
-    amax = epsilon;
-  }
-
-  float scale = 1.f;
-
-  if (isinf(amax) || amax == 0.f) {
-    *scale_ptr = scale;
-    return;
-  }
-
-  scale = max_fp8 / amax;
-
-  // The amax is too small that the scale becoming infinite in FP32. In other word,
-  // the scale is not representable in FP32.
-  if (isinf(scale)) {
-    // use fp32 max to represent the scale
-    scale = std::numeric_limits<float>::max();
-  }
-
-  if (isnan(scale)) {
-    scale = 1.f;
-  }
-
-  if (force_pow_2_scales) {
-    uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&scale);
-    scale_bits &= 0xFF800000;
-    // If the exponent was zero, we have a logic error.
-    __builtin_assume(scale_bits != 0);
-    __builtin_assume(scale_bits != 0x80000000);
-    scale = *reinterpret_cast<float *>(&scale_bits);
-  }
-
-  *scale_ptr = scale;
+  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon);
 }
 
 }  // namespace

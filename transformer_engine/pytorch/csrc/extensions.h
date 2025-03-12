@@ -183,6 +183,8 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype);
 
+void compute_amax(const at::Tensor& tensor, at::Tensor& amax);
+
 std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
 
 std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
@@ -350,6 +352,18 @@ void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
                            std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
                            float momentum, float dampening, float lr, bool nesterov, bool first_run,
                            bool wd_after_momentum, float scale);
+
+void multi_tensor_compute_scale_cuda(int chunk_size, at::Tensor noop_flag,
+                                     std::vector<std::vector<at::Tensor>> tensor_lists,
+                                     float max_fp8, bool force_pow_2_scales, float epsilon);
+
+void multi_tensor_compute_scale_inv_cuda(int chunk_size, at::Tensor noop_flag,
+                                         std::vector<std::vector<at::Tensor>> tensor_lists,
+                                         float max_fp8, bool force_pow_2_scales, float epsilon);
+
+void multi_tensor_compute_scale_and_scale_inv_cuda(
+  int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+  float max_fp8, bool force_pow_2_scales, float epsilon);
 
 /***************************************************************************************************
  * padding

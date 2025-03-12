@@ -76,6 +76,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("output") = py::none(), py::arg("noop") = py::none());
   m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
         py::arg("otype"));
+  m.def("compute_amax", &transformer_engine::pytorch::compute_amax, "Compute amax",
+        py::arg("input"), py::arg("amax"));
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
@@ -258,6 +260,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
         "Fused SGD optimizer for list of contiguous tensors",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale", &multi_tensor_compute_scale_cuda,
+        "Fused compute scale from amax",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_inv", &multi_tensor_compute_scale_inv_cuda,
+        "Fused compute scale_inv from scale",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
+        "Fused compute scale and scale_inv from amax",
         py::call_guard<py::gil_scoped_release>());
 
   // Data structures
