@@ -1,3 +1,8 @@
+..
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+    See LICENSE for license information.
+
 # Distributed training
 
 Nvidia-Pytorch-Inspect with Transformer Engine support multi-GPU training. This guide describes how to run them and how the supported features work in the distributed setting.

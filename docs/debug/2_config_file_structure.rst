@@ -1,3 +1,8 @@
+..
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+    See LICENSE for license information.
+
 # Config File Structure
 
 To enable debug features, create a `config.yaml` file to specify the desired behavior, such as determining which GEMMs (General Matrix Multiply operations) should run in higher precision rather than FP8 and defining which statistics to log. Below, we outline how to structure the `config.yaml` file.

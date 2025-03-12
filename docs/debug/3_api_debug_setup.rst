@@ -1,3 +1,8 @@
+..
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+    See LICENSE for license information.
+
 # Setup
 
 Precision debug tools for the Transformer Engine use [Nvidia-DL-Framework-Inspect](https://github.com/NVIDIA/nvidia-dlfw-inspect) package from NVIDIA. Here, we provide brief information on how to use it with TE.

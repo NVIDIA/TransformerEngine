@@ -1,3 +1,8 @@
+..
+    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+    See LICENSE for license information.
+
 # Calls to Nvidia-DL-Framework-Inspect
 
 Let's look deeper into how Nvidia-DL-Framework-Inspect with Transformer Engine work together. TransformerEngine layers have some hook calls inside each of the GEMMs. Users can define feature classes or use feature classes provided with TE. File `config.yaml` describes which hooks need to be used for which layers. Nvidia-DL-Framework-Inspect combines 3 things: TE training, feature classes and `config.yaml` and takes care of inserting hooks in the correct places. This process is illustrated in the image below.
