@@ -6,12 +6,13 @@
 
 #include "common/util/system.h"
 #include "extensions.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape &shape, DType dtype,
                                                         py::handle quantizer) {
   std::vector<size_t> shape_vec;
-  for (int i = 0; i < shape.ndim; i++) {
+  for (size_t i = 0; i < shape.ndim; i++) {
     size_t t = shape.data[i];
     shape_vec.push_back(t);
   }
@@ -74,6 +75,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                                       float eps, py::object out, py::handle quantizer,
                                       DType out_dtype, const int sm_margin,
                                       const bool zero_centered_gamma) {
+  using namespace transformer_engine::pytorch::detail;
   using namespace transformer_engine::pytorch;
   using namespace transformer_engine;
 
@@ -111,10 +113,10 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   if (quantizer.is_none()) {
     // No need for separate quantization step if output is unquantized
     force_unfused_kernel = false;
-  } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+  } else if (IsFloat8Quantizers(quantizer.ptr())) {
     // Always used fused kernel for FP8 delayed scaling
     force_unfused_kernel = false;
-  } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
     if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
       force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
@@ -148,7 +150,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
-    if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
@@ -222,6 +224,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     py::object out, py::handle quantizer,
                                     transformer_engine::DType out_dtype, const int sm_margin,
                                     const bool zero_centered_gamma) {
+  using namespace transformer_engine::pytorch::detail;
   using namespace transformer_engine::pytorch;
   using namespace transformer_engine;
 
@@ -253,10 +256,10 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   if (quantizer.is_none()) {
     // No need for separate quantization step if output is unquantized
     force_unfused_kernel = false;
-  } else if (detail::IsFloat8Quantizers(quantizer.ptr())) {
+  } else if (IsFloat8Quantizers(quantizer.ptr())) {
     // Always used fused kernel for FP8 delayed scaling
     force_unfused_kernel = false;
-  } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
     if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
       force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
@@ -290,7 +293,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
-    if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+    if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
       // my_quantizer here has to be a Float8CurrentScalingQuantizer
       auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
       nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
