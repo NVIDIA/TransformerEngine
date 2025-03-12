@@ -355,7 +355,7 @@ class Float8BlockScaling(Recipe):
             `LayerNormLinear (FP8 output) -> FP8 DPA -> Linear`.
     """
 
-    fp8_format: Format = Format.HYBRID
+    fp8_format: Format = Format.E4M3
     fp8_quant_fwd_inp = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_quant_fwd_weight = QParams(power_2_scale=False, amax_epsilon=0.0)
     fp8_quant_bwd_grad = QParams(power_2_scale=False, amax_epsilon=0.0)
