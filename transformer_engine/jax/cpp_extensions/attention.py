@@ -2215,27 +2215,31 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
 
-                if not config.context_parallel_causal_load_balanced and cp_rank >= idx:
-                    if config.attn_mask_type == AttnMaskType.CAUSAL_PADDING_MASK:
-                        subblock_config = replace(
-                            subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK
-                        )
+                def compute(config):
+                    return FusedAttnFwdPrimitive.impl(
+                        q,
+                        kv,
+                        _not_used,
+                        bias,
+                        seed,
+                        q_seqlen,
+                        kv_seqlen,
+                        q_seq_offsets,
+                        k_seq_offsets,
+                        q_segment_ids,
+                        kv_segment_ids,
+                        q_segment_pos,
+                        kv_segment_pos,
+                        config,
+                    )
 
-                output_per_step, softmax_aux_per_step, _ = FusedAttnFwdPrimitive.impl(
-                    q,
-                    kv,
-                    _not_used,
-                    bias,
-                    seed,
-                    q_seqlen,
-                    kv_seqlen,
-                    q_seq_offsets,
-                    k_seq_offsets,
-                    q_segment_ids,
-                    kv_segment_ids,
-                    q_segment_pos,
-                    kv_segment_pos,
-                    subblock_config,
+                causal_padding_config = subblock_config
+                padding_config = replace(subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK)
+
+                output_per_step, softmax_aux_per_step, _ = lax.cond(
+                    not config.context_parallel_load_balanced and cp_rank > idx,
+                    partial(compute, padding_config),
+                    partial(compute, causal_padding_config),
                 )
 
                 # TODO(rewang): THD softmax_aux layout is acutally [B, S, H]
@@ -2345,7 +2349,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
             dkv = jnp.zeros_like(kv)
             dbias = jnp.zeros_like(bias)
 
-            def scan_kv_block(_idx, carry):
+            def scan_kv_block(idx, carry):
                 kv, kv_segment_ids, kv_segment_pos, dq, dkv, dbias = carry
 
                 # Start communication that feeds the next iteration.
@@ -2355,13 +2359,7 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 kv_segment_ids_next = helper.permute_kv(kv_segment_ids, cp_perm)
                 kv_segment_pos_next = helper.permute_kv(kv_segment_pos, cp_perm)
 
-                if not config.context_parallel_causal_load_balanced and cp_rank >= _idx:
-                    if config.attn_mask_type == AttnMaskType.CAUSAL_PADDING_MASK:
-                        subblock_config = replace(
-                            subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK
-                        )
-
-                def compute():
+                def compute(config):
                     dq_per_step, dkv_per_step, _, dbias_per_step = FusedAttnBwdPrimitive.impl(
                         q,
                         kv,
@@ -2379,11 +2377,18 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                         kv_segment_ids,
                         q_segment_pos,
                         kv_segment_pos,
-                        config=subblock_config,
+                        config=config,
                     )
                     return dq_per_step, dkv_per_step, dbias_per_step
 
-                dq_per_step, dkv_per_step, dbias_per_step = compute()
+                causal_padding_config = subblock_config
+                padding_config = replace(subblock_config, attn_mask_type=AttnMaskType.PADDING_MASK)
+
+                dq_per_step, dkv_per_step, dbias_per_step = lax.cond(
+                    not config.context_parallel_load_balanced and cp_rank > idx,
+                    partial(compute, padding_config),
+                    partial(compute, causal_padding_config),
+                )
 
                 kv_next, dkv = jnp.unstack(kv_dkv)
                 dq += dq_per_step
