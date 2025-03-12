@@ -229,6 +229,11 @@ class TestDistributedCrossAttn:
             AttnMaskType.PADDING_CAUSAL_MASK,
             id="THD_SEPARATE-PADDING_CAUSAL",
         ),
+        pytest.param(
+            QKVLayout.THD_THD_THD,
+            AttnMaskType.PADDING_MASK,
+            id="THD_SEPARATE-PADDING",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -378,9 +383,6 @@ class TestDistributedContextParallelSelfAttn:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
-
-        # if qkv_layout.is_thd() and not load_balanced:
-        #     pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
         return self.impl_test_context_parallel_attn(
             device_count,

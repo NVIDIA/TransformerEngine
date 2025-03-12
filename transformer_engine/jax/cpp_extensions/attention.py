@@ -1627,7 +1627,7 @@ class _FusedAttnCPWithP2PHelper:
             raise ValueError(f"{header} does not support bias got: {self.config.attn_bias_type}")
 
         if self.config.qkv_layout.is_thd():
-            allowed_masks = [AttnMaskType.PADDING_CAUSAL_MASK]
+            allowed_masks = [AttnMaskType.PADDING_MASK, AttnMaskType.PADDING_CAUSAL_MASK]
         else:
             allowed_masks = [AttnMaskType.NO_MASK, AttnMaskType.CAUSAL_MASK]
         if self.config.attn_mask_type not in allowed_masks:
