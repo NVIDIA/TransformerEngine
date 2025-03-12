@@ -685,5 +685,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         return out
 
     def wgrad_comp(self):
+        if not self.wgrad_store.split_bw():
+            return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
             self.wgrad_store.pop()

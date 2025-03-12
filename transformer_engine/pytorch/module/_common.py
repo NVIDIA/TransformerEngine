@@ -241,6 +241,8 @@ class WeightGradStore:
 
     def is_supported(self):
         # doesn't support use_bias
+        # doesn't support fuse_wgrad_accumulation
+        # doesn't support
         return True
 
     def split_bw(self):
