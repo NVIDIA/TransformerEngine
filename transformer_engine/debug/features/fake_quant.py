@@ -72,25 +72,25 @@ class FakeQuant(TEConfigAPIMapper):
 
         Fig 1: Comparison of FP8 FPROP GEMM with the same GEMM in BF16 with fake quantization of activation tensor. Green tensors have the same values, but different dtypes.
 
-    
+
 
     Parameters
     ----------
 
-    gemms/gemms_struct: List[str] 
+    gemms/gemms_struct: List[str]
         list of gemms to fake quantize
 
             - fprop
             - dgrad
             - wgrad
-    tensors/tensors_struct: List[str] 
+    tensors/tensors_struct: List[str]
         list of tensors to fake quantize
 
             - activation
             - gradient
             - weight
     quant_format: str, default = "FP8E5M2"
-        specifies the FP8 format to use: 
+        specifies the FP8 format to use:
 
             - FP8E5M2
             - FP8E4M3

@@ -78,10 +78,11 @@ class DebugQuantizer(Quantizer):
                 self.get_plans_for_output_tensors()
             )
         else:
-            self.inspect_tensor_enabled, self.inspect_tensor_postquantize_enabled_rowwise,\
-                self.inspect_tensor_postquantize_enabled_columnwise = (
-                self.get_enabled_look_at_tensors()
-            )
+            (
+                self.inspect_tensor_enabled,
+                self.inspect_tensor_postquantize_enabled_rowwise,
+                self.inspect_tensor_postquantize_enabled_columnwise,
+            ) = self.get_enabled_look_at_tensors()
             self.rowwise_tensor_plan, self.columnwise_tensor_plan = self.get_tensors_plan()
 
             self.log_messages_about_plans()
@@ -118,16 +119,26 @@ class DebugQuantizer(Quantizer):
         )
         inspect_tensor_postquantize_enabled_rowwise = (
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-                layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration, gemm=self.rowwise_gemm_name
+                layer_name=self.layer_name,
+                tensor_name=self.tensor_name,
+                iteration=self.iteration,
+                gemm=self.rowwise_gemm_name,
             )
         )
         inspect_tensor_postquantize_enabled_columnwise = (
             debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
-                layer_name=self.layer_name, tensor_name=self.tensor_name, iteration=self.iteration, gemm=self.columnwise_gemm_name
+                layer_name=self.layer_name,
+                tensor_name=self.tensor_name,
+                iteration=self.iteration,
+                gemm=self.columnwise_gemm_name,
             )
         )
 
-        return inspect_tensor_enabled, inspect_tensor_postquantize_enabled_rowwise, inspect_tensor_postquantize_enabled_columnwise
+        return (
+            inspect_tensor_enabled,
+            inspect_tensor_postquantize_enabled_rowwise,
+            inspect_tensor_postquantize_enabled_columnwise,
+        )
 
     def get_tensors_plan(self):
         """
@@ -220,13 +231,17 @@ class DebugQuantizer(Quantizer):
         if self.output_tensor:
             return
 
-        if self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE] and \
-                self.inspect_tensor_postquantize_enabled_rowwise:
+        if (
+            self.rowwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
+            and self.inspect_tensor_postquantize_enabled_rowwise
+        ):
             args["tensor"] = rowwise_gemm_tensor
             args["rowwise"] = True
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
-        if self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE] and \
-                self.inspect_tensor_postquantize_enabled_columnwise:
+        if (
+            self.columnwise_tensor_plan in [API_CALL_MODIFY, STANDARD_FP8_QUANTIZE]
+            and self.inspect_tensor_postquantize_enabled_columnwise
+        ):
             args["tensor"] = columnwise_gemm_tensor
             args["rowwise"] = False
             debug_api.transformer_engine.inspect_tensor_postquantize(**args)
@@ -425,7 +440,7 @@ class DebugQuantizer(Quantizer):
             return self.inspect_tensor_enabled or self.rowwise_tensor_plan == API_CALL_MODIFY
         if (
             self.inspect_tensor_enabled
-            or self.inspect_tensor_postquantize_enabled_rowwise 
+            or self.inspect_tensor_postquantize_enabled_rowwise
             or self.inspect_tensor_postquantize_enabled_columnwise
             or self.rowwise_tensor_plan == API_CALL_MODIFY
             or self.columnwise_tensor_plan == API_CALL_MODIFY
@@ -517,7 +532,7 @@ class DebugQuantizedTensor(QuantizedTensor):
             self.rowwise_gemm_tensor = self.rowwise_gemm_tensor.detach()
         if isinstance(self.columnwise_gemm_tensor, torch.Tensor):
             self.columnwise_gemm_tensor = self.columnwise_gemm_tensor.detach()
-        return self 
+        return self
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

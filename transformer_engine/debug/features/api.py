@@ -102,103 +102,112 @@ class TEDefaultFeatures:
 
     def fp8_gemm_enabled(self, config: Dict, layer_name: str, gemm: str, iteration: int) -> bool:
         """
-            If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled, 
-            then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*. 
-            If the tensor is processed using *modify_tensor* and or fp8 autocast is not enabled, 
-            the result of this call does not matter.
+        If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
+        then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
+        If the tensor is processed using *modify_tensor* and or fp8 autocast is not enabled,
+        the result of this call does not matter.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            gemm: str 
-                one of [`fprop`, `dgrad`, `wgrad`],
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        gemm: str
+            one of [`fprop`, `dgrad`, `wgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
 
-            Returns
-            -------
+        Returns
+        -------
 
-            bool - default is True
+        bool - default is True
         """
         return True  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
-    def modify_tensor_enabled(self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int) -> bool:
+    def modify_tensor_enabled(
+        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
+    ) -> bool:
         """
-            It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
+        It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            gemm: str 
-                one of [`fprop`, `dgrad`, `wgrad`],
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        gemm: str
+            one of [`fprop`, `dgrad`, `wgrad`],
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
 
-            Returns
-            -------
+        Returns
+        -------
 
-            bool - default is False
+        bool - default is False
         """
         return False
 
-    def modify_tensor(self, config: Dict, layer_name: str, gemm: str, 
-                      tensor_name: str, tensor: torch.Tensor, default_quantizer: Quantizer, 
-                      iteration: int, out: Union[torch.Tensor, QuantizedTensor]
-        ) -> Union[torch.Tensor, QuantizedTensor, None]:
+    def modify_tensor(
+        self,
+        config: Dict,
+        layer_name: str,
+        gemm: str,
+        tensor_name: str,
+        tensor: torch.Tensor,
+        default_quantizer: Quantizer,
+        iteration: int,
+        out: Union[torch.Tensor, QuantizedTensor],
+    ) -> Union[torch.Tensor, QuantizedTensor, None]:
         """
-            It allows inserting tensor processing. 
-            For example, feature `FakeQuant` uses it to emulate casting to FP8, 
-            but the tensor is returned in higher precision. 
-            It can be invoked at most once for each tensor within a given GEMM operation.
+        It allows inserting tensor processing.
+        For example, feature `FakeQuant` uses it to emulate casting to FP8,
+        but the tensor is returned in higher precision.
+        It can be invoked at most once for each tensor within a given GEMM operation.
 
-            This call is invoked if `modify_tensor_enabled` returns `True` and the feature is enabled for the *tensor_name* and *gemm*.
+        This call is invoked if `modify_tensor_enabled` returns `True` and the feature is enabled for the *tensor_name* and *gemm*.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            tensor: torch.Tensor 
-                tensor in high precision,
-            gemm: str 
-                one of [`fprop`, `dgrad`, `wgrad`],
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-            default_quantizer : Quantizer 
-                quantizer which is used to cast the tensor to lower precision 
-                if *modify_tensor* is not invoked. For example, 
-                feature per tensor scale uses it to obtain FP8 dtype of the tensor. 
-                If the recipe indicates that the tensor is not cast - for example, 
-                if running without FP8 autocast, then `default_quantizer=None`,
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
-            out: Union[torch.Tensor, QuantizedTensor] 
-                output tensor, used in the weight caching mechanism.
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor: torch.Tensor
+            tensor in high precision,
+        gemm: str
+            one of [`fprop`, `dgrad`, `wgrad`],
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        default_quantizer : Quantizer
+            quantizer which is used to cast the tensor to lower precision
+            if *modify_tensor* is not invoked. For example,
+            feature per tensor scale uses it to obtain FP8 dtype of the tensor.
+            If the recipe indicates that the tensor is not cast - for example,
+            if running without FP8 autocast, then `default_quantizer=None`,
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+        out: Union[torch.Tensor, QuantizedTensor]
+            output tensor, used in the weight caching mechanism.
 
-                
-            Returns
-            -------
 
-            Union[torch.Tensor, transformer_engine.pytorch.QuantizerTensor, None] 
-                can be `torch.Tensor` or one of the Transformer Engine's `QuantizedTensor` - 
-                the rule is that both tensors returned for each GEMM should have the same type. 
-                If both are `Float8Tensor`, then GEMM is run in FP8.
-                If both are `torch.Tensor`, GEMM is run in high precision. 
-                Please take that into account especially if only one tensor of the GEMM 
-                is processed by the `modify_tensor()`. For example, `FakeQuant` 
-                disabled FP8 GEMM to ensure that the second tensor is also in high precision. 
-                If the tensor is not the input for any GEMM - namely  `output`, 
-                `wgrad` and `dgrad` - the return type would match the input type. 
-            Should return `None` if `out` is not `None`.
+        Returns
+        -------
+
+        Union[torch.Tensor, transformer_engine.pytorch.QuantizerTensor, None]
+            can be `torch.Tensor` or one of the Transformer Engine's `QuantizedTensor` -
+            the rule is that both tensors returned for each GEMM should have the same type.
+            If both are `Float8Tensor`, then GEMM is run in FP8.
+            If both are `torch.Tensor`, GEMM is run in high precision.
+            Please take that into account especially if only one tensor of the GEMM
+            is processed by the `modify_tensor()`. For example, `FakeQuant`
+            disabled FP8 GEMM to ensure that the second tensor is also in high precision.
+            If the tensor is not the input for any GEMM - namely  `output`,
+            `wgrad` and `dgrad` - the return type would match the input type.
+        Should return `None` if `out` is not `None`.
 
         """
         raise NotImplementedError(
@@ -206,104 +215,124 @@ class TEDefaultFeatures:
             " handled by any API."
         )
 
-    def inspect_tensor(self, config: Dict, layer_name: str, tensor_name: str, tensor: torch.Tensor, iteration: int, tp_group: torch.distributed.ProcessGroup) -> None:
+    def inspect_tensor(
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        tensor: torch.Tensor,
+        iteration: int,
+        tp_group: torch.distributed.ProcessGroup,
+    ) -> None:
         """
-            The feature is invoked if *inspect_tensor_enabled* returns `True`. It can be used to obtain information on the high precision tensor. For example, it is run by the `LogTensorStats` feature.
+        The feature is invoked if *inspect_tensor_enabled* returns `True`. It can be used to obtain information on the high precision tensor. For example, it is run by the `LogTensorStats` feature.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-            tensor: torch.Tensor
-                tensor in high precision,
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
-            tp_group: torch.distributed.ProcessGroup
-                process group for the tensor parallel group,
-            
-            Returns
-            -------
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        tensor: torch.Tensor
+            tensor in high precision,
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+        tp_group: torch.distributed.ProcessGroup
+            process group for the tensor parallel group,
 
-            Should return nothing.
-        """
+        Returns
+        -------
 
-    def inspect_tensor_postquantize(self, config: Dict, layer_name: str, tensor_name: str,  gemm: str,
-                                    tensor: torch.Tensor, iteration: int, tp_group: torch.distributed.ProcessGroup) -> None:
-        """
-            Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
-
-            Parameters
-            ----------
-
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-            tensor: torch.Tensor 
-                tensor in fp8 or processed tensor after the modify_tensor call,
-            gemm: str 
-                one of [`fprop`, `dgrad`, `wgrad`],
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
-            tp_group: torch.distributed.ProcessGroup
-                process group for the tensor parallel group,
-
-            Returns
-            -------
-
-            Should return nothing.
+        Should return nothing.
         """
 
-    def inspect_tensor_enabled(self, config: Dict, layer_name: str, tensor_name: str, iteration: int) -> bool:
+    def inspect_tensor_postquantize(
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        gemm: str,
+        tensor: torch.Tensor,
+        iteration: int,
+        tp_group: torch.distributed.ProcessGroup,
+    ) -> None:
         """
-            It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked for every forward.
+        Similar to *inspect_tensor*, but is run after one of the: fp8 cast, modify_tensor if they are run. If none of the fp8 cast or modify_tensor is invoked, then *inspect_tensor_postquantize* is also not invoked. The feature LogFp8Stats uses this call to collect FP8 statistics after the quantization.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`].
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        tensor: torch.Tensor
+            tensor in fp8 or processed tensor after the modify_tensor call,
+        gemm: str
+            one of [`fprop`, `dgrad`, `wgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+        tp_group: torch.distributed.ProcessGroup
+            process group for the tensor parallel group,
 
-            Returns
-            -------
+        Returns
+        -------
 
-            bool - default is False
+        Should return nothing.
+        """
+
+    def inspect_tensor_enabled(
+        self, config: Dict, layer_name: str, tensor_name: str, iteration: int
+    ) -> bool:
+        """
+        It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked for every forward.
+
+        Parameters
+        ----------
+
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`].
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
+
+        Returns
+        -------
+
+        bool - default is False
         """
         return False
 
-    def inspect_tensor_postquantize_enabled(self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int) -> bool:
+    def inspect_tensor_postquantize_enabled(
+        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int
+    ) -> bool:
         """
-            It is a routing call, which is run at the initialization of the layer. 
-            If it returns true, then *inspect_tensor_postquantize* for 
-            a given GEMM and tensor will be invoked for every forward.
+        It is a routing call, which is run at the initialization of the layer.
+        If it returns true, then *inspect_tensor_postquantize* for
+        a given GEMM and tensor will be invoked for every forward.
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            config: Dict 
-                dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
-            layer_name: str
-            gemm: str 
-                one of [`fprop`, `dgrad`, `wgrad`],
-            tensor_name: str 
-                one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
-            iteration: int 
-                iteration number - equal to the number of times `debug_api.step()` was called.
+        config: Dict
+            dictionary containing information from `config.yaml` corresponding to the feature, tensor_name and gemm.
+        layer_name: str
+        gemm: str
+            one of [`fprop`, `dgrad`, `wgrad`],
+        tensor_name: str
+            one of [`activation`, `weight`, `gradient`, `output`, `wgrad`, `dgrad`],
+        iteration: int
+            iteration number - equal to the number of times `debug_api.step()` was called.
 
-            Returns
-            -------
+        Returns
+        -------
 
-            bool - default is False
+        bool - default is False
         """
         return False
 

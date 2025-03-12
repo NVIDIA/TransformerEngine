@@ -24,58 +24,58 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """
-    This feature handles logging of FP8 tensor stats. 
+        This feature handles logging of FP8 tensor stats.
 
 
-In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
+    In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
 
-`LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.  
+    `LogFp8TensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.
 
-`LogFp8TensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogFp8TensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.  
+    `LogFp8TensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogFp8TensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.
 
-Parameters
-----------
+    Parameters
+    ----------
 
-    stats: List[str] 
-        list of statistics to log
+        stats: List[str]
+            list of statistics to log
 
-            - underflows%
-            - overflows%
-    tensors/tensors_struct: List[str] 
-        list of tensors to log
+                - underflows%
+                - overflows%
+        tensors/tensors_struct: List[str]
+            list of tensors to log
 
-            - activation
-            - gradient
-            - weight
-    freq: Optional[int], default = 1
-        frequency of logging stats, stats will be logged every `freq` steps
-    start_step: Optional[int], default = None
-        start step of logging stats
-    end_step: Optional[int], default = None
-        end step of logging stats
-    start_end_list: Optional[list([int, int])], default = None
-        non-overlapping list of (start, end) pairs in incremental order. If not None, will ignore start_step and end_step
+                - activation
+                - gradient
+                - weight
+        freq: Optional[int], default = 1
+            frequency of logging stats, stats will be logged every `freq` steps
+        start_step: Optional[int], default = None
+            start step of logging stats
+        end_step: Optional[int], default = None
+            end step of logging stats
+        start_end_list: Optional[list([int, int])], default = None
+            non-overlapping list of (start, end) pairs in incremental order. If not None, will ignore start_step and end_step
 
-Example
--------
-.. code-block:: yaml
+    Example
+    -------
+    .. code-block:: yaml
 
-    example_fp8_tensor_stat_collection:
-        enabled: True
-        layers:
-            layer_types: [layernorm_linear]
-        transformer_engine:
-            LogFp8TensorStats:
-                enabled: True
-                tensors_struct: 
-                - tensor: activation
-                stats: [underflows%, overflows%]
-                freq: 1
-                - tensor: gradient
-                stats: [overflows%]
-                freq: 5
-                start_step: 0
-                end_step: 80
+        example_fp8_tensor_stat_collection:
+            enabled: True
+            layers:
+                layer_types: [layernorm_linear]
+            transformer_engine:
+                LogFp8TensorStats:
+                    enabled: True
+                    tensors_struct:
+                    - tensor: activation
+                    stats: [underflows%, overflows%]
+                    freq: 1
+                    - tensor: gradient
+                    stats: [overflows%]
+                    freq: 5
+                    start_step: 0
+                    end_step: 80
     """
 
     def _get_supported_stats_list(self):

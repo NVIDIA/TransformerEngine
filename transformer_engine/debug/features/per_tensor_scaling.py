@@ -15,7 +15,11 @@ import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 from transformer_engine.pytorch.tensor import Quantizer
-from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Tensor, Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8CurrentScalingQuantizer,
+    Float8Tensor,
+    Float8Quantizer,
+)
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 
@@ -37,7 +41,6 @@ def per_tensor_cast(
         tex.DType.kFloat8E5M2,
     }, "[NVTORCH INSPECT ERROR] Only 2 FP8 types: E4M3 and E5M2 are supported in TE."
 
-
     quantizer = Float8CurrentScalingQuantizer(fp8_dtype, device=tensor.device)
 
     if out is not None:
@@ -56,13 +59,13 @@ class PerTensorScaling(TEConfigAPIMapper):
     Parameters
     ----------
 
-    gemms/gemms_struct: List[str] 
+    gemms/gemms_struct: List[str]
         list of gemms to enable per-tensor scaling for
 
             - fprop
             - dgrad
             - wgrad
-    tensors/tensors_struct: List[str] 
+    tensors/tensors_struct: List[str]
         list of tensors to enable per-tensor scaling for
 
             - activation
@@ -124,8 +127,9 @@ class PerTensorScaling(TEConfigAPIMapper):
                 raise ValueError(f'[NVTORCH INSPECT ERROR] Unexpected key in config: "{key}".')
 
         assert isinstance(default_quantizer, Float8Quantizer), (
-            f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor:"
-            f" Per tensor current scaling can be used only within `DelayedScaling` recipe autocast. {layer_name}"
+            f"[NVTORCH INSPECT ERROR] Feature={self.__class__.__name__}, API=process_tensor: Per"
+            " tensor current scaling can be used only within `DelayedScaling` recipe autocast."
+            f" {layer_name}"
         )
 
         debug_api.log_message(

@@ -24,17 +24,17 @@ from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 @Registry.register_feature(namespace="transformer_engine")
 class LogTensorStats(BaseLogTensorStats):
     """
-    This feature handles the logging of basic tensor statistics.  
+    This feature handles the logging of basic tensor statistics.
 
-    For a distributed setting, the auxiliary stats are computed for each node and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!  
+    For a distributed setting, the auxiliary stats are computed for each node and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
 
-    `LogTensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.  
+    `LogTensorStats` supports micro-batching. If multiple forward/backward passes are invoked per `debug_api.step()`, then stats for all tensors except weights will be accumulated.
 
-    `LogTensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogTensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.  
-   
+    `LogTensorStats` can induce significant overhead. To mitigate this issue, logging stats with `freq > 1` is recommended. If `LogTensorStats` is not used in a given step, the overhead is smaller. Moreover, if no other feature is used for the layer, the TE layer will run as fast as it would without `debug_api` initialized.
+
     Parameters
     ----------
-    stats: List[str] 
+    stats: List[str]
         list of statistics to log
 
             - "min"
@@ -45,9 +45,9 @@ class LogTensorStats(BaseLogTensorStats):
             - "l2_norm"
             - "cur_amax" – maximal absolute value of a tensor,
             - "dynamic_range" – equal to `torch.log2(amax) - torch.log2(amin)`
-    tensors/tensors_struct: List[str] 
+    tensors/tensors_struct: List[str]
         list of tensors to log
-        
+
             - "activation"
             - "gradient"
             - "weight"

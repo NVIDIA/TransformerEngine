@@ -22,7 +22,9 @@ def test_transformer_engine_no_config(feature_dirs):
         tensor = torch.rand(24, 2046).cuda()
 
         # FP8 enabled - true by the default
-        assert debug_api.transformer_engine.fp8_gemm_enabled("decoder.1.attn.qkv", gemm="fprop", iteration=0)
+        assert debug_api.transformer_engine.fp8_gemm_enabled(
+            "decoder.1.attn.qkv", gemm="fprop", iteration=0
+        )
 
         # modify_tensor_enabled - False by default
         assert not debug_api.transformer_engine.modify_tensor_enabled(

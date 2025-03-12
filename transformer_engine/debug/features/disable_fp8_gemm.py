@@ -16,7 +16,7 @@ class DisableFp8Gemm(TEConfigAPIMapper):
     Parameters
     ----------
 
-    gemms: List[str] 
+    gemms: List[str]
         list of gemms to disable
 
             - fprop
@@ -35,7 +35,7 @@ class DisableFp8Gemm(TEConfigAPIMapper):
                 DisableFp8Gemm:
                 enabled: True
                 gemms: [dgrad, wgrad]
-   """
+    """
 
     @api_method
     def fp8_gemm_enabled(
