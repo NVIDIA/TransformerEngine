@@ -292,6 +292,7 @@ class _Linear(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             if fuse_wgrad_accumulation and weight.requires_grad:
                 ctx.main_grad = weight.main_grad
+                ctx.grad_added_to_main_grad = getattr(weight,"grad_added_to_main_grad",None)
 
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
@@ -374,9 +375,12 @@ class _Linear(torch.autograd.Function):
                 else None
             )
 
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = torch.nn.Parameter(weight, weight.requires_grad)
-                weight.main_grad = main_grad
+            if ctx.cpu_offloading:
+                weight = torch.nn.Parameter(weight, ctx.requires_wgrad)
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    weight.main_grad = main_grad
+                    if ctx.grad_added_to_main_grad is not None:
+                        weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already

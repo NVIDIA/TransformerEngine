@@ -368,6 +368,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.quantized_weight = quantized_weight
             if fuse_wgrad_accumulation and weight.requires_grad:
                 ctx.main_grad = weight.main_grad
+                ctx.grad_added_to_main_grad = getattr(weight,"grad_added_to_main_grad",None)
             ctx.grad_input_quantizer = grad_input_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
             ctx.input_quantizer = input_quantizer
@@ -493,8 +494,12 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+            if ctx.cpu_offloading:
+                origin_weight = torch.nn.Parameter(origin_weight, ctx.requires_wgrad)
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    origin_weight.main_grad = main_grad
+                    if ctx.grad_added_to_main_grad is not None:
+                        origin_weight.grad_added_to_main_grad = ctx.grad_added_to_main_grad
 
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
