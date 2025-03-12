@@ -6,20 +6,17 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
-from tests.pytorch.references.quantize_scale_calc import (
-    scale_from_amax_tensor
-)
+from tests.pytorch.references.quantize_scale_calc import scale_from_amax_tensor
 
 
 # compute amax and scale
 def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
     x_fp32 = x.to(torch.float32)
     amax = torch.amax(torch.abs(x_fp32)).view(1)
-    return scale_from_amax_tensor(torch.float32,
-                                  amax,
-                                  quant_dtype,
-                                  eps=eps,
-                                  pow_2_scales=pow_2_scales)
+    return scale_from_amax_tensor(
+        torch.float32, amax, quant_dtype, eps=eps, pow_2_scales=pow_2_scales
+    )
+
 
 def _multi_dim_transpose(tensor):
     # Get the number of dimensions
