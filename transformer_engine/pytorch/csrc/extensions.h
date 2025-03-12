@@ -183,7 +183,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype);
 
-void compute_amax(const at::Tensor& tensor, at::Tensor& amax);
+void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
 std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
 
@@ -362,8 +362,8 @@ void multi_tensor_compute_scale_inv_cuda(int chunk_size, at::Tensor noop_flag,
                                          float max_fp8, bool force_pow_2_scales, float epsilon);
 
 void multi_tensor_compute_scale_and_scale_inv_cuda(
-  int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
-  float max_fp8, bool force_pow_2_scales, float epsilon);
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    float max_fp8, bool force_pow_2_scales, float epsilon);
 
 /***************************************************************************************************
  * padding

@@ -51,6 +51,6 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
   return scale;
 }
 
-}
+}  // namespace transformer_engine
 
 #endif  // RECIPE_COMMON_CUH_

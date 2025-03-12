@@ -262,14 +262,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Fused SGD optimizer for list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_compute_scale", &multi_tensor_compute_scale_cuda,
-        "Fused compute scale from amax",
-        py::call_guard<py::gil_scoped_release>());
+        "Fused compute scale from amax", py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_compute_scale_inv", &multi_tensor_compute_scale_inv_cuda,
-        "Fused compute scale_inv from scale",
-        py::call_guard<py::gil_scoped_release>());
+        "Fused compute scale_inv from scale", py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
-        "Fused compute scale and scale_inv from amax",
-        py::call_guard<py::gil_scoped_release>());
+        "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

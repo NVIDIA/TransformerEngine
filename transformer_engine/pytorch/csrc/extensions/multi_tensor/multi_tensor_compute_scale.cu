@@ -15,8 +15,8 @@
 // Stringstream is a big hammer, but I want to rely on operator<< for dtype.
 #include <sstream>
 
-#include "common/utils.cuh"
 #include "common/recipe/recipe_common.cuh"
+#include "common/utils.cuh"
 #include "multi_tensor_apply.cuh"
 #include "type_shim.h"
 
@@ -44,9 +44,8 @@ struct ComputeScaleFunctor {
     n -= chunk_idx * chunk_size;
 
     for (int i_start = threadIdx.x; i_start < n && i_start < chunk_size; i_start += blockDim.x) {
-      scale[i_start] = transformer_engine::compute_scale_from_amax(
-        amax[i_start], max_fp8, force_pow_2_scales, epsilon
-      );
+      scale[i_start] = transformer_engine::compute_scale_from_amax(amax[i_start], max_fp8,
+                                                                   force_pow_2_scales, epsilon);
     }
   }
 };
@@ -83,9 +82,8 @@ struct ComputeScaleInvFunctor {
     n -= chunk_idx * chunk_size;
 
     for (int i_start = threadIdx.x; i_start < n && i_start < chunk_size; i_start += blockDim.x) {
-      float scale_val = transformer_engine::compute_scale_from_amax(
-        amax[i_start], max_fp8, force_pow_2_scales, epsilon
-      );
+      float scale_val = transformer_engine::compute_scale_from_amax(amax[i_start], max_fp8,
+                                                                    force_pow_2_scales, epsilon);
       transformer_engine::reciprocal(scale_inv + i_start, scale_val);
     }
   }
@@ -126,9 +124,8 @@ struct ComputeScaleAndScaleInvFunctor {
     n -= chunk_idx * chunk_size;
 
     for (int i_start = threadIdx.x; i_start < n && i_start < chunk_size; i_start += blockDim.x) {
-      float scale_val = transformer_engine::compute_scale_from_amax(
-        amax[i_start], max_fp8, force_pow_2_scales, epsilon
-      );
+      float scale_val = transformer_engine::compute_scale_from_amax(amax[i_start], max_fp8,
+                                                                    force_pow_2_scales, epsilon);
       scale[i_start] = scale_val;
       transformer_engine::reciprocal(scale_inv + i_start, scale_val);
     }
@@ -136,8 +133,8 @@ struct ComputeScaleAndScaleInvFunctor {
 };
 
 void multi_tensor_compute_scale_and_scale_inv_cuda(
-  int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
-  float max_fp8, bool force_pow_2_scales, float epsilon) {
+    int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
+    float max_fp8, bool force_pow_2_scales, float epsilon) {
   using namespace at;
 
   multi_tensor_apply<3>(BLOCK_SIZE, chunk_size, noop_flag, tensor_lists,

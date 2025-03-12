@@ -155,7 +155,7 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
     # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
     # NCCL kernels at once.
     packed_amaxes = torch.zeros([len(params)], dtype=torch.float32, device=params[0][0].device)
-    packed_amax_views = [packed_amaxes[i:i+1].view(1) for i in range(len(params))]
+    packed_amax_views = [packed_amaxes[i : i + 1].view(1) for i in range(len(params))]
 
     # Collect amaxes so we can copy the reduced amax from packed_amaxes to the quantizer.
     # Collect scales and scale_invs to update them after amax reduction.
@@ -205,8 +205,14 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
-    multi_tensor_applier(multi_tensor_compute_scale_and_scale_inv, dummy_overflow_buf,
-                         [amaxes, scales, scale_invs], max_fp8, force_pow_2_scales, amax_epsilon)
+    multi_tensor_applier(
+        multi_tensor_compute_scale_and_scale_inv,
+        dummy_overflow_buf,
+        [amaxes, scales, scale_invs],
+        max_fp8,
+        force_pow_2_scales,
+        amax_epsilon,
+    )
 
     # ---------------------------------------------------------------------------------------------
     # Step 5: Use quantizers to cast master weights to FP8.
