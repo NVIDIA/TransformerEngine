@@ -149,7 +149,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if fp8:
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
-                FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling()
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
@@ -178,11 +178,17 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
 
         # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-        if fp8 and FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling() and ub_bulk_dgrad:
+        if (
+            fp8
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
             input_quantizer.set_usage(rowwise=True, columnwise=False)
 
         ub_obj_fprop = None
         ln_out = None
+        # For Delay scaling, output of normalization can be in fp8.
+        # For CurrentScaling, it will be fused in the future, but currently we need the output of normalization in high precision.
         if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
@@ -476,7 +482,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not (ctx.fp8_recipe.per_tensor_scaling()):
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
                     raise NotImplementedError(
                         "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
                         " current scaling"
@@ -567,7 +573,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
             if ctx.grad_output_quantizer is not None:
                 # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
                     ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 else:
                     ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)

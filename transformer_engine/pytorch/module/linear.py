@@ -130,7 +130,7 @@ class _Linear(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(inputmat, weight)
             if any([ub_overlap_ag_fprop, ub_overlap_rs_fprop]) and not (
-                FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling()
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
@@ -150,7 +150,10 @@ class _Linear(torch.autograd.Function):
                     quantizer=input_quantizer,
                 )
             else:
-                if ub_bulk_dgrad:
+                if (
+                    FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+                    and ub_bulk_dgrad
+                ):
                     # reduce duplicated transpose in `_fix_gathered_fp8_transpose`
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
                 else:
@@ -368,7 +371,7 @@ class _Linear(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not (ctx.fp8_recipe.per_tensor_scaling()):
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
                     raise NotImplementedError(
                         "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
                         " current scaling"
@@ -439,7 +442,6 @@ class _Linear(torch.autograd.Function):
                     ub_obj_dgrad = ctx.ub_obj_gradout
                     ub_type_dgrad = tex.CommOverlapType.AG
                     ub_obj_dgrad.copy_into_buffer(inputmat, ctx.input_quantizer, local_chunk=True)
-                    inputmat = ub_obj_dgrad.get_buffer(ctx.input_quantizer)
 
                 if ctx.ub_bulk_wgrad:
                     # Overlap dgrad reduce-scatter with wgrad compute
@@ -452,7 +454,7 @@ class _Linear(torch.autograd.Function):
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_output_quantizer is not None:
                 # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
                     ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 else:
                     ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)

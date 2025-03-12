@@ -191,7 +191,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
             if any([ub_overlap_ag, ub_overlap_rs]) and not (
-                FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling()
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
                     "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
@@ -238,7 +238,11 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
 
         # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
-        if fp8 and FP8GlobalStateManager.get_fp8_recipe().per_tensor_scaling() and ub_bulk_dgrad:
+        if (
+            fp8
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
 
         ub_obj_lnout = None
@@ -601,7 +605,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.per_tensor_scaling():
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
                     raise NotImplementedError(
                         "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
                         " current scaling"
@@ -672,7 +676,7 @@ class _LayerNormMLP(torch.autograd.Function):
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_fc2_output_quantizer is not None:
                 # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.per_tensor_scaling():
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
                     ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 else:
                     ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=True)
