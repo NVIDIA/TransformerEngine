@@ -354,11 +354,28 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        return _ViewFunc.apply(self, shape)
+        if not self.requires_grad:
+            # Autograd removes the quantized return type
+            # because of __torch_function__ in base class
+            # and torch._C._disabled_torch_function_impl
+            return _ViewFunc.forward(None, self, shape)
+        return super.view(self, *shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        return _ReshapeFunc.apply(self, shape)
+        if not self.requires_grad:
+            return _ReshapeFunc.forward(None, self, shape)
+        return super.reshape(self, *shape)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+
+        # View op
+        if func == aten.view.default:
+            return _ViewFunc.apply(args[0], *args[1:])
+
+        # Default case
+        return super().__torch_dispatch__(func, types, args, kwargs)
 
     def contiguous(
         self,
@@ -386,38 +403,9 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
 
     @classmethod
-    def __torch_dispatch__(cls, func, types, args, kwargs=None):
-
-        # View op
-        if func == aten.view.default:
-            tensor = args[0]
-            data = tensor._rowwise_data
-            out_data = data.__torch_dispatch__(
-                func,
-                types,
-                [data] + list(args[1:]),
-                kwargs,
-            )
-            out_shape = out_data.size()
-            return Float8BlockwiseQTensor(
-                shape=out_shape,
-                dtype=tensor.dtype,
-                rowwise_data=out_data,
-                rowwise_scale_inv=tensor._rowwise_scale_inv,
-                columnwise_data=tensor._columnwise_data,
-                columnwise_scale_inv=tensor._columnwise_scale_inv,
-                quantizer=tensor._quantizer,
-                is_2D_scaled=tensor._is_2D_scaled,
-                requires_grad=False,
-                fp8_dtype=tensor._fp8_dtype,
-            )
-
-        # Default case
-        return super().__torch_dispatch__(func, types, args, kwargs)
-
-    @classmethod
     def _make_in_reduce_ex(
         cls,
+        shape: torch.Size,
         rowwise_data: torch.Tensor,
         rowwise_scale_inv: torch.Tensor,
         columnwise_data: torch.Tensor,
@@ -434,6 +422,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
         """
         return Float8BlockwiseQTensor(
+            shape=shape,
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
             fp8_dtype=fp8_dtype,
@@ -449,6 +438,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         return (
             Float8BlockwiseQTensor._make_in_reduce_ex,
             (
+                self.shape,
                 self._rowwise_data,
                 self._rowwise_scale_inv,
                 self._columnwise_data,
@@ -462,7 +452,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     def _get_data(self) -> Float8BlockwiseQTensor:
         """Get tensor data property"""
-        return super().data
+        return self.dequantize()
 
     @torch.no_grad()
     def _set_data(self, tensor: torch.Tensor) -> None:
@@ -476,41 +466,37 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
 
+        def _set_from_tensor(dst: Float8BlockwiseQTensor, src: Float8BlockwiseQTensor):
+            dst._rowwise_data = src._rowwise_data
+            dst._columnwise_data = src._columnwise_data
+            dst._quantizer = src._quantizer
+            dst._fp8_dtype = src._fp8_dtype
+            dst._rowwise_scale_inv = src._rowwise_scale_inv
+            dst._columnwise_scale_inv = src._columnwise_scale_inv
+            if dst.requires_grad != src.requires_grad:
+                dst.requires_grad_(requires_grad=src.requires_grad)
+
         # Just copy FP8 data if other tensor is Float8BlockwiseQTensor
-        if isinstance(tensor, Float8BlockwiseQTensor):
-            if (  # pylint: disable=too-many-boolean-expressions
-                self.size() != tensor.size()
-                or self.stride() != tensor.stride()
-                or self.storage_offset() != tensor.storage_offset()
-                or self.dtype != tensor.dtype
-                or self.layout != tensor.layout
-                or not devices_match(self.device, new_device)
-            ):
-                dummy_tensor = torch.Tensor._make_wrapper_subclass(
-                    Float8BlockwiseQTensor,
-                    tensor.size(),
-                    strides=tensor.stride(),
-                    storage_offset=tensor.storage_offset(),
-                    dtype=tensor.dtype,
-                    layout=tensor.layout,
-                    requires_grad=tensor.requires_grad,
-                    device=new_device,
-                )
-                # pylint: disable=unnecessary-dunder-call
-                super(Float8BlockwiseQTensor, type(self)).data.__set__(self, dummy_tensor)
-            self._rowwise_data = tensor._rowwise_data
-            self._columnwise_data = tensor._columnwise_data
-            self._quantizer = tensor._quantizer
-            self._fp8_dtype = tensor._fp8_dtype
-            self._rowwise_scale_inv = tensor._rowwise_scale_inv
-            self._columnwise_scale_inv = tensor._columnwise_scale_inv
+        if (
+            isinstance(tensor, Float8BlockwiseQTensor)
+            and self.size() == tensor.size()
+            and self.stride() == tensor.stride()
+            and self.storage_offset() == tensor.storage_offset()
+            and self.dtype == tensor.dtype
+            and self.layout == tensor.layout
+            and devices_match(self.device, new_device)
+        ):
+            _set_from_tensor(self, tensor)
             return
+        elif isinstance(tensor, Float8BlockwiseQTensor):
+            assert tensor._quantizer is not None, "Can't quantize without a quantizer"
+            quantizer = tensor._quantizer
+        else:
+            assert self._quantizer is not None, "Can't quantize without a quantizer"
+            quantizer = self._quantizer
 
         # Quantize to FP8
-        assert self._quantizer is not None, "Can't quantize without a quantizer"
-        self.data = self._quantizer.quantize(tensor)
-        if self.requires_grad != tensor.requires_grad:
-            self.requires_grad_(requires_grad=tensor.requires_grad)
+        quantizer.update_quantized(tensor, self)
 
     # Cast to FP8 when setting Float8BlockwiseQTensor.data
     data = property(_get_data, _set_data)
@@ -532,11 +518,12 @@ class _ViewFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        ctx.shape = tensor.shape
+        if ctx is not None:
+            ctx.shape = tensor.shape
         if shape is None:
             return tensor
 
-        if shape != ctx.shape:
+        if list(shape) != list(tensor.shape):
             raise NotImplementedError("View not implemented.")
         return tensor
 
@@ -568,7 +555,9 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        ctx.shape = tensor.shape
+        shape_arg = shape
+        if ctx is not None:
+            ctx.shape = tensor.shape
         if shape is None:
             return tensor
 
@@ -579,12 +568,12 @@ class _ReshapeFunc(torch.autograd.Function):
             shape = shape[0]
         if -1 in shape:
             shape = list(shape)
-            d_inferred = -math.prod(ctx.shape) // math.prod(shape)
+            d_inferred = -math.prod(tensor.shape) // math.prod(shape)
             for i, d in enumerate(shape):
                 if d == -1:
                     shape[i] = d_inferred
                     break
-        if shape != ctx.shape:
+        if list(shape) != list(tensor.shape):
             raise NotImplementedError("Reshape not implemented yet.")
         return tensor
 
