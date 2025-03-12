@@ -115,7 +115,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     // Always used fused kernel for FP8 delayed scaling
     force_unfused_kernel = false;
   } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
       force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
     }
@@ -256,7 +256,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     // Always used fused kernel for FP8 delayed scaling
     force_unfused_kernel = false;
   } else if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
-    if (transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
       force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
     }
