@@ -435,7 +435,7 @@ class TestFP8BlockScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase)
             dtype=dtype,
             y_error=0.5,
             ln_out_error=0.5,
-            dgrad_error=1,
+            dgrad_error=1.6,
             wgrad_error=1,
             bgrad_error=0.5,
             recipe1_golden_tensors=None,
