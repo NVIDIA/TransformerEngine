@@ -745,6 +745,8 @@ class _LayerNormMLP(torch.autograd.Function):
                 if isinstance(grad_output, QuantizedTensor):
                     grad_output.update_usage(rowwise_usage=True, columnwise_usage=True)
 
+                bias_to_pass = fc2_bias if (ctx.use_fc2_bias and fc2_bias_grad is None) else None
+
                 fc2_wgrad, fc2_bias_grad_, *_ = general_gemm(
                     act_out,
                     grad_output,
@@ -753,7 +755,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     quantization_params=None,  # wgrad in high precision
                     layout="NT",
                     grad=True,
-                    bias=fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
+                    bias=bias_to_pass,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,

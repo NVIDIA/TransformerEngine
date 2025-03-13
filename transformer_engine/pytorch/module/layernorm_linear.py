@@ -684,7 +684,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     out_dtype=(
                         main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
                     ),
-                    bias=(bias if (grad_bias is None and not ctx.fp8) else None),
+                    bias=(bias if (grad_bias is None and not ctx.fp8 and ctx.use_bias) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
