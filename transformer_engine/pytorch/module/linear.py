@@ -56,6 +56,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
@@ -252,9 +253,21 @@ class _Linear(torch.autograd.Function):
 
         if is_grad_enabled:
             saved_inputmat = None
+
+            ctx.backward_input_needs_gather = (
+                weight.requires_grad
+                and parallel_mode == "column"
+                and sequence_parallel
+                and not ub_bulk_dgrad
+            )
+
             if backward_needs_input:
                 if own_quantized_input and isinstance(inputmat, QuantizedTensor):
-                    inputmat.update_usage(rowwise_usage=False)
+                    # For sequence parallel in vanilla FP8, rowwise data is
+                    # to gather the input. For MXFP8, columnwise only data
+                    # can be allgathered.
+                    if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
+                        inputmat.update_usage(rowwise_usage=False)
                 saved_inputmat = inputmat
 
             if cpu_offloading:
@@ -452,12 +465,7 @@ class _Linear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             inputmat_total = None
             inputmat_total_work = None
-            if (
-                ctx.requires_wgrad
-                and ctx.parallel_mode == "column"
-                and ctx.sequence_parallel
-                and not ctx.ub_bulk_dgrad
-            ):
+            if ctx.backward_input_needs_gather:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
