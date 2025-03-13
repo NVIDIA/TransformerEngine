@@ -5,18 +5,18 @@
 """Internal function used by multiple modules."""
 
 import os
-from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
 from functools import reduce
 from operator import mul as multiply_op
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 
 from .. import cpp_extensions as tex
 from ..constants import TE_DType
-from ..utils import get_default_init_method
 from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..utils import get_default_init_method
 
 _use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 

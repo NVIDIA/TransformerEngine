@@ -4,7 +4,9 @@
 
 """Utilities for debugging numerical issues with FP8"""
 from typing import Tuple
+
 import torch
+
 from transformer_engine.common import recipe
 
 _NUMERICS_DEBUG = False

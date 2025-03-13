@@ -4,14 +4,13 @@
 
 """Installation script."""
 
+import copy
 import ctypes
 import os
 import subprocess
 import sys
 import sysconfig
-import copy
 import time
-
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import List, Optional, Type
@@ -20,10 +19,10 @@ import setuptools
 
 from .utils import (
     cmake_bin,
+    cuda_path,
     debug_build_enabled,
     found_ninja,
     get_frameworks,
-    cuda_path,
     get_max_jobs_for_parallel_build,
 )
 

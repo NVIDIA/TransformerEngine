@@ -5,6 +5,7 @@
 """Fusible operation for reduce-scatter."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch

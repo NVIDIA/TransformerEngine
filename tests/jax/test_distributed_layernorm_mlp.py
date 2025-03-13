@@ -1,33 +1,31 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-import pytest
 from typing import Callable, List, Sequence, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from utils import assert_allclose, assert_tree_like_allclose, is_devices_enough
 
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper
-from transformer_engine.jax.fp8 import is_fp8_available
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.flax import LayerNormMLP
+from transformer_engine.jax.fp8 import FP8Helper, FP8MetaPackage, is_fp8_available
 from transformer_engine.jax.layernorm_mlp import fused_layernorm_fp8_mlp
 from transformer_engine.jax.sharding import (
+    BATCH_AXES,
     HIDDEN_AXES,
     HIDDEN_TP_AXES,
-    BATCH_AXES,
-    SEQLEN_TP_AXES,
     SEQLEN_AXES,
-    W_NO_SHARD_AXES,
+    SEQLEN_TP_AXES,
     W_FSDP_AXES,
-    W_TP_AXES,
     W_JOINED_AXES,
+    W_NO_SHARD_AXES,
+    W_TP_AXES,
+    MeshResource,
 )
-from transformer_engine.jax.sharding import MeshResource
-
-from utils import assert_allclose, assert_tree_like_allclose, is_devices_enough
 
 is_fp8_supported, reason = is_fp8_available()
 DTYPES = [jnp.bfloat16, jnp.float16]

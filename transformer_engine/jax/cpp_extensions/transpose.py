@@ -2,37 +2,34 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for transpose"""
-from functools import partial, reduce
-from typing import Tuple, Sequence, Union, Callable
 import operator
+from functools import partial, reduce
+from typing import Callable, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes
+from jax import dtypes, ffi
 from jax.interpreters.mlir import ir
-from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
+from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType
 
+from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
+from .activation import ActivationEnum, _jax_act_lu
 from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
+from .custom_call import CustomCallArgsWrapper, custom_caller
 from .misc import (
     check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    jax_dtype_to_ir_dtype,
-    te_dtype_to_jax_dtype,
     get_padded_spec,
+    is_ffi_enabled,
+    jax_dtype_to_ir_dtype,
+    jax_dtype_to_te_dtype,
     multidim_transpose,
     normalize_axis_boundary,
-    is_ffi_enabled,
+    te_dtype_to_jax_dtype,
 )
-from .activation import ActivationEnum
-from .activation import _jax_act_lu
 from .quantization import _jax_cast_fp8
-from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-
 
 __all__ = [
     "transpose",

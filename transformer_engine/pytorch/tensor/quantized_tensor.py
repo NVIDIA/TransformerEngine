@@ -5,9 +5,10 @@
 """Tensor with quantized data"""
 
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+
 import abc
 import copy
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import torch
 from torch.utils._pytree import tree_map

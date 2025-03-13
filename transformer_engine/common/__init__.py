@@ -4,13 +4,13 @@
 
 """FW agnostic user-end APIs"""
 
-import sys
-import glob
-import sysconfig
-import subprocess
 import ctypes
+import glob
 import os
 import platform
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import transformer_engine

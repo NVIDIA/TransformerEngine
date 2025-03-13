@@ -5,15 +5,14 @@
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
-import sys
-import logging
+import ctypes
 import importlib
 import importlib.util
-import ctypes
+import logging
+import sys
 from importlib.metadata import version
 
-from transformer_engine.common import get_te_path, is_package_installed
-from transformer_engine.common import _get_sys_extension
+from transformer_engine.common import _get_sys_extension, get_te_path, is_package_installed
 
 _logger = logging.getLogger(__name__)
 
@@ -66,14 +65,10 @@ def _load_library():
 
 
 _load_library()
+from ..common.utils import DeprecatedEnum, deprecate_wrapper
 from . import flax
-from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
-from .fp8 import NVTE_FP8_COLLECTION_NAME
-from .sharding import MeshResource
-from .sharding import MajorShardingType, ShardingResource, ShardingType
-
-from ..common.utils import deprecate_wrapper
-from ..common.utils import DeprecatedEnum
+from .fp8 import NVTE_FP8_COLLECTION_NAME, fp8_autocast, get_delayed_scaling, update_collections
+from .sharding import MajorShardingType, MeshResource, ShardingResource, ShardingType
 
 MajorShardingType = DeprecatedEnum(
     MajorShardingType, "MajorShardingType is deprecating in the near feature."

@@ -2,49 +2,45 @@
 #
 # See LICENSE for license information.
 
+import copy
 import math
 import os
-from typing import Dict, List, Optional
-import pytest
-import copy
 import random
+from typing import Dict, List, Optional
 
+import pytest
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
 
-from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager,
-    fp8_autocast,
-    fp8_model_init,
-)
-from transformer_engine.pytorch.utils import (
-    init_method_normal,
-    scaled_init_method_normal,
-    attention_mask_func,
-    is_bf16_compatible,
-)
+import transformer_engine_torch as tex
+from transformer_engine.common import recipe
 from transformer_engine.pytorch import (
     DotProductAttention,
+    Fp8Padding,
+    Fp8Unpadding,
+    GroupedLinear,
+    InferenceParams,
+    LayerNorm,
     LayerNormLinear,
     LayerNormMLP,
     Linear,
-    GroupedLinear,
     MultiheadAttention,
     RMSNorm,
     TransformerLayer,
-    LayerNorm,
-    InferenceParams,
-    Fp8Padding,
-    Fp8Unpadding,
 )
-from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace, get_workspace
-from transformer_engine.pytorch.utils import get_device_compute_capability
-from transformer_engine.common import recipe
-import transformer_engine_torch as tex
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    get_device_compute_capability,
+    init_method_normal,
+    is_bf16_compatible,
+    scaled_init_method_normal,
+)
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

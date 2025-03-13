@@ -4,14 +4,13 @@
 
 """FP8 Padding API"""
 
-from typing import Union, List
+from typing import List, Union
 
 import torch
 
 import transformer_engine_torch as tex
 
 from ..jit import no_torch_dynamo
-
 
 __all__ = ["Fp8Padding"]
 

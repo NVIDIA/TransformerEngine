@@ -5,14 +5,12 @@
 """Fusible operation for identity."""
 
 from __future__ import annotations
+
 from typing import Optional
 
 import torch
 
-from transformer_engine.pytorch.ops.op import (
-    BasicOperation,
-    OperationContext,
-)
+from transformer_engine.pytorch.ops.op import BasicOperation, OperationContext
 
 
 class Identity(BasicOperation):

@@ -12,7 +12,6 @@ import transformer_engine_torch as tex
 
 from ..jit import no_torch_dynamo
 
-
 __all__ = ["Fp8Unpadding"]
 
 

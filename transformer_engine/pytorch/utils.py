@@ -4,12 +4,14 @@
 
 """Utility functions for Transformer Engine modules"""
 from __future__ import annotations
+
 import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
+
 import transformer_engine.pytorch.cpp_extensions as ext
 
 from .tensor.quantized_tensor import QuantizedTensor

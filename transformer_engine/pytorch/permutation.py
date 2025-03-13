@@ -5,13 +5,13 @@
 """MoE Permutaion API"""
 import warnings
 from typing import Tuple
+
 import torch
 
-import transformer_engine_torch as tex
 import transformer_engine.pytorch.triton.permutation as triton_permutation
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
-
 
 __all__ = [
     "moe_permute",

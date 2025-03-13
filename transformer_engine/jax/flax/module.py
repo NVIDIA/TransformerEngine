@@ -8,8 +8,8 @@ import functools
 import operator
 from typing import Any, Callable, Iterable, List, Sequence, Tuple, Union
 
-import numpy as np
 import jax.numpy as jnp
+import numpy as np
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from jax import lax
@@ -17,14 +17,13 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
+from ..cpp_extensions import is_softmax_kernel_available
 from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
-from ..layernorm import canonicalize_layernorm_type
-from ..layernorm import layernorm, layernorm_fp8_dot
-from ..layernorm_mlp import fused_layernorm_fp8_mlp, activation_lu
-from ..softmax import softmax, SoftmaxType
+from ..layernorm import canonicalize_layernorm_type, layernorm, layernorm_fp8_dot
+from ..layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
 from ..sharding import with_sharding_constraint_by_logical_axes
-from ..cpp_extensions import is_softmax_kernel_available
+from ..softmax import SoftmaxType, softmax
 
 PRNGKey = Any
 Shape = Tuple[int, ...]

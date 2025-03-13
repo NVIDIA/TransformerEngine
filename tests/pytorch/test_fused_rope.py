@@ -2,13 +2,12 @@
 #
 # See LICENSE for license information.
 import math
+from typing import Callable, Tuple, Union
+
 import pytest
 import torch
-from typing import Callable, Tuple, Union
-from transformer_engine.pytorch.attention import (
-    RotaryPositionEmbedding,
-    apply_rotary_pos_emb,
-)
+
+from transformer_engine.pytorch.attention import RotaryPositionEmbedding, apply_rotary_pos_emb
 
 
 def _get_thd_freqs_on_this_cp_rank(

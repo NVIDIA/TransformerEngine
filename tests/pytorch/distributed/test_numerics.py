@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import torch
+
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 """

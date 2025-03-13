@@ -3,16 +3,15 @@
 # See LICENSE for license information.
 
 import warnings
-import pytest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
+from distributed_test_base import compare_ops, generate_collectives_count, generate_configs
 from jax import random
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-from distributed_test_base import generate_configs, generate_collectives_count
-from distributed_test_base import compare_ops
 from transformer_engine.jax import fp8_autocast
 from transformer_engine.jax.layernorm import layernorm
 
