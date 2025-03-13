@@ -252,10 +252,17 @@ class _GroupedLinear(torch.autograd.Function):
             grad_biases = [None] * ctx.num_gemms
             if ctx.fp8:
                 if ctx.use_bias:
-                    for i in range(ctx.num_gemms):
-                        grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                            grad_output_mats[i], ctx.grad_output_quantizers[i]
-                        )
+                    # unfuse bgrad for now until cast_transpose + dgrad calculation is ready
+                    # for Float8BlockQuantizer.
+                    if ctx.fp8_recipe.fp8blockwise():
+                        for i in range(ctx.num_gemms):
+                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
+                            grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
+                    else:
+                        for i in range(ctx.num_gemms):
+                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
+                                grad_output_mats[i], ctx.grad_output_quantizers[i]
+                            )
                 else:
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
@@ -489,7 +496,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self._offsets = {"input": 0, "weight": num_gemms, "output": 2 * num_gemms, "grad_output": 0}
+        self._offsets = {"input": 0, "weight": 1, "output": 2, "grad_output": 0, "grad_input": 1}
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -532,7 +539,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 ),
                 init_fn=init_method,
                 get_rng_state_tracker=get_rng_state_tracker,
-                fp8_meta_index=self._offsets["weight"] + i,
+                fp8_meta_index=self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"],
             )
 
             # Construct bias parameters if needed
@@ -651,20 +658,26 @@ class GroupedLinear(TransformerEngineBaseModule):
             grad_output_quantizers, _ = [None] * self.num_gemms, [None] * self.num_gemms
             if self.fp8:
                 input_quantizers = [
-                    self.quantizers["scaling_fwd"][self._offsets["input"] + i]
+                    self.quantizers["scaling_fwd"][
+                        self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                    ]
                     for i in range(self.num_gemms)
                 ]
                 for i in range(self.num_gemms):
                     input_quantizers[i].internal = True
                 weight_quantizers = [
-                    self.quantizers["scaling_fwd"][self._offsets["weight"] + i]
+                    self.quantizers["scaling_fwd"][
+                        self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
+                    ]
                     for i in range(self.num_gemms)
                 ]
                 for i in range(self.num_gemms):
                     weight_quantizers[i].internal = True
                 if torch.is_grad_enabled():
                     grad_output_quantizers = [
-                        self.quantizers["scaling_bwd"][self._offsets["input"] + i]
+                        self.quantizers["scaling_bwd"][
+                            self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
+                        ]
                         for i in range(self.num_gemms)
                     ]
                     for i in range(self.num_gemms):
@@ -712,24 +725,24 @@ class GroupedLinear(TransformerEngineBaseModule):
             for i in range(self.num_gemms):
                 # set configs about amax epsilon and power_2_scale
                 self.quantizers["scaling_fwd"][
-                    self._offsets["input"] + i
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
                 ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
                 self.quantizers["scaling_fwd"][
-                    self._offsets["input"] + i
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["fwd"]
                 ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
                 # also set weight quantizer with same amax_epsilon & power_2_scale
                 self.quantizers["scaling_fwd"][
-                    self._offsets["weight"] + i
+                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
                 ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
                 self.quantizers["scaling_fwd"][
-                    self._offsets["weight"] + i
+                    self._offsets["weight"] + i * self._num_fp8_tensors_per_gemm["fwd"]
                 ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
         else:
             for i in range(self.num_gemms):
                 # set grad_output_quantizer with amax epsilon and power_2_scale
                 self.quantizers["scaling_bwd"][
-                    self._offsets["input"] + i
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
                 ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
                 self.quantizers["scaling_bwd"][
-                    self._offsets["input"] + i
+                    self._offsets["input"] + i * self._num_fp8_tensors_per_gemm["bwd"]
                 ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
