@@ -24,6 +24,22 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
+class multi_module_model(torch.nn.Module):
+    def __init__(self, module, num_layers, *args, **kwargs):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
+
+    def forward(self, x):
+        consistent_shape = x.shape
+        for layer in self.layers:
+            x = layer(x)
+            # For stacked layers, we need to reshape the output to the consistent shape
+            if self.num_layers > 1:
+                x = x.reshape(consistent_shape)
+        return x
+
+
 def _te_layer_argtype(name):
     te_layers = [
         te.Linear,
@@ -40,10 +56,14 @@ def _te_layer_argtype(name):
     return layer_map[name.lower()]
 
 
-def _get_layer_args(config, tp_group, tp_size, reference=False):
+def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
     hidden_size = config.num_heads * config.head_dim
     ffn_hidden_size = 4 * hidden_size
     qkv_size = 3 * hidden_size
+    # Shape is fine if using TransformerLayer for stacked layers
+    # For other layer modules, we need to reshape the input to the consistent shape
+    if num_layers > 1 and config.layer_type != te.TransformerLayer:
+        qkv_size = ffn_hidden_size = hidden_size
     input_shape = [config.seq_length, config.batch_size, hidden_size]
     args = [hidden_size]
     kwargs = {
@@ -106,6 +126,9 @@ def _parse_args(argv=None, namespace=None):
         description="Test a Transformer Engine layer with GEMM+comm overlap via Userbuffers."
     )
     parser.add_argument("-l", "--layer-type", type=_te_layer_argtype, default=te.LayerNormMLP)
+    parser.add_argument(
+        "--num-layers", type=int, default=1, help="Number of identical layers to stack."
+    )
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
@@ -348,7 +371,7 @@ def _train(opts):
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
     # Initialize the Transformer Engine layer with overlap
-    args, kwargs, input_shape = _get_layer_args(opts, nccl_world, opts.tp)
+    args, kwargs, input_shape = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers)
     # Intialize userbuffers
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
@@ -366,7 +389,7 @@ def _train(opts):
     )
 
     with te.fp8_model_init(enabled=opts.fp8_init):
-        test_model = opts.layer_type(*args, **kwargs)
+        test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
     if WORLD_RANK == 0:
         pprint.pprint(kwargs)
@@ -374,9 +397,9 @@ def _train(opts):
     dist.barrier()
 
     # Initialize the reference model and copy all parameters
-    ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, reference=True)
+    ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True)
     with te.fp8_model_init(enabled=opts.fp8_init):
-        ref_model = opts.layer_type(*ref_args, **ref_kwargs)
+        ref_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized reference model...", debug=True)
     for test_param, ref_param in zip(test_model.parameters(), ref_model.parameters()):
         with torch.no_grad():
