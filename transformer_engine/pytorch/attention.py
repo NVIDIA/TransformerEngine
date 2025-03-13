@@ -2956,9 +2956,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     dout = ctx.dO_quantizer(dout)
                 fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
-                dq_fp8 = torch.empty(
-                    (cp_size, *q.shape), dtype=dout._data.dtype, device=q.device
-                )
+                dq_fp8 = torch.empty((cp_size, *q.shape), dtype=dout._data.dtype, device=q.device)
                 dkv_fp8 = torch.empty(
                     (cp_size, *kv.shape), dtype=dout._data.dtype, device=kv.device
                 )
