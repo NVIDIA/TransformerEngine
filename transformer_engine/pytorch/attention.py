@@ -2950,24 +2950,21 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if ctx.use_fused_attention:
                 fused_attn_backend = FusedAttnBackend["FP8"]
 
-                dqkv_fp8_torch_dtype = get_fp8_torch_dtype(
-                    ctx.fp8_meta["recipe"], fprop_tensor=False
-                )
-                dq_fp8 = torch.empty(
-                    (cp_size, *q.shape), dtype=dqkv_fp8_torch_dtype, device=q.device
-                )
-                dkv_fp8 = torch.empty(
-                    (cp_size, *kv.shape), dtype=dqkv_fp8_torch_dtype, device=kv.device
-                )
-                dkv_fp8_ = torch.empty_like(dkv_fp8)
                 if ctx.is_output_fp8:
                     assert isinstance(dout, Float8Tensor), "dout must be Float8Tensors for FP8 MHA!"
                     ctx.dO_quantizer = dout._quantizer
                 else:
                     dout = ctx.dO_quantizer(dout)
-                fused_attn_dqkv_dtype = dout._fp8_dtype
-                dout = dout._data
+                fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
+                dq_fp8 = torch.empty(
+                    (cp_size, *q.shape), dtype=dout._data.dtype, device=q.device
+                )
+                dkv_fp8 = torch.empty(
+                    (cp_size, *kv.shape), dtype=dout._data.dtype, device=kv.device
+                )
+                dkv_fp8_ = torch.empty_like(dkv_fp8)
                 p2p_comm_buffers = [[kv, dkv_fp8], [torch.empty_like(kv), dkv_fp8_]]
+                dout = dout._data
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
@@ -3157,7 +3154,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             v_part,
                             out_part,
                             dout_part,
-                            ctx.qkv_dtype,
+                            dout_dtype,
                             fused_attn_dqkv_dtype,
                             aux_ctx_tensors,
                             fused_attn_backend,
@@ -3272,7 +3269,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             v_part,
                             out_part,
                             dout_part,
-                            ctx.qkv_dtype,
+                            dout_dtype,
                             fused_attn_dqkv_dtype,
                             aux_ctx_tensors,
                             fused_attn_backend,
@@ -3391,7 +3388,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             v_part,
                             out_part,
                             dout_part,
-                            ctx.qkv_dtype,
+                            dout_dtype,
                             fused_attn_dqkv_dtype,
                             aux_ctx_tensors,
                             fused_attn_backend,
@@ -3487,7 +3484,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         v_part,
                         out_part,
                         dout_part,
-                        ctx.qkv_dtype,
+                        dout_dtype,
                         fused_attn_dqkv_dtype,
                         aux_ctx_tensors,
                         fused_attn_backend,
