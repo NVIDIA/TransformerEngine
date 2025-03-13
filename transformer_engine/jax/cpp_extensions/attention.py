@@ -2260,7 +2260,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     subblock_config,
                 )
 
-                # TODO(rewang): THD softmax_aux layout is acutally [B, S, H]
                 softmax_aux_per_step = softmax_aux_per_step.reshape((batch, q_max_seqlen, head, 1))
 
                 def skip_correction(_output, _softmax_aux, output_per_step, softmax_aux_per_step):
@@ -2295,8 +2294,6 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                 for i in range(0, cp_size):
                     carry = scan_kv_block(i, carry)
             (_, _, _, output, softmax_aux) = carry
-
-            softmax_aux = softmax_aux.reshape((batch, head, q_max_seqlen, 1))
 
             return output.astype(q.dtype), softmax_aux, rng_state
 
