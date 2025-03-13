@@ -1,6 +1,7 @@
 from typing import Tuple
 import torch
 
+
 def scale_from_amax_tensor(
     x_dtype: torch.dtype,
     amax: torch.Tensor,
