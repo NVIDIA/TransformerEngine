@@ -323,8 +323,6 @@ class DebugQuantizer(Quantizer):
             return rowwise_gemm_tensor
 
         return DebugQuantizedTensor(
-            shape=tensor.shape,
-            dtype=tensor.dtype,
             rowwise_gemm_tensor=rowwise_gemm_tensor,
             columnwise_gemm_tensor=columnwise_gemm_tensor,
             quantizer=self,
@@ -454,33 +452,27 @@ class DebugQuantizer(Quantizer):
         return False
 
 
-class DebugQuantizedTensor(QuantizedTensor):
+class DebugQuantizedTensor:
     """
     Class containing quantized tensors after debug. Depending on configuration
     it can contain one or two different objects. These objects can be accessed by the method
     get_tensor().
     """
 
-    def __new__(
-        cls,
-        shape,
-        dtype,
+    def __init__(
+        self,
         rowwise_gemm_tensor,
         columnwise_gemm_tensor,
         quantizer,
-        requires_grad=False,
         layer_name=None,
         tensor_name=None,
     ):
-        instance = super().__new__(cls, shape, dtype, requires_grad=requires_grad)
 
-        instance.rowwise_gemm_tensor = rowwise_gemm_tensor
-        instance.columnwise_gemm_tensor = columnwise_gemm_tensor
-        instance.quantizer = quantizer
-        instance._layer_name = layer_name
-        instance._tensor_name = tensor_name
-
-        return instance
+        self.rowwise_gemm_tensor = rowwise_gemm_tensor
+        self.columnwise_gemm_tensor = columnwise_gemm_tensor
+        self.quantizer = quantizer
+        self._layer_name = layer_name
+        self._tensor_name = tensor_name
 
     def prepare_for_saving(self):
         """ " Prepare for saving method override"""
@@ -524,36 +516,6 @@ class DebugQuantizedTensor(QuantizedTensor):
         """Is used in the python gemm() to get tensor or transpose of the tensor."""
         return self.rowwise_gemm_tensor if not transpose else self.columnwise_gemm_tensor
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
-        pass
-
-    def detach(self):
-        if isinstance(self.rowwise_gemm_tensor, torch.Tensor):
-            self.rowwise_gemm_tensor = self.rowwise_gemm_tensor.detach()
-        if isinstance(self.columnwise_gemm_tensor, torch.Tensor):
-            self.columnwise_gemm_tensor = self.columnwise_gemm_tensor.detach()
-        return self
-
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args, kwargs=None):
-        """Method used to define .slice() on DebugQuantizedTensor."""
-        if func in [aten.slice.Tensor]:
-            tensor = args[0]
-            rowwise_gemm_tensor = tensor.rowwise_gemm_tensor.__torch_dispatch__(
-                func,
-                types,
-                [tensor.rowwise_gemm_tensor] + list(args[1:]),
-                kwargs,
-            )
-            return DebugQuantizedTensor(
-                shape=rowwise_gemm_tensor.shape,
-                dtype=tensor.dtype,
-                rowwise_gemm_tensor=rowwise_gemm_tensor,
-                columnwise_gemm_tensor=None,
-                quantizer=tensor.quantizer,
-                requires_grad=tensor.requires_grad,
-                layer_name=tensor._layer_name,
-                tensor_name=tensor._tensor_name,
-            )
-
-        return super().__torch_dispatch__(func, types, args, kwargs)
+    def size(self):
+        """Size of the tensor."""
+        return self.rowwise_gemm_tensor.size()

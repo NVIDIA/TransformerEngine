@@ -4,7 +4,7 @@
 
 """
 Buffer used for LogTensorStats and LogFp8TensorStats features.
-Buffer are fed with tensors, they compute necessary stats and save them.
+Buffers are fed with tensors, they compute necessary stats and save them.
 When log() is called, they gather stats from all nodes, compute combined final stats and log them.
 """
 
@@ -24,7 +24,7 @@ from transformer_engine.debug.features.utils.stats_computation import (
 
 class _Buffer:
     """
-    Buffer stores temporary statisitcs for one tensor for one layer.
+    Buffer stores temporary statistics for one tensor for one layer.
     It also can synchronize between nodes and log final stats.
     """
 
@@ -57,15 +57,15 @@ class _Buffer:
     def _gather_helper_stats(self) -> torch.Tensor:
         """
         If tensor stats should be accumulated among many nodes,
-        this method gather all stats from the nodes where the stat was modified.
+        this method gathers all stats from the nodes where the stat was modified.
         """
         if self.skip_reduction:
             return self._buffer.unsqueeze(0)
         mask = gather_along_first_dim(self.modified, process_group=self.reduction_group)[0]
-        gathered__buffer, _ = gather_along_first_dim(
+        gathered_buffer, _ = gather_along_first_dim(
             self._buffer.unsqueeze(0), process_group=self.reduction_group
         )
-        return gathered__buffer[mask.to(bool)]
+        return gathered_buffer[mask.to(bool)]
 
     def feed(self, tensor, iteration):
         """
@@ -74,13 +74,13 @@ class _Buffer:
         times for one log().
 
         Ability to combine result for already processed tensors with
-        results new tensor are the main reason for such a design of this class.
+        results of new tensor are the main reason for such a design of this class.
         """
 
         self.iteration = iteration
 
         # If the stats are not reduced within microbatch and
-        # buffer was feed, we do not change the stats for the tensor.
+        # buffer was fed, we do not change the stats for the tensor.
         # It is used for weights and microbatching.
         if self.modified[0] and not self.reduce_within_microbatch:
             return
@@ -95,7 +95,7 @@ class _Buffer:
 
         for stat_name in self.stats_to_compute:
             fn, combinator = STATS[stat_name]
-            if self.modified:
+            if self.modified[0]:
                 self._new_buffer[stats_to_num[stat_name]] = combinator(buffers)
             else:
                 fn = STATS[stat_name][0]
@@ -152,13 +152,13 @@ class StatsBuffers:
             return
         buffer = _Buffer(layer_name, tensor_name, stats, reduction_group, reduce_within_microbatch)
         self.buffers[(layer_name, tensor_name, options)] = buffer
-        self.reduction_group_to_buffer[reduction_group].append((buffer))
+        self.reduction_group_to_buffer[reduction_group].append(buffer)
 
-    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduciton):
+    def feed(self, layer_name, tensor_name, options, tensor, iteration, skip_reduction):
         """Feeds the tensor into the respective buffer."""
         buffer = self.buffers[(layer_name, tensor_name, options)]
         buffer.feed(tensor, iteration)
-        buffer.skip_reduction = skip_reduciton
+        buffer.skip_reduction = skip_reduction
 
     def log_stats(self):
         """Logs the stats from all the buffers."""
@@ -173,7 +173,7 @@ class StatsBuffers:
             ]
             for _, buffer in changed_buffers:
                 stats = buffer.log()
-                output = output | stats
+                output.update(stats)
 
         return output
 

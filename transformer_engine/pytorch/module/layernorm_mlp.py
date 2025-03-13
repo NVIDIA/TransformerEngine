@@ -41,6 +41,7 @@ from ..utils import (
     clear_tensor_data,
     requires_grad,
     non_tn_fp8_gemm_supported,
+    needs_quantized_gemm
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -72,7 +73,7 @@ from ..cpp_extensions import (
 )
 from ...debug.pytorch.utils import any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
-
+from ...debug.pytorch.debug_quantization import DebugQuantizedTensor
 __all__ = ["LayerNormMLP"]
 
 
@@ -297,7 +298,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer, False)
             else:
                 if fp8 or debug:
-                    if not isinstance(ln_out, QuantizedTensor):
+                    if not isinstance(ln_out, QuantizedTensor) and not isinstance(ln_out, DebugQuantizedTensor):
                         fc1_input_quantizer.set_usage(
                             rowwise=True, columnwise=backwards_needs_fc1_input
                         )
@@ -345,7 +346,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Cast biases to expected dtype
         bias_dtype = activation_dtype
-        if fp8 and activation_dtype == torch.float32:
+        if needs_quantized_gemm(ln_out_total) and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16
         if fc1_bias is not None:
             fc1_bias = cast_if_needed(fc1_bias, bias_dtype)

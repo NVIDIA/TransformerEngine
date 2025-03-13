@@ -34,6 +34,7 @@ from ..utils import (
     nvtx_range_pop,
     nvtx_range_push,
     requires_grad,
+    needs_quantized_gemm
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -275,7 +276,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
-        if fp8 and activation_dtype == torch.float32:
+        if needs_quantized_gemm(ln_out_total) and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16
         bias = cast_if_needed(bias, bias_dtype) if bias is not None else bias
 
@@ -357,7 +358,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 ln_out if weight.requires_grad else None,
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
-
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
@@ -604,7 +604,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 recipe = ctx.fp8_recipe
                 if hasattr(recipe, "fp8_gemm_dgrad"):
                     dgrad_gemm_use_split_accumulator = recipe.fp8_gemm_dgrad.use_split_accumulator
-
             dgrad, *_ = general_gemm(
                 weight,
                 grad_output,

@@ -16,7 +16,6 @@ from transformer_engine.common.recipe import Format
 from transformer_engine.pytorch.fp8 import _default_sf_compute
 from transformer_engine.pytorch.tensor import Quantizer
 from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8CurrentScalingQuantizer,
     Float8Tensor,
     Float8Quantizer,
 )

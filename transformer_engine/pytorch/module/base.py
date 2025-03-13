@@ -40,7 +40,7 @@ from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..utils import needs_quantized_gemm
 from ...common.recipe import Recipe
 from ...debug.pytorch.debug_state import TEDebugState
-
+from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -985,13 +985,20 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             FSDP process group that the weights are distributed over.
         workspace_dtype: torch.dtype, default = None
             If weight workspace contains high-precision tensor - for example
-            for debug quantization, this will be stored in such precision.
+            for debug quantization, this is dtype of the tensor.
         """
 
         # Try getting workspace from cache
         out = None
+
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+
+
+            is_debug = isinstance(quantizer, DebugQuantizer)
+            is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)
+            if is_debug != is_out_debug_tensor:
+                out = None
 
         # Gather cached Fp8 workspace if it's distributed
         # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
@@ -1083,7 +1090,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             or getattr(self, "ub_overlap_rs", False)
         ):
             import nvdlfw_inspect.api as debug_api
-            import pdb; pdb.set_trace()
 
             debug_api.log_message(
                 "> UserBuffers are not supported in debug module. "

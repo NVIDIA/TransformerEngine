@@ -16,9 +16,10 @@ def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
-    amax = tensor_abs.max().float()
-    if not amax.all():
+    if tensor_abs.numel() == 0:
         amax = torch.tensor(1, device=tensor.device).to(torch.float)
+    else:
+        amax = tensor_abs.max().float()
     return torch.log2(amax)
 
 
@@ -26,10 +27,10 @@ def _compute_dynamic_range_bottom(tensor):
     """Computes the log2 of the amin of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
-    if tensor_abs.any():
-        amin = tensor_abs.min().float()
-    else:
+    if tensor_abs.numel() == 0:
         amin = torch.tensor(1, device=tensor.device).to(torch.float)
+    else:
+        amin = tensor_abs.min().float()
     return torch.log2(amin)
 
 
@@ -42,7 +43,7 @@ def compute_variance(variances, numels, sums):
 
 
 def compute_std(variances, numels, sums):
-    """Computates standard deviation."""
+    """Computes standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
 
 
