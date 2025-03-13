@@ -16,7 +16,7 @@ To use precision debug tools in multi-GPU training, one needs to:
 Behavior of the features
 -----------------------
 
-In a distributed setting, **DisableFp8Gemm** and **DisableFp8Layer** function similarly to the single-GPU case, with no notable differences. 
+In a distributed setting, **DisableFP8GEMM** and **DisableFP8Layer** function similarly to the single-GPU case, with no notable differences. 
 
 **PerTensorScaling** and **FakeQuant** calculate FP8 scaling factors independently on each node, meaning the number of GPUs may affect results. This differs from the standard FP8 recipe behavior, in which scaling factors are synchronized.
 

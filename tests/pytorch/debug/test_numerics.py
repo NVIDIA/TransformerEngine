@@ -262,7 +262,7 @@ DISABLE_FP8_CONFIG = Template(
   layers:
     layer_types: [linear]
   transformer_engine:
-    DisableFp8Gemm:
+    DisableFP8GEMM:
       enabled: True
       gemms: [$gemms]
 """
@@ -320,7 +320,7 @@ DISABLE_FP8_LAYER_CONFIG = """disable_fp8_config:
   layers:
     layer_types: [linear]
   transformer_engine:
-    DisableFp8Layer:
+    DisableFP8Layer:
       enabled: True
 """
 

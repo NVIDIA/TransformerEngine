@@ -4,7 +4,7 @@ test_per_tensor_scaling:
     layer_numbers: [1]
     layer_types: [fc1, fc2]
   transformer_engine:
-    DisableFp8Gemm:
+    DisableFP8GEMM:
       enabled: True
       gemms: [wgrad]
     PerTensorScaling:

@@ -2,14 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""DisableFp8Gemm Feature support for nvidia-dlframework-inspect"""
+"""DisableFP8GEMM Feature support for nvidia-dlframework-inspect"""
 
 from nvdlfw_inspect.registry import Registry, api_method
 from transformer_engine.debug.features.api import TEConfigAPIMapper
 
 
 @Registry.register_feature(namespace="transformer_engine")
-class DisableFp8Gemm(TEConfigAPIMapper):
+class DisableFP8GEMM(TEConfigAPIMapper):
     """
     GEMM operations are executed in higher precision, even when FP8 autocast is enabled.
 
@@ -32,9 +32,9 @@ class DisableFp8Gemm(TEConfigAPIMapper):
             layers:
                 layer_types: [fc1]
             transformer_engine:
-                DisableFp8Gemm:
-                enabled: True
-                gemms: [dgrad, wgrad]
+                DisableFP8GEMM:
+                    enabled: True
+                    gemms: [dgrad, wgrad]
     """
 
     @api_method

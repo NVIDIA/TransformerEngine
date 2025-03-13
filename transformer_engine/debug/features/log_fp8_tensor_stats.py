@@ -24,7 +24,7 @@ from transformer_engine.debug.pytorch.debug_state import TEDebugState
 @Registry.register_feature(namespace="transformer_engine")
 class LogFp8TensorStats(BaseLogTensorStats):
     """
-        This feature handles logging of FP8 tensor stats.
+    This feature handles logging of FP8 tensor stats.
 
 
     In a distributed setting, the auxiliary stats are computed on each rank and gathered after the `debug_api.step()` call. Do not forget to invoke `debug_api.step()` at every step to log stats!
@@ -39,8 +39,8 @@ class LogFp8TensorStats(BaseLogTensorStats):
         stats: List[str]
             list of statistics to log
 
-                - underflows%
-                - overflows%
+                - underflows% - percentage of elements of the tensor equal to 0,
+                - overflows% - percentage of nan values is the tensor,
         tensors/tensors_struct: List[str]
             list of tensors to log
 

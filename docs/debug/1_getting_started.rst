@@ -28,7 +28,7 @@ There are 4 things one needs to do to use Transformer Engine debug features:
 To start debugging, one needs to create a ``config.yaml`` file. This file lists the features to be used in particular layers. There are 2 kinds of features:
 
 - provided by the Transformer Engine - for example, DisableFP8GEMM or LogTensorStats - they are listed in the :doc:`debug features API <3_api_features>` section
-- defined by the user. For details on how to create a custom feature - please read the :doc:`calls to nvidia-dlframework-inspect <3_api_te_calls>` section.
+- defined by the user. For details on how to create a custom feature - please read the :doc:`calls to Nvidia-DL-Framework-Inspect <3_api_te_calls>` section.
 
 .. figure:: ./img/introduction.svg
    :align: center
@@ -78,7 +78,7 @@ Let's look at a simple example of training a Transformer layer using Transformer
 We will demonstrate two debug features on the code above:
 
 1. Disabling FP8 precision for specific GEMM operations, such as the FC1 and FC2 forward propagation GEMM.
-2. Logging statistics for other GEMM operations, such as gradient statistics for data gradient GEMM within the LayerNormLinear layer, which is contained in the TransformerLayer.
+2. Logging statistics for other GEMM operations, such as gradient statistics for data gradient GEMM within the LayerNormLinear sub-layer of the TransformerLayer.
 
 Config file
 ----------
@@ -94,7 +94,7 @@ We need to prepare the **config.yaml** file, as below
       layers:
         layer_types: [fc1, fc2] # contains fc1 or fc2 in name
       transformer_engine:
-        DisableFp8Gemm:
+        DisableFP8GEMM:
           enabled: True
           gemms: [fprop]
 
@@ -114,7 +114,7 @@ We need to prepare the **config.yaml** file, as below
 Further explanation on how to create config files is in the :doc:`next part of the documentation <2_config_file_structure>`.
 
 Adjusting Python file
--------------------
+--------------------
 
 .. code-block:: python
 
@@ -128,7 +128,6 @@ Adjusting Python file
         default_logging_enabled=True)
 
     # initialization of the TransformerLayer with the name
-    # debug_api.initialize(...)
     transformer_layer = TransformerLayer(
       name="transformer_layer",
       # ...)
@@ -146,7 +145,7 @@ In the modified code above, the following changes were made:
 3. Added ``debug_api.step()`` after each of the forward-backward pass.
 
 Inspecting the logs
------------------
+------------------
 
 Let's look at the files with the logs. Two files will be created:
 
@@ -164,7 +163,6 @@ In the main log file, you can find detailed information about the transformer's 
     INFO - Default logging to file enabled at ./log
     INFO - Reading config from ./config.yaml.
     INFO - Loaded configs for dict_keys(['fc1_fprop_to_fp8', 'log_tensor_stats']).
-    WARNING - > UserBuffers are not supported in debug module. Using UB optimization will not affect the debug module. 
     INFO - transformer_layer.self_attention.layernorm_qkv: Tensor: activation, gemm fprop - FP8 quantization
     INFO - transformer_layer.self_attention.layernorm_qkv: Tensor: activation, gemm wgrad - FP8 quantization
     INFO - transformer_layer.self_attention.layernorm_qkv: Tensor: weight, gemm fprop - FP8 quantization
@@ -215,7 +213,7 @@ The second log file (``nvdlfw_inspect_statistics_logs/nvdlfw_inspect_globalrank-
     INFO - transformer_layer.self_attention.layernorm_qkv_activation_l1_norm             iteration=000004                  value=130776.7969
 
 Logging using TensorBoard
------------------------
+------------------------
 
 Precision debug tools support logging using `TensorBoard <https://www.tensorflow.org/tensorboard>`_. To enable it, one needs to pass the argument ``tb_writer`` to the ``debug_api.initialize()``.  Let's modify ``train.py`` file.
 

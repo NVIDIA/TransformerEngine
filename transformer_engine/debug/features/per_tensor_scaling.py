@@ -81,7 +81,7 @@ class PerTensorScaling(TEConfigAPIMapper):
             - gradient
             - weight
     margin: int, default = 0
-        impacts the computation of scaling factors, default is 0, `amax = amax * (2^margin)`.
+        impacts the computation of scaling factors, default is 0, `amax = original_amax * (2^margin)`.
 
     Example
     -------

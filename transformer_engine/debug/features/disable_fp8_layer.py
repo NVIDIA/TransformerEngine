@@ -2,14 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""DisableFp8Layer Feature support for nvidia-dlframework-inspect"""
+"""DisableFP8Layer Feature support for nvidia-dlframework-inspect"""
 
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.registry import Registry, api_method
 
 
 @Registry.register_feature(namespace="transformer_engine")
-class DisableFp8Layer:
+class DisableFP8Layer:
     """
     Disables all FP8 GEMMs in the layer.
 
@@ -23,8 +23,8 @@ class DisableFp8Layer:
         layers:
             layer_types: [fc1]
         transformer_engine:
-            DisableFp8Layer:
-            enabled: True
+            DisableFP8Layer:
+                enabled: True
     """
 
     @api_method
@@ -45,7 +45,7 @@ class DisableFp8Layer:
 
     def parse_config_and_api(self, config, **_kwargs):
         """Determines whether to run the API
-        DisableFp8Layer is the only feature provided by the Transformer Engine
+        DisableFP8Layer is the only feature provided by the Transformer Engine
         which does not inherit from TEConfigAPIMapper.
 
         Explanation of the parse_config_and_api can be found in the nvidia-dlframework-inspect documentation.

@@ -37,20 +37,23 @@ class LogTensorStats(BaseLogTensorStats):
     stats: List[str]
         list of statistics to log
 
-            - "min"
-            - "max"
-            - "mean"
-            - "std"
-            - "l1_norm"
-            - "l2_norm"
-            - "cur_amax" – maximal absolute value of a tensor,
-            - "dynamic_range" – equal to `torch.log2(amax) - torch.log2(amin)`
+            - min
+            - max
+            - mean
+            - std
+            - l1_norm
+            - l2_norm
+            - cur_amax – maximal absolute value of a tensor,
+            - dynamic_range – equal to `torch.log2(amax) - torch.log2(amin)`
     tensors/tensors_struct: List[str]
         list of tensors to log
 
-            - "activation"
-            - "gradient"
-            - "weight"
+            - activation
+            - gradient
+            - weight
+            - output
+            - wgrad
+            - dgrad
     freq: Optional[int], default = 1
         frequency of logging stats, stats will be logged every `freq` steps
     start_step: Optional[int], default = None

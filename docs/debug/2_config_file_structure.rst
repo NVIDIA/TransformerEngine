@@ -64,8 +64,8 @@ Debug layers can be identified by a ``name`` parameter:
 
 This name is used in the config file to identify the layer. To specify the ``layers`` field, you can use one of the following methods:
 
-1. **``layer_name_regex_pattern``**: Use a regular expression to match layer names. This expression must adhere to the Python ``re`` module syntax.
-2. **``layer_types``**: Provide a list of strings, where a layer will be selected if any string matches part of its name.
+1. ``layer_name_regex_pattern``: Use a regular expression to match layer names. This expression must adhere to the Python ``re`` module syntax.
+2. ``layer_types``: Provide a list of strings, where a layer will be selected if any string matches part of its name.
 
 Examples:
 
@@ -110,7 +110,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
 
 .. figure:: ./img/names.svg
    :align: center
-   :width: 50%
+   :width: 80%
 
    Fig 1: Names of layers in an example configuration of TransformerLayer. The most nested blocks represent the most basic layers, each containing one linear layer. Layers that do not contain linear layers, such as ``DotProductAttention``, are omitted.
 
@@ -124,7 +124,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
       layers:
         layer_types: [transformer_layer]
       transformer_engine:
-        DisableFp8Gemm:
+        DisableFP8GEMM:
           enabled: True
           gemms: [wgrad]
 
@@ -134,7 +134,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
       layers:
         layer_types: [layernorm_mlp]
       transformer_engine:
-        DisableFp8Layer:
+        DisableFP8Layer:
           enabled: True
       
     # Logs wgrad stats in fc1
@@ -153,7 +153,7 @@ Below is an example ``TransformerLayer`` with four linear layers that can be inf
 
 
 Structured Configuration for GEMMs and Tensors
---------------------------------------------
+---------------------------------------------
 
 Sometimes a feature is parameterized by a list of tensors or by a list of GEMMs.
 There are multiple ways of describing this parameterization.
@@ -183,11 +183,19 @@ We can use struct for tensors.
 
 Similarly, we can use struct for GEMMs.
 
-.. warning::
+.. code-block:: yaml
 
-   When using structs for both tensors and GEMMs,
-   tensors_struct should be inside gemms_struct.
+    Feature:
+      enabled: ...
+      tensors: [tensor1, tensor2]
+      gemms_struct:
+      - gemm: gemm1
+        feature_param1: value
+      - gemm: gemm2
+        feature_param1: value
+      gemm_feature_param1: value
 
+We can use both structs for tensors and GEMMs. The tensors_struct should be nested inside gemms_struct.
 
 .. code-block:: yaml
 
@@ -207,7 +215,7 @@ Similarly, we can use struct for GEMMs.
           gemm_feature_param1: value
 
 Enabling or Disabling Sections and Features
------------------------------------------
+------------------------------------------
 
 Debug features can be enabled or disabled with the ``enabled`` keyword:
 
@@ -226,7 +234,7 @@ Debug features can be enabled or disabled with the ``enabled`` keyword:
       enabled: False # Disables entire section2
       transformer_engine:
         LogFp8TensorStats:
-          enabled: True
+          enabled: True # Does not enable the LogFp8TensorStats feature, because section2 is disabled
           stats: [underflows, overflows]
 
 By organizing your ``config.yaml`` properly, you can easily manage debugging features, ensuring a more streamlined and customizable debugging experience.

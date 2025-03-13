@@ -1083,6 +1083,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             or getattr(self, "ub_overlap_rs", False)
         ):
             import nvdlfw_inspect.api as debug_api
+            import pdb; pdb.set_trace()
 
             debug_api.log_message(
                 "> UserBuffers are not supported in debug module. "

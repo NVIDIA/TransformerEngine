@@ -104,7 +104,7 @@ class TEDefaultFeatures:
         """
         If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
         then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
-        If the tensor is processed using *modify_tensor* and or fp8 autocast is not enabled,
+        If the tensor is processed using *modify_tensor* or fp8 autocast is not enabled,
         the result of this call does not matter.
 
         Parameters
@@ -163,12 +163,12 @@ class TEDefaultFeatures:
         out: Union[torch.Tensor, QuantizedTensor],
     ) -> Union[torch.Tensor, QuantizedTensor, None]:
         """
-        It allows inserting tensor processing.
-        For example, feature `FakeQuant` uses it to emulate casting to FP8,
-        but the tensor is returned in higher precision.
+        It allows tensor modification.
+        For example, feature `FakeQuant` uses it to emulate casting to FP8.
         It can be invoked at most once for each tensor within a given GEMM operation.
 
         This call is invoked if `modify_tensor_enabled` returns `True` and the feature is enabled for the *tensor_name* and *gemm*.
+        Then it is called **instead of** the default quantization.
 
         Parameters
         ----------
@@ -240,7 +240,8 @@ class TEDefaultFeatures:
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
-            process group for the tensor parallel group,
+            process group for the tensor parallel group. This is used for weight statistics reduction.
+            This is not reduction group from debug_api.
 
         Returns
         -------
@@ -276,7 +277,8 @@ class TEDefaultFeatures:
         iteration: int
             iteration number - equal to the number of times `debug_api.step()` was called.
         tp_group: torch.distributed.ProcessGroup
-            process group for the tensor parallel group,
+            process group for the tensor parallel group. This is used for weight statistics reduction.
+            This is not reduction group from debug_api.
 
         Returns
         -------
@@ -288,7 +290,7 @@ class TEDefaultFeatures:
         self, config: Dict, layer_name: str, tensor_name: str, iteration: int
     ) -> bool:
         """
-        It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked for every forward.
+        It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
 
         Parameters
         ----------
@@ -314,7 +316,7 @@ class TEDefaultFeatures:
         """
         It is a routing call, which is run at the initialization of the layer.
         If it returns true, then *inspect_tensor_postquantize* for
-        a given GEMM and tensor will be invoked for every forward.
+        a given GEMM and tensor will be invoked.
 
         Parameters
         ----------

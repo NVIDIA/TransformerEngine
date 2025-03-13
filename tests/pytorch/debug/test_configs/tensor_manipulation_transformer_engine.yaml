@@ -5,7 +5,7 @@ transformer_engine_fc1_manipulation:
   layers:
     layer_name_regex_pattern: .*(fc1) # Select layers if they end in fc1
   transformer_engine: # namespace
-    DisableFp8Gemm: # Disable FP8 GEMM. FProp run in high precision
+    DisableFP8GEMM: # Disable FP8 GEMM. FProp run in high precision
       enabled: True
       gemms: [fprop]
     PerTensorScaling: # Scale DGrad gradients using per tensor current scaling and run FP8 GEMM

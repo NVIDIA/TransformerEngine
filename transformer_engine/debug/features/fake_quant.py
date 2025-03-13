@@ -89,13 +89,17 @@ class FakeQuant(TEConfigAPIMapper):
             - activation
             - gradient
             - weight
+            - output
+            - wgrad
+            - dgrad
+
     quant_format: str, default = "FP8E5M2"
         specifies the FP8 format to use:
 
             - FP8E5M2
             - FP8E4M3
     margin: int, default = 0
-        impacts the computation of scaling factors, default is 0, `amax = amax * (2^margin)`.
+        impacts the computation of scaling factors, default is 0, `amax = original_amax * (2^margin)`.
 
     Example
     -------
