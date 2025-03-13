@@ -333,7 +333,7 @@ class _TorchLinearCrossEntropy(torch.autograd.Function):
         # Save tensors needed for backward
         ctx.save_for_backward(hidden, weight, labels, whole_logits)
         ctx.dist_process_group = dist_process_group
-        
+
         return logprobs
     
     @staticmethod
@@ -581,6 +581,98 @@ class _TestTensorParallel:
             print(f"[INFO] rank {self.local_rank}, linear combined parallel cross entropy "
                   f"backward max memory: {backward_max_memory:.2f} MB")
         
+    def verify_linear_cross_entropy(self):
+        cleanup()
+        self.generate_hyper()
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        custom_forward_latency = list()
+        custom_backward_latency = list()
+
+        for i in range(self.iterations):
+            hidden, weight, labels = self.generate_forward_input()
+            dist.broadcast(hidden, src=0, group=self.group)
+            dist.broadcast(labels, src=0, group=self.group)
+
+            torch_logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.group)
+
+            start_event.record()
+            custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group)
+            end_event.record()
+            torch.cuda.synchronize()
+            custom_forward_latency.append(start_event.elapsed_time(end_event))
+
+            torch.testing.assert_close(custom_logprobs, torch_logprobs, atol=1e-4, rtol=1e-4)
+
+            # backward pass
+            g_logprobs = self.generate_backward_input()
+            dist.broadcast(g_logprobs, src=0, group=self.group)
+
+            torch_d_hidden, torch_d_weight = torch.autograd.grad((torch_logprobs,),
+                                                                  (hidden, weight),
+                                                                  (g_logprobs,),
+                                                                  retain_graph=False)
+            dist.all_reduce(torch_d_hidden, op=dist.ReduceOp.SUM, group=self.group)
+            torch.cuda.synchronize()
+
+            start_event.record()
+            custom_d_hidden, custom_d_weight = torch.autograd.grad((custom_logprobs,),
+                                                                     (hidden, weight),
+                                                                     (g_logprobs,),
+                                                                     retain_graph=False)
+            end_event.record()
+            torch.cuda.synchronize()
+            custom_backward_latency.append(start_event.elapsed_time(end_event))
+            dist.all_reduce(custom_d_hidden, op=dist.ReduceOp.SUM, group=self.group)
+            
+            torch.testing.assert_close(torch_d_hidden, custom_d_hidden, atol=1e-4, rtol=1e-4)
+            torch.testing.assert_close(torch_d_weight, custom_d_weight, atol=1e-4, rtol=1e-4)
+
+        # remove first latency
+        custom_forward_latency = custom_forward_latency[1:]
+        custom_backward_latency = custom_backward_latency[1:]
+        if self.local_rank == 0:
+            print()
+            print(f"[INFO] rank {self.local_rank}, linear cross entropy correctness verified")
+            print()
+            print(f"[INFO] rank {self.local_rank}, linear cross entropy forward latency "
+                  f"{sum(custom_forward_latency) / len(custom_forward_latency):.2f} ms")
+            print(f"[INFO] rank {self.local_rank}, linear cross entropy backward latency "
+                  f"{sum(custom_backward_latency) / len(custom_backward_latency):.2f} ms")
+
+    def check_linear_cross_entropy_storage(self):
+        cleanup()
+        self.generate_hyper()
+
+        hidden, weight, labels = self.generate_forward_input()
+        dist.broadcast(hidden, src=0, group=self.group)
+        dist.broadcast(labels, src=0, group=self.group)
+
+        torch.cuda.reset_peak_memory_stats()
+        custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group)
+        torch.cuda.synchronize()
+        forward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+
+        g_logprobs = self.generate_backward_input()
+        dist.broadcast(g_logprobs, src=0, group=self.group)
+
+        torch.cuda.reset_peak_memory_stats()
+        (d_hidden, d_weight) = torch.autograd.grad((custom_logprobs,),
+                                                    (hidden, weight),
+                                                    (g_logprobs,),
+                                                    retain_graph=False)
+        torch.cuda.synchronize()
+        backward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
+        dist.all_reduce(d_hidden, op=dist.ReduceOp.SUM, group=self.group)
+
+        if self.local_rank == 0:
+            print()
+            print(f"[INFO] rank {self.local_rank}, linear cross entropy "
+                  f"forward max memory: {forward_max_memory:.2f} MB")
+            print(f"[INFO] rank {self.local_rank}, linear cross entropy "
+                  f"backward max memory: {backward_max_memory:.2f} MB")
         
 
 
@@ -589,10 +681,14 @@ class _TestTensorParallel:
 
 if __name__ == "__main__":
     # torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/pytorch/test_linear_cross_entropy.py
+    torch.manual_seed(233376)
+
     tp_test = _TestTensorParallel()
 
     tp_test.verify_torch_correctness_with_single_gpu()
     tp_test.verify_linear_combined_parallel_cross_entropy()
     tp_test.check_linear_combined_parallel_cross_entropy_storage()
+    tp_test.verify_linear_cross_entropy()
+    tp_test.check_linear_cross_entropy_storage()
 
     tp_test.shutdown()
