@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import abc
+import itertools
 import os
 from contextlib import contextmanager
 from collections import deque
@@ -974,7 +975,7 @@ class Float8BlockScalingRecipeState(RecipeState):
             # is somewhat awkward, and doesn't play nicely with QuantizeOp,
             # which is not associated with a GEMM.
             assert self.num_quantizers % 3 == 0  # x, w, output per gemm
-            return [
+            return list(itertools.chain.from_iterable([[
                 Float8BlockQuantizer(
                     fp8_dtype=self.qx_dtype,
                     rowwise=True,
@@ -999,11 +1000,11 @@ class Float8BlockScalingRecipeState(RecipeState):
                     force_pow_2_scales=self.recipe.fp8_quant_fwd_inp.power_2_scale,
                     block_scaling_dim=self.recipe.x_block_scaling_dim,
                 ),
-            ] * (self.num_quantizers // 3)
+            ] for _ in range(self.num_quantizers // 3)]))
 
         assert self.mode == "backward", f"Unexpected mode {self.mode}"
         assert self.num_quantizers % 2 == 0  # grad_output and grad_input per gemm
-        return [
+        return list(itertools.chain.from_iterable([[
             Float8BlockQuantizer(
                 fp8_dtype=self.qgrad_dtype,
                 rowwise=True,
@@ -1020,4 +1021,4 @@ class Float8BlockScalingRecipeState(RecipeState):
                 force_pow_2_scales=self.recipe.fp8_quant_bwd_grad.power_2_scale,
                 block_scaling_dim=self.recipe.grad_block_scaling_dim,
             ),
-        ] * (self.num_quantizers // 2)
+        ] for _ in range(self.num_quantizers // 2)]))
