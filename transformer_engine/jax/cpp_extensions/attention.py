@@ -653,11 +653,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         else:
             raise ValueError(f"Unsupported {config.qkv_layout=}")
 
-        if :
-            
-        else:
-           
-
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
         return (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
