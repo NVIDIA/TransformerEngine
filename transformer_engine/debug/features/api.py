@@ -100,7 +100,9 @@ required_kwargs = {
 class TEDefaultFeatures:
     """Transformer Engine API calls default behavior."""
 
-    def fp8_gemm_enabled(self, config: Dict, layer_name: str, gemm: str, iteration: int) -> bool: # pylint: disable=unused-argument
+    def fp8_gemm_enabled(
+        self, config: Dict, layer_name: str, gemm: str, iteration: int
+    ) -> bool:  # pylint: disable=unused-argument
         """
         If the tensor is not processed using *modify_tensor* and the fp8 recipe is enabled,
         then the decision whether to cast it to fp8 is based on the value returned by the call *fp8_gemm_enabled*.
@@ -126,7 +128,12 @@ class TEDefaultFeatures:
         return True  # if it is false, fp8_gemm will be turned off. Otherwise nothing happens.
 
     def modify_tensor_enabled(
-        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int # pylint: disable=unused-argument
+        self,
+        config: Dict,
+        layer_name: str,
+        gemm: str,
+        tensor_name: str,
+        iteration: int,  # pylint: disable=unused-argument
     ) -> bool:
         """
         It is used to determine whether *modify_tensor* will be run for a given GEMM and tensor name. It has **higher priority** than fp8_gemm, if *modify_tensor_enabled* returns True, then modify_tensor call is invoked for the respective tensor no matter what.
@@ -152,7 +159,7 @@ class TEDefaultFeatures:
         return False
 
     def modify_tensor(
-        self, # pylint: disable=unused-argument
+        self,  # pylint: disable=unused-argument
         config: Dict,
         layer_name: str,
         gemm: str,
@@ -216,7 +223,7 @@ class TEDefaultFeatures:
         )
 
     def inspect_tensor(
-        self, # pylint: disable=unused-argument
+        self,  # pylint: disable=unused-argument
         config: Dict,
         layer_name: str,
         tensor_name: str,
@@ -250,7 +257,7 @@ class TEDefaultFeatures:
         """
 
     def inspect_tensor_postquantize(
-        self, # pylint: disable=unused-argument
+        self,  # pylint: disable=unused-argument
         config: Dict,
         layer_name: str,
         tensor_name: str,
@@ -287,7 +294,11 @@ class TEDefaultFeatures:
         """
 
     def inspect_tensor_enabled(
-        self, config: Dict, layer_name: str, tensor_name: str, iteration: int # pylint: disable=unused-argument
+        self,
+        config: Dict,
+        layer_name: str,
+        tensor_name: str,
+        iteration: int,  # pylint: disable=unused-argument
     ) -> bool:
         """
         It is a routing call, which is run at the initialization of the layer. If it returns true, then *inspect_tensor* for a given GEMM and tensor will be invoked.
@@ -311,7 +322,12 @@ class TEDefaultFeatures:
         return False
 
     def inspect_tensor_postquantize_enabled(
-        self, config: Dict, layer_name: str, gemm: str, tensor_name: str, iteration: int # pylint: disable=unused-argument
+        self,
+        config: Dict,
+        layer_name: str,
+        gemm: str,
+        tensor_name: str,
+        iteration: int,  # pylint: disable=unused-argument
     ) -> bool:
         """
         It is a routing call, which is run at the initialization of the layer.

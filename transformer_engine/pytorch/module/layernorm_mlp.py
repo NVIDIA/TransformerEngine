@@ -41,7 +41,7 @@ from ..utils import (
     clear_tensor_data,
     requires_grad,
     non_tn_fp8_gemm_supported,
-    needs_quantized_gemm
+    needs_quantized_gemm,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,
@@ -74,6 +74,7 @@ from ..cpp_extensions import (
 from ...debug.pytorch.utils import any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizedTensor
+
 __all__ = ["LayerNormMLP"]
 
 
@@ -298,7 +299,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer, False)
             else:
                 if fp8 or debug:
-                    if not isinstance(ln_out, QuantizedTensor) and not isinstance(ln_out, DebugQuantizedTensor):
+                    if not isinstance(ln_out, QuantizedTensor) and not isinstance(
+                        ln_out, DebugQuantizedTensor
+                    ):
                         fc1_input_quantizer.set_usage(
                             rowwise=True, columnwise=backwards_needs_fc1_input
                         )

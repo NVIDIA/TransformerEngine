@@ -34,7 +34,7 @@ from ..utils import (
     nvtx_range_pop,
     nvtx_range_push,
     requires_grad,
-    needs_quantized_gemm
+    needs_quantized_gemm,
 )
 from ..distributed import (
     set_tensor_model_parallel_attributes,

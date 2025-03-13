@@ -994,7 +994,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
 
-
             is_debug = isinstance(quantizer, DebugQuantizer)
             is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)
             if is_debug != is_out_debug_tensor:
