@@ -12,14 +12,13 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
+from common import is_bf16_supported
 from datasets import load_dataset
 from flax import linen as nn
 from flax.training import train_state
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-
-from common import is_bf16_supported
 
 PARAMS_KEY = "params"
 DROPOUT_KEY = "dropout"

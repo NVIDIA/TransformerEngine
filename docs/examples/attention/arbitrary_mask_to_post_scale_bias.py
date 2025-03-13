@@ -3,8 +3,10 @@
 # See LICENSE for license information.
 
 import os
-import torch
 from typing import Tuple
+
+import torch
+
 from tests.pytorch.fused_attn.test_fused_attn import ModelConfig
 from transformer_engine.pytorch.attention import DotProductAttention
 

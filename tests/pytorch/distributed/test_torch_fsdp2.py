@@ -3,14 +3,14 @@
 # See LICENSE for license information.
 
 import os
-import pytest
 import subprocess
 from pathlib import Path
-from transformer_engine.pytorch import torch_version
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
+import pytest
 import torch
 
+from transformer_engine.pytorch import torch_version
+from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 

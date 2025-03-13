@@ -5,25 +5,22 @@
 """Fusable operation for Layer Normalization."""
 
 from __future__ import annotations
-from collections.abc import Iterable
+
 import math
 import os
+from collections.abc import Iterable
 from typing import Optional
 
 import torch
 
 from transformer_engine_torch import layernorm_bwd, layernorm_fwd
-from ...fp8 import FP8GlobalStateManager
+
 from ...constants import TE_DType
+from ...fp8 import FP8GlobalStateManager
 from ...tensor import QuantizedTensor
-from ...utils import (
-    canonicalize_device,
-    canonicalize_dtype,
-    clear_tensor_data,
-    devices_match,
-)
-from ..op import BasicOperation, OperationContext
+from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data, devices_match
 from .._common import maybe_autocast_dtype, reshape
+from ..op import BasicOperation, OperationContext
 
 
 class LayerNorm(BasicOperation):

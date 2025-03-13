@@ -10,20 +10,21 @@ import os
 import sys
 from functools import wraps
 
-import transformer_engine.pytorch as te
 import torch
-from torch import nn
 import torch.distributed as dist
+from run_layer_with_overlap import _compare_tensors
+from torch import nn
+
+import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
-    MXFP8BlockScaling,
     DelayedScaling,
     Float8CurrentScaling,
     Format,
+    MXFP8BlockScaling,
     Recipe,
 )
 from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
-from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
 HIDDEN_SIZE = 64

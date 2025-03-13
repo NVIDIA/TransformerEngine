@@ -2,53 +2,50 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-from dataclasses import dataclass, replace
-from functools import partial, reduce
 import operator
 import os
-from typing import Optional, Tuple
 import warnings
+from dataclasses import dataclass, replace
+from functools import partial, reduce
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
-from jax import dtypes, lax
+from jax import dtypes, ffi, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
-from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
-
+from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
-from transformer_engine_jax import NVTE_Fused_Attn_Backend
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
-    QKVLayout,
-    QKVFormat,
     CPStrategy,
+    QKVFormat,
+    QKVLayout,
     SequenceDescriptor,
 )
+from transformer_engine_jax import NVTE_Fused_Attn_Backend
 
-from .base import BasePrimitive, register_primitive
-from .custom_call import custom_caller, CustomCallArgsWrapper
-from .misc import (
-    check_valid_batch_dims,
-    jax_dtype_to_te_dtype,
-    te_dtype_to_jax_dtype,
-    get_padded_spec,
-    get_cudnn_version,
-    is_ffi_enabled,
-)
 from ..sharding import (
+    all_reduce_sum_along_dp_fsdp,
+    get_all_mesh_axes,
+    get_mesh_axis_rank,
+    get_mesh_axis_size,
     global_mesh_resource,
     lax_paral_op,
-    all_reduce_sum_along_dp_fsdp,
-    get_mesh_axis_size,
-    get_mesh_axis_rank,
-    get_all_mesh_axes,
     num_of_devices,
 )
-
+from .base import BasePrimitive, register_primitive
+from .custom_call import CustomCallArgsWrapper, custom_caller
+from .misc import (
+    check_valid_batch_dims,
+    get_cudnn_version,
+    get_padded_spec,
+    is_ffi_enabled,
+    jax_dtype_to_te_dtype,
+    te_dtype_to_jax_dtype,
+)
 
 __all__ = [
     "FusedAttnHelper",

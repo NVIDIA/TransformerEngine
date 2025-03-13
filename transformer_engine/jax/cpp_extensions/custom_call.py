@@ -7,6 +7,7 @@ from enum import IntEnum
 
 import jax
 from jax.interpreters import mlir
+
 import transformer_engine_jax
 
 from .misc import is_ffi_enabled

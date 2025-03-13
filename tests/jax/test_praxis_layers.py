@@ -9,29 +9,36 @@ from typing import Dict, Tuple
 import flax
 import jax
 import jax.numpy as jnp
-from praxis import pax_fiddle
-from praxis.base_layer import WeightInit, DEFAULT_INIT_MUTABLE_LIST
 import pytest
-
+from praxis import pax_fiddle
+from praxis.base_layer import DEFAULT_INIT_MUTABLE_LIST, WeightInit
 from utils import assert_allclose
 
 from transformer_engine.common.recipe import DelayedScaling, Format
 from transformer_engine.jax import fp8_autocast, update_collections
-from transformer_engine.jax.flax import DenseGeneral, LayerNormDenseGeneral
+from transformer_engine.jax.flax import DenseGeneral
+from transformer_engine.jax.flax import DotProductAttention as flax_DotProductAttention
 from transformer_engine.jax.flax import LayerNorm as flax_LayerNorm
+from transformer_engine.jax.flax import LayerNormDenseGeneral
 from transformer_engine.jax.flax import LayerNormMLP as flax_LayerNormMLP
 from transformer_engine.jax.flax import MultiHeadAttention as flax_MultiHeadAttention
-from transformer_engine.jax.flax import DotProductAttention as flax_DotProductAttention
 from transformer_engine.jax.flax import RelativePositionBiases as flax_RelativePositionBiases
 from transformer_engine.jax.flax import TransformerLayer as flax_TransformerLayer
 from transformer_engine.jax.flax.module import Softmax
 from transformer_engine.jax.fp8 import FP8Helper, is_fp8_available
-from transformer_engine.jax.praxis import LayerNorm
-from transformer_engine.jax.praxis import FusedSoftmax
-from transformer_engine.jax.praxis import LayerNormLinear, LayerNormMLP, Linear
-from transformer_engine.jax.praxis import DotProductAttention, MultiHeadAttention
-from transformer_engine.jax.praxis import RelativePositionBiases, TransformerEngineBaseLayer
-from transformer_engine.jax.praxis import TransformerLayer, TransformerLayerType
+from transformer_engine.jax.praxis import (
+    DotProductAttention,
+    FusedSoftmax,
+    LayerNorm,
+    LayerNormLinear,
+    LayerNormMLP,
+    Linear,
+    MultiHeadAttention,
+    RelativePositionBiases,
+    TransformerEngineBaseLayer,
+    TransformerLayer,
+    TransformerLayerType,
+)
 from transformer_engine.jax.softmax import SoftmaxType
 
 is_fp8_supported, reason = is_fp8_available()

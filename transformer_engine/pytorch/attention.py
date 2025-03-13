@@ -4,89 +4,85 @@
 
 """Attention."""
 import collections
-from contextlib import nullcontext
-from importlib.metadata import version as get_pkg_version
-from importlib.metadata import PackageNotFoundError
+import functools
+import logging
 import math
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
-import logging
-import functools
-
+from contextlib import nullcontext
 from dataclasses import dataclass, fields
-import numpy as np
-from packaging.version import Version as PkgVersion
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as get_pkg_version
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from packaging.version import Version as PkgVersion
 
-import transformer_engine_torch as tex
 import transformer_engine as te
-from transformer_engine.pytorch.utils import (
-    get_cudnn_version,
-    nvtx_range_pop,
-    nvtx_range_push,
+import transformer_engine_torch as tex
+from transformer_engine.pytorch.constants import (
+    AttnBiasTypes,
+    AttnMaskTypes,
+    AttnTypes,
+    QKVLayouts,
+    TE_DType,
+    dist_group_type,
 )
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
-    fused_attn_fwd,
-    fused_attn_bwd,
-    QKVLayout,
+    META_DO,
+    META_DP,
+    META_DQKV,
+    META_DQKV_CP,
+    META_O,
+    META_O_CP,
+    META_QKV,
+    META_S,
     AttnBiasType,
     AttnMaskType,
     FusedAttnBackend,
-    META_QKV,
-    META_DQKV,
-    META_O,
-    META_DO,
-    META_S,
-    META_DP,
-    META_O_CP,
-    META_DQKV_CP,
+    QKVLayout,
+    fused_attn_bwd,
+    fused_attn_fwd,
 )
+from transformer_engine.pytorch.distributed import (
+    CudaRNGStatesTracker,
+    checkpoint,
+    gather_along_first_dim,
+    get_distributed_rank,
+    get_distributed_world_size,
+    graph_safe_rng_available,
+    reduce_scatter_along_first_dim,
+    set_all_rng_states,
+)
+from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
     get_fp8_te_dtype,
     get_fp8_torch_dtype,
 )
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
+from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.module import LayerNormLinear, Linear
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-from transformer_engine.pytorch.utils import (
-    divide,
-    attention_mask_func,
-    split_tensor_along_dim,
-    get_device_compute_capability,
-    get_default_init_method,
-)
-from transformer_engine.pytorch.constants import (
-    AttnMaskTypes,
-    AttnTypes,
-    AttnBiasTypes,
-    QKVLayouts,
-    dist_group_type,
-    TE_DType,
-)
 from transformer_engine.pytorch.softmax import FusedScaleMaskSoftmax
-from transformer_engine.pytorch.distributed import (
-    get_distributed_world_size,
-    get_distributed_rank,
-    checkpoint,
-    set_all_rng_states,
-    CudaRNGStatesTracker,
-    graph_safe_rng_available,
-    gather_along_first_dim,
-    reduce_scatter_along_first_dim,
-)
-from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
-from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.tensor._internal.float8_tensor_base import Float8TensorBase
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
     restore_from_saved,
 )
-
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    divide,
+    get_cudnn_version,
+    get_default_init_method,
+    get_device_compute_capability,
+    nvtx_range_pop,
+    nvtx_range_push,
+    split_tensor_along_dim,
+)
 
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
@@ -152,16 +148,16 @@ else:
         _flash_attn_is_installed = True
 
     if _flash_attn_is_installed:
-        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
-        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd
-        from flash_attn.flash_attn_interface import (
-            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
-        )
+        from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
         from flash_attn.flash_attn_interface import (
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
+        from flash_attn.flash_attn_interface import (
+            _flash_attn_varlen_forward as _flash_attn_varlen_fwd,
+        )
+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
+        from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
 
         _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
         _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
@@ -210,17 +206,17 @@ except PackageNotFoundError:
             _flash_attn_3_installation_steps,
         )
 else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flashattn_hopper.flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
     from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
+    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flashattn_hopper.flash_attn_interface import (
+        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
+    )
     from flashattn_hopper.flash_attn_interface import (
         _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
     )
+    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
+        flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
 
     _flash_attn_3_is_installed = True

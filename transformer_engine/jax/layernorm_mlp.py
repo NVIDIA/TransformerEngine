@@ -3,8 +3,8 @@
 # See LICENSE for license information.
 """JAX MLP modules"""
 
-from typing import List, Tuple, Sequence, Union, Callable
 from functools import partial
+from typing import Callable, List, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -12,8 +12,8 @@ from jax.ad_checkpoint import checkpoint_name
 
 from . import cpp_extensions as tex
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
-from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
+from .layernorm import canonicalize_layernorm_type
 from .sharding import with_sharding_constraint_by_logical_axes
 
 

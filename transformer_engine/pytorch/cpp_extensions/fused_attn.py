@@ -4,17 +4,19 @@
 
 """Python interface for fused attention extensions"""
 import math
-from typing import Tuple, List, Union, Optional
+from typing import List, Optional, Tuple, Union
+
 import torch
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import (
-    NVTE_QKV_Layout,
     NVTE_Bias_Type,
-    NVTE_Mask_Type,
     NVTE_Fused_Attn_Backend,
+    NVTE_Mask_Type,
+    NVTE_QKV_Layout,
 )
-from ..tensor.quantized_tensor import Quantizer
 
+from ..tensor.quantized_tensor import Quantizer
 
 __all__ = [
     "fused_attn_fwd",

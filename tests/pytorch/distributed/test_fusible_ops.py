@@ -5,13 +5,13 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 import functools
 import itertools
 import os
 import pathlib
 import subprocess
 import sys
+from collections.abc import Iterable
 from typing import Optional
 
 import pytest
@@ -20,14 +20,13 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
+import transformer_engine.pytorch.ops as te_ops
+import transformer_engine_torch as tex
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-import transformer_engine.pytorch.ops as te_ops
-from transformer_engine.pytorch.ops._common import is_float8_tensor
 from transformer_engine.pytorch.utils import is_bf16_compatible
-import transformer_engine_torch as tex
-
 
 # Check what quantization schemes are supported
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()

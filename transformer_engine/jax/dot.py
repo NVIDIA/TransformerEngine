@@ -3,8 +3,9 @@
 # See LICENSE for license information.
 """JAX te modules"""
 
-from typing import List, Tuple, Sequence
 from functools import partial
+from typing import List, Sequence, Tuple
+
 import jax
 import jax.numpy as jnp
 

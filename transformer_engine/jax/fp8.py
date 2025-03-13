@@ -14,15 +14,14 @@ import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 from flax.linen import fp8_ops
 
-from transformer_engine_jax import DType
-from transformer_engine_jax import get_cublasLt_version
+from transformer_engine.common.recipe import DelayedScaling, Format
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine_jax import (
+    DType,
+    get_cublasLt_version,
     get_cuda_version,
     get_device_compute_capability,
 )
-from transformer_engine.common.recipe import DelayedScaling, Format
-from transformer_engine.jax.sharding import global_shard_guard
-from transformer_engine.jax.sharding import MeshResource
 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""

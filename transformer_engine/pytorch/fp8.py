@@ -7,24 +7,24 @@ from __future__ import annotations
 
 import abc
 import os
-from contextlib import contextmanager
 from collections import deque
-from typing import Callable, List, Optional, Dict, Any, Tuple, Union
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
-    Recipe,
     DelayedScaling,
+    Float8CurrentScaling,
     Format,
     MXFP8BlockScaling,
-    Float8CurrentScaling,
+    Recipe,
 )
 
 from .constants import dist_group_type
-from .utils import get_device_compute_capability
 from .jit import jit_fuser
-
+from .utils import get_device_compute_capability
 
 __all__ = ["fp8_autocast", "fp8_model_init"]
 

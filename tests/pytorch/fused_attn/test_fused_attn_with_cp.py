@@ -7,16 +7,10 @@ import subprocess
 
 import pytest
 import torch
-from transformer_engine.pytorch.attention import (
-    _flash_attn_2_plus,
-    _flash_attn_2_3_plus,
-)
-from transformer_engine.pytorch.utils import (
-    get_device_compute_capability,
-    get_cudnn_version,
-)
-
 from test_fused_attn import ModelConfig
+
+from transformer_engine.pytorch.attention import _flash_attn_2_3_plus, _flash_attn_2_plus
+from transformer_engine.pytorch.utils import get_cudnn_version, get_device_compute_capability
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias

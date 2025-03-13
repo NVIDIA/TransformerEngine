@@ -12,17 +12,16 @@ import jax.numpy as jnp
 import nltk
 import numpy as np
 import optax
+from common import is_bf16_supported
 from datasets import load_dataset
 from flax import linen as nn
 from flax.linen import partitioning as nn_partitioning
 from flax.training import train_state
 from jax.experimental import mesh_utils
-from jax.sharding import PartitionSpec, NamedSharding
+from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
-
-from common import is_bf16_supported
 
 DEVICE_DP_AXIS = "data"
 DEVICE_TP_AXIS = "model"

@@ -7,6 +7,7 @@
 # pylint: disable=unused-import
 
 from importlib import metadata
+
 import transformer_engine.common
 
 try:

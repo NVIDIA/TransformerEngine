@@ -4,19 +4,19 @@
 #
 # See LICENSE for license information.
 
+import argparse
 import os
-import sys
+import pprint
 import socket
 import subprocess
-import argparse
+import sys
 import warnings
-import pprint
 
 import torch
 import torch.distributed as dist
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import DelayedScaling, Format
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)

@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
+from contextlib import nullcontext
+
 import pytest
 import torch
-from contextlib import nullcontext
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager

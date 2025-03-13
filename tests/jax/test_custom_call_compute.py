@@ -2,31 +2,30 @@
 #
 # See LICENSE for license information.
 
+import os
 from contextlib import nullcontext
 from typing import Callable, List, Sequence, Union
-import os
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax import jit, value_and_grad
 from flax import linen as nn
-
+from jax import jit, value_and_grad
 from utils import assert_allclose, assert_tree_like_allclose
-from transformer_engine.jax.dot import type_safe_dot_general, dequantize, quantize
-from transformer_engine.jax.fp8 import FP8MetaPackage, FP8Helper, is_fp8_available
-from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
-from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
+
+from transformer_engine.jax import cpp_extensions as tex
 from transformer_engine.jax.cpp_extensions.activation import _jax_act_lu
+from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax.cpp_extensions.transpose import (
-    _jax_transpose,
     _jax_cast_transpose,
     _jax_dbias_cast_transpose,
+    _jax_transpose,
 )
-from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
-from transformer_engine.jax import cpp_extensions as tex
-
+from transformer_engine.jax.dot import dequantize, quantize, type_safe_dot_general
+from transformer_engine.jax.fp8 import FP8Helper, FP8MetaPackage, is_fp8_available
+from transformer_engine.jax.layernorm import layernorm, layernorm_fp8_dot
+from transformer_engine.jax.layernorm_mlp import activation_lu, fused_layernorm_fp8_mlp
 
 GEMM_CASES = [
     (256, 256, 512),
