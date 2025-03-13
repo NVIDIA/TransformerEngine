@@ -1470,8 +1470,7 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            if recipe.delayed() or recipe.float8_current_scaling():
-                split_size = 16
+            split_size = 16
             if recipe.mxfp8():
                 split_size = 128
         m = config.seq_len // split_size

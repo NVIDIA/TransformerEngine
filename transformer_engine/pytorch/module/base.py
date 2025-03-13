@@ -412,6 +412,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.fsdp_group = None
         self._fp8_workspaces: Dict[str, QuantizedTensor] = {}
         self.activation_dtype: Optional[torch.dtype] = None
+        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
+        # 2 (grad_output and grad_input) for bwd
+        self._num_fp8_tensors_per_gemm = {
+            "fwd": 3,
+            "bwd": 2,
+        }
 
     # Names of attributes that can be set quickly (see __setattr__
     # method)
@@ -503,9 +509,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.fp8blockwise() and isinstance(recipe_state, Float8BlockScalingRecipeState):
                 return
 
-        # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
-        # 2 (grad_output and grad_input) for bwd
-        num_fp8_tensors = self.fp8_meta["num_gemms"] * 3 if fwd else self.fp8_meta["num_gemms"] * 2
+        num_fp8_tensors = self.fp8_meta["num_gemms"] * self._num_fp8_tensors_per_gemm[
+            "fwd" if fwd else "bwd"
+        ]
 
         # Initialize recipe state and quantizers
         recipe_state = RecipeState.create(
