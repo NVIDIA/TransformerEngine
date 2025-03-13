@@ -8,7 +8,7 @@ import pytest
 import torch
 import transformer_engine as te
 import transformer_engine_torch as tex
-
+from transformer_engine.pytorch.utils import get_device_compute_capability
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
@@ -18,6 +18,10 @@ from tests.pytorch.references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
 )
+
+# TODO replace with call to fp8.py when recipe added.
+recipe_available = get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8
+reason_for_no_recipe = "Quantize kernels require TMA and are only relevant with GEMMS."
 
 
 def initialize_for_many_scales(
@@ -62,6 +66,7 @@ def initialize_for_many_scales(
     return result
 
 
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
     [
@@ -188,6 +193,7 @@ def test_quantization_block_tiling_versus_reference(
         assert sx_t is None and sx_t_ref is None
 
 
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
     [

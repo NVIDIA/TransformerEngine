@@ -65,7 +65,7 @@ constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP
 
 #define MIN(a, b) (a < b ? a : b)
 
-template <bool kReturnTranspose, bool kPow2Scaling, typename CType, typename IType, typename OType>
+template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     block_scaled_cast_transpose_kernel(const IType* const input, OType* const output_c,
                                        OType* const output_t, CType* const tile_scales_inv_c,
@@ -73,7 +73,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
                                        const size_t num_rows, const size_t scale_stride_x,
                                        const size_t scale_stride_y, const size_t scale_t_stride_x,
                                        const size_t scale_t_stride_y, const float epsilon,
-                                       const __grid_constant__ CUtensorMap tensor_map_output_t) {
+                                       const __grid_constant__ CUtensorMap tensor_map_output_t,
+                                       bool pow_2_scaling) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
@@ -152,7 +153,11 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   __syncthreads();
   block_tile_amax = block_tile_amax_shared[0];
 
-  block_tile_scale = ComputeScale<IType, OType, kPow2Scaling>(block_tile_amax, epsilon);
+  if (pow_2_scaling) {
+    block_tile_scale = ComputeScale<IType, OType, true>(block_tile_amax, epsilon);
+  } else {
+    block_tile_scale = ComputeScale<IType, OType, false>(block_tile_amax, epsilon);
+  }
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
@@ -244,12 +249,13 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   }
 }
 
-template <bool kReturnTranspose, bool kPow2Scaling, typename CType, typename IType, typename OType>
+template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose_kernel_notaligned(
     const IType* const input, OType* const output_c, OType* const output_t,
     CType* const tile_scales_inv_c, CType* const tile_scales_inv_t, const size_t row_length,
     const size_t num_rows, const size_t scale_stride_x, const size_t scale_stride_y,
-    const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon) {
+    const size_t scale_t_stride_x, const size_t scale_t_stride_y, const float epsilon,
+    bool pow_2_scaling) {
   using IVec = Vec<IType, THREAD_TILE_DIM_X>;
   using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
   using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
@@ -372,7 +378,11 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   __syncthreads();
   block_tile_amax = block_tile_amax_shared[0];
 
-  block_tile_scale = ComputeScale<IType, OType, kPow2Scaling>(block_tile_amax, epsilon);
+  if (pow_2_scaling) {
+    block_tile_scale = ComputeScale<IType, OType, true>(block_tile_amax, epsilon);
+  } else {
+    block_tile_scale = ComputeScale<IType, OType, false>(block_tile_amax, epsilon);
+  }
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
@@ -517,47 +527,43 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output.dtype, OutputType,
 
-          dim3 grid(num_blocks_x, num_blocks_y, 1);
-          const bool full_tile = row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_transpose, kReturnTranspose,
 
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  pow_2_scale, kPow2Scale,
+              dim3 grid(num_blocks_x, num_blocks_y, 1);
+              const bool full_tile =
+                  row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
-                  if (full_tile) {
-                    CUtensorMap tensor_map_output_trans;
-                    if constexpr (kReturnTranspose) {
-                      tensor_map_output_trans =
-                          get_tensor_map<OutputType>(output_t, num_rows, row_length);
-                    }
-                    block_scaled_cast_transpose_kernel<kReturnTranspose, kPow2Scale, float,
-                                                       InputType, OutputType>
-                        <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
-                            reinterpret_cast<const InputType*>(input.dptr),
-                            reinterpret_cast<OutputType*>(output.dptr),
-                            reinterpret_cast<OutputType*>(output_t.dptr),
-                            reinterpret_cast<float*>(scale_inv.dptr),
-                            reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                            scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
-                            epsilon, tensor_map_output_trans);
-                  } else {
-                    block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, kPow2Scale,
-                                                                  float, InputType, OutputType>
-                        <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
-                            reinterpret_cast<const InputType*>(input.dptr),
-                            reinterpret_cast<OutputType*>(output.dptr),
-                            reinterpret_cast<OutputType*>(output_t.dptr),
-                            reinterpret_cast<float*>(scale_inv.dptr),
-                            reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
-                            scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
-                            epsilon);
-                  }  // full-tile
-
-                  )  // kPow2Scale
-              )      // kReturnTranspose
-          )          // OutputType
-      )              // InputType
+              if (full_tile) {
+                CUtensorMap tensor_map_output_trans;
+                if (return_transpose) {
+                  tensor_map_output_trans =
+                      get_tensor_map<OutputType>(output_t, num_rows, row_length);
+                }
+                block_scaled_cast_transpose_kernel<kReturnTranspose, float, InputType, OutputType>
+                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                        reinterpret_cast<const InputType*>(input.dptr),
+                        reinterpret_cast<OutputType*>(output.dptr),
+                        reinterpret_cast<OutputType*>(output_t.dptr),
+                        reinterpret_cast<float*>(scale_inv.dptr),
+                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                        tensor_map_output_trans, pow_2_scale);
+              } else {
+                block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
+                                                              OutputType>
+                    <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                        reinterpret_cast<const InputType*>(input.dptr),
+                        reinterpret_cast<OutputType*>(output.dptr),
+                        reinterpret_cast<OutputType*>(output_t.dptr),
+                        reinterpret_cast<float*>(scale_inv.dptr),
+                        reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                        scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                        pow_2_scale);
+              }  // full-tile
+              )  // return_transpose
+          )      // OutputType
+      )          // InputType
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
