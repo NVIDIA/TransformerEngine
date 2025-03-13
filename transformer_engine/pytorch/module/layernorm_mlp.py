@@ -836,7 +836,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     )  # activation in high precision
 
                 if ctx.fp8:
-                    fc1_bias_grad, dact = tex.bgrad_quantize(dact, ctx.grad_fc1_output_quantizer)
+                    fc1_bias_grad, dact = tex.bgrad_quantize(dact, ctx.fc1_grad_output_quantizer)
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
                         True  # fc1_bias_grad is computed later, fused with wgrad gemm for the FC1

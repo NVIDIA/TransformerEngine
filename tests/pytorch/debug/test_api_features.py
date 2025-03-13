@@ -274,7 +274,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
         )
 
         expected_underflows = (tensor_fp8._data == 0).sum() * 100 / (100 * 100 * 5)
-        expected_overflows = (tensor_fp8._data == 255).sum() * 100 / (100 * 100 * 5)
+        expected_overflows = (tensor_fp8._data == 126).sum() * 100 / (100 * 100 * 5)
 
         # TE FP8 tensor stats --
         assert debug_api.transformer_engine.inspect_tensor_postquantize_enabled(

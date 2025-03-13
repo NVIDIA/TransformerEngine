@@ -66,7 +66,7 @@ stats_to_num = {
     "dynamic_range_top": 10,
     "dynamic_range_bottom": 11,
     "underflows_num": 12,
-    "overflows_num": 13,
+    "saturations_num": 13,
     "std": 14,
     "dynamic_range": 15,
     "underflows%": 16,
