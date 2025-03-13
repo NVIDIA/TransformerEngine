@@ -1071,20 +1071,18 @@ def gather_along_first_dim(
         )
 
     # Debug case - call gather_along_first_dim on each tensor
-    if isinstance(input_, DebugQuantizedTensor):
-        out_obj = input_
-        rowwise = input_.get_tensor(False)
-        columnwise = input_.get_tensor(True)
+    if isinstance(inp, DebugQuantizedTensor):
+        out_obj = inp
+        rowwise = inp.get_tensor(False)
+        columnwise = inp.get_tensor(True)
         final_quantizer = (
-            None if not needs_quantized_gemm(input_, rowwise=True) else quantizer.parent_quantizer
+            None if not needs_quantized_gemm(inp, rowwise=True) else quantizer.parent_quantizer
         )
         rowwise_total = gather_along_first_dim(rowwise, process_group, False, final_quantizer)[0]
         out_obj.rowwise_gemm_tensor = rowwise_total
         if rowwise is not columnwise:
             final_quantizer_columnwise = (
-                None
-                if not needs_quantized_gemm(input_, rowwise=False)
-                else quantizer.parent_quantizer
+                None if not needs_quantized_gemm(inp, rowwise=False) else quantizer.parent_quantizer
             )
             columnwise_total, _ = gather_along_first_dim(
                 columnwise, process_group, False, final_quantizer_columnwise
