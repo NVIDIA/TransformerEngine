@@ -4910,7 +4910,16 @@ def attn_forward_func_with_cp(
     ]
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
-        args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream, quantizers, pad_between_seqs, use_flash_attn_3]
+        args += [
+            fp8,
+            fp8_meta,
+            cp_group,
+            cp_global_ranks,
+            cp_stream,
+            quantizers,
+            pad_between_seqs,
+            use_flash_attn_3,
+        ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)
