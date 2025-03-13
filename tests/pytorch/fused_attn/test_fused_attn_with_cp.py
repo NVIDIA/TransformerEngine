@@ -41,7 +41,7 @@ model_configs_flash_attn = {
 
 def get_bash_arguments(num_gpus_per_node, **kwargs):
     args = [
-        "python",
+        "python3",
         "-m",
         "torch.distributed.launch",
         "--nproc-per-node=" + str(num_gpus_per_node),
