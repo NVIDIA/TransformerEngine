@@ -7,7 +7,7 @@ Utils/Helper classes and methods for attention
 """
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union, TypeAlias
+from typing import Any, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
@@ -148,10 +148,6 @@ class FlashAttentionUtils:
             PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")
         )
         FlashAttentionUtils.use_v3 = True
-
-
-# Typedef/alias for code readibility
-FAUtils: TypeAlias = FlashAttentionUtils
 
 
 @dataclass(eq=True)
@@ -317,10 +313,10 @@ def get_attention_backend(
         "compute_capability": "sm"
         + str(10 * device_compute_capability[0] + device_compute_capability[1]),
         "flash_attn_version": (
-            str(FlashAttentionUtils.version) if FAUtils.is_installed else "not installed"
+            str(FlashAttentionUtils.version) if FlashAttentionUtils.is_installed else "not installed"
         ),
         "flash_attn_3_version": (
-            str(FAUtils.fa3_version) if FAUtils.v3_is_installed else "not installed"
+            str(FlashAttentionUtils.fa3_version) if FlashAttentionUtils.v3_is_installed else "not installed"
         ),
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
@@ -341,7 +337,7 @@ def get_attention_backend(
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-    if not use_flash_attention and FAUtils.is_installed:
+    if not use_flash_attention and FlashAttentionUtils.is_installed:
         logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
@@ -350,23 +346,23 @@ def get_attention_backend(
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
-        if use_flash_attention and FAUtils.is_installed:
+        if use_flash_attention and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
         use_flash_attention = False
         if use_fused_attention:
             logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
             use_fused_attention = False
     if device_compute_capability < (9, 0):
-        if use_flash_attention and FAUtils.v3_is_installed:
+        if use_flash_attention and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
-        FAUtils.use_v3 = False
+        FlashAttentionUtils.use_v3 = False
 
     # Filter: Data type
     if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
         torch.Tensor,
         Float8Tensor,
     ]:
-        if use_flash_attention and FAUtils.is_installed:
+        if use_flash_attention and FlashAttentionUtils.is_installed:
             logger.debug(
                 "Disabling FlashAttention due to unsupported QKV data type. "
                 "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
@@ -385,11 +381,11 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and not FAUtils.use_v3:
-            if FAUtils.is_installed:
+        if use_flash_attention and not FlashAttentionUtils.use_v3:
+            if FlashAttentionUtils.is_installed:
                 logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
             use_flash_attention = False
-        if use_flash_attention and FAUtils.use_v3 and is_training:
+        if use_flash_attention and FlashAttentionUtils.use_v3 and is_training:
             logger.debug(
                 "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
             )
@@ -400,7 +396,7 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if use_flash_attention and head_dim_qk != head_dim_v:
-        if FAUtils.is_installed:
+        if FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention as it does not support MLA.")
         use_flash_attention = False
     if use_flash_attention and (
@@ -411,7 +407,7 @@ def get_attention_backend(
             and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
         )
     ):
-        if FAUtils.is_installed:
+        if FlashAttentionUtils.is_installed:
             logger.debug(
                 "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
                 "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
@@ -437,7 +433,7 @@ def get_attention_backend(
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
         if use_flash_attention and pad_between_seqs:
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
@@ -445,9 +441,9 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Dropout
-    if attention_dropout != 0.0 and use_flash_attention and FAUtils.use_v3:
+    if attention_dropout != 0.0 and use_flash_attention and FlashAttentionUtils.use_v3:
         logger.debug("Disabling FlashAttention 3 for dropout")
-        FAUtils.use_v3 = False
+        FlashAttentionUtils.use_v3 = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -468,27 +464,27 @@ def get_attention_backend(
         use_unfused_attention = False
     if context_parallel and use_flash_attention:
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with FP8"
                 )
             use_flash_attention = False
         if "bottom_right" in attn_mask_type:
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal_bottom_right masking"
                 )
             use_flash_attention = False
         elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal masking for cross-attention"
                 )
             use_flash_attention = False
         elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with bias"
                     " type of %s",
@@ -496,7 +492,7 @@ def get_attention_backend(
                 )
             use_flash_attention = False
         elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
-            if FAUtils.is_installed:
+            if FlashAttentionUtils.is_installed:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " attention bias for THD format"
@@ -554,7 +550,7 @@ def get_attention_backend(
     # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
-        if use_flash_attention and FAUtils.is_installed:
+        if use_flash_attention and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention for arbitrary mask")
         use_flash_attention = False
         if use_fused_attention:
@@ -562,7 +558,7 @@ def get_attention_backend(
         use_fused_attention = False
     if (
         use_flash_attention
-        and FAUtils.use_v3
+        and FlashAttentionUtils.use_v3
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
@@ -571,29 +567,29 @@ def get_attention_backend(
             "causal mask since flash-attn 2.1. See "
             "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
         )
-        FAUtils.use_v3 = False
+        FlashAttentionUtils.use_v3 = False
     if (
         use_flash_attention
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
-        if FAUtils.v2_1_plus:
+        if FlashAttentionUtils.v2_1_plus:
             logger.warning(
                 "Disabling FlashAttention as it only supports bottom-right-diagonal "
                 "causal mask since flash-attn 2.1. See "
                 "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
             )
             use_flash_attention = False
-        if not FAUtils.is_installed:
-            FAUtils.max_version = PkgVersion("2.1")
+        if not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.max_version = PkgVersion("2.1")
     if (
         use_flash_attention
         and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
         and max_seqlen_q != max_seqlen_kv
     ):
-        if not FAUtils.is_installed:
-            FAUtils.version_required = PkgVersion("2.1")
-        elif not FAUtils.v2_1_plus and not FAUtils.use_v3:
+        if not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.version_required = PkgVersion("2.1")
+        elif not FlashAttentionUtils.v2_1_plus and not FlashAttentionUtils.use_v3:
             logger.warning(
                 "Disabling FlashAttention as it only supports top-left-diagonal "
                 "causal mask before flash-attn 2.1. See "
@@ -602,13 +598,13 @@ def get_attention_backend(
             use_flash_attention = False
     if (
         use_flash_attention
-        and FAUtils.use_v3
+        and FlashAttentionUtils.use_v3
         and fp8
         and fp8_meta["recipe"].fp8_dpa
         and "padding" in attn_mask_type
     ):
         logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
-        FAUtils.use_v3 = False
+        FlashAttentionUtils.use_v3 = False
 
     # Filter: Sliding window attention
     #    backend                 |      window_size       | diagonal alignment
@@ -640,14 +636,14 @@ def get_attention_backend(
                 )
                 use_fused_attention = False
         if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if FAUtils.use_v3:
+            if FlashAttentionUtils.use_v3:
                 logger.debug(
                     "Disabling FlashAttention 3 as it does not support sliding window attention"
                 )
-                FAUtils.use_v3 = False
-            if not FAUtils.is_installed:
-                FAUtils.version_required = PkgVersion("2.3")
-            elif not FAUtils.v2_3_plus:
+                FlashAttentionUtils.use_v3 = False
+            if not FlashAttentionUtils.is_installed:
+                FlashAttentionUtils.version_required = PkgVersion("2.3")
+            elif not FlashAttentionUtils.v2_3_plus:
                 logger.debug(
                     "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
                 )
@@ -663,12 +659,12 @@ def get_attention_backend(
     # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
     #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
     if use_flash_attention and core_attention_bias_type == "alibi":
-        if FAUtils.use_v3:
+        if FlashAttentionUtils.use_v3:
             logger.debug("Disabling FlashAttention 3 for ALiBi")
-            FAUtils.use_v3 = False
-        if not FAUtils.is_installed:
-            FAUtils.version_required = PkgVersion("2.4")
-        elif not FAUtils.v2_4_plus:
+            FlashAttentionUtils.use_v3 = False
+        if not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.version_required = PkgVersion("2.4")
+        elif not FlashAttentionUtils.v2_4_plus:
             logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
             use_flash_attention = False
 
@@ -676,7 +672,7 @@ def get_attention_backend(
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
     ):
-        if FAUtils.is_installed:
+        if FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
 
@@ -782,9 +778,9 @@ def get_attention_backend(
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
     if use_flash_attention and deterministic:
-        if not FAUtils.is_installed:
-            FAUtils.version_required = PkgVersion("2.4.1")
-        elif not FAUtils.v2_4_1_plus and not FAUtils.use_v3:
+        if not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.version_required = PkgVersion("2.4.1")
+        elif not FlashAttentionUtils.v2_4_1_plus and not FlashAttentionUtils.use_v3:
             logger.warning(
                 "Disabling FlashAttention as version <2.4.1 does not support deterministic "
                 "execution. To use FlashAttention with deterministic behavior, "
@@ -813,16 +809,16 @@ def get_attention_backend(
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
     # does, we recommend users to install flash-attn if not installed already.
-    if not use_fused_attention and use_flash_attention and not FAUtils.is_installed:
+    if not use_fused_attention and use_flash_attention and not FlashAttentionUtils.is_installed:
         logger.warning(
             "flash-attn may provide important feature support or performance improvement."
             " Please install flash-attn %s.",
             _get_supported_versions(
-                FAUtils.version_required,
-                FAUtils.max_version,
+                FlashAttentionUtils.version_required,
+                FlashAttentionUtils.max_version,
             ),
         )
-    if use_flash_attention and not FAUtils.is_installed:
+    if use_flash_attention and not FlashAttentionUtils.is_installed:
         use_flash_attention = False
         available_backends[0] = False
 
@@ -855,7 +851,7 @@ def get_attention_backend(
         use_flash_attention
         and use_fused_attention
         and fused_attention_backend == FusedAttnBackend["FP8"]
-        and FAUtils.use_v3
+        and FlashAttentionUtils.use_v3
     ):
         logger.debug(
             "Disabling FlashAttention 3 to give FusedAttention preference for performance reasons "
