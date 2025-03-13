@@ -51,94 +51,95 @@ uint32_t _getAlignment(uintptr_t address) {
 inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 
-struct GemmParam {
-  void *A;
-  void *B;
-  cublasOperation_t transA;
-  cublasOperation_t transB;
-  transformer_engine::DType Atype;
-  transformer_engine::DType Btype;
-  void *A_scale_inv;
-  void *B_scale_inv;
-  int lda;
-  int ldb;
+  struct GemmParam {
+    void *A;
+    void *B;
+    cublasOperation_t transA;
+    cublasOperation_t transB;
+    transformer_engine::DType Atype;
+    transformer_engine::DType Btype;
+    void *A_scale_inv;
+    void *B_scale_inv;
+    int lda;
+    int ldb;
 
-  GemmParam(cublasOperation_t transA, cublasOperation_t transB)
-      : A(nullptr),
-        B(nullptr),
-        transA(transA),
-        transB(transB),
-        Atype(transformer_engine::DType::kNumTypes),
-        Btype(transformer_engine::DType::kNumTypes),
-        A_scale_inv(nullptr),
-        B_scale_inv(nullptr),
-        lda(0),
-        ldb(0) {}
-};
+    GemmParam(cublasOperation_t transA, cublasOperation_t transB)
+        : A(nullptr),
+          B(nullptr),
+          transA(transA),
+          transB(transB),
+          Atype(transformer_engine::DType::kNumTypes),
+          Btype(transformer_engine::DType::kNumTypes),
+          A_scale_inv(nullptr),
+          B_scale_inv(nullptr),
+          lda(0),
+          ldb(0) {}
+  };
 
-GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
-                                const transformer_engine::Tensor &B, const cublasOperation_t transB,
-                                const int k, const int lda, const int ldb) {
-  using namespace transformer_engine;
-  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
-             "Inputs A and B to GEMM need to have the same scaling mode!");
-  NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
-  NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
-  GemmParam ret(transA, transB);
+  GemmParam CanonicalizeGemmInput(
+      const transformer_engine::Tensor &A, const cublasOperation_t transA,
+      const transformer_engine::Tensor &B, const cublasOperation_t transB, const int k,
+      const int lda, const int ldb) {
+    using namespace transformer_engine;
+    NVTE_CHECK(A.scaling_mode == B.scaling_mode,
+               "Inputs A and B to GEMM need to have the same scaling mode!");
+    NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
+    NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
+    GemmParam ret(transA, transB);
 
-  ret.lda = lda;
-  ret.ldb = ldb;
+    ret.lda = lda;
+    ret.ldb = ldb;
 
-  if (is_tensor_scaling(A.scaling_mode)) {
-    ret.A = A.data.dptr;
-    ret.A_scale_inv = A.scale_inv.dptr;
-    if (transA == CUBLAS_OP_T) {
-      ret.Atype = A.data.dtype;
-    } else {
-      ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
-      if (is_fp8_dtype(ret.Atype)) {
-        int arch = cuda::sm_arch(cuda::current_device());
-        if (arch < 100) {
-          // Hopper and Ada - we need to use columnwise_data and change transA
-          NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
-          ret.A = A.columnwise_data.dptr;
-          ret.transA = CUBLAS_OP_T;
-          ret.A_scale_inv = A.columnwise_scale_inv.dptr;
-          ret.lda = k;
+    if (is_tensor_scaling(A.scaling_mode)) {
+      ret.A = A.data.dptr;
+      ret.A_scale_inv = A.scale_inv.dptr;
+      if (transA == CUBLAS_OP_T) {
+        ret.Atype = A.data.dtype;
+      } else {
+        ret.Atype = A.has_columnwise_data() ? A.columnwise_data.dtype : A.data.dtype;
+        if (is_fp8_dtype(ret.Atype)) {
+          int arch = cuda::sm_arch(cuda::current_device());
+          if (arch < 100) {
+            // Hopper and Ada - we need to use columnwise_data and change transA
+            NVTE_CHECK(A.has_columnwise_data(), "Input A is not suitable for columnwise usage!");
+            ret.A = A.columnwise_data.dptr;
+            ret.transA = CUBLAS_OP_T;
+            ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+            ret.lda = k;
+          }
         }
       }
-    }
-    ret.B = B.data.dptr;
-    ret.B_scale_inv = B.scale_inv.dptr;
-    if (transB == CUBLAS_OP_T) {
-      ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
-      if (is_fp8_dtype(ret.Btype)) {
-        int arch = cuda::sm_arch(cuda::current_device());
-        if (arch < 100) {
-          // Hopper and Ada - we need to use columnwise_data and change transA
-          NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
-          ret.B = B.columnwise_data.dptr;
-          ret.transB = CUBLAS_OP_N;
-          ret.B_scale_inv = B.columnwise_scale_inv.dptr;
-          ret.ldb = k;
+      ret.B = B.data.dptr;
+      ret.B_scale_inv = B.scale_inv.dptr;
+      if (transB == CUBLAS_OP_T) {
+        ret.Btype = B.has_columnwise_data() ? B.columnwise_data.dtype : B.data.dtype;
+        if (is_fp8_dtype(ret.Btype)) {
+          int arch = cuda::sm_arch(cuda::current_device());
+          if (arch < 100) {
+            // Hopper and Ada - we need to use columnwise_data and change transA
+            NVTE_CHECK(B.has_columnwise_data(), "Input B is not suitable for columnwise usage!");
+            ret.B = B.columnwise_data.dptr;
+            ret.transB = CUBLAS_OP_N;
+            ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+            ret.ldb = k;
+          }
         }
+      } else {
+        ret.Btype = B.data.dtype;
       }
     } else {
-      ret.Btype = B.data.dtype;
+      // If not tensor scaling (which includes also high precision types), we need to
+      // use the proper version of data
+      // We leave the transA/B values as is, since Blackwell supports transposes
+      ret.A = transA ? A.data.dptr : A.columnwise_data.dptr;
+      ret.Atype = transA ? A.data.dtype : A.columnwise_data.dtype;
+      ret.A_scale_inv = transA ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+      ret.B = transB ? B.columnwise_data.dptr : B.data.dptr;
+      ret.Btype = transB ? B.columnwise_data.dtype : B.data.dtype;
+      ret.B_scale_inv = transB ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     }
-  } else {
-    // If not tensor scaling (which includes also high precision types), we need to
-    // use the proper version of data
-    // We leave the transA/B values as is, since Blackwell supports transposes
-    ret.A = transA ? A.data.dptr : A.columnwise_data.dptr;
-    ret.Atype = transA ? A.data.dtype : A.columnwise_data.dtype;
-    ret.A_scale_inv = transA ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.B = transB ? B.columnwise_data.dptr : B.data.dptr;
-    ret.Btype = transB ? B.columnwise_data.dtype : B.data.dtype;
-    ret.B_scale_inv = transB ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    return ret;
   }
-  return ret;
-}
 
 }  // namespace
 
