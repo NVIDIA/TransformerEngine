@@ -4,7 +4,7 @@
 
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple, Optional
 import pytest
 import copy
 import random
@@ -328,9 +328,9 @@ class TorchLayerNormLinear(nn.Module):
         in_features: int,
         out_features: int,
         eps: float,
-        bias: bool = True,
         normalization: str = "LayerNorm",
         zero_centered_gamma: bool = False,
+        return_bias: bool = False,
     ):
         super().__init__()
         if normalization == "LayerNorm":
@@ -344,7 +344,7 @@ class TorchLayerNormLinear(nn.Module):
         else:
             raise RuntimeError("Unsupported normalization")
 
-        self.linear = nn.Linear(in_features, out_features)
+        self.linear = nn.Linear(in_features, out_features, bias=not return_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(self.layernorm(x))
@@ -444,6 +444,7 @@ class TorchLayerNormMLP(nn.Module):
         eps: float = 1e-5,
         activation="gelu",
         normalization: str = "LayerNorm",
+        return_bias: bool = False,
     ):
         super().__init__()
         if normalization == "LayerNorm":
@@ -460,7 +461,7 @@ class TorchLayerNormMLP(nn.Module):
             self.gelu = _supported_act[activation]
 
         self.fc1 = nn.Linear(hidden_size, fc1_output_features)
-        self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
+        self.fc2 = nn.Linear(ffn_hidden_size, hidden_size, bias=not return_bias)
 
     def forward(self, x):
         t = self.gelu(self.fc1(self.ln(x)))
@@ -1038,6 +1039,8 @@ def _test_granular_accuracy(block, bs, dtype, config):
     inp_hidden_states.retain_grad()
 
     out = block(inp_hidden_states)
+    if isinstance(out, (List, Tuple)):
+        out = out[0]
     loss = out.sum()
     loss.backward()
 
@@ -1119,7 +1122,8 @@ def test_dpa_accuracy(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
-def test_linear_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("return_bias", all_boolean)
+def test_linear_accuracy(dtype, bs, model, return_bias):
     config = model_configs[model]
 
     te_linear = Linear(
@@ -1127,21 +1131,23 @@ def test_linear_accuracy(dtype, bs, model):
         4 * config.hidden_size,
         bias=True,
         params_dtype=dtype,
+        return_bias=return_bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_linear = torch.nn.Linear(
         config.hidden_size,
         4 * config.hidden_size,
-        bias=True,
+        bias=not return_bias,
         device="cuda",
         dtype=dtype,
-    ).eval()
+    )
 
     # Share params
     with torch.no_grad():
         torch_linear.weight = Parameter(te_linear.weight.clone())
-        torch_linear.bias = Parameter(te_linear.bias.clone())
+        if not return_bias:
+            torch_linear.bias = Parameter(te_linear.bias.clone())
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_linear, bs, dtype, config)
@@ -1264,7 +1270,8 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
+@pytest.mark.parametrize("return_bias", all_boolean)
+def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma, return_bias):
     config = model_configs[model]
 
     te_ln_linear = LayerNormLinear(
@@ -1275,21 +1282,21 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
         normalization=normalization,
         params_dtype=dtype,
         zero_centered_gamma=zero_centered_gamma,
+        return_bias=return_bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_ln_linear = (
         TorchLayerNormLinear(
             config.hidden_size,
             4 * config.hidden_size,
             config.eps,
-            bias=True,
             normalization=normalization,
             zero_centered_gamma=zero_centered_gamma,
+            return_bias=return_bias,
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     # Share params
@@ -1298,7 +1305,8 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
         if normalization != "RMSNorm":
             torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.layer_norm_bias.clone())
         torch_ln_linear.linear.weight = Parameter(te_ln_linear.weight.clone())
-        torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
+        if not return_bias:
+            torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
@@ -1338,7 +1346,8 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
+@pytest.mark.parametrize("return_bias", all_boolean)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias):
     config = model_configs[model]
 
     te_ln_mlp = LayerNormMLP(
@@ -1347,8 +1356,9 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         activation=activation,
         normalization=normalization,
         params_dtype=dtype,
+        return_bias=return_bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_ln_mlp = (
         TorchLayerNormMLP(
@@ -1356,10 +1366,10 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             4 * config.hidden_size,
             activation=activation,
             normalization=normalization,
+            return_bias=return_bias,
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     # Share params
@@ -1370,7 +1380,8 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
         torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
         torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
         torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())
-        torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
+        if not return_bias:
+            torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)

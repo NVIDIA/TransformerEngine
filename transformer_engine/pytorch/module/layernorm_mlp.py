@@ -520,7 +520,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.is_first_microbatch = is_first_microbatch
             ctx.use_fc1_bias = use_fc1_bias
             ctx.use_fc2_bias = use_fc2_bias
-            ctx.use_bias = ctx.use_fc1_bias
+            ctx.use_bias = ctx.use_fc2_bias
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
