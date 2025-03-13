@@ -83,9 +83,11 @@ size_t product(const NVTEShape &shape, size_t begin, size_t end) {
     }
     return ret;
 }
+
 size_t product(const NVTEShape &shape) {
   return product(shape, 0, shape.ndim);
 }
+
 size_t product(const std::vector<size_t> shape, size_t begin, size_t end) {
     size_t ret = 1;
     NVTE_CHECK(end <= shape.size());
@@ -193,6 +195,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
+  NVTEShape columnwise_shape{nullptr, 0};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
@@ -207,7 +210,11 @@ Tensor::Tensor(const std::string& name,
       columnwise_shape_vec.emplace_back(shape.data[i]);
     }
   }
-  const NVTEShape columnwise_shape{columnwise_shape_vec.data(), columnwise_shape_vec.size()};
+
+  if (columnwise) {
+    columnwise_shape.data = columnwise_shape_vec.data();
+    columnwise_shape.ndim = columnwise_shape_vec.size();
+  }
 
   tensor_ = TensorWrapper(scaling_mode);
 

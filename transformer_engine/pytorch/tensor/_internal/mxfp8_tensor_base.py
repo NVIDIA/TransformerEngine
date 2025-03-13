@@ -115,7 +115,9 @@ class MXFP8TensorBase:
 
     def size(self, *args, **kwargs):
         # pylint: disable=missing-function-docstring
-        return self._rowwise_data.size(*args, **kwargs)
+        if self._rowwise_data is not None:
+            return self._rowwise_data.size(*args, **kwargs)
+        return self._columnwise_data.size(*args, **kwargs)
 
     def __repr__(self):
         data_rowwise = self.dequantize()
