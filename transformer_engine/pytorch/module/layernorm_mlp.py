@@ -250,8 +250,9 @@ class _LayerNormMLP(torch.autograd.Function):
         # For DelayScaling, output of normalization will be in fp8.
         # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
         if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-            ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
+            ln_out = fc1_input_quantizer.make_empty(
+                inputmat.shape, dtype=inputmat.dtype, device="cuda"
+            )
         elif not with_quantized_norm:
             ln_out = torch.empty_like(
                 inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
@@ -275,11 +276,15 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
-        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+        if ub_overlap_ag and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling():
             ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out_local = ln_out
-            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-            fc1_input_quantizer.quantize(ln_out_local, out=ln_out)
+            if isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+                ln_out_local = fc1_input_quantizer.quantize(ln_out)
+                ub_obj_lnout.copy_into_buffer(ln_out_local, fc1_input_quantizer, local_chunk=True)
+                ln_out = ln_out_local
+            else:
+                ln_out_local = ln_out
+                ub_obj_lnout.copy_into_buffer(ln_out, fc1_input_quantizer, local_chunk=True)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -498,7 +503,7 @@ class _LayerNormMLP(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag else ln_out,  # avoid saving a UB buffer
+                ln_out_local if ub_overlap_ag else ln_out,  # avoid saving a UB buffer
                 fc1_weight_final,
                 fc1_bias,
                 fc1_out,
