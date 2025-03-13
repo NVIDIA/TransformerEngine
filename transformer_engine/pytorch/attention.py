@@ -4582,7 +4582,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     ctx.dO_quantizer = dout._quantizer
                 else:
                     dout = ctx.dO_quantizer(dout)
-                fused_attn_dqkv_dtype = dout._fp8_dtype
+                fused_attn_dqkv_dtype = TE_DType[dout._data.dtype]
                 dout = dout._data
                 fp8_meta_kwargs = {}
                 fp8_meta_kwargs["s_quantizer"] = ctx.S_quantizer
@@ -4693,7 +4693,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 v_part,
                 out_part,
                 dout_part,
-                ctx.qkv_dtype,
+                dout_dtype,
                 fused_attn_dqkv_dtype,
                 aux_ctx_tensors,
                 fused_attn_backend,
