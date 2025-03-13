@@ -610,28 +610,54 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
         del result_infos
         q_spec = get_padded_spec(arg_infos[0])
+
+        # when supported softmax_aux shape is (b, s, h, 1) for thd on cudnn 9.6+
+        # otherwise softmax_aux shape is (b, h, s, 1) or (b, h, s, max_segments)
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+
         if config.qkv_layout.is_qkvpacked():
             # q_spec = (...batch, q_seqlen, 3, head, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec[:-3], *q_spec[-2:]))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-2], q_spec[-4], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-4], q_spec[-4], q_spec[-2], None)
+                )
         elif config.qkv_layout.is_kvpacked():
             # q_spec = (...batch, q_seqlen, head, hidden)
             # k_spec = (...batch, kv_seqlen, 2, num_gqa_groups, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+                )
         elif config.qkv_layout.is_separate():
             # q_spec = (...batch, q_seqlen, head, hidden)
             # k_spec = (...batch, kv_seqlen, num_gqa_groups, hidden)
             out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
-            softmax_aux_sharding = NamedSharding(
-                mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
-            )
+            if not is_packed_softmax:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+                )
+            else:
+                softmax_aux_sharding = NamedSharding(
+                    mesh, PartitionSpec(*q_spec[:-3], q_spec[-3], q_spec[-2], None)
+                )
         else:
             raise ValueError(f"Unsupported {config.qkv_layout=}")
+
+        if :
+            
+        else:
+           
+
         rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
         return (out_sharding, softmax_aux_sharding, rng_state_sharding)
 
