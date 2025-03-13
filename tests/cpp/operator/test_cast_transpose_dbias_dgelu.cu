@@ -75,29 +75,26 @@ void performTest(const size_t N, const size_t H) {
 
   DType itype = TypeInfo<IType>::dtype;
   DType otype = TypeInfo<OType>::dtype;
-  DType ctype = TypeInfo<CType>::dtype;
 
-  Tensor input({N, H}, itype);
-  Tensor gelu_input({N, H}, itype);
+  Tensor input("input", {N, H}, itype);
+  Tensor gelu_input("gelu_input", {N, H}, itype);
 
-  Tensor output_c({N, H}, otype);
-  Tensor output_t({ H, N}, otype);
+  Tensor output("output", {N, H}, otype, true, true);
   // dbias has the same data type with "output grad"
-  Tensor dbias({H}, itype);
+  Tensor dbias("dbias", {H}, itype);
 
   fillUniform(&input);
   fillUniform(&gelu_input);
-  setRandomScale(&output_c);
-  output_t.shareFP8Meta(output_c);
+  setRandomScale(&output);
 
   std::unique_ptr<OType[]> ref_output_c = std::make_unique<OType[]>(N*H);
   std::unique_ptr<OType[]> ref_output_t = std::make_unique<OType[]>(N*H);
   std::unique_ptr<IType[]> ref_output_dbias = std::make_unique<IType[]>(H);
 
   CType ref_amax;
-  compute_ref_cast_transpose_dbias_dgelu(input.cpu_dptr<IType>(),
-                                         gelu_input.cpu_dptr<IType>(),
-                                         output_c.scale(),
+  compute_ref_cast_transpose_dbias_dgelu(input.rowwise_cpu_dptr<IType>(),
+                                         gelu_input.rowwise_cpu_dptr<IType>(),
+                                         output.scale(),
                                          ref_output_c.get(),
                                          ref_output_t.get(),
                                          &ref_amax,
@@ -108,19 +105,17 @@ void performTest(const size_t N, const size_t H) {
 
   nvte_cast_transpose_dbias_dgelu(input.data(),
                                   gelu_input.data(),
-                                  output_c.data(),
-                                  output_t.data(),
+                                  output.data(),
                                   dbias.data(),
                                   workspace.data(),
                                   0);
 
-  workspace = Tensor(workspace.shape(), workspace.dtype());
+  workspace = Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
 
   nvte_cast_transpose_dbias_dgelu(input.data(),
                                   gelu_input.data(),
-                                  output_c.data(),
-                                  output_t.data(),
+                                  output.data(),
                                   dbias.data(),
                                   workspace.data(),
                                   0);
@@ -131,18 +126,18 @@ void performTest(const size_t N, const size_t H) {
 
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output_c.scale();
-    compareResults("scale_inv", output_c.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
+    compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+    float ref_scale_inv = 1.f / output.scale();
+    compareResults("scale_inv", output.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
 
   auto [atol, rtol] = getTolerances(otype);
-  compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);
-  compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
+  compareResults("output_c", output, ref_output_c.get(), true, atol, rtol);
+  compareResults("output_t", output, ref_output_t.get(), false, atol, rtol);
 
   auto [atol_dbias, rtol_dbias] = getTolerances(itype);
   rtol_dbias *= 4;
-  compareResults("output_dbias", dbias, ref_output_dbias.get(), atol_dbias, rtol_dbias);
+  compareResults("output_dbias", dbias, ref_output_dbias.get(), true, atol_dbias, rtol_dbias);
 }
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{64, 400},

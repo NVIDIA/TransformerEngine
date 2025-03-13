@@ -14,7 +14,7 @@
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <transformer_engine/transpose.h>
+#include <transformer_engine/cast.h>
 #include "../test_common.h"
 
 using namespace transformer_engine;
@@ -38,6 +38,8 @@ void compute_ref(const InputType *data, OutputType *output_c, OutputType *output
   *amax = current_max;
 }
 
+
+// delayed tensor scaling test
 template <typename InputType, typename OutputType>
 void performTest(const size_t N, const size_t H) {
   using namespace test;
@@ -45,37 +47,36 @@ void performTest(const size_t N, const size_t H) {
   DType itype = TypeInfo<InputType>::dtype;
   DType otype = TypeInfo<OutputType>::dtype;
 
-  Tensor input({ N, H }, itype);
-  Tensor output_c({ N, H }, otype);
-  Tensor output_t({ H, N }, otype);
+  Tensor input("input", { N, H }, itype);
+  Tensor output("output", { N, H }, otype, true, true);
 
   std::unique_ptr<OutputType[]> ref_output_c = std::make_unique<OutputType[]>(N * H);
   std::unique_ptr<OutputType[]> ref_output_t = std::make_unique<OutputType[]>(N * H);
 
   fillUniform(&input);
-  setRandomScale(&output_c);
-  output_t.shareFP8Meta(output_c);
+  setRandomScale(&output);
 
-  nvte_cast_transpose(input.data(), output_c.data(), output_t.data(), 0);
+  nvte_quantize(input.data(), output.data(), 0);
 
   float ref_amax;
-  compute_ref<InputType, OutputType>(input.cpu_dptr<InputType>(), ref_output_c.get(),
+  compute_ref<InputType, OutputType>(input.rowwise_cpu_dptr<InputType>(), ref_output_c.get(),
                                      ref_output_t.get(), N, H, &ref_amax,
-                                     output_c.scale());
+                                     output.scale());
 
   cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
   if (isFp8Type(otype)) {
     auto [atol_amax, rtol_amax] = getTolerances(DType::kFloat32);
-    compareResults("amax", output_c.amax(), ref_amax, atol_amax, rtol_amax);
-    float ref_scale_inv = 1.f / output_c.scale();
-    compareResults("scale_inv", output_c.scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
+    compareResults("amax", output.amax(), ref_amax, atol_amax, rtol_amax);
+    float ref_scale_inv = 1.f / output.scale();
+    compareResults("scale_inv", output.rowwise_scale_inv(), ref_scale_inv, atol_amax, rtol_amax);
   }
   auto [atol, rtol] = getTolerances(otype);
-  compareResults("output_c", output_c, ref_output_c.get(), atol, rtol);
-  compareResults("output_t", output_t, ref_output_t.get(), atol, rtol);
+  compareResults("output_c", output, ref_output_c.get(), true, atol, rtol);
+  compareResults("output_t", output, ref_output_t.get(), false, atol, rtol);
 }
+
 
 std::vector<std::pair<size_t, size_t>> test_cases = {{2048, 12288},
                                                      {768, 1024},
@@ -103,6 +104,7 @@ TEST_P(CTTestSuite, TestCastTranspose) {
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(input_type, InputType,
     TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(output_type, OutputType,
+      // delayed tensor scaling
       performTest<InputType, OutputType>(size.first, size.second);
     );
   );

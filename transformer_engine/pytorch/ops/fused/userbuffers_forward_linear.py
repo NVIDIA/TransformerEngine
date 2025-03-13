@@ -4,6 +4,8 @@
 
 """Linear layer forward with Userbuffers communication."""
 
+# pylint: skip-file  ### TODO Debug Userbuffers support
+
 from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
@@ -11,7 +13,7 @@ from typing import Any, Optional
 import torch
 
 from transformer_engine_torch import CommOverlapAlgo
-from ...cpp_extensions import fp8_gemm, gemm
+from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
@@ -48,6 +50,9 @@ class UserbuffersForwardLinear(FusedOperation):
         bias: Optional[Bias],
         reduce_scatter: Optional[ReduceScatter],
     ) -> None:
+
+        ### TODO Debug Userbuffers support
+        raise NotImplementedError("Userbuffers support has been broken by recent refactors")
 
         # Basic operations that comprise this fused operation
         op_idxs = {"linear": 0, "bias": None, "reduce_scatter": None}
@@ -523,6 +528,8 @@ def fuse_userbuffers_forward_linear(
         Updated forward pass operations
 
     """
+
+    return ops  ### TODO Debug Userbuffers support
 
     # Return immediately if environment is not distributed
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:

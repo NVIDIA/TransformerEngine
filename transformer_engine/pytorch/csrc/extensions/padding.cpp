@@ -10,6 +10,7 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
                              std::vector<size_t> input_row_list,
                              std::vector<size_t> padded_input_row_list) {
   using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   NVTE_CHECK(input_row_list.size() == padded_input_row_list.size(),
              "Number of input row list and padded row list must match.");

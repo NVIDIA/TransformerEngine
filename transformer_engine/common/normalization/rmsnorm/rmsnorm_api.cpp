@@ -13,6 +13,7 @@
 #include "../../common.h"
 #include "../common.h"
 #include "transformer_engine/normalization.h"
+#include "transformer_engine/transpose.h"
 
 namespace transformer_engine {
 
@@ -21,6 +22,11 @@ using namespace normalization;
 void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tensor *z,
                  Tensor *rsigma, Tensor *workspace, const int multiprocessorCount,
                  const bool zero_centered_gamma, cudaStream_t stream) {
+  if (is_fp8_dtype(z->data.dtype) && !is_delayed_tensor_scaling(z->scaling_mode) &&
+      !is_block_scaling(z->scaling_mode)) {
+    NVTE_ERROR("Not implemented scaling mode: " + to_string(z->scaling_mode) + ".");
+  }
+
   NVTE_CHECK(x.data.shape.size() == 2);
 
   NVTE_CHECK(gamma.data.shape[0] == x.data.shape[1]);
@@ -39,17 +45,21 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
-  Tensor empty;
-
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
-  if (use_cudnn_norm_fwd()) {
+  bool cudnn_backend = use_cudnn_norm_fwd() || is_block_scaling(z->scaling_mode);
+
+  bool training =
+      is_delayed_tensor_scaling(z->scaling_mode) || (z->columnwise_data).dptr != nullptr;
+
+  if (cudnn_backend) {
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
   } else {
     norm_backend = NVTE_Norm_Backend::Te;
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, rsigma->data.dptr);
   }
+
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
       gamma.data.dtype,  // wtype
@@ -57,17 +67,29 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
       z->data.dtype,     // otype
       x.data.shape[0],   // batch_size
       x.data.shape[1],   // hidden_size
-      multiprocessorCount, zero_centered_gamma, is_aligned);
+      multiprocessorCount, zero_centered_gamma, is_aligned, z->scaling_mode, training);
 
   if (workspace->data.shape.empty()) {
     workspace->data.shape = plan->getWorkspaceShape();
     workspace->data.dtype = DType::kByte;
     return;
-  } else {
-    NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-    plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr, nullptr,
-                  reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
-                  workspace->data.dptr, stream);
+  }
+
+  NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
+  NVTE_CHECK(
+      !is_block_scaling(z->scaling_mode) || (!training || z->columnwise_scale_inv.dptr != nullptr),
+      "Columnwise scale_inv must be allocated for NormFwdTraining!");
+  plan->execute(z, x.data.dptr, gamma.data.dptr, nullptr /*beta*/, nullptr /*mu*/,
+                reinterpret_cast<void *>(const_cast<float *>(&epsilon)), rsigma->data.dptr,
+                workspace->data.dptr, stream);
+
+  // Compute FP8 transpose if required
+  if (z->has_columnwise_data() && is_tensor_scaling(z->scaling_mode)) {
+    Tensor transpose_data;
+    transpose_data.data = z->columnwise_data;
+    transpose_data.scaling_mode = z->scaling_mode;
+    nvte_transpose(reinterpret_cast<NVTETensor>(z), reinterpret_cast<NVTETensor>(&transpose_data),
+                   stream);
   }
 
   return;
@@ -101,8 +123,6 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     CheckOutputTensor(*dgamma, "dgamma");
   }
 
-  Tensor empty;
-
   NVTE_Norm_Backend norm_backend;
   bool is_aligned = true;
   if (use_cudnn_norm_bwd()) {
@@ -128,8 +148,8 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     return;
   } else {
     NVTE_CHECK(workspace->data.shape == plan->getWorkspaceShape());
-    plan->execute(x.data.dptr, gamma.data.dptr, nullptr, rsigma.data.dptr, dx->data.dptr,
-                  dz.data.dptr, nullptr, dgamma->data.dptr, workspace->data.dptr, stream);
+    plan->execute(x.data.dptr, gamma.data.dptr, nullptr /*mu*/, rsigma.data.dptr, dx->data.dptr,
+                  dz.data.dptr, nullptr /*dbeta*/, dgamma->data.dptr, workspace->data.dptr, stream);
   }
   return;
 }

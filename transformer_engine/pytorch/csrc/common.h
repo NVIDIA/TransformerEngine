@@ -33,23 +33,25 @@
 #include <transformer_engine/permutation.h>
 #include <transformer_engine/recipe.h>
 #include <transformer_engine/softmax.h>
+#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include <transformer_engine/transpose.h>
 
 #include <ATen/cuda/CUDAGraphsUtils.cuh>
 #include <cassert>
 #include <cstring>
-#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <random>
-#include <stdexcept>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <vector>
 
+#include "c10/util/ArrayRef.h"
 #include "common/util/logging.h"
 
-namespace transformer_engine {
+namespace transformer_engine::pytorch {
+
+// in python we have: dist_group_type = torch.distributed.ProcessGroup
+using dist_group_type = c10d::ProcessGroup;
 
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
@@ -85,7 +87,99 @@ enum FP8BwdTensors {
   GRAD_INPUT3 = 5
 };
 
-}  // namespace transformer_engine
+class Quantizer {
+ public:
+  virtual NVTEScalingMode get_scaling_mode() const = 0;
+
+  virtual void set_quantization_params(TensorWrapper* tensor) const = 0;
+
+  virtual std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const = 0;
+
+  virtual ~Quantizer() = default;
+
+  bool rowwise_usage = true;
+  bool columnwise_usage = true;
+  bool internal = false;
+  py::handle quantizer;
+
+ protected:
+  explicit Quantizer(const py::handle& quantizer);
+};
+
+class NoneQuantizer : public Quantizer {
+ public:
+  explicit NoneQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {}
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override {}
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8Quantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+
+  explicit Float8Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8CurrentScalingQuantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  int amax_reduction_size;
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+
+  explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class MXFP8Quantizer : public Quantizer {
+ public:
+  DType dtype;
+
+  explicit MXFP8Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP8_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
+
+std::vector<size_t> getTensorShape(at::Tensor t);
 
 transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
                                                       const std::string& fp8_recipe);
@@ -103,9 +197,11 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     case transformer_engine::DType::kBFloat16:
       return at::kBFloat16;
     case transformer_engine::DType::kByte:
-    case transformer_engine::DType::kFloat8E4M3:
-    case transformer_engine::DType::kFloat8E5M2:
       return at::kByte;
+    case transformer_engine::DType::kFloat8E4M3:
+      return at::kFloat8_e4m3fn;
+    case transformer_engine::DType::kFloat8E5M2:
+      return at::kFloat8_e5m2;
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -113,6 +209,10 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
 
 inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
   switch (t) {
+    case at::kFloat8_e4m3fn:
+      return transformer_engine::DType::kFloat8E4M3;
+    case at::kFloat8_e5m2:
+      return transformer_engine::DType::kFloat8E5M2;
     case at::kHalf:
       return transformer_engine::DType::kFloat16;
     case at::kFloat:
@@ -128,6 +228,7 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
     case torch::kInt64:
       return transformer_engine::DType::kInt64;
     default:
+      std::cout << "Type: " << static_cast<int>(t) << std::endl;
       NVTE_ERROR("Invalid type");
   }
 }
@@ -140,11 +241,18 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const std::vector<size_t>& shape,
                                                               const transformer_engine::DType type);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
-                                                              const std::vector<size_t>& shape,
-                                                              const transformer_engine::DType type,
-                                                              void* amax_ptr, void* scale_ptr,
-                                                              void* scale_inv_ptr);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, const std::vector<size_t>& shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, std::vector<size_t> scale_inv_shape = {1},
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    void* data_ptr, void* columnwise_data_ptr, const std::vector<size_t>& shape,
+    const std::vector<size_t>& columnwise_shape, const transformer_engine::DType type,
+    void* amax_ptr, void* scale_ptr, void* scale_inv_ptr, void* columnwise_scale_inv_ptr,
+    const std::vector<size_t>& scale_inv_shape = {1},
+    const std::vector<size_t>& columnwise_scale_inv_shape = {1},
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
                                                               const NVTEShape& shape,
@@ -152,11 +260,18 @@ transformer_engine::TensorWrapper makeTransformerEngineTensor(void* data_ptr,
 
 transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor);
 
-transformer_engine::TensorWrapper makeTransformerEngineTensor(at::Tensor tensor, at::Tensor amax,
-                                                              const at::Tensor scale,
-                                                              at::Tensor scale_inv);
+TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer);
 
-size_t product(const std::vector<size_t>& shape);
+transformer_engine::TensorWrapper makeTransformerEngineTensor(
+    at::Tensor tensor, at::Tensor amax, const at::Tensor scale, at::Tensor scale_inv,
+    NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING);
+
+template <typename T>
+T product(const std::vector<T>& shape);
+
+size_t product(const NVTEShape& shape, size_t begin, size_t end);
+
+std::vector<size_t> nvte_shape_to_vector(const NVTEShape& nvte_shape);
 
 at::Tensor allocateSpace(const std::vector<size_t>& shape, const transformer_engine::DType type,
                          bool init_to_zeros);
@@ -169,5 +284,55 @@ at::Tensor allocateTorchTensor(int M, int N, transformer_engine::DType dtype);
 at::Tensor allocateTorchTensor(int M, transformer_engine::DType dtype);
 
 void* getDataPtr(at::Tensor tensor, int offset = 0);
+
+std::vector<size_t> convertShape(const NVTEShape& shape);
+
+int roundup(const int value, const int multiple);
+
+}  // namespace transformer_engine::pytorch
+
+namespace std {
+template <typename T>
+string to_string(const vector<T>& vec) {
+  string ret = "[";
+  for (const auto& val : vec) {
+    ret += to_string(val) + ",";
+  }
+  if (ret.size() > 1) {
+    ret[ret.size() - 1] = ']';
+  } else {
+    ret += "]";
+  }
+  return ret;
+}
+
+// Torch shape -> string
+template <typename T>
+string to_string(const c10::ArrayRef<T>& vec) {
+  string ret = "[";
+  for (const auto& val : vec) {
+    ret += to_string(val) + ",";
+  }
+  if (ret.size() > 1) {
+    ret[ret.size() - 1] = ']';
+  } else {
+    ret += "]";
+  }
+  return ret;
+}
+
+inline string to_string(const NVTEShape& s) {
+  string ret = "[";
+  for (size_t i = 0; i < s.ndim; ++i) {
+    ret += to_string(s.data[i]) + ",";
+  }
+  if (ret.size() > 1) {
+    ret[ret.size() - 1] = ']';
+  } else {
+    ret += "]";
+  }
+  return ret;
+}
+}  // namespace std
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_COMMON_H_

@@ -4,17 +4,25 @@
 #
 # See LICENSE for license information.
 
-import sys
-import os
 import argparse
+import datetime
+import os
+import sys
 from functools import wraps
 
 import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
-
-from transformer_engine.common.recipe import Format, DelayedScaling
+import transformer_engine_torch as tex
+from transformer_engine.common.recipe import (
+    MXFP8BlockScaling,
+    DelayedScaling,
+    Float8CurrentScaling,
+    Format,
+    Recipe,
+)
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
@@ -23,15 +31,29 @@ NR_HEADS = 4
 WORLD_RANK, WORLD_SIZE = None, None
 NCCL_WORLD = None
 LOSS_FN = nn.MSELoss()
-FP8 = False
+QUANTIZATION = None
 
-# Fp8 recipe setup
-fp8_format = Format.HYBRID
-fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+
+# Disable TF32
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
+
+# Quantization recipe setup
+def quantization_recipe() -> Recipe:
+    if QUANTIZATION == "fp8":
+        return DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
+        )
+    if QUANTIZATION == "mxfp8":
+        return MXFP8BlockScaling()
+    if QUANTIZATION == "fp8_cs":
+        return Float8CurrentScaling()
+    return te.fp8.get_default_fp8_recipe()
 
 
 def main(argv=None, namespace=None):
-    global WORLD_RANK, WORLD_SIZE, NCCL_WORLD, FP8
+    global WORLD_RANK, WORLD_SIZE, NCCL_WORLD, QUANTIZATION
 
     WORLD_RANK = int(os.getenv("RANK", "0"))
     WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
@@ -44,6 +66,7 @@ def main(argv=None, namespace=None):
         "backend": "nccl",
         "rank": WORLD_RANK,
         "world_size": WORLD_SIZE,
+        "timeout": datetime.timedelta(seconds=30),
     }
     dist_init_kwargs["init_method"] = "env://"
     dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
@@ -57,18 +80,25 @@ def main(argv=None, namespace=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--layer-type", type=str)
-    parser.add_argument("--fp8", action="store_true", default=False)
+    parser.add_argument("--quantization", type=str, default=None)
     args = parser.parse_args(argv, namespace)
 
+    # Quantization scheme
+    QUANTIZATION = args.quantization
+    if QUANTIZATION in ("fp8", "mxfp8"):
+        global SEQ_LEN, BATCH_SIZE, HIDDEN_SIZE
+        SEQ_LEN = 32
+        BATCH_SIZE = 32
+        HIDDEN_SIZE = 128
+
     test_dict = [
+        test_quantizer,
         test_linear,
         test_layernorm,
         test_layernorm_linear,
         test_layernorm_mlp,
         test_transformer_layer,
     ]
-
-    FP8 = args.fp8
 
     for test in test_dict:
         test()
@@ -124,11 +154,15 @@ def dist_print(msg, src=None, end="\n", error=False):
     stream = sys.stderr if error else sys.stdout
     if WORLD_RANK == (0 if src is None else src):
         stream.write(f"[rank{WORLD_RANK}] {msg}{end}\n")
-    dist.barrier()
 
 
 def _get_tolerances(dtype):
-    if FP8:
+    # loose tolerances for fp8_cs because of sequence parallel & amax reduction
+    # so that each rank has a different scale_inv for computing Y when we have
+    # row parallel & sequence parallel, because we do the all_gather in backward pass
+    if QUANTIZATION == "fp8_cs":
+        return {"rtol": 0.4, "atol": 0.25}
+    elif QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
 
     if dtype == torch.float16:
@@ -153,8 +187,7 @@ def _check_outputs(output_single_node, output_distributed):
         dist_print(output_info, src=WORLD_RANK, error=output_failed)
     numerics_failed[0] = int(output_failed)
     dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
-    if bool(numerics_failed.item()):
-        sys.exit(1)
+    assert not bool(numerics_failed.item())
 
 
 def _match_param_sizes(dist_param, single_param):
@@ -213,13 +246,12 @@ def _check_gradients(model_distributed, model_single, main_grad_check=False):
             )
 
         if grad_failed:
-            dist_print(i)
-            dist_print(name)
+            dist_print(i, src=WORLD_RANK)
+            dist_print(name, src=WORLD_RANK)
             dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
         numerics_failed[0] = int(grad_failed)
         dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, NCCL_WORLD)
-        if bool(numerics_failed.item()):
-            sys.exit(1)
+        assert not bool(numerics_failed.item())
 
 
 def _copy_params(model_distributed, model_single):
@@ -243,9 +275,18 @@ def _apply_models(
     model_single_node, model_distributed, input_single_node, input_distributed, **kwargs
 ):
     _alloc_main_grad(model_single_node, model_distributed)  # for fuse_wgrad_accumulation=True
-    with te.fp8_autocast(enabled=FP8, fp8_recipe=fp8_recipe):
+    input_single_node.requires_grad_()
+    input_distributed.requires_grad_()
+    with te.fp8_autocast(
+        enabled=QUANTIZATION is not None,
+        fp8_recipe=quantization_recipe(),
+    ):
         output_single_node = model_single_node(input_single_node, **kwargs)
-    with te.fp8_autocast(enabled=FP8, fp8_recipe=fp8_recipe, fp8_group=NCCL_WORLD):
+    with te.fp8_autocast(
+        enabled=QUANTIZATION is not None,
+        fp8_recipe=quantization_recipe(),
+        fp8_group=NCCL_WORLD,
+    ):
         output_distributed = model_distributed(input_distributed, **kwargs)
     return output_single_node, output_distributed
 
@@ -260,6 +301,98 @@ def _alloc_main_grad(model_single_node, model_distributed):
     for model in [model_single_node, model_distributed]:
         for param in model.parameters():
             param.main_grad = torch.zeros_like(param, dtype=torch.float32)
+
+
+###############################################
+#                   Quantizer                 #
+###############################################
+def _construct_quantizer(quantizer_class, fp8_dtype, device, tp_group, tp_size):
+    """
+    quantizer is the reference quantizer on a single GPU.
+    quantizer_dist is the distributed quantizer to be tested on multiple GPUs.
+    """
+    if quantizer_class == Float8CurrentScalingQuantizer:
+        quantizer_dist = quantizer_class(
+            fp8_dtype=fp8_dtype,
+            device=device,
+            with_amax_reduction=True,
+            amax_reduction_group=tp_group,
+            amax_reduction_size=tp_size,
+        )
+        quantizer = quantizer_class(
+            fp8_dtype=fp8_dtype,
+            device=device,
+            with_amax_reduction=False,
+        )
+        return quantizer, quantizer_dist
+    else:
+        raise ValueError(f"Unsupported quantizer class: {quantizer_class}")
+
+
+def _shard_tensor(x, world_size, axis):
+    split_size = x.size()[axis] // world_size
+    split_tensor = torch.split(x, split_size, axis)
+    out = []
+    for tensor in split_tensor:
+        out.append(tensor.detach().clone().requires_grad_(x.requires_grad).cuda())
+    return out
+
+
+@run_distributed_test()
+def _test_quantizer(input_dtype, fp8_dtype):
+    """Test the quantizer under distributed settings.
+
+    Args:
+        input_dtype (torch.dtype): The data type of the input.
+        fp8_dtype (tex.DType): The data type of the fp8.
+    """
+
+    M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE
+
+    # high precision input
+    x_hp_cpu = torch.randn((M, N), device="cpu").to(input_dtype)
+    # set one element of the input to a very large value, which doesn't live in rank 0 after the split
+    # to test the amax reduction on purpose
+    x_hp_cpu[M - 1, N - 1] = 1e4
+    # rank 0 takes the full copy and quantize with GPU 0 for verification
+    if WORLD_RANK == 0:
+        x_hp_rank0 = x_hp_cpu.clone().detach().requires_grad_(True).to("cuda")
+    x_hp_local_rank = _shard_tensor(x_hp_cpu, WORLD_SIZE, 0)[WORLD_RANK]
+
+    # Create quantizers
+    quantizer, quantizer_dist = _construct_quantizer(
+        Float8CurrentScalingQuantizer, fp8_dtype, x_hp_local_rank.device, NCCL_WORLD, WORLD_SIZE
+    )
+
+    # quantize the input
+    if WORLD_RANK == 0:
+        x_fp8_single = quantizer(x_hp_rank0)
+
+    # multi-GPU quantizer
+    x_fp8_dist = quantizer_dist(x_hp_local_rank)
+
+    # check scale_inv with zero tolerance
+    if WORLD_RANK == 0:
+        torch.testing.assert_close(
+            x_fp8_single._scale_inv, x_fp8_dist._scale_inv, rtol=0.0, atol=0.0
+        )
+
+
+def test_quantizer():
+    """
+    Run quantizer tests with various configurations.
+    Currently only check fp8_cs because it needs to do amax reduction in the quantizer.
+    """
+    # skip this test for other quantization schemes
+    if QUANTIZATION != "fp8_cs":
+        return
+
+    input_dtypes = [torch.float32, torch.bfloat16]
+    fp8_dtypes = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+
+    for input_dtype in input_dtypes:
+        for fp8_dtype in fp8_dtypes:
+            _test_quantizer(input_dtype, fp8_dtype)
 
 
 ############################################
@@ -308,6 +441,11 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
                 torch.empty((WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
             )
             input_distributed = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+            # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+            if QUANTIZATION == "fp8_cs":
+                input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+                if WORLD_RANK == WORLD_SIZE - 1:
+                    input_distributed[BATCH_SIZE - 1, HIDDEN_SIZE - 1] = 11
             input_single_node = _gather(input_distributed, dim=0).detach()
         else:
             input_distributed = input_single_node.clone()
@@ -470,6 +608,12 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
         # Duplicate input for sequence parallelism
         input_single_node = torch.empty((WORLD_SIZE * SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
         input_distributed = torch.randn((SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
+        # make the last element of the input a large value to test the amax reduction on purpose
+        # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+        if QUANTIZATION == "fp8_cs":
+            input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+            if WORLD_RANK == WORLD_SIZE - 1:
+                input_distributed[SEQ_LEN - 1, HIDDEN_SIZE - 1] = 11
         input_single_node = _gather(input_distributed).detach()
     else:
         input_distributed = input_single_node.clone()
@@ -544,9 +688,7 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
     """
     # Set parameter data type
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = (
-        64 if FP8 else 32
-    )  # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     # Create models
     model_single_node = te.LayerNormMLP(HIDDEN_SIZE, FFN_HIDDEN_SIZE, **kwargs)
@@ -570,6 +712,12 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
         # Duplicate input for sequence parallelism
         input_single_node = torch.empty((WORLD_SIZE * SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
         input_distributed = torch.randn((SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
+        # make the last element of the input a large value to test the amax reduction on purpose
+        # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+        if QUANTIZATION == "fp8_cs":
+            input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+            if WORLD_RANK == WORLD_SIZE - 1:
+                input_distributed[SEQ_LEN - 1, HIDDEN_SIZE - 1] = 11
         input_single_node = _gather(input_distributed).detach()
     else:
         input_distributed = input_single_node.clone()
@@ -622,6 +770,7 @@ def test_layernorm_mlp():
         {"return_bias": True},
         {"return_layernorm_output": True},
     ]
+
     for kwargs in kwargs_list:
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
@@ -636,9 +785,7 @@ def test_layernorm_mlp():
 @run_distributed_test()
 def _test_transformer_layer_parallel(sequence_parallel=False, **kwargs):
     params_dtype = kwargs.get("params_dtype", torch.float32)
-    FFN_HIDDEN_SIZE = (
-        64 if FP8 else 32
-    )  # larger tensors lead to numerical failures with thight atol and rtol
+    FFN_HIDDEN_SIZE = 32 if QUANTIZATION is None else 128
 
     model_single_node = te.TransformerLayer(
         HIDDEN_SIZE, FFN_HIDDEN_SIZE, NR_HEADS, attention_dropout=0, hidden_dropout=0, **kwargs
@@ -718,6 +865,7 @@ def test_transformer_layer():
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]
+
     for kwargs in kwargs_list:
         for sequence_parallel in [False, True]:
             _test_transformer_layer_parallel(sequence_parallel, **kwargs)

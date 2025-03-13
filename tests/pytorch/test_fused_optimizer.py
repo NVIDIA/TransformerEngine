@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.testing._internal.common_device_type import largeTensorTest
 import transformer_engine.pytorch as te
+from transformer_engine.common.recipe import DelayedScaling
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch import fp8_model_init
 from transformer_engine.pytorch.utils import is_bf16_compatible
@@ -184,6 +185,7 @@ class TestFusedAdam(TestFusedOptimizer):
         grad_dtype,
         exp_avg_dtype,
         exp_avg_sq_dtype,
+        store_param_remainders=False,
         model_rtol=None,
         model_atol=None,
         master_rtol=None,
@@ -220,6 +222,7 @@ class TestFusedAdam(TestFusedOptimizer):
             "weight_decay": 0,
             "amsgrad": False,
         }
+
         ref_optim = torch.optim.Adam(ref_params, **options)
         tst_optim = te.optimizers.FusedAdam(
             model_params,
@@ -228,6 +231,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_dtype=exp_avg_dtype,
             exp_avg_sq_dtype=exp_avg_sq_dtype,
             use_decoupled_grad=True,
+            store_param_remainders=store_param_remainders,
             **options,
         )
 
@@ -237,7 +241,7 @@ class TestFusedAdam(TestFusedOptimizer):
                 p.decoupled_grad = p_ref.grad.clone().to(grad_dtype)
             ref_optimizer.step()
             tst_optimizer.step()
-            if use_master_weights:
+            if use_master_weights and not store_param_remainders:
                 master_weights_to_fp32 = [
                     tst_optim.get_unscaled_state(p, "master_param") for p in model_params
                 ]
@@ -270,6 +274,7 @@ class TestFusedAdam(TestFusedOptimizer):
             exp_avg_dtype=exp_avg_dtype,
             exp_avg_sq_dtype=exp_avg_sq_dtype,
             use_decoupled_grad=True,
+            store_param_remainders=store_param_remainders,
             **options,
         )
         tst_optim.load_state_dict(state_dict)
@@ -298,6 +303,19 @@ class TestFusedAdam(TestFusedOptimizer):
             grad_dtype=torch.float32,
             exp_avg_dtype=torch.float32,
             exp_avg_sq_dtype=torch.float32,
+        )
+
+    @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
+    def test_fp32_master_store_param_remainders(self):
+        self.gen_precision_aware_test(
+            use_fp8_params=False,
+            param_dtype=torch.bfloat16,
+            use_master_weights=True,
+            master_weight_dtype=torch.float32,
+            grad_dtype=torch.float32,
+            exp_avg_dtype=torch.float32,
+            exp_avg_sq_dtype=torch.float32,
+            store_param_remainders=True,
         )
 
     @pytest.mark.skipif(not is_bf16_compatible(), reason="bf16 if not supported")
@@ -429,7 +447,7 @@ class TestFusedAdam(TestFusedOptimizer):
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     def test_fp8_model_weight_cast(self):
         dtype = torch.bfloat16
-        with fp8_model_init(enabled=True):
+        with fp8_model_init(enabled=True, recipe=DelayedScaling()):
             model = MultiheadAttention(
                 hidden_size=1024,
                 num_attention_heads=16,
