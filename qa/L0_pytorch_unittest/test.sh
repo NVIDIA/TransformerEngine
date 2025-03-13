@@ -6,7 +6,7 @@ set -x
 
 : ${TE_PATH:=/opt/transformerengine}
 
-pip install pytest==8.2.1
+pip3 install pytest==8.2.1
 
 FAIL=0
 

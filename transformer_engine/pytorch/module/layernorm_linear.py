@@ -56,6 +56,7 @@ from ..tensor.quantized_tensor import (
     restore_from_saved,
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
@@ -324,6 +325,19 @@ class _LayerNormLinear(torch.autograd.Function):
                 clear_tensor_data(ln_out, ln_out_total)
 
         if is_grad_enabled:
+            ctx.ln_out_needs_gather = (
+                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+            )
+
+            # Input with column-wise usage is needed for dgrad GEMM.
+            if backward_needs_input:
+                if isinstance(ln_out, QuantizedTensor):
+                    # For sequence parallel in vanilla FP8, rowwise data is
+                    # to gather the input. For MXFP8, columnwise only data
+                    # can be allgathered.
+                    if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
+                        ln_out.update_usage(rowwise_usage=False)
+
             if cpu_offloading:
                 if fp8 and weightmat is not None:
                     set_offloading_param(weightmat, "weight_offloading", True)
@@ -554,12 +568,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             ln_out_total = None
             ln_out_total_work = None
-            if (
-                ctx.requires_wgrad
-                and ctx.parallel_mode == "column"
-                and ctx.sequence_parallel
-                and not ctx.ub_bulk_dgrad
-            ):
+            if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
