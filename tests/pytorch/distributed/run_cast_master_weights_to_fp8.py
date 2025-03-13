@@ -53,7 +53,7 @@ class MiniZero_1:
         # Padding to avoid global buffer cannot be divided by world size, so the offsets[-1] may
         # not be the end range of the last weight.
         if self.offsets[-1] % self.world_size != 0:
-            self.offsets[-1] += (self.world_size - self.offsets[-1] % self.world_size)
+            self.offsets[-1] += self.world_size - self.offsets[-1] % self.world_size
 
         self.master_weights = []
         # The start offset of the master weight in the weight
@@ -84,27 +84,29 @@ class MiniZero_1:
                         start_offset : start_offset + length
                     ]
                 else:
-                    master_weight = weight.detach().view(-1).float()[
-                        start_offset : start_offset + length
-                    ]
+                    master_weight = (
+                        weight.detach().view(-1).float()[start_offset : start_offset + length]
+                    )
                 overlapping_area = (overlapping_start, overlapping_end)
             self.master_weights.append(master_weight)
             self.start_offsets.append(start_offset)
             self.overlapping_areas.append(overlapping_area)
 
         # Create global buffer for grads reduce-scatter
-        self.grad_buffer = torch.empty([self.offsets[-1]], dtype=torch.float32,
-                                       device=weights[0].device)
-        self.grad_buffer_slice = self.grad_buffer[rank_start : rank_end]
+        self.grad_buffer = torch.empty(
+            [self.offsets[-1]], dtype=torch.float32, device=weights[0].device
+        )
+        self.grad_buffer_slice = self.grad_buffer[rank_start:rank_end]
 
         # Create global buffer for weights all-gather
         if isinstance(self.weights[0], QuantizedTensor):
             weight_buffer_dtype = torch.uint8
         else:
             weight_buffer_dtype = weights[0].dtype
-        self.weight_buffer = torch.empty([self.offsets[-1]], dtype=weight_buffer_dtype,
-                                         device=weights[0].device)
-        self.weight_buffer_slice = self.weight_buffer[rank_start : rank_end]
+        self.weight_buffer = torch.empty(
+            [self.offsets[-1]], dtype=weight_buffer_dtype, device=weights[0].device
+        )
+        self.weight_buffer_slice = self.weight_buffer[rank_start:rank_end]
 
     def step(self):
         # -----------------------------------------------------------------------------------------
@@ -113,7 +115,7 @@ class MiniZero_1:
         for weight, offset in zip(self.weights, self.offsets[:-1]):
             start = offset
             end = offset + weight.numel()
-            self.grad_buffer[start : end].copy_(weight.main_grad.view(-1))
+            self.grad_buffer[start:end].copy_(weight.main_grad.view(-1))
 
         # -----------------------------------------------------------------------------------------
         # Step 2: Grads reduce-scatter
@@ -127,7 +129,7 @@ class MiniZero_1:
             buffers[0] += buffers[i]
         rank_start = self.offsets[-1] // self.world_size * self.rank
         rank_end = rank_start + self.offsets[-1] // self.world_size
-        self.grad_buffer_slice.copy_(buffers[0][rank_start : rank_end])
+        self.grad_buffer_slice.copy_(buffers[0][rank_start:rank_end])
         self.grad_buffer_slice /= self.world_size
 
         # -----------------------------------------------------------------------------------------
@@ -147,8 +149,9 @@ class MiniZero_1:
             # FP8 weights case
             for i in range(1, len(self.weights)):
                 assert isinstance(self.weights[i], QuantizedTensor)
-            cast_master_weights_to_fp8(self.weights, self.master_weights, self.start_offsets,
-                                       self.dp_group)
+            cast_master_weights_to_fp8(
+                self.weights, self.master_weights, self.start_offsets, self.dp_group
+            )
         else:
             # BF16 weights case
             for weight, master_weight, start_offset in zip(
@@ -158,7 +161,7 @@ class MiniZero_1:
                     continue
                 start = start_offset
                 end = start_offset + master_weight.numel()
-                weight.data.view(-1)[start : end].copy_(master_weight)
+                weight.data.view(-1)[start:end].copy_(master_weight)
 
         # -----------------------------------------------------------------------------------------
         # Step 5: Copy the updated weights (not all weights) to the weight buffer
@@ -174,13 +177,14 @@ class MiniZero_1:
                 weight = self.weights[i]
             weight_slice = weight.view(-1)[start_offset : start_offset + master_weight.numel()]
             overlapping_start, overlapping_end = self.overlapping_areas[i]
-            self.weight_buffer[overlapping_start : overlapping_end].copy_(weight_slice)
+            self.weight_buffer[overlapping_start:overlapping_end].copy_(weight_slice)
 
-         # -----------------------------------------------------------------------------------------
+        # -----------------------------------------------------------------------------------------
         # Step 6: Weight all-gather (FP8 or BF16)
         # -----------------------------------------------------------------------------------------
-        dist.all_gather_into_tensor(self.weight_buffer, self.weight_buffer_slice,
-                                    group=self.dp_group)
+        dist.all_gather_into_tensor(
+            self.weight_buffer, self.weight_buffer_slice, group=self.dp_group
+        )
 
         # -----------------------------------------------------------------------------------------
         # Step 7: Copy the gathered weights from weight buffer to the actual weights
@@ -190,7 +194,7 @@ class MiniZero_1:
             end = offset + weight.numel()
             if isinstance(weight, QuantizedTensor):
                 weight = _get_raw_data(weight)
-            weight.view(-1).data.copy_(self.weight_buffer[start : end])
+            weight.view(-1).data.copy_(self.weight_buffer[start:end])
 
 
 class MiniOptimizer:
@@ -284,9 +288,11 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
     linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
 
     # Create model with FP8 weights
-    with te.fp8.fp8_model_init(enabled=quantization is not None,
-                               recipe=quantization_recipe(quantization),
-                               preserve_high_precision_init_val=True):
+    with te.fp8.fp8_model_init(
+        enabled=quantization is not None,
+        recipe=quantization_recipe(quantization),
+        preserve_high_precision_init_val=True,
+    ):
         model_fp8 = nn.Sequential(
             te.Linear(128, 256, **linear_kwargs),
             te.Linear(256, 256 * 3, **linear_kwargs),
