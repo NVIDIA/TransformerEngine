@@ -26,6 +26,8 @@ from transformer_engine.pytorch.jit import (
 from transformer_engine.pytorch.utils import (
     cast_if_needed,
     get_default_init_method,
+    torch_get_autocast_gpu_dtype,
+    is_torch_min_version,
 )
 from transformer_engine.pytorch.constants import (
     AttnMaskTypes,
@@ -430,9 +432,7 @@ class TransformerLayer(torch.nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0.0 else None
 
         # Set bias+dropout+add fusion grad_enable execution handler.
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        TORCH_MINOR = int(torch.__version__.split(".")[1])
-        use_nvfuser = TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)
+        use_nvfuser = is_torch_min_version("1.10.0a0") and not is_torch_min_version("2.2.0a0")
         self.bias_dropout_add_exec_handler = nullcontext if use_nvfuser else torch.enable_grad
 
         if self.bias_dropout_fusion:
@@ -681,7 +681,7 @@ class TransformerLayer(torch.nn.Module):
 
         # For AMP
         if torch.is_autocast_enabled():
-            hidden_states = cast_if_needed(hidden_states, torch.get_autocast_gpu_dtype())
+            hidden_states = cast_if_needed(hidden_states, torch_get_autocast_gpu_dtype())
 
         # Self attention.
         self_attention_outputs = self.self_attention(
