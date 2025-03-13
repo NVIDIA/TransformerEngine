@@ -519,3 +519,6 @@ class DebugQuantizedTensor:
     def size(self):
         """Size of the tensor."""
         return self.rowwise_gemm_tensor.size()
+
+    def update_usage(self, rowwise_usage: bool, columnwise_usage: bool):
+        """Update usage of the tensor."""
