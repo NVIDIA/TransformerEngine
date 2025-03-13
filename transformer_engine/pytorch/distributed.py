@@ -381,7 +381,7 @@ class _CheckpointFunction(torch.autograd.Function):
         ), fp8_autocast(
             enabled=ctx.fp8, fp8_recipe=ctx.fp8_recipe
         ):
-            # FIXME(kwyss): Activation recomputation should
+            # TODO(github issues/1568): Activation recomputation should
             # reuse the quantization settings that were present
             # at the time of the original forward pass.
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
