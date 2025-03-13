@@ -376,7 +376,7 @@ class _CheckpointFunction(torch.autograd.Function):
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
         ):
-            # FIXME(kwyss): Activation recomputation should
+            # TODO(github issues/1568): Activation recomputation should
             # reuse the quantization settings that were present
             # at the time of the original forward pass.
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
