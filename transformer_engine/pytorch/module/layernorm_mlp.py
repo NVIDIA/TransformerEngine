@@ -302,8 +302,8 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # Cast weights to expected dtype
         if not fp8:
-            fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
-            fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)
+            fc1_weight_final = cast_if_needed(fc1_weight, activation_dtype)
+            fc2_weight_final = cast_if_needed(fc2_weight, activation_dtype)
         else:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.

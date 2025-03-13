@@ -9,6 +9,9 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.optimizers import MultiTensorApply
 
+from references.ref_per_tensor_cs import ref_compute_scale_and_scale_inv_from_amax
+
+
 input_size_pairs = [
     (7777 * 77, 555 * 555),
     (777, 555),
@@ -216,3 +219,34 @@ def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, 
     if per_tensor:
         torch.testing.assert_close(norm_per_tensor, normab.broadcast_to(norm_per_tensor.shape))
     assert overflow_buf.item() == 0
+
+
+@pytest.mark.parametrize("input_size_pair", input_size_pairs + [(1, 1)])
+@pytest.mark.parametrize("applier", appliers)
+@pytest.mark.parametrize("repeat", [1, 55])
+@pytest.mark.parametrize("max_fp8", [448.0, 57344.0])
+@pytest.mark.parametrize("pow_2_scales", [False, True])
+@pytest.mark.parametrize("epsilon", [0.0, 100.0])
+def test_multi_tensor_compute_scale_and_scale_inv(input_size_pair, applier, repeat, max_fp8,
+                                                  pow_2_scales, epsilon):
+    sizea, sizeb = input_size_pair
+    device = torch.device("cuda")
+    overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
+    a = torch.randn([sizea], dtype=torch.float32, device=device).abs()
+    b = torch.randn([sizeb], dtype=torch.float32, device=device).abs()
+
+    amax_list = []
+    for i in range(repeat):
+        amax_list += [a.clone(), b.clone()]
+
+    scale_list = [torch.empty_like(x) for x in amax_list]
+    scale_inv_list = [torch.empty_like(x) for x in amax_list]
+
+    applier(tex.multi_tensor_compute_scale_and_scale_inv, overflow_buf,
+            [amax_list, scale_list, scale_inv_list], max_fp8, pow_2_scales, epsilon)
+
+    for amax, scale, scale_inv in zip(amax_list, scale_list, scale_inv_list):
+        scale_ref, scale_inv_ref = ref_compute_scale_and_scale_inv_from_amax(amax, max_fp8, epsilon,
+                                                                             pow_2_scales)
+        torch.testing.assert_close(scale, scale_ref, rtol=0, atol=0)
+        torch.testing.assert_close(scale_inv, scale_inv_ref, rtol=0, atol=0)

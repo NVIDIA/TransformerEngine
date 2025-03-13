@@ -245,7 +245,7 @@ class _LayerNormLinear(torch.autograd.Function):
         # Cast weight to expected dtype
         if not fp8:
             quantized_weight = False
-            weightmat = cast_if_needed(weightmat, activation_dtype)
+            weightmat = cast_if_needed(weight, activation_dtype)
         else:
             quantized_weight = not isinstance(weight, QuantizedTensor)
 

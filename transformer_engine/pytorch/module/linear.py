@@ -168,7 +168,7 @@ class _Linear(torch.autograd.Function):
 
         # Cast weight to expected dtype
         if not fp8:
-            weightmat = cast_if_needed(weightmat, activation_dtype)
+            weightmat = cast_if_needed(weight, activation_dtype)
         else:
             # Configure quantizer
             if weight_quantizer is not None:
