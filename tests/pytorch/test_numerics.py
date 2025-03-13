@@ -679,10 +679,6 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_mxfp8)
     if recipe.fp8blockwise() and not fp8_block_scaling_available:
         pytest.skip(reason_for_no_fp8_block_scaling)
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for full recompute.")
-    if fp8 and recipe.fp8blockwise():
-        pytest.skip("Float8 Blockwise scaling unsupported for full recompute.")
 
     config = model_configs[model]
 
