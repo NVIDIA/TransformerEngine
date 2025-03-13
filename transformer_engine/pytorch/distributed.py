@@ -954,9 +954,9 @@ def _all_gather_mxfp8(
     if not isinstance(inp, MXFP8TensorBase):
         inp = quantizer(inp)
     elif (
-        inp.rowwise_data is None
+        inp._rowwise_data is None
         and quantizer.rowwise_usage
-        or inp.columnwise_data is None
+        or inp._columnwise_data is None
         and quantizer.columnwise_usage
     ):
         warnings.warn(
