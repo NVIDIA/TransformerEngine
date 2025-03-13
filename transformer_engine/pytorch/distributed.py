@@ -409,8 +409,10 @@ class _CheckpointFunction(torch.autograd.Function):
                 "none of output has requires_grad=True, this checkpoint() is not necessary"
             )
 
-        with te.fp8_autocast(enabled=use_fp8, fp8_recipe=recipe):
-            torch.autograd.backward(outputs_with_grad, args_with_grad)
+        # backward does not require entering autocast context because
+        # backward implementations already retrieve fp8 recipe and
+        # enablement from stored ctx.
+        torch.autograd.backward(outputs_with_grad, args_with_grad)
         grads = tuple(
             inp.grad if isinstance(inp, torch.Tensor) else None for inp in detached_inputs
         )
