@@ -255,10 +255,7 @@ class _Linear(torch.autograd.Function):
             saved_inputmat = None
 
             ctx.backward_input_needs_gather = (
-                weight.requires_grad
-                and parallel_mode == "column"
-                and sequence_parallel
-                and not ub_bulk_dgrad
+                weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
             if backward_needs_input:
@@ -465,7 +462,7 @@ class _Linear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             inputmat_total = None
             inputmat_total_work = None
-            if ctx.backward_input_needs_gather:
+            if ctx.backward_input_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer

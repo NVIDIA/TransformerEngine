@@ -328,10 +328,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         if is_grad_enabled:
             ctx.ln_out_needs_gather = (
-                weight.requires_grad
-                and parallel_mode == "column"
-                and sequence_parallel
-                and not ub_bulk_dgrad
+                weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
             # Input with column-wise usage is needed for dgrad GEMM.
@@ -573,7 +570,7 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Perform tensor-parallel communication if needed
             ln_out_total = None
             ln_out_total_work = None
-            if ctx.ln_out_needs_gather:
+            if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
