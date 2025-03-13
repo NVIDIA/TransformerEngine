@@ -21,6 +21,7 @@ from ._common import _ParameterInitMeta
 from ..fp8 import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
+    Float8CurrentScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -430,7 +431,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             super().__setattr__(name, value)
 
     def adjust_amax_history_length(self, length: int, fwd: Optional[bool] = None) -> None:
-        """Increase or decrease size of amax history based on given `length`.
+        """
+        Delayed scaling only.
+
+        Increase or decrease size of amax history based on given `length`.
 
         .. warning::
             This changes the underlying amax memory location.
@@ -488,6 +492,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.adjust_amax_history_length(recipe.amax_history_len, fwd=fwd)
                 return
             if recipe.mxfp8() and isinstance(recipe_state, MXFP8BlockScalingRecipeState):
+                return
+            if recipe.float8_current_scaling() and isinstance(
+                recipe_state, Float8CurrentScalingRecipeState
+            ):
                 return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and

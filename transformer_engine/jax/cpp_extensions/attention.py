@@ -2,12 +2,13 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for attention"""
-from dataclasses import dataclass, replace
-from functools import partial, reduce
 import operator
 import os
-from typing import Optional, Tuple
 import warnings
+from dataclasses import dataclass, replace
+from functools import partial, reduce
+from typing import Optional, Tuple
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -15,8 +16,6 @@ from jax import dtypes, lax
 from jax.interpreters import mlir
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
-
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -38,7 +37,6 @@ from .misc import (
     get_padded_spec,
     get_cudnn_version,
     is_ffi_enabled,
-    get_xla_flag,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -49,6 +47,12 @@ from ..sharding import (
     get_all_mesh_axes,
     num_of_devices,
 )
+
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = [
@@ -1607,14 +1611,7 @@ class _FusedAttnCPWithP2PHelper:
     def use_scanloop():
         """Returns true if the implementation will use a scan loop for iteration."""
         use_scan = bool(int(os.getenv("NVTE_FUSED_RING_ATTENTION_USE_SCAN", "1")))
-
-        # nvbug(4675071): Disable the HLO verifier for channel ID checks.
-        # A WAR was added to XLA: https://github.com/openxla/xla/pull/16779
-        def truthy(val):
-            return val.lower() in ["1", "true"]
-
-        x = use_scan and get_xla_flag("--xla_ignore_channel_id", default=True, cast=truthy)
-        return x
+        return use_scan
 
     def check_supported(self):
         """Checks if the context parallel implementation is supported by the given arguments."""
@@ -1659,8 +1656,7 @@ class _FusedAttnCPWithP2PHelper:
         if not self.use_scanloop():
             warnings.warn(
                 "Scan loop is disabled for fused ring attention. To enable set"
-                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment and"
-                " add --xla_experimental_ignore_channel_id=true to XLA_FLAGS."
+                " NVTE_FUSED_RING_ATTENTION_USE_SCAN=1 in your environment"
             )
 
     def get_step_config(self, attn_mask_type) -> _FusedAttnConfig:

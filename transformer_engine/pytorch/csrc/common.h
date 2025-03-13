@@ -52,6 +52,9 @@
 
 namespace transformer_engine::pytorch {
 
+// in python we have: dist_group_type = torch.distributed.ProcessGroup
+using dist_group_type = c10d::ProcessGroup;
+
 // Each tensor here is shape (N, ) holding all scaling
 // data for a single FP8 block, e.g. LayerNormLinear
 class FP8TensorMeta {
@@ -128,6 +131,29 @@ class Float8Quantizer : public Quantizer {
   DType dtype;
 
   explicit Float8Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(
+      const std::vector<size_t>& shape, DType dtype,
+      std::optional<at::Tensor> rowwise_data = std::nullopt) const override;
+};
+
+class Float8CurrentScalingQuantizer : public Quantizer {
+ public:
+  at::Tensor scale;
+  at::Tensor scale_inv;
+  at::Tensor amax;
+  DType dtype;
+  bool with_amax_reduction;
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  int amax_reduction_size;
+  bool force_pow_2_scales = false;
+  float amax_epsilon = 0.0;
+
+  explicit Float8CurrentScalingQuantizer(const py::handle& quantizer);
 
   NVTEScalingMode get_scaling_mode() const override { return NVTE_DELAYED_TENSOR_SCALING; }
 
