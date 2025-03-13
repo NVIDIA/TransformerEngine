@@ -1271,7 +1271,9 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("return_bias", all_boolean)
-def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma, return_bias):
+def test_layernorm_linear_accuracy(
+    dtype, bs, model, normalization, zero_centered_gamma, return_bias
+):
     config = model_configs[model]
 
     te_ln_linear = LayerNormLinear(
