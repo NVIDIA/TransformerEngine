@@ -49,9 +49,7 @@ class TestFP8ModelInit:
         weight = model.weight
 
         assert isinstance(weight, QuantizedTensor), "Weight should be QuantizedTensor"
-        assert hasattr(
-            weight, "_high_precision_init_val"
-        ), "_high_precision_init_val not found"
+        assert hasattr(weight, "_high_precision_init_val"), "_high_precision_init_val not found"
         assert hasattr(
             weight, "get_high_precision_init_val"
         ), "get_high_precision_init_val() not found"
@@ -62,8 +60,9 @@ class TestFP8ModelInit:
         high_precision = weight.get_high_precision_init_val()
         assert high_precision.device.type == "cpu", "high_precision_init_val is not on the CPU"
 
-        new_weight = weight._get_quantizer().make_empty(shape=weight.shape, dtype=weight.dtype,
-                                                        device=weight.device)
+        new_weight = weight._get_quantizer().make_empty(
+            shape=weight.shape, dtype=weight.dtype, device=weight.device
+        )
         weight._get_quantizer().update_quantized(high_precision.to(weight.device), new_weight)
 
         torch.testing.assert_close(

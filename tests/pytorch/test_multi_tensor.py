@@ -227,8 +227,9 @@ def test_multi_tensor_unscale_l2norm(input_size_pair, applier, repeat, in_type, 
 @pytest.mark.parametrize("max_fp8", [448.0, 57344.0])
 @pytest.mark.parametrize("pow_2_scales", [False, True])
 @pytest.mark.parametrize("epsilon", [0.0, 100.0])
-def test_multi_tensor_compute_scale_and_scale_inv(input_size_pair, applier, repeat, max_fp8,
-                                                  pow_2_scales, epsilon):
+def test_multi_tensor_compute_scale_and_scale_inv(
+    input_size_pair, applier, repeat, max_fp8, pow_2_scales, epsilon
+):
     sizea, sizeb = input_size_pair
     device = torch.device("cuda")
     overflow_buf = torch.zeros(1, dtype=torch.int32, device=device)
@@ -242,11 +243,18 @@ def test_multi_tensor_compute_scale_and_scale_inv(input_size_pair, applier, repe
     scale_list = [torch.empty_like(x) for x in amax_list]
     scale_inv_list = [torch.empty_like(x) for x in amax_list]
 
-    applier(tex.multi_tensor_compute_scale_and_scale_inv, overflow_buf,
-            [amax_list, scale_list, scale_inv_list], max_fp8, pow_2_scales, epsilon)
+    applier(
+        tex.multi_tensor_compute_scale_and_scale_inv,
+        overflow_buf,
+        [amax_list, scale_list, scale_inv_list],
+        max_fp8,
+        pow_2_scales,
+        epsilon,
+    )
 
     for amax, scale, scale_inv in zip(amax_list, scale_list, scale_inv_list):
-        scale_ref, scale_inv_ref = ref_compute_scale_and_scale_inv_from_amax(amax, max_fp8, epsilon,
-                                                                             pow_2_scales)
+        scale_ref, scale_inv_ref = ref_compute_scale_and_scale_inv_from_amax(
+            amax, max_fp8, epsilon, pow_2_scales
+        )
         torch.testing.assert_close(scale, scale_ref, rtol=0, atol=0)
         torch.testing.assert_close(scale_inv, scale_inv_ref, rtol=0, atol=0)
