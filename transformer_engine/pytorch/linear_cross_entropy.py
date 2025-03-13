@@ -128,6 +128,7 @@ class LinearCrossEntropy(torch.autograd.Function):
 
             ctx.save_for_backward(hidden, weight, labels, _maximum, _acc)
             ctx.REDUCTION = REDUCTION
+            ctx.dist_process_group = dist_process_group
 
         return logprobs
 
@@ -145,12 +146,13 @@ class LinearCrossEntropy(torch.autograd.Function):
         with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):
             (hidden, weight, labels, _maximum, _acc) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
-
+            dist_process_group = ctx.dist_process_group
             d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
                 dlogprobs, 
                 hidden, weight, labels,
                 _maximum, _acc,
-                REDUCTION
+                REDUCTION,
+                dist_process_group
             )
         return d_hidden, d_weight, None, None, None
     
