@@ -304,12 +304,12 @@ def _train(opts):
         opts.tp = WORLD_SIZE
 
     # Tensor dim overrides for tensors that do not require TP communication
-    if ops.in_features is not None:
+    if opts.in_features is not None:
         assert opts.layer_type is te.Linear and opts.linear_parallel_mode == "row", (
             "--in-features is only used to configure row-tensor-parallel Linear layers. Use"
             " --num-heads or --head-dim for other cases."
         )
-    if ops.out_features is not None:
+    if opts.out_features is not None:
         assert opts.layer_type is te.LayerNormLinear and opts.linear_parallel_mode == "column", (
             "--out-features is only used to configure column-tensor-parallel LayerNormLinear"
             " layers. Use --num-heads or --head-dim for other cases."
