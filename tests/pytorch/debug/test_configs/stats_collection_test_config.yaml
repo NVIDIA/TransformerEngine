@@ -19,7 +19,7 @@ stat_collection_test_1:
       end_step: 500
     LogFp8TensorStats:
       enabled: True
-      stats: [underflows%, overflows%]
+      stats: [underflows%, saturations%]
       tensors: [gradient]
       freq: 5
       start_step: 100
@@ -55,5 +55,5 @@ stat_collection_test_4:
       stats: [cur_amax, dynamic_range, mean, std, l1_norm]
     LogFp8TensorStats:
       enabled: True
-      stats: [underflows%, overflows%]
+      stats: [underflows%, saturations%]
       tensors: [activation]

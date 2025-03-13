@@ -237,7 +237,7 @@ CONFIG_LOG_TEST_DISTRIBUTED = """log_distributed:
     LogFp8TensorStats:
       enabled: True
       tensors: [activation, gradient, weight]
-      stats: [underflows%, overflows%]
+      stats: [underflows%, saturations%]
       start_step : 0
       end_step: 1
 """

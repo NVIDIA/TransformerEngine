@@ -16,10 +16,9 @@ def _compute_dynamic_range_top(tensor):
     """Computes the log2 of the amax of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
-    if tensor_abs.numel() == 0:
+    amax = tensor_abs.max().float()
+    if not amax.all():
         amax = torch.tensor(1, device=tensor.device).to(torch.float)
-    else:
-        amax = tensor_abs.max().float()
     return torch.log2(amax)
 
 
@@ -27,10 +26,10 @@ def _compute_dynamic_range_bottom(tensor):
     """Computes the log2 of the amin of the tensor"""
     tensor_abs = tensor.abs()
     tensor_abs = tensor_abs[tensor_abs != 0]
-    if tensor_abs.numel() == 0:
-        amin = torch.tensor(1, device=tensor.device).to(torch.float)
-    else:
+    if tensor_abs.any():
         amin = tensor_abs.min().float()
+    else:
+        amin = torch.tensor(1, device=tensor.device).to(torch.float)
     return torch.log2(amin)
 
 
@@ -43,7 +42,7 @@ def compute_variance(variances, numels, sums):
 
 
 def compute_std(variances, numels, sums):
-    """Computes standard deviation."""
+    """Computates standard deviation."""
     return torch.sqrt(compute_variance(variances, numels, sums))
 
 
@@ -71,7 +70,7 @@ stats_to_num = {
     "std": 14,
     "dynamic_range": 15,
     "underflows%": 16,
-    "overflows%": 17,
+    "saturations%": 17,
 }
 
 DEPENDENCIES = {
@@ -88,11 +87,11 @@ DEPENDENCIES = {
     "dynamic_range_top": {"dynamic_range_top"},
     "dynamic_range_bottom": {"dynamic_range_bottom"},
     "underflows_num": {"underflows_num"},
-    "overflows_num": {"overflows_num"},
+    "saturations_num": {"saturations_num"},
     "std": {"variance", "numel", "sum"},
     "dynamic_range": {"dynamic_range_top", "dynamic_range_bottom"},
     "underflows%": {"underflows_num", "numel"},
-    "overflows%": {"overflows_num", "numel"},
+    "saturations%": {"saturations_num", "numel"},
 }
 
 STATS = {
@@ -129,9 +128,9 @@ STATS = {
         lambda x: (x == 0).sum(),
         lambda buffers: sum(_get(buffers, "underflows_num")),
     ),
-    "overflows_num": (
-        lambda x: (x == 255).sum(),
-        lambda buffers: sum(_get(buffers, "overflows_num")),
+    "saturations_num": (
+        lambda x: (x == 126).sum(),
+        lambda buffers: sum(_get(buffers, "saturations_num")),
     ),
     "std": (
         torch.std,
@@ -148,8 +147,8 @@ STATS = {
         lambda x: (x == 0).sum() / x.numel() * 100,
         lambda buffers: 100 * sum(_get(buffers, "underflows_num")) / sum(_get(buffers, "numel")),
     ),
-    "overflows%": (
-        lambda x: (x == 255).sum() / x.numel() * 100,
-        lambda buffers: 100 * sum(_get(buffers, "overflows_num")) / sum(_get(buffers, "numel")),
+    "saturations%": (
+        lambda x: (x == 126).sum() / x.numel() * 100,
+        lambda buffers: 100 * sum(_get(buffers, "saturations_num")) / sum(_get(buffers, "numel")),
     ),
 }

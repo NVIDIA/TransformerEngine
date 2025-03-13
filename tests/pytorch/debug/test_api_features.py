@@ -293,7 +293,7 @@ def test_statistics_collection(configs_dir, feature_dirs):
             stats[("decoder.1.mlp.fc1", "gradient", "underflows%", 200)], expected_underflows
         )
         torch.testing.assert_close(
-            stats[("decoder.1.mlp.fc1", "gradient", "overflows%", 200)], expected_overflows
+            stats[("decoder.1.mlp.fc1", "gradient", "saturations%", 200)], expected_overflows
         )
 
         assert not debug_api.transformer_engine.inspect_tensor_postquantize_enabled(
