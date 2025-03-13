@@ -313,10 +313,14 @@ def get_attention_backend(
         "compute_capability": "sm"
         + str(10 * device_compute_capability[0] + device_compute_capability[1]),
         "flash_attn_version": (
-            str(FlashAttentionUtils.version) if FlashAttentionUtils.is_installed else "not installed"
+            str(FlashAttentionUtils.version)
+            if FlashAttentionUtils.is_installed
+            else "not installed"
         ),
         "flash_attn_3_version": (
-            str(FlashAttentionUtils.fa3_version) if FlashAttentionUtils.v3_is_installed else "not installed"
+            str(FlashAttentionUtils.fa3_version)
+            if FlashAttentionUtils.v3_is_installed
+            else "not installed"
         ),
         "cudnn_version": ".".join([str(i) for i in cudnn_version]),
     }
