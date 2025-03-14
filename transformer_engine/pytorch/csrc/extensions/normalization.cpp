@@ -171,7 +171,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
       quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
       nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
       // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-      te_output.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
+      out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
     }
     nvte_quantize_noop(unquantized_out_cu.data(), out_cu.data(), nullptr,
                        at::cuda::getCurrentCUDAStream());
@@ -314,7 +314,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
       quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
       nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
       // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
-      te_output.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
+      out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
     }
     nvte_quantize_noop(unquantized_out_cu.data(), out_cu.data(), nullptr,
                        at::cuda::getCurrentCUDAStream());
