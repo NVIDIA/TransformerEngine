@@ -376,10 +376,11 @@ def efficient_entropy_backward_kernel_general_preprocess(num_tokens: int,
                                                         hidden_size: int,
                                                         vocab_size: int,
                                                         vocab_per_split: int,
+                                                        num_splits: int,
                                                         hidden_ptr, stride_hidden_m, stride_hidden_k,
                                                         weight_ptr, stride_weight_k, stride_weight_n,
                                                         maximum_ptr,
-                                                        d_scale_ptr, stride_d_scale,
+                                                        d_scale_ptr, stride_d_scale_m, stride_d_scale_n,
                                                         BLOCK_SIZE_M: tl.constexpr,
                                                         BLOCK_SIZE_N: tl.constexpr,
                                                         BLOCK_SIZE_K: tl.constexpr):
@@ -423,9 +424,10 @@ def efficient_entropy_backward_kernel_general_preprocess(num_tokens: int,
 
         _scale += tl.sum(exp_logits * logits, axis=1)
 
-
-    tl.atomic_add(d_scale_ptr + offs_am * stride_d_scale,
-                  _scale, mask=offs_am < num_tokens)
+    # tl.store(d_scale_ptr + offs_am * stride_d_scale_m + pid_n * stride_d_scale_n,
+    #          _scale, mask=offs_am < num_tokens)
+    tl.store(d_scale_ptr + pid_n * stride_d_scale_m + offs_am * stride_d_scale_n,
+             _scale, mask=(offs_am < num_tokens) & (pid_n < num_splits))
 
 
 # NOTE: merge d_weight & d_hidden here, split along M & N
@@ -442,13 +444,11 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(num_tokens: int,
                                                        weight_ptr, stride_weight_k, stride_weight_n,
                                                        labels_ptr, stride_labels,
                                                        maximum_ptr, stride_maximum,
-                                                       maximum_indices_ptr, stride_maximum_indices,
                                                        accu_ptr, stride_accu,
                                                        d_entropy_ptr, stride_d_entropy,
                                                        d_logprobs_ptr, stride_d_logprobs,
                                                        reduction: int,
-                                                       d_max_ptr, stride_d_max,
-                                                       d_acc_exp_logits_ptr, stride_d_acc_exp_logits,
+                                                       d_scale_ptr, stride_d_scale,
                                                        d_hidden_ptr, stride_d_hidden_m, stride_d_hidden_k,
                                                        d_weight_ptr, stride_d_weight_k, stride_d_weight_n,
                                                        BLOCK_SIZE_M: tl.constexpr,
@@ -468,10 +468,10 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(num_tokens: int,
 
     maximum_ptrs = maximum_ptr + offs_am * stride_maximum
     maximum = tl.load(maximum_ptrs, mask=offs_am < num_tokens, other=0.0)
-    maximum_indices_ptrs = maximum_indices_ptr + offs_am * stride_maximum_indices
-    maximum_indices = tl.load(maximum_indices_ptrs, mask=offs_am < num_tokens, other=0)
     accu_ptrs = accu_ptr + offs_am * stride_accu
     accu = tl.load(accu_ptrs, mask=offs_am < num_tokens, other=1e-6) # epsilon to avoid division by zero
+    accu_rcp = tl.fdiv(1.0, accu)
+
     d_entropy_ptrs = d_entropy_ptr + offs_am * stride_d_entropy
     d_entropy = tl.load(d_entropy_ptrs, mask=offs_am < num_tokens, other=0.0)
     if reduction == 0: # none
@@ -484,10 +484,8 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(num_tokens: int,
         d_logprobs = tl.fdiv(tl.load(d_logprobs_ptr), num_tokens.to(tl.float32))
         d_logprobs = tl.broadcast_to(d_logprobs, (BLOCK_SIZE_M,))
 
-    d_max_ptrs = d_max_ptr + offs_am * stride_d_max
-    d_max = tl.load(d_max_ptrs, mask=offs_am < num_tokens, other=0.0)
-    d_acc_exp_logits_ptrs = d_acc_exp_logits_ptr + offs_am * stride_d_acc_exp_logits
-    d_acc_exp_logits = tl.load(d_acc_exp_logits_ptrs, mask=offs_am < num_tokens, other=0.0)
+    d_scale = tl.load(d_scale_ptr + offs_am * stride_d_scale,
+                      mask=offs_am < num_tokens, other=0.0)
 
     hidden_ptrs = hidden_ptr + (offs_am[:,None] * stride_hidden_m + offs_k[None,:] * stride_hidden_k)
     weight_ptrs = weight_ptr + (offs_k[:,None] * stride_weight_k + offs_bn[None,:] * stride_weight_n)
@@ -516,21 +514,14 @@ def efficient_entropy_backward_kernel_general_mainloop_MN(num_tokens: int,
     weight_ptrs -= hidden_size * stride_weight_k
 
     exp_logits = tl.exp(logits - maximum[:,None])
-    accu_rcp = tl.fdiv(1.0, accu)
-
-    d_logits = (-d_entropy * accu_rcp)[:, None] * exp_logits
 
     d_pd = logits * -d_entropy[:,None]
     mask = offs_bn[None,:] == labels[:,None]
     d_pd += tl.fdiv((-1.0 * d_logprobs * accu)[:,None], exp_logits) * mask
 
-    d_exp_logits = d_pd * accu_rcp[:,None]
-    d_exp_logits += d_acc_exp_logits[:,None]
-    d_logits += d_exp_logits * exp_logits
-
-    d_max = d_entropy - d_max
-    mask = offs_bn[None,:] == maximum_indices[:,None]
-    d_logits += tl.where(mask, d_max[:,None], 0.0)
+    coeff = d_scale * d_entropy * accu_rcp * accu_rcp + d_logprobs * accu_rcp
+    d_logits = exp_logits * coeff[:,None]
+    d_logits += exp_logits * d_pd * accu_rcp[:,None]
 
     # loop for d_weight & d_hidden
     for k in range(0, tl.cdiv(hidden_size, BLOCK_SIZE_K)):
@@ -725,19 +716,20 @@ def efficient_entropy_backward(dlogprobs: torch.Tensor,
     assert vocab_per_split % 128 == 0
     num_splits = (vocab_size + vocab_per_split - 1) // vocab_per_split
 
-    # FIXME: perhaps separate reduction, so that numeric determinism is guaranteed
-    _d_scale = torch.zeros((num_tokens,), device=hidden.device, dtype=torch.float32)
-    assert _d_scale.is_contiguous() and _d_scale.is_cuda
+    # _d_scale_non_reduced = torch.empty((num_tokens, num_splits), device=hidden.device, dtype=torch.float32)
+    _d_scale_non_reduced = torch.zeros((num_splits, num_tokens), device=hidden.device, dtype=torch.float32)
+    assert _d_scale_non_reduced.is_contiguous() and _d_scale_non_reduced.is_cuda
 
     def preprocess_grid(meta):
         return (triton.cdiv(num_tokens, meta["BLOCK_SIZE_M"]) * num_splits,)
     efficient_entropy_backward_kernel_general_preprocess[preprocess_grid](
-        num_tokens, hidden_size, vocab_size, vocab_per_split,
+        num_tokens, hidden_size, vocab_size, vocab_per_split, num_splits,
         hidden, hidden.stride(0), hidden.stride(1),
         weight, weight.stride(0), weight.stride(1),
         maximum,
-        _d_scale, _d_scale.stride(0),
+        _d_scale_non_reduced, _d_scale_non_reduced.stride(0), _d_scale_non_reduced.stride(1),
     )
+    _d_scale = _d_scale_non_reduced.sum(dim=0)
 
     if _BACKWARD == BackwardEnum._Total_Fuse_MN:
         def mainloop_grid(meta):
@@ -749,13 +741,11 @@ def efficient_entropy_backward(dlogprobs: torch.Tensor,
             weight, weight.stride(0), weight.stride(1),
             labels, labels.stride(0),
             maximum, maximum.stride(0),
-            maximum_indices, maximum_indices.stride(0),
             acc, acc.stride(0),
             dentropy, dentropy.stride(0),
             dlogprobs, dlogprobs.stride(0) if REDUCTION == EntropyReductionEnum._None else 0,
             REDUCTION,
-            _d_max, _d_max.stride(0),
-            _d_acc_exp_logits, _d_acc_exp_logits.stride(0),
+            _d_scale, _d_scale.stride(0),
             d_hidden, d_hidden.stride(0), d_hidden.stride(1),
             d_weight, d_weight.stride(0), d_weight.stride(1),
         )
