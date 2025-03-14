@@ -141,11 +141,7 @@ _flash_attn_varlen_bwd = None
 try:
     _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v2 is not installed. To use, please install it by"
-            """ "pip3 install flash-attn".""",
-        )
+    pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
         if _flash_attn_version_required_blackwell <= _flash_attn_version <= _flash_attn_max_version:
@@ -194,20 +190,21 @@ else:
 _flash_attn_3_is_installed = False
 _flash_attn_3_version = PkgVersion("0")
 _flash_attn_3_0_0_beta = False
-_flash_attn_3_installation_steps = """\
+_flash_attn_3_installation_steps_non_cp = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
 (2) cd flash-attention/ && git checkout 39e7197 && cd hopper/ && python setup.py install
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
 (5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/39e71975642daab365a5a37c959182c93ed5fc8a/hopper/flash_attn_interface.py"""
+_flash_attn_3_installation_steps_cp = """\
+(1) pip3 install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
+(2) python_path=`python3 -c "import site; print(site.getsitepackages()[0])"`
+(3) mkdir -p $python_path/flashattn_hopper
+(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flash-attn-3"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() == (9, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v3 is not installed. To use, please install it by \n%s",
-            _flash_attn_3_installation_steps,
-        )
+    pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
     from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
     from flash_attn_3.flash_attn_interface import (
@@ -947,12 +944,12 @@ def get_attention_backend(
             logger.warning(
                 "flash-attn v3 may provide important feature support or performance improvement."
                 " Please install flash-attn v3 by \n%s",
-                _flash_attn_3_installation_steps,
+                _flash_attn_3_installation_steps_cp if context_parallel else _flash_attn_3_installation_steps_non_cp,
             )
         elif use_flash_attention_2 and not _flash_attn_is_installed:
             logger.warning(
                 "flash-attn may provide important feature support or performance improvement."
-                " Please install flash-attn %s.",
+                " Please install flash-attn %s by pip3 install flash-attn==<version>.",
                 _get_supported_versions(
                     _flash_attn_version_required,
                     _flash_attn_max_version,
@@ -3802,6 +3799,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -4274,6 +4272,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -4794,6 +4793,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             dq,
             dk,
             dv,
+            None,
             None,
             None,
             None,
@@ -6236,7 +6236,7 @@ class FlashAttention(torch.nn.Module):
                                 e.args[0]
                                 + ". Please update your flash-attn v3 (beta) installation as it "
                                 + "may have added more supported arguments to its API. \n"
-                                + _flash_attn_3_installation_steps,
+                                + _flash_attn_3_installation_steps_non_cp,
                             ) + e.args[1:]
                         raise
 
