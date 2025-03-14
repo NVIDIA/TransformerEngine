@@ -189,11 +189,9 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out = None
         # For DelayScaling, output of normalization will be in fp8.
         # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
-        if ub_overlap_ag_fprop and not fp8:
+        if ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
             ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
-        elif ub_overlap_ag_fprop and not isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
         elif with_quantized_norm:
             if with_input_all_gather:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -205,8 +203,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
-        print(f"with_quantized_norm: {with_quantized_norm}")
-        print(f"ln_out: {ln_out}")
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
             ln_out,
@@ -224,17 +220,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
-        if (
-            ub_overlap_ag_fprop
-            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
-        ):
+        if ub_overlap_ag_fprop and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
-            if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-                ln_out_local = input_quantizer.quantize(ln_out)
-                ub_obj_fprop.copy_into_buffer(ln_out_local, input_quantizer, local_chunk=True)
-                ln_out = ln_out_local
-            else:
-                ub_obj_fprop.copy_into_buffer(ln_out, input_quantizer, local_chunk=True)
+            ln_out_local = input_quantizer.quantize(ln_out)
+            ub_obj_fprop.copy_into_buffer(ln_out_local, input_quantizer, local_chunk=True)
+            ln_out = ln_out_local
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication

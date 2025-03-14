@@ -395,11 +395,11 @@ def _train(opts):
         pprint.pprint(kwargs)
         sys.stdout.write("\n")
     dist.barrier()
-
+    
     # Initialize the reference model and copy all parameters
     ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True)
     with te.fp8_model_init(enabled=opts.fp8_init):
-        ref_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
+        ref_model = multi_module_model(opts.layer_type, opts.num_layers, *ref_args, **ref_kwargs)
     dist_print("Initialized reference model...", debug=True)
     for test_param, ref_param in zip(test_model.parameters(), ref_model.parameters()):
         with torch.no_grad():

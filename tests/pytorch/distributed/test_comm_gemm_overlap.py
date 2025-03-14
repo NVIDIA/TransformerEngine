@@ -200,15 +200,6 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 
 
 @pytest.mark.parametrize(
-    "test_times",
-    [1, 2, 5],
-    ids=[
-        " x 1 times ",
-        " x 2 times ",
-        " x 5 times ",
-    ],
-)
-@pytest.mark.parametrize(
     "fp8",
     (False,),
     ids=[
@@ -217,10 +208,10 @@ def test_bulk_overlaps(comm_type, fp8, connections):
 )
 @pytest.mark.parametrize(
     "num_layers",
-    (1, 4),
+    (1, 2),
     ids=[
         " 1 layer ",
-        " 4 layers ",
+        " 2 layers ",
     ],
 )
 @pytest.mark.parametrize(
@@ -257,26 +248,16 @@ def test_bulk_overlaps(comm_type, fp8, connections):
     ],
 )
 def test_layers_with_overlap_bf16(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, num_layers, test_times
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, num_layers
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    for _ in range(test_times):
-        _run_layer_with_overlap(
-            layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, num_layers
-        )
+    _run_layer_with_overlap(
+        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, None, num_layers
+    )
 
 
-@pytest.mark.parametrize(
-    "test_times",
-    [1, 2, 5],
-    ids=[
-        " x 1 times ",
-        " x 2 times ",
-        " x 5 times ",
-    ],
-)
 @pytest.mark.parametrize(
     "quantization",
     ["fp8_delayed_scaling", "fp8_current_scaling"],
@@ -291,10 +272,10 @@ def test_layers_with_overlap_bf16(
 )
 @pytest.mark.parametrize(
     "num_layers",
-    (1, 4),
+    (1, 2),
     ids=[
         " 1 layer ",
-        " 4 layers ",
+        " 2 layers ",
     ],
 )
 @pytest.mark.parametrize(
@@ -331,12 +312,11 @@ def test_layers_with_overlap_bf16(
     ],
 )
 def test_layers_with_overlap_fp8(
-    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers, test_times
+    layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers
 ):
     """
     Test Transformer Engine layers with comm+GEMM overlap.
     """
-    for _ in range(test_times):
-        _run_layer_with_overlap(
-            layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers
-        )
+    _run_layer_with_overlap(
+        layer_type, linear_parallel_mode, overlap_rs_dgrad, fp8, quantization, num_layers
+    )

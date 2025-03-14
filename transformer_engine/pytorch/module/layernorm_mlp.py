@@ -249,13 +249,9 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_out = None
         # For DelayScaling, output of normalization will be in fp8.
         # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
-        if ub_overlap_ag and not fp8:
+        if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-        elif ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-            ln_out = fc1_input_quantizer.make_empty(
-                inputmat.shape, dtype=inputmat.dtype, device="cuda"
-            )
         elif not with_quantized_norm:
             ln_out = torch.empty_like(
                 inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
@@ -279,14 +275,11 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
-        if ub_overlap_ag and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling():
+        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
-            if isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-                ln_out_local = fc1_input_quantizer.quantize(ln_out)
-                ub_obj_lnout.copy_into_buffer(ln_out_local, fc1_input_quantizer, local_chunk=True)
-                ln_out = ln_out_local
-            else:
-                ub_obj_lnout.copy_into_buffer(ln_out, fc1_input_quantizer, local_chunk=True)
+            ln_out_local = fc1_input_quantizer.quantize(ln_out)
+            ub_obj_lnout.copy_into_buffer(ln_out_local, fc1_input_quantizer, local_chunk=True)
+            ln_out = ln_out_local
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
