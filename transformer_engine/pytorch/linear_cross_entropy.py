@@ -148,18 +148,18 @@ class LinearCrossEntropy(torch.autograd.Function):
             REDUCTION = ctx.REDUCTION
             dist_process_group = ctx.dist_process_group
             d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
-                dlogprobs, 
+                dlogprobs,
                 hidden, weight, labels,
                 _maximum, _acc,
                 REDUCTION,
                 dist_process_group
             )
         return d_hidden, d_weight, None, None, None
-    
+
 
 linear_cross_entropy = LinearCrossEntropy.apply
 
-__all__ = ["linear_cross_entropy_with_token_entropy", 
+__all__ = ["linear_cross_entropy_with_token_entropy",
            "LinearCrossEntropyWithTokenEntropy",
            "linear_cross_entropy",
            "LinearCrossEntropy"]
