@@ -592,7 +592,7 @@ class _Linear(torch.autograd.Function):
                         wgrad_gemm_use_split_accumulator = (
                             recipe.fp8_gemm_wgrad.use_split_accumulator
                         )
-                        
+
                 wgrad, grad_bias_, _, rs_out = general_gemm(
                     inputmat_total,
                     grad_output,

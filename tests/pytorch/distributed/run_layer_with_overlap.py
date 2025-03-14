@@ -395,7 +395,7 @@ def _train(opts):
         pprint.pprint(kwargs)
         sys.stdout.write("\n")
     dist.barrier()
-    
+
     # Initialize the reference model and copy all parameters
     ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True)
     with te.fp8_model_init(enabled=opts.fp8_init):
