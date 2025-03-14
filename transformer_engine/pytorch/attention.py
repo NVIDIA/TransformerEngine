@@ -528,6 +528,11 @@ def get_attention_backend(
             use_fused_attention = False
             use_unfused_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
+            if fp8_meta["recipe"].fp8_mha:
+                logger.debug("Disabling all backends for KV caching with FP8 MHA")
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = False
             if use_flash_attention_3 and q_format != "thd":
                 if _flash_attn_3_is_installed:
                     logger.debug("Disabling FlashAttention 3 for FP8 KV caching and non-THD")

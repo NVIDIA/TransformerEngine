@@ -219,8 +219,7 @@ def get_model(
     qkv_format: str = "bshd",
     num_layers: int = 1,
     mode: str = "reference",
-    fp8_dpa: bool = False,
-    fp8_mha: bool = False,
+    is_fp8: bool = False,
 ):
     reset_rng_states()
     sigma = 0.023
@@ -238,13 +237,13 @@ def get_model(
         fp8_format=recipe.Format.HYBRID,
         amax_history_len=1,
         amax_compute_algo="most_recent",
-        fp8_dpa=fp8_dpa,
-        fp8_mha=fp8_mha,
+        fp8_dpa=is_fp8,
+        fp8_mha=False,
     )
 
     if module == "TransformerLayer":
         hidden_size = config.head_dim_qk * config.num_heads
-        with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 TransformerLayer(
                     hidden_size=hidden_size,
@@ -258,6 +257,7 @@ def get_model(
                     layer_number=layer_number,
                     kv_channels=config.head_dim_qk,
                     self_attn_mask_type=attn_mask_type,
+                    fuse_qkv_params=False,
                     params_dtype=dtype,
                     attn_input_format=qkv_format,
                 )
@@ -266,7 +266,7 @@ def get_model(
                 for layer_number in range(1, num_layers + 1)
             ]
     if module == "DotProductAttention":
-        with fp8_model_init(enabled=fp8_mha, recipe=fp8_recipe):
+        with fp8_model_init(enabled=is_fp8, recipe=fp8_recipe):
             model = [
                 DotProductAttention(
                     kv_channels=config.head_dim_qk,
@@ -373,14 +373,14 @@ def generate_args(
 def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
         tols = {
-            torch.half: 4e-3,
-            torch.bfloat16: 3.5e-2,
+            torch.half: (3e-3, 3e-3),
+            torch.bfloat16: (3e-2, 3e-2),
         }
     if module == "DotProductAttention":
         tols = {
-            torch.half: 1e-3,
-            torch.bfloat16: 1e-2,
-            torch.float8_e4m3fn: 3e-2,
+            torch.half: (1e-3, 1e-3),
+            torch.bfloat16: (1e-2, 1e-3),
+            torch.float8_e4m3fn: (1e-2, 3e-2),
         }
     return tols[dtype]
 
@@ -394,6 +394,7 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
 def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
+    reset_rng_states()
     logger = logging.getLogger("test_paged_attn")
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
@@ -401,7 +402,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         amax_history_len=1,
         amax_compute_algo="most_recent",
         fp8_dpa=is_fp8,
-        fp8_mha=is_fp8,
+        fp8_mha=False,
     )
     fp8_meta = {}
     fp8_meta["recipe"] = fp8_recipe
@@ -480,8 +481,9 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     os.environ["NVTE_UNFUSED_ATTN"] = str(int(backend == "UnfusedAttention"))
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
+    # TransformerLayer FP8 TN Gemm currently requires %8=0
     if is_fp8 and not (
-        qkv_format == "thd" and module == "DotProductAttention" and dtype == torch.float16
+        qkv_format == "thd" and module == "DotProductAttention"
     ):
         pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
 
@@ -516,8 +518,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         qkv_format,
         num_layers,
         mode="inference",
-        fp8_dpa=is_fp8,
-        fp8_mha=is_fp8,
+        is_fp8=is_fp8,
     )
 
     # graph the model if necessary
@@ -663,29 +664,29 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
         incremental_output = incremental_output[0]
 
         # compare results
-        tol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
+        atol, rtol = get_tols(module, backend, dtype=dtype if not is_fp8 else torch.float8_e4m3fn)
         for i, seq in enumerate(sim.t_seq_ids):
             token_index = sim.step_lens[i] - 1
             if qkv_format == "bshd":
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     incremental_output[i, sim.step_lens[i] - 1, :],
-                    atol=tol,
-                    rtol=tol,
+                    atol=atol,
+                    rtol=rtol,
                 )
             if qkv_format == "sbhd":
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     incremental_output[sim.step_lens[i] - 1, i, :],
-                    atol=tol,
-                    rtol=tol,
+                    atol=atol,
+                    rtol=rtol,
                 )
             if qkv_format == "thd":
                 torch.testing.assert_close(
                     full_output[seq, sim.t_total_lens[i] - 1, :],
                     incremental_output[cu_seqlens_q[i + 1] - 1, :],
-                    atol=tol,
-                    rtol=tol,
+                    atol=atol,
+                    rtol=rtol,
                 )
 
         sim.t += 1
