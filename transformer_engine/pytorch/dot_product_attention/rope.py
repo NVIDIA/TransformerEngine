@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 """
-Rotary Position Embedding implementation of different types along with hlper functions
+Rotary Position Embedding implementation of different types along with helper functions
 """
 from typing import Optional, Tuple, Union
 import torch

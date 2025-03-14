@@ -76,7 +76,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 
 # Import attention utils
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
-import transformer_engine.pytorch.dot_product_attention.inference as dpa_infer
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
@@ -5384,7 +5384,7 @@ class DotProductAttention(TransformerEngineBaseModule):
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
         fast_zero_fill: bool = True,
-        inference_params: Optional[dpa_infer.InferenceParams] = None,
+        inference_params: Optional[InferenceParams] = None,
         pad_between_seqs: Optional[bool] = None,
     ) -> torch.Tensor:
         """
@@ -5545,7 +5545,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                      to the attention score of query i and key j.
         fast_zero_fill: bool, default = `True`
                     Whether to use the fast path to set output tensors to 0 or not.
-        inference_params: Optional[dpa_infer.InferenceParams], default = `None`
+        inference_params: Optional[InferenceParams], default = `None`
             Optimizes execution performance during inference by caching Keys and Values of the
             current decoding iteration. These cached values are appended to the K and V values
             computed in previous iterations, eliminating the need to recalculate them for the
@@ -6501,7 +6501,7 @@ class MultiheadAttention(torch.nn.Module):
         window_size: Optional[Tuple[int, int]] = None,
         is_first_microbatch: Optional[bool] = None,
         checkpoint_core_attention: bool = False,
-        inference_params: Optional[dpa_infer.InferenceParams] = None,
+        inference_params: Optional[InferenceParams] = None,
         rotary_pos_emb: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,

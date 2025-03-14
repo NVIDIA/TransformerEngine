@@ -46,7 +46,6 @@ from transformer_engine.pytorch.utils import (
 
 from transformer_engine.pytorch.jit import jit_fuser
 
-# ----Global constants----
 # NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
 _NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
 # NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
@@ -54,7 +53,6 @@ _NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
 _NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
 
 
-# ----Helper/Util classes and methods-----
 class AttentionLogging:
     """
     Manage logging for attention module
