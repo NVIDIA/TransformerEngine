@@ -241,17 +241,10 @@ class _GroupedLinear(torch.autograd.Function):
             grad_biases = [None] * ctx.num_gemms
             if ctx.fp8:
                 if ctx.use_bias:
-                    # TODO zhongboz: the fused kernel of cast_transpose + dgrad # pylint: disable=fixme
-                    # calculation is still not ready for per-tensor current scaling
-                    if ctx.fp8_recipe.float8_current_scaling():
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i] = grad_output_mats[i].sum(dim=0)
-                            grad_output[i] = ctx.grad_output_quantizers[i](grad_output_mats[i])
-                    else:
-                        for i in range(ctx.num_gemms):
-                            grad_biases[i], grad_output[i] = tex.bgrad_quantize(
-                                grad_output_mats[i], ctx.grad_output_quantizers[i]
-                            )
+                    for i in range(ctx.num_gemms):
+                        grad_biases[i], grad_output[i] = tex.bgrad_quantize(
+                            grad_output_mats[i], ctx.grad_output_quantizers[i]
+                        )
                 else:
                     grad_output = tex.fused_multi_quantize(
                         grad_output_mats,
