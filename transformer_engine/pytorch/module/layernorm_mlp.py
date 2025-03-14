@@ -687,7 +687,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.fc1_input_quantizer
-                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    quantizer.set_usage(rowwise=False, columnwise=True)
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,

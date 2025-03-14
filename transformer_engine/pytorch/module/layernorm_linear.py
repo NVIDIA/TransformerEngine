@@ -574,7 +574,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    quantizer.set_usage(rowwise=False, columnwise=True)
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
