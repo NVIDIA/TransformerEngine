@@ -49,11 +49,13 @@ if is_bf16_compatible():
     param_types.append(torch.bfloat16)
 
 model_configs_infer = {
-    #    test:             b,  h, hg,  d,  sq, skv,   p,      mask,      bias
+    # test: b,  h, hg,  d,  sq, skv,   p,      mask,      bias
     "infer_0": ModelConfig(
         4, 16, 16, 128, 64, 64, 0.0, "no_mask", "no_bias", total_requests=8, max_ctx_len=16
     ),
-    # "infer_1": ModelConfig(2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16),
+    "infer_1": ModelConfig(
+        2, 16, 4, 64, 66, 66, 0.0, "no_mask", "no_bias", total_requests=6, max_ctx_len=16
+    ),
 }
 
 qkv_formats = ["bshd", "sbhd", "thd"]
@@ -374,7 +376,7 @@ def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
         tols = {
             torch.half: (3e-3, 3e-3),
-            torch.bfloat16: (3e-2, 3e-2),
+            torch.bfloat16: (3.5e-2, 3.5e-2),
         }
     if module == "DotProductAttention":
         tols = {

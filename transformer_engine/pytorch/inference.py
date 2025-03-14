@@ -54,8 +54,8 @@ class KVCacheManager:
 
 class InferenceParams:
     """
-    KV caching mechanism in inference. The memory allocation of the caches, and the copying of
-    new tokens to the cache take place at the following locations in TransformerLayer.::
+    KV caching for inference. The memory allocation of the caches and the copying of new tokens
+    to the cache take place at the following locations.::
 
       class TransformerLayer:
           class MultiHeadAttention:
@@ -67,20 +67,22 @@ class InferenceParams:
                           new_k, new_v, qkv_format)
                   output = attention(new_q, k_cache, v_cache, new_qkv_format)
 
-    allocate_memory() can be called independently if needed. step() takes 'bshd', 'sbhd' and 'thd'
-    formats and converts new_k and new_v to 'bshd' in both NonPagedKVCacheManager and PagedKVCacheManager.
-    Since new_q's format is unchanged, the returned new_qkv_format is 'bshd', 'sbhd_2bshd' and 'thd_2bshd',
-    respectively. A standard workflow for using InferenceParams to cache KV tokens, is as follows.::
+    allocate_memory() can be called outside the model, independently. step() can take three formats,
+    qkv_format = {'bshd', 'sbhd', 'thd'}. It converts new_k and new_v to 'bshd' in both
+    NonPagedKVCacheManager and PagedKVCacheManager. The format of new_q may change depending on the
+    backend. If it is unchanged, we would have new_qkv_format = {'bshd', 'sbhd_2bshd', 'thd_2bshd'}.
+    A standard KV caching workflow for inference is as follows.::
 
       model = [TransformerLayer() for _ in range(num_layers)]
-      # initialize InferenceParams, for example, with PagedKVCacheManager
+      # initialize InferenceParams, e.g. with PagedKVCacheManager
       inference_params = InferenceParams(..., is_paged=True)
-      # inference iterations
+      # inference loop
       for i in range(num_iters):
-          # get step info, e.g. seq_ids = [0, 2, 3], step_lens = [10, 1, 1]
+          # get info for iteration i, e.g. seq_ids = [0, 2, 3], step_lens = [10, 1, 1]
           step_dict = OrderedDict(zip(seq_ids, step_lens))
-          # update inference_params state
+          # update inference_params' state
           inference_params.pre_step(step_dict)
+          # run iteration
           output = model(
                 ...,
                 attn_mask_type="padding_causal",
@@ -88,10 +90,10 @@ class InferenceParams:
                 cu_seqlens_kv=cu_seqlens_new_kv,
                 inference_params=inference_params,
                 )
-          # get inference tokens based on qkv_format
-          # "bshd": output = output[:,step_dict.values()-1]
-          # "sbhd": output = output[step_dict.values()-1,:]
-          # "thd" : output = output[cu_seqlens_new_q[j+1]-1], j=0,...b-1
+          # get output tokens based on qkv_format
+          # 'bshd': output = output[:,step_dict.values()-1]
+          # 'sbhd': output = output[step_dict.values()-1,:]
+          # 'thd' : output = output[cu_seqlens_new_q[j+1]-1], j=0,...b-1
 
 
     Parameters

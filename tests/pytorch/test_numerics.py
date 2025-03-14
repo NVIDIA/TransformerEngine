@@ -2038,7 +2038,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model_key", model_configs_inference.keys())
-@pytest.mark.parametrize("use_RoPE", [False])  # all_boolean)
+@pytest.mark.parametrize("use_RoPE", all_boolean)
 @pytest.mark.parametrize("input_format", input_formats_inference)
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
@@ -2048,6 +2048,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
         pytest.skip("FusedAttention and FlashAttention do not support FP32")
+    if use_RoPE:
+        pytest.skip("KV cache does not support starting positions for RoPE")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"

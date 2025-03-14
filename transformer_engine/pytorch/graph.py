@@ -91,6 +91,9 @@ def _make_graphed_callables(
         sample_args = (sample_args,)
         sample_kwargs = (sample_kwargs,)
 
+    # Check training/inference
+    is_training = all(c.training for c in callables)
+
     # Check sizes of args
     if _order is None:
         assert len(sample_args) == len(callables)
@@ -255,7 +258,7 @@ def _make_graphed_callables(
                 outputs, _ = _tree_flatten(func(*args, **kwargs))
                 for hook in hooks:
                     hook.remove()
-                if callables[0].training:
+                if is_training:
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in outputs if o.requires_grad),
                         inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -317,7 +320,7 @@ def _make_graphed_callables(
                     static_grad_outputs = tuple(
                         torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                     )
-                    if callables[0].training:
+                    if is_training:
                         with torch.cuda.graph(bwd_graph, pool=mempool):
                             grad_inputs = torch.autograd.grad(
                                 outputs=tuple(o for o in static_outputs if o.requires_grad),
@@ -334,7 +337,7 @@ def _make_graphed_callables(
                     grad_idx = 0
                     for arg in static_input_surface:
                         if (
-                            callables[0].training
+                            is_training
                             and isinstance(arg, torch.Tensor)
                             and arg.requires_grad
                         ):
@@ -374,7 +377,7 @@ def _make_graphed_callables(
             static_grad_outputs = tuple(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
-            if callables[0].training:
+            if is_training:
                 with torch.cuda.graph(bwd_graph, pool=mempool):
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in static_outputs if o.requires_grad),
@@ -390,7 +393,7 @@ def _make_graphed_callables(
             static_grad_inputs = []
             grad_idx = 0
             for arg in static_input_surface:
-                if callables[0].training and isinstance(arg, torch.Tensor) and arg.requires_grad:
+                if is_training and isinstance(arg, torch.Tensor) and arg.requires_grad:
                     static_grad_inputs.append(grad_inputs[grad_idx])
                     grad_idx += 1
                 else:
