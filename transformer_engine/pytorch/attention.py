@@ -944,7 +944,11 @@ def get_attention_backend(
             logger.warning(
                 "flash-attn v3 may provide important feature support or performance improvement."
                 " Please install flash-attn v3 by \n%s",
-                _flash_attn_3_installation_steps_cp if context_parallel else _flash_attn_3_installation_steps_non_cp,
+                (
+                    _flash_attn_3_installation_steps_cp
+                    if context_parallel
+                    else _flash_attn_3_installation_steps_non_cp
+                ),
             )
         elif use_flash_attention_2 and not _flash_attn_is_installed:
             logger.warning(
