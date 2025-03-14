@@ -1906,6 +1906,7 @@ def get_fa_args(
     dk=None,
     dv=None,
     ):
+    """Get forward/backward arguments for flash-attn v2 and v3."""
     if use_flash_attn_3:
         if forward:
             if qkv_format == "thd":
@@ -1918,66 +1919,59 @@ def get_fa_args(
                     max_seqlen_kv,
                     *[None] * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
                 ]
-            else:
-                return [
-                    *[None] * 9,  # k_new, v_new, qv, out, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_k_new, seqused_q, seqused_k
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    *[None] * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
-                ]
-        else:
-            if qkv_format == "thd":
-                return [
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    None,  # sequed_q
-                    None,  # sequed_k
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    dq,
-                    dk,
-                    dv,
-                ]
-            else:
-                return [
-                    None,  # cu_seqlens_q
-                    None,  # cu_seqlens_kv
-                    None,  # sequed_q
-                    None,  # sequed_k
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                    dq,
-                    dk,
-                    dv,
-                ]
-    else:
-        if forward:
-            if qkv_format == "thd":
-                return [
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                ]
-            else:
-                return []
-        else:
-            if qkv_format == "thd":
-                return [
-                    dq,
-                    dk,
-                    dv,
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                ]
-            else:
-                return [
-                    dq,
-                    dk,
-                    dv,
-                ]
+            return [
+                *[None] * 9,  # k_new, v_new, qv, out, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_k_new, seqused_q, seqused_k
+                max_seqlen_q,
+                max_seqlen_kv,
+                *[None] * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+            ]
+        if qkv_format == "thd":
+            return [
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                None,  # sequed_q
+                None,  # sequed_k
+                max_seqlen_q,
+                max_seqlen_kv,
+                dq,
+                dk,
+                dv,
+            ]
+        return [
+            None,  # cu_seqlens_q
+            None,  # cu_seqlens_kv
+            None,  # sequed_q
+            None,  # sequed_k
+            max_seqlen_q,
+            max_seqlen_kv,
+            dq,
+            dk,
+            dv,
+        ]
+    if forward:
+        if qkv_format == "thd":
+            return [
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_seqlen_q,
+                max_seqlen_kv,
+            ]
+        return []
+    if qkv_format == "thd":
+        return [
+            dq,
+            dk,
+            dv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+        ]
+    return [
+        dq,
+        dk,
+        dv,
+    ]
 
 
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
