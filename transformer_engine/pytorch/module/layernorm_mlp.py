@@ -60,7 +60,6 @@ from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
