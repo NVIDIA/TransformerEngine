@@ -89,6 +89,10 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
         "pydantic",
         "importlib-metadata>=1.0",
         "packaging",
+        (
+            "nvdlfw-inspect @"
+            " git+https://github.com/NVIDIA/nvidia-dlfw-inspect.git@v0.1#egg=nvdlfw-inspect"
+        ),
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
