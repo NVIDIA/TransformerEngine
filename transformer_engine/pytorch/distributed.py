@@ -386,7 +386,9 @@ class _CheckpointFunction(torch.autograd.Function):
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
-        ), te.fp8_autocast(enabled=use_fp8, fp8_recipe=recipe):
+        ), te.fp8_autocast(
+            enabled=use_fp8, fp8_recipe=recipe
+        ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
         # Set the states back to what it was at the start of this function.
@@ -714,7 +716,11 @@ def checkpoint(
     def recompute_fn(*args, **kwargs):
         with torch.autograd.enable_grad(), (
             te_recompute_ctx
-        ), user_recompute_ctx, torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, te.fp8_autocast(enabled=fp8, fp8_recipe=fp8_recipe):
+        ), (
+            user_recompute_ctx
+        ), torch_gpu_amp_forward_ctx, torch_cpu_amp_forward_ctx, te.fp8_autocast(
+            enabled=fp8, fp8_recipe=fp8_recipe
+        ):
             function(*args, **kwargs)
 
     # Initialize a new checkpoint frame for each new forward pass.
