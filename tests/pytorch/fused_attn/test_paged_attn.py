@@ -34,7 +34,6 @@ from test_fused_attn import (
     reset_rng_states,
     _get_attention_backends,
 )
-from tests.pytorch.test_numerics import assert_allclose
 
 # Initialize RNG state
 seed = 1234
