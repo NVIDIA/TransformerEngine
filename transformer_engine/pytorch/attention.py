@@ -2555,7 +2555,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     )
                     max_seqlen_kv_ = seq_end_idx - seq_start_idx
                     if use_fused_attention or qkv_format == "thd":
-                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cumul_seqlens(
+                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
                             k.shape[1], max_seqlen_kv_, k.device
                         )
                     k_, v_ = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
