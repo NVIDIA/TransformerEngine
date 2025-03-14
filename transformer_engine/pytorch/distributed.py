@@ -18,7 +18,7 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import safely_set_viewless_tensor_data
+from .utils import safely_set_viewless_tensor_data, is_torch_min_version
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -257,17 +257,36 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-    )
+    if is_torch_min_version("2.4.0a0"):
+        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
+        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_ctx = torch.amp.autocast(
+            "cuda",
+            enabled=gpu_autocast_enabled,
+            dtype=gpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-    )
+        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+        cpu_autocast_ctx = torch.amp.autocast(
+            "cpu",
+            enabled=cpu_autocast_enabled,
+            dtype=cpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
+    else:
+        gpu_autocast_enabled = torch.is_autocast_enabled()
+        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
+            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
+
+        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
+        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+        cpu_autocast_ctx = torch.cpu.amp.autocast(
+            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
