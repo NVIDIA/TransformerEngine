@@ -482,9 +482,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     if backend == "UnfusedAttention" and is_cuda_graph:
         pytest.skip("CUDA graph is not supported for UnfusedAttention backend")
     # TransformerLayer FP8 TN Gemm currently requires %8=0
-    if is_fp8 and not (
-        qkv_format == "thd" and module == "DotProductAttention"
-    ):
+    if is_fp8 and not (qkv_format == "thd" and module == "DotProductAttention"):
         pytest.skip("BSHD/SBHD <-> THD conversions for FP8 are not supported")
 
     # create full model
