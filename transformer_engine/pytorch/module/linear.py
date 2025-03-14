@@ -11,6 +11,7 @@ import torch
 
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Recipe
 from .base import (
     get_workspace,
     get_ub,
@@ -55,6 +56,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
@@ -154,6 +156,7 @@ class _Linear(torch.autograd.Function):
                 )
                 if not isinstance(inputmat, QuantizedTensor):
                     inputmat = input_quantizer(inputmat)
+                    own_quantized_input = True
                 elif backward_needs_input:
                     inputmat.update_usage(rowwise_usage=True, columnwise_usage=True)
                 inputmat_total = inputmat
@@ -228,6 +231,12 @@ class _Linear(torch.autograd.Function):
             inputmat_total = ub_obj.get_buffer(input_quantizer)
 
         nvtx_range_push(f"{nvtx_label}.gemm")
+        fprop_gemm_use_split_accumulator = _2X_ACC_FPROP
+        if fp8:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            if hasattr(recipe, "fp8_gemm_fprop"):
+                fprop_gemm_use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
+
         out, *_, rs_out = general_gemm(
             weightmat,
             inputmat_total,
@@ -235,7 +244,7 @@ class _Linear(torch.autograd.Function):
             quantization_params=output_quantizer,
             out_dtype=out_dtype,
             bias=bias,
-            use_split_accumulator=_2X_ACC_FPROP,
+            use_split_accumulator=fprop_gemm_use_split_accumulator,
             ub=ub_obj,
             ub_type=ub_type,
             extra_output=rs_out,
@@ -244,9 +253,18 @@ class _Linear(torch.autograd.Function):
 
         if is_grad_enabled:
             saved_inputmat = None
+
+            ctx.backward_input_needs_gather = (
+                weight.requires_grad and parallel_mode == "column" and sequence_parallel
+            )
+
             if backward_needs_input:
                 if own_quantized_input and isinstance(inputmat, QuantizedTensor):
-                    inputmat.update_usage(rowwise_usage=False)
+                    # For sequence parallel in vanilla FP8, rowwise data is
+                    # to gather the input. For MXFP8, columnwise only data
+                    # can be allgathered.
+                    if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
+                        inputmat.update_usage(rowwise_usage=False)
                 saved_inputmat = inputmat
 
             if cpu_offloading:
@@ -277,6 +295,7 @@ class _Linear(torch.autograd.Function):
             ctx.tensor_objects = tensor_objects
 
             ctx.activation_dtype = activation_dtype
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.fp8 = fp8
             ctx.input_quantizer = input_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
@@ -303,7 +322,6 @@ class _Linear(torch.autograd.Function):
             ctx.requires_wgrad = weight.requires_grad
             ctx.reduce_and_update_bwd_fp8_tensors = False
             ctx.owns_input = saved_inputmat is not inp
-            ctx.is_input_fp8 = not own_quantized_input
             if ctx.fp8 and requires_grad(inp, weight, bias):
                 _first_fp8_module = FP8GlobalStateManager.IS_FIRST_FP8_MODULE
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
@@ -344,16 +362,20 @@ class _Linear(torch.autograd.Function):
                         ctx.ub_bulk_wgrad,
                     ]
                 )
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and (ctx.fp8_recipe is not None)
             ):
-                raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
-                )
+                if not ctx.fp8_recipe.delayed():
+                    raise NotImplementedError(
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    )
 
             saved_tensors = ctx.saved_tensors
             inputmat, weight_fp8, weight, bias = (  # pylint: disable=unbalanced-tuple-unpacking
                 restore_from_saved(ctx.tensor_objects, saved_tensors)
             )
+            # Delete the references to tensor objects once they've been consumed
+            # by the `restore_from_saved` method to construct back the actual tensors.
+            ctx.tensor_objects = None
 
             # Since main_grad can be modified inplace, it should not be a part of saved_tensors
             main_grad = (
@@ -424,6 +446,7 @@ class _Linear(torch.autograd.Function):
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_output_quantizer is not None:
                 ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
                 grad_bias,
@@ -433,17 +456,13 @@ class _Linear(torch.autograd.Function):
                 ctx.parallel_mode == "row",
                 ctx.grad_output_quantizer,
             )
+            nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
             # Prepare input tensor
             # Note: Perform tensor-parallel communication if needed
             inputmat_total = None
             inputmat_total_work = None
-            if (
-                ctx.requires_wgrad
-                and ctx.parallel_mode == "column"
-                and ctx.sequence_parallel
-                and not ctx.ub_bulk_dgrad
-            ):
+            if ctx.backward_input_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
@@ -478,6 +497,14 @@ class _Linear(torch.autograd.Function):
 
                 # dgrad GEMM
                 nvtx_range_push(f"{nvtx_label}.dgrad_gemm")
+                dgrad_gemm_use_split_accumulator = _2X_ACC_DGRAD
+                if ctx.fp8:
+                    recipe = ctx.fp8_recipe
+                    if hasattr(recipe, "fp8_gemm_dgrad"):
+                        dgrad_gemm_use_split_accumulator = (
+                            recipe.fp8_gemm_dgrad.use_split_accumulator
+                        )
+
                 dgrad, *_, rs_out = general_gemm(
                     weight_fp8,
                     grad_output,
@@ -487,7 +514,7 @@ class _Linear(torch.autograd.Function):
                     quantization_params=ctx.grad_input_quantizer,
                     out=dgrad_bulk,
                     out_dtype=ctx.activation_dtype,
-                    use_split_accumulator=_2X_ACC_DGRAD,
+                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
                     ub=ub_obj_dgrad,
                     ub_type=ub_type_dgrad,
                     extra_output=rs_out,
@@ -546,6 +573,14 @@ class _Linear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
+                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
+                if ctx.fp8:
+                    recipe = ctx.fp8_recipe
+                    if hasattr(recipe, "fp8_gemm_wgrad"):
+                        wgrad_gemm_use_split_accumulator = (
+                            recipe.fp8_gemm_wgrad.use_split_accumulator
+                        )
+
                 wgrad, grad_bias_, _, rs_out = general_gemm(
                     inputmat_total,
                     grad_output,
@@ -557,7 +592,7 @@ class _Linear(torch.autograd.Function):
                     ),
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=_2X_ACC_WGRAD,
+                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,
@@ -620,7 +655,9 @@ class _Linear(torch.autograd.Function):
             wgrad = None
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
+            nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
+            nvtx_range_pop(f"{nvtx_label}.reduce_and_update_fp8_tensors")
 
         # Scatter fp8 weight buffers
         if ctx.fp8 and not isinstance(weight, QuantizedTensor):
@@ -948,6 +985,16 @@ class Linear(TransformerEngineBaseModule):
         else:
             self.gemm_bias_unfused_add = False
 
+    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
+        """Init scales and amaxes for fwd | bwd."""
+        super().set_meta_tensor(fwd, recipe)
+
+        # customize quantizers based on each recipe & layer configs
+        recipe = FP8GlobalStateManager.get_fp8_recipe()
+        if recipe.float8_current_scaling():
+            self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        # elif for other recipes (mxfp8, etc.)
+
     def reset_parameters(self, defer_init=False):
         super().reset_parameters(defer_init=defer_init)
 
@@ -1111,3 +1158,56 @@ class Linear(TransformerEngineBaseModule):
             grad_output_quantizer,
             grad_input_quantizer,
         )
+
+    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on current scaling recipe + linear."""
+        assert (
+            recipe.float8_current_scaling()
+        ), "current scaling recipe quantizer customization here"
+        if fwd:
+            # set configs about amax epsilon and power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+            # also set weight quantizer with same amax_epsilon & power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+            # paralle related
+            if self.sequence_parallel and self.parallel_mode == "column":
+                # customize input_quantizer with amax reduction TP group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_size = self.tp_size
+        else:
+            # set grad_output_quantizer with amax epsilon and power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            # parallel related
+            if self.sequence_parallel and self.parallel_mode == "row":
+                # customize grad_output_quantizer with amax reduction TP group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_size = self.tp_size
