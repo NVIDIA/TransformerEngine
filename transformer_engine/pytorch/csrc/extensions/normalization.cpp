@@ -119,7 +119,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
     if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
-      force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
+      force_unfused_kernel = N % 128 != 0 || H % 128 != 0;
     }
   }
   TensorWrapper unquantized_out_cu;
@@ -262,7 +262,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   } else if (IsMXFP8Quantizers(quantizer.ptr())) {
     if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
       // cuDNN MXFP8 kernel requires full tile
-      force_unfused_kernel = N % 128 == 0 && H % 128 == 0;
+      force_unfused_kernel = N % 128 != 0 || H % 128 != 0;
     }
   }
   TensorWrapper unquantized_out_cu;
