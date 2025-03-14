@@ -273,7 +273,7 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
-            if cpu_offloading:
+            if cpu_offloading and hasattr(weight, "grad_added_to_main_grad"):
                 # If you are passing torch.nn.Parameter through the Torch hooks, you will
                 # get back torch.Tensor. Torch rips off the Parameter wrapper.
                 # You need to preserve the weight object to have all the attributes user
