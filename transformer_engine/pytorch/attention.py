@@ -6199,7 +6199,6 @@ class FlashAttention(torch.nn.Module):
                                 QKV_quantizer(x) for x in [query_layer, key_layer, value_layer]
                             )
                         batch_size = cu_seqlens_q.shape[0] - 1
-                        num_heads_q = query_layer.shape[-2]
                         num_heads_k = key_layer.shape[-2]
                         fa_3_optional_forward_kwargs["q_descale"] = (
                             query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
@@ -7747,7 +7746,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
             # update KV cache and retrieve saved tokens from cache for inference
-            page_table = None
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
 
@@ -7768,7 +7766,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                 (
                     key_layer,
                     value_layer,
-                    page_table,
                     cu_seqlens_q,
                     cu_seqlens_kv,
                     max_seqlen_kv,
@@ -8134,8 +8131,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes=alibi_slopes,
                     inference_params=inference_params,
                 )
-
-            return output
+            return None
 
 
 class MultiheadAttention(torch.nn.Module):

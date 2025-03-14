@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 """Inference"""
-import os
 import logging
 from collections import OrderedDict, defaultdict
 from typing import Optional, List
@@ -50,7 +49,7 @@ class KVCacheManager:
         qkv_format: str,  # pylint: disable=unused-argument
     ):
         """Copy the new tokens to KV cache"""
-        return *self.cache[layer_number], None
+        return self.cache[layer_number]
 
 
 class InferenceParams:
@@ -337,8 +336,6 @@ class InferenceParams:
             Full key tensor containing both previous and current key tokens
         v_cache: torch.Tensor
             Full value tensor containing both previous and current value tokens
-        page_table: torch.Tensor
-            Page table for paged KV cache, [batch_size, max_pages_per_seq]. None for non-paged KV cache.
         cu_seqlens_q: torch.Tensor
             Updated cumulative sequence lengths for query, [batch_size + 1]
         cu_seqlens_kv: torch.Tensor
@@ -356,7 +353,7 @@ class InferenceParams:
         else:
             self.output_qkv_format = self.input_qkv_format + "_2" + self.cache_qkv_format
 
-        k_cache, v_cache, page_table = self.cache_manager.step(
+        k_cache, v_cache = self.cache_manager.step(
             layer_number,
             new_k,
             new_v,
@@ -368,7 +365,6 @@ class InferenceParams:
         return (
             k_cache,
             v_cache,
-            page_table,
             self.cu_seqlens_q,
             self.cu_seqlens_kv,
             self.max_seqlen_kv,
@@ -507,8 +503,6 @@ class NonPagedKVCacheManager(KVCacheManager):
             Full key tensor containing both previous and current key tokens
         v_cache: torch.Tensor
             Full value tensor containing both previous and current value tokens
-        page_table: torch.Tensor
-            None for non-paged KV cache
         """
         k_cache, v_cache = self.cache[layer_number]
 
@@ -540,7 +534,7 @@ class NonPagedKVCacheManager(KVCacheManager):
         k_cache = k_cache[:batch_size]
         v_cache = v_cache[:batch_size]
 
-        return k_cache, v_cache, None
+        return k_cache, v_cache
 
 
 class Page:
@@ -767,8 +761,6 @@ class PagedKVCacheManager(KVCacheManager):
             Full key tensor containing both previous and current key tokens
         v_cache: torch.Tensor
             Full value tensor containing both previous and current value tokens
-        page_table: torch.Tensor
-            Page table for current iteration, in shape [batch_size, max_pages_per_seq]
         """
         k_cache, v_cache = self.cache[layer_number]
 
@@ -797,6 +789,4 @@ class PagedKVCacheManager(KVCacheManager):
             False,
         )
 
-        page_table = self.page_table[:batch_size]
-
-        return k_cache, v_cache, page_table
+        return k_cache, v_cache
