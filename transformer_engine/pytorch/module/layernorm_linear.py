@@ -222,9 +222,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
         if ub_overlap_ag_fprop and isinstance(input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_fprop = get_ub(ub_name + "_fprop")
-            ln_out_local = input_quantizer.quantize(ln_out)
-            ub_obj_fprop.copy_into_buffer(ln_out_local, input_quantizer, local_chunk=True)
-            ln_out = ln_out_local
+            ln_out_local = ln_out
+            ln_out = ub_obj_fprop.get_buffer(input_quantizer, local_chunk=True)
+            input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication

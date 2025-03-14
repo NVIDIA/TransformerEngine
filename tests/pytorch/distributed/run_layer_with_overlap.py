@@ -31,12 +31,8 @@ class multi_module_model(torch.nn.Module):
         self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
 
     def forward(self, x):
-        consistent_shape = x.shape
         for layer in self.layers:
             x = layer(x)
-            # For stacked layers, we need to reshape the output to the consistent shape
-            if self.num_layers > 1:
-                x = x.reshape(consistent_shape)
         return x
 
 
@@ -60,10 +56,8 @@ def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
     hidden_size = config.num_heads * config.head_dim
     ffn_hidden_size = 4 * hidden_size
     qkv_size = 3 * hidden_size
-    # Shape is fine if using TransformerLayer for stacked layers
-    # For other layer modules, we need to reshape the input to the consistent shape
     if num_layers > 1 and config.layer_type != te.TransformerLayer:
-        qkv_size = ffn_hidden_size = hidden_size
+        raise ValueError("Stacked layers are only supported for te.TransformerLayer!")
     input_shape = [config.seq_length, config.batch_size, hidden_size]
     args = [hidden_size]
     kwargs = {
