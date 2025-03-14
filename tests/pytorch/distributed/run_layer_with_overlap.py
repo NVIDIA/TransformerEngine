@@ -365,7 +365,9 @@ def _train(opts):
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
     # Initialize the Transformer Engine layer with overlap
-    args, kwargs, input_shape = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers)
+    args, kwargs, input_shape = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers
+    )
     # Intialize userbuffers
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
@@ -391,7 +393,9 @@ def _train(opts):
     dist.barrier()
 
     # Initialize the reference model and copy all parameters
-    ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True)
+    ref_args, ref_kwargs, _ = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True
+    )
     with te.fp8_model_init(enabled=opts.fp8_init):
         ref_model = multi_module_model(opts.layer_type, opts.num_layers, *ref_args, **ref_kwargs)
     dist_print("Initialized reference model...", debug=True)
