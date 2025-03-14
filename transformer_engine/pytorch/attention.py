@@ -191,7 +191,7 @@ _flash_attn_3_is_installed = False
 _flash_attn_3_version = PkgVersion("0")
 _flash_attn_3_0_0_beta = False
 # FA3 from FA 2.7.3+/hopper has different APIs than from 2.7.2/hopper
-# TODO: adopt these new APIs for CP
+# we need to adopt these new APIs for CP
 _flash_attn_3_installation_steps_non_cp = """\
 (1) git clone https://github.com/Dao-AILab/flash-attention.git
 (2) cd flash-attention/ && git checkout 39e7197 && cd hopper/ && python setup.py install
