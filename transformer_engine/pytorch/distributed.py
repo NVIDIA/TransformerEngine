@@ -376,18 +376,11 @@ class _CheckpointFunction(torch.autograd.Function):
             get_rng_state_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
         # Compute the forward pass.
-        if hasattr(ctx, "fp8"):
-            use_fp8 = ctx.fp8
-            recipe = ctx.fp8_recipe
-        else:
-            use_fp8 = FP8GlobalStateManager.is_fp8_enabled()
-            recipe = FP8GlobalStateManager.get_fp8_recipe() if use_fp8 else None
-
         detached_inputs = detach_variable(inputs)
         with torch.enable_grad(), ctx.recompute_ctx, ctx.torch_gpu_amp_ctx, ctx.torch_cpu_amp_ctx, activation_recompute_forward(
             activation_recompute=True, recompute_phase=True
         ), te.fp8_autocast(
-            enabled=use_fp8, fp8_recipe=recipe
+            enabled=ctx.fp8, fp8_recipe=ctx.fp8_recipe
         ):
             outputs = ctx.run_function(*detached_inputs, **ctx.kwargs)
 
