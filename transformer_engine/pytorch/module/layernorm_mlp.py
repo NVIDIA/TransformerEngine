@@ -1563,7 +1563,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight_quantizer.internal = True
             fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
-                rowwise=True, columnwise=isinstance(fc2_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer))
+                rowwise=True,
+                columnwise=isinstance(fc2_input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)),
             )
             fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
             fc2_weight_quantizer.internal = True
