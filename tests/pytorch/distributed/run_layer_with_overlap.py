@@ -267,11 +267,6 @@ def _train(opts):
         opts.tcp_init = True
         opts.bind_to_device = True
         opts.bootstrap_backend = "mpi"
-    elif "SLURM_PROCID" in os.environ:
-        WORLD_RANK = (int)(os.environ["SLURM_PROCID"])
-        LOCAL_RANK = (int)(os.environ["SLURM_LOCALID"])
-        WORLD_SIZE = (int)(os.environ["SLURM_NTASKS"])
-        LOCAL_SIZE = WORLD_SIZE
     else:
         WORLD_RANK = int(os.getenv("RANK", "0"))
         WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
