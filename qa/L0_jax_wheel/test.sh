@@ -18,16 +18,16 @@ FAILED_CASES=""
 
 : "${TE_PATH:=/opt/transformerengine}"
 
-pip install wheel || error_exit "Failed to install wheel"
+pip3 install wheel || error_exit "Failed to install wheel"
 
 cd $TE_PATH
-pip uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-jax || error_exit "Failed to uninstall transformer-engine transformer-engine-cu12 transformer-engine-jax"
+pip3 uninstall -y transformer-engine transformer-engine-cu12 transformer-engine-jax || error_exit "Failed to uninstall transformer-engine transformer-engine-cu12 transformer-engine-jax"
 
 VERSION=`cat $TE_PATH/build_tools/VERSION.txt`
 WHL_BASE="transformer_engine-${VERSION}"
 
 # Core wheel.
-NVTE_RELEASE_BUILD=1 python setup.py bdist_wheel || error_exit "Failed to setup bdist_wheel"
+NVTE_RELEASE_BUILD=1 python3 setup.py bdist_wheel || error_exit "Failed to setup bdist_wheel"
 wheel unpack dist/* || error_exit "Failed to unpack dist/*"
 sed -i "s/Name: transformer-engine/Name: transformer-engine-cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
 sed -i "s/Name: transformer_engine/Name: transformer_engine_cu12/g" "transformer_engine-${VERSION}/transformer_engine-${VERSION}.dist-info/METADATA"
@@ -35,16 +35,16 @@ mv "${WHL_BASE}/${WHL_BASE}.dist-info" "${WHL_BASE}/transformer_engine_cu12-${VE
 wheel pack ${WHL_BASE} || error_exit "Failed to pack ${WHL_BASE}"
 rm dist/*.whl || error_exit "Failed to remove dist/*.whl"
 mv *.whl dist/ || error_exit "Failed to move *.whl to dist/"
-NVTE_RELEASE_BUILD=1 NVTE_BUILD_METAPACKAGE=1 python setup.py bdist_wheel || error_exit "Failed to setup metapackage"
+NVTE_RELEASE_BUILD=1 NVTE_BUILD_METAPACKAGE=1 python3 setup.py bdist_wheel || error_exit "Failed to setup metapackage"
 
 cd transformer_engine/jax
-NVTE_RELEASE_BUILD=1 python setup.py sdist || error_exit "Failed to setup sdist"
+NVTE_RELEASE_BUILD=1 python3 setup.py sdist || error_exit "Failed to setup sdist"
 
-pip install dist/* || error_exit "Failed to install dist/*"
+pip3 install dist/* || error_exit "Failed to install dist/*"
 cd $TE_PATH
-pip install dist/*.whl --no-deps || error_exit "Failed to install dist/*.whl --no-deps"
+pip3 install dist/*.whl --no-deps || error_exit "Failed to install dist/*.whl --no-deps"
 
-python $TE_PATH/tests/jax/test_sanity_import.py || test_fail "test_sanity_import.py"
+python3 $TE_PATH/tests/jax/test_sanity_import.py || test_fail "test_sanity_import.py"
 
 if [ $RET -ne 0 ]; then
     echo "Error: some sub-tests failed: $FAILED_CASES"
