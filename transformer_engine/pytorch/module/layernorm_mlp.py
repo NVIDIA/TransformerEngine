@@ -214,8 +214,6 @@ class _LayerNormMLP(torch.autograd.Function):
         # for return_layernorm_output: layernorm output = High precision, then cast to FP8
         #                              high precision layernorm output and output of the linear are returned
         with_quantized_norm = fp8 and not return_layernorm_output
-        if isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output
