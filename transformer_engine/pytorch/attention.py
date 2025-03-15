@@ -136,7 +136,7 @@ else:
             fa_utils.version,
         )
 try:
-    _flash_attn_3_version = PkgVersion(get_pkg_version("flash-attn-3"))
+    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:

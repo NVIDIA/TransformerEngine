@@ -106,6 +106,7 @@ class FlashAttentionUtils:
     v2_5_7_plus = False
     v2_6_0_plus = False
     v2_7_0_plus = False
+    warning_printed = False
 
     v3_is_installed = False
     fa3_version = PkgVersion("0")
@@ -119,6 +120,7 @@ class FlashAttentionUtils:
 (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
 (4) mkdir -p $python_path/flash_attn_3
 (5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/39e71975642daab365a5a37c959182c93ed5fc8a/hopper/flash_attn_interface.py"""
+    v3_warning_printed = False
 
     @staticmethod
     def set_flash_attention_version():
@@ -842,14 +844,15 @@ def get_attention_backend(
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
     # does, we recommend users to install flash-attn if not installed already.
-    if not use_fused_attention:
-        if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed:
+    if not use_fused_attention and _NVTE_FLASH_ATTN:
+        if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed and not FlashAttentionUtils.v3_warning_printed and torch.cuda.current_device() == 0:
             logger.warning(
                 "flash-attn v3 may provide important feature support or performance improvement."
                 " Please install flash-attn v3 by \n%s",
                 FlashAttentionUtils.v3_installation_steps,
             )
-        elif use_flash_attention_2 and not FlashAttentionUtils.is_installed:
+            FlashAttentionUtils.v3_warning_printed = True
+        elif use_flash_attention_2 and not FlashAttentionUtils.is_installed and not FlashAttentionUtils.warning_printed and torch.cuda.current_device() == 0:
             logger.warning(
                 "flash-attn may provide important feature support or performance improvement."
                 " Please install flash-attn %s by pip3 install flash-attn==<version>.",
@@ -858,6 +861,7 @@ def get_attention_backend(
                     FlashAttentionUtils.max_version,
                 ),
             )
+            FlashAttentionUtils.warning_printed = True
     # All available backends
     if use_flash_attention_2 and not FlashAttentionUtils.is_installed:
         use_flash_attention_2 = False
