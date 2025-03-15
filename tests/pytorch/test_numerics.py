@@ -1421,7 +1421,7 @@ def _test_grouped_linear_accuracy(
     if num_gemms > 1:
         split_size = 1
         if fp8:
-            if recipe.delayed():
+            if recipe.delayed() or recipe.float8_current_scaling():
                 split_size = 16
             if recipe.mxfp8():
                 split_size = 128
@@ -1460,12 +1460,11 @@ def _test_grouped_linear_accuracy(
     return outputs
 
 
-@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
-@pytest.mark.parametrize("fp8", all_boolean)
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 def test_grouped_linear_accuracy(
@@ -1473,20 +1472,16 @@ def test_grouped_linear_accuracy(
     num_gemms,
     bs,
     model,
-    fp8,
     recipe,
     fp8_model_params,
     fuse_wgrad_accumulation,
     parallel_mode=None,
 ):
+    fp8 = recipe is not None
     if fp8 and not fp8_available:
         pytest.skip(reason_for_no_fp8)
-    if recipe.mxfp8() and not mxfp8_available:
+    if fp8 and recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
-        pytest.skip("MXFP8 unsupported for grouped linear.")
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
 
     config = model_configs[model]
     if config.seq_len % 16 != 0 and fp8:
@@ -1541,7 +1536,7 @@ def test_grouped_linear_accuracy(
 
 
 @pytest.mark.parametrize("parallel_mode", ["column", "row"])
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
 def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -1549,7 +1544,6 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
         num_gemms=6,
         bs=2,
         model="126m",
-        fp8=True,
         recipe=recipe,
         fp8_model_params=True,
         parallel_mode=parallel_mode,
@@ -1557,7 +1551,7 @@ def test_grouped_linear_accuracy_parallel_mode(parallel_mode, recipe):
     )
 
 
-@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
     test_grouped_linear_accuracy(
@@ -1565,7 +1559,6 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
         num_gemms=1,
         bs=2,
         model="126m",
-        fp8=True,
         recipe=recipe,
         fp8_model_params=True,
         fuse_wgrad_accumulation=True,
@@ -1575,9 +1568,12 @@ def test_grouped_linear_accuracy_single_gemm(recipe):
 def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
 
     def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
-        """Padding tensor shapes to multiples of 16."""
+        align_size = 16
+        if recipe.mxfp8():
+            align_size = 32
         padded_tokens_per_expert = [
-            (num_tokens + 15) // 16 * 16 for num_tokens in tokens_per_expert
+            (num_tokens + align_size - 1) // align_size * align_size
+            for num_tokens in tokens_per_expert
         ]
         hidden_states = torch.split(hidden_states, tokens_per_expert)
         padded_hidden_states = []
@@ -1678,8 +1674,6 @@ def test_padding_grouped_linear_accuracy(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.mxfp8():  # TODO(ksivamani): debug mismatches
-        pytest.skip("MXFP8 unsupported for grouped linear.")
     if fp8 and recipe.float8_current_scaling():
         pytest.skip("Float8 Current Scaling unsupported for grouped linear.")
 
