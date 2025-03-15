@@ -37,7 +37,8 @@ py::object activation_helper(const at::Tensor& input, py::handle quantizer, int 
         my_quantizer_none->create_tensor(input_shape, GetTransformerEngineDType(fake_tensor_type));
     act_func(te_input.data(), te_output_act.data(), at::cuda::getCurrentCUDAStream());
     // use te_output_act as input to the compute amax and find the amax of activated tensor
-    nvte_compute_amax(te_output_act.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
+    nvte_compute_amax(te_output_act.data(), te_output.data(), false,
+                      at::cuda::getCurrentCUDAStream());
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
     if (my_quantizer_cs->with_amax_reduction) {

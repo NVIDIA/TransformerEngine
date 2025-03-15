@@ -123,7 +123,7 @@ void performTest(const size_t N, const size_t H) {
   // compute amax
   float amax_to_check = 0.0f;
   if (is_out_fp8){
-    nvte_compute_amax(input.data(), output.data(), 0);
+    nvte_compute_amax(input.data(), output.data(), false, 0);
     QuantizationConfigWrapper config;
     nvte_compute_scale_from_amax(output.data(), config, 0);
     // avoid atomic amax update in cuda cast kernels because of current per-tensor scaling

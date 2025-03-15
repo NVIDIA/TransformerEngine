@@ -146,10 +146,14 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
   const DType type = quantizer.attr("dtype").cast<DType>();
   // For current scaling, need several other components:
-  // 1. with_amax_reduction: bool
-  // 2. amax_reduction_group: torch.distributed.ProcessGroup or None
-  // 3. amax_reduction_size: int
+  // 1. with_computing_amax: bool
+  // 2. with_amax_reduction: bool
+  // 3. with_computing_scale: bool
+  // 4. amax_reduction_group: torch.distributed.ProcessGroup or None
+  // 5. amax_reduction_size: int
+  const bool with_computing_amax = quantizer.attr("with_computing_amax").cast<bool>();
   const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
+  const bool with_computing_scale = quantizer.attr("with_computing_scale").cast<bool>();
   const py::object amax_reduction_group_obj = quantizer.attr("amax_reduction_group");
   const c10::intrusive_ptr<dist_group_type> amax_reduction_group =
       amax_reduction_group_obj.is_none()
@@ -160,7 +164,9 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   this->amax = amax;
   this->scale = scale;
   this->dtype = type;
+  this->with_computing_amax = with_computing_amax;
   this->with_amax_reduction = with_amax_reduction;
+  this->with_computing_scale = with_computing_scale;
   this->amax_reduction_group = amax_reduction_group;
   this->amax_reduction_size = amax_reduction_size;
 
