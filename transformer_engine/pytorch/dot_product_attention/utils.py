@@ -845,14 +845,24 @@ def get_attention_backend(
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
     # does, we recommend users to install flash-attn if not installed already.
     if not use_fused_attention and _NVTE_FLASH_ATTN:
-        if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed and not FlashAttentionUtils.v3_warning_printed and torch.cuda.current_device() == 0:
+        if (
+            use_flash_attention_3
+            and not FlashAttentionUtils.v3_is_installed
+            and not FlashAttentionUtils.v3_warning_printed
+            and torch.cuda.current_device() == 0
+        ):
             logger.warning(
                 "flash-attn v3 may provide important feature support or performance improvement."
                 " Please install flash-attn v3 by \n%s",
                 FlashAttentionUtils.v3_installation_steps,
             )
             FlashAttentionUtils.v3_warning_printed = True
-        elif use_flash_attention_2 and not FlashAttentionUtils.is_installed and not FlashAttentionUtils.warning_printed and torch.cuda.current_device() == 0:
+        elif (
+            use_flash_attention_2
+            and not FlashAttentionUtils.is_installed
+            and not FlashAttentionUtils.warning_printed
+            and torch.cuda.current_device() == 0
+        ):
             logger.warning(
                 "flash-attn may provide important feature support or performance improvement."
                 " Please install flash-attn %s by pip3 install flash-attn==<version>.",
