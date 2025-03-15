@@ -5,6 +5,7 @@
 """Methods needed for distributed training (DP/TP)."""
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager, AbstractContextManager, ContextDecorator
 from functools import lru_cache
 import math
