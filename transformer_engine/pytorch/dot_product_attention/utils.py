@@ -34,6 +34,7 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_O_CP,
     META_DQKV_CP,
 )
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.float8_tensor import Float8Tensor
 from transformer_engine.pytorch.fp8 import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
@@ -102,6 +103,7 @@ class FlashAttentionUtils:
     v2_3_plus = False
     v2_4_plus = False
     v2_4_1_plus = False
+    v2_5_plus = False
     v2_5_7_plus = False
     v2_6_0_plus = False
     v2_7_0_plus = False
@@ -110,13 +112,14 @@ class FlashAttentionUtils:
     fa3_version = PkgVersion("0")
     v3_0_0_beta = False
     use_v3 = False
-    # TODO(cyang): update FA to 2.7.3 when its FA3 compilation issue is resolved
-    # https://github.com/Dao-AILab/flash-attention/issues/1452
+    # FA3 from FA 2.7.3+/hopper has different APIs than FA3 from 2.7.2/hopper
+    # Please follow these instructions to install FA3
     v3_installation_steps = """\
-    (1) pip install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
-    (2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-    (3) mkdir -p $python_path/flashattn_hopper
-    (4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
+    (1) git clone https://github.com/Dao-AILab/flash-attention.git
+    (2) cd flash-attention/ && git checkout 39e7197 && cd hopper/ && python setup.py install
+    (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+    (4) mkdir -p $python_path/flash_attn_3
+    (5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/39e71975642daab365a5a37c959182c93ed5fc8a/hopper/flash_attn_interface.py"""
 
     @staticmethod
     def set_flash_attention_version():
@@ -129,13 +132,12 @@ class FlashAttentionUtils:
         FlashAttentionUtils.v2_3_plus = FlashAttentionUtils.version >= PkgVersion("2.3")
         FlashAttentionUtils.v2_4_plus = FlashAttentionUtils.version >= PkgVersion("2.4")
         FlashAttentionUtils.v2_4_1_plus = FlashAttentionUtils.version >= PkgVersion("2.4.1")
+        FlashAttentionUtils.v2_5_plus = FlashAttentionUtils.version >= PkgVersion("2.5.0")
         FlashAttentionUtils.v2_5_7_plus = FlashAttentionUtils.version >= PkgVersion("2.5.7")
         FlashAttentionUtils.v2_6_0_plus = FlashAttentionUtils.version >= PkgVersion("2.6.0")
         FlashAttentionUtils.v2_7_0_plus = FlashAttentionUtils.version >= PkgVersion("2.7.0")
 
-    # Detect flash-attn v3 in the environment
-    # This section will be removed when FA3 is released as a regular FA package,
-    # i.e. flashattn-hopper 3.0.0 as flash-attn 3.0.0
+    # Detect flash-attn v3 in the environment (Hopper only)
     @staticmethod
     def set_flash_attention_3_params():
         """
@@ -145,7 +147,6 @@ class FlashAttentionUtils:
         FlashAttentionUtils.v3_0_0_beta = (
             PkgVersion("3.0.0b") < FlashAttentionUtils.fa3_version < PkgVersion("3.0.0")
         )
-        FlashAttentionUtils.use_v3 = True
 
 
 @dataclass(eq=True)
@@ -203,6 +204,8 @@ class AttentionParams:
         Whether `DotProductAttention` is in an `fp8_autocast` region.
     fp8_meta: Optional[Dict[str Any]], default = `None`
         The FP8 metadata tensor of `DotProductAttention`.
+    inference_params: Optional[InferenceParams], default = `None`
+        Inference-related parameters. See InferenceParams for details.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -228,6 +231,7 @@ class AttentionParams:
     is_training: bool = True
     fp8: bool = False
     fp8_meta: Union[Dict[str, Any], None] = None
+    inference_params: Optional[InferenceParams] = None
 
     def __eq__(self, other):
         """
@@ -298,6 +302,7 @@ def get_attention_backend(
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
     fp8_meta = attention_params.fp8_meta
+    inference_params = attention_params.inference_params
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -334,13 +339,19 @@ def get_attention_backend(
     # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
     # necessary for performance/functionality, a warning will be issued to prompt users to
     # install an appropriate FA version.
+    qkv_format, q_format, _ = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
+    use_flash_attention_2 = use_flash_attention
+    use_flash_attention_3 = use_flash_attention
+    flash_attention_backend = None
     use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
     use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-    if not use_flash_attention and FlashAttentionUtils.is_installed:
-        logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
+    if not use_flash_attention_2 and FlashAttentionUtils.is_installed:
+        logger.debug("Disabling FlashAttention 2 due to NVTE_FLASH_ATTN=0")
+    if not use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
+        logger.debug("Disabling FlashAttention 3 due to NVTE_FLASH_ATTN=0")
     if not use_fused_attention:
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
@@ -348,60 +359,124 @@ def get_attention_backend(
 
     # Filter: Compute capability
     if device_compute_capability < (8, 0):
-        if use_flash_attention and FlashAttentionUtils.is_installed:
-            logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
-        use_flash_attention = False
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for compute capability < sm80")
+        use_flash_attention_2 = False
         if use_fused_attention:
-            logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
+            logger.debug("Disabling FusedAttention for compute capability < sm80")
             use_fused_attention = False
-    if device_compute_capability < (9, 0):
-        if use_flash_attention and FlashAttentionUtils.v3_is_installed:
-            logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
-        FlashAttentionUtils.use_v3 = False
+    if device_compute_capability != (9, 0):
+        if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
+            logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
+        use_flash_attention_3 = False
 
     # Filter: Data type
-    if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
+    if qkv_dtype not in [torch.bfloat16, torch.float16]:
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug(
+                "Disabling FlashAttention 2 for unsupported qkv_dtype = %s. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. ",
+                qkv_dtype,
+            )
+        use_flash_attention_2 = False
+    if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in [
         torch.Tensor,
         Float8Tensor,
     ]:
-        if use_flash_attention and FlashAttentionUtils.is_installed:
+        if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
-                "Disabling FlashAttention due to unsupported QKV data type. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-                "Found: qkv_dtype = %s.",
+                "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
+                "qkv_type = {torch.Tensor, Float8Tensor}. ",
                 qkv_dtype,
+                qkv_type,
             )
-        use_flash_attention = False
+        use_flash_attention_3 = False
         if use_fused_attention:
             logger.debug(
-                "Disabling FusedAttention due to unsupported QKV data type. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-                "Found: qkv_dtype = %s.",
+                "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. "
+                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
+                "qkv_type = {torch.Tensor, Float8Tensor}. ",
                 qkv_dtype,
+                qkv_type,
             )
             use_fused_attention = False
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and not FlashAttentionUtils.use_v3:
-            if FlashAttentionUtils.is_installed:
-                logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
-            use_flash_attention = False
-        if use_flash_attention and FlashAttentionUtils.use_v3 and is_training:
-            logger.debug(
-                "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
-            )
-            use_flash_attention = False
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+            logger.debug("Disabling FlashAttention 2 for FP8 attention")
+        use_flash_attention_2 = False
+        if use_flash_attention_3 and is_training:
+            if FlashAttentionUtils.v3_is_installed:
+                logger.debug("Disabling FlashAttention 3 for FP8 training")
+            use_flash_attention_3 = False
         if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
+            logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
             use_unfused_attention = False
 
+    # Filter: KV cache
+    # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
+    # ---------------------------------------------------------------------------------------
+    # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
+    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
+    # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
+    #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
+    # Unfused  | FP32/FP16/BF16 | non-paged/paged | all          | bshd,sbhd,thd | >= 1
+    if inference_params is not None:
+        if context_parallel:
+            logger.debug("Disabling all backends for KV caching with context parallelism")
+            use_flash_attention = False
+            use_fused_attention = False
+            use_unfused_attention = False
+        if fp8 and fp8_meta["recipe"].fp8_dpa:
+            if fp8_meta["recipe"].fp8_mha:
+                logger.debug("Disabling all backends for KV caching with FP8 MHA")
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = False
+            if use_flash_attention_3 and q_format != "thd":
+                if FlashAttentionUtils.v3_is_installed:
+                    logger.debug("Disabling FlashAttention 3 for FP8 KV caching and non-THD")
+                use_flash_attention_3 = False
+            if use_fused_attention:
+                logger.debug("Disabling FusedAttention for FP8 KV caching")
+                use_fused_attention = False
+        else:
+            if q_format == "thd" and pad_between_seqs:
+                logger.debug("Disabling all backends for pad_between_seqs = True and KV caching")
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = False
+        if inference_params.is_paged:
+            if use_flash_attention_2 and inference_params.page_size < 256:
+                if FlashAttentionUtils.is_installed:
+                    logger.debug("Disabling FlashAttention 2 for page size < 256")
+                use_flash_attention_2 = False
+            if use_flash_attention_2:
+                if not FlashAttentionUtils.is_installed:
+                    FlashAttentionUtils.version_required = PkgVersion("2.5")
+                elif not FlashAttentionUtils.v2_5_plus:
+                    logger.debug(
+                        "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
+                    )
+                    use_flash_attention_2 = False
+
     # Filter: Head dimension
-    if use_flash_attention and head_dim_qk != head_dim_v:
-        if FlashAttentionUtils.is_installed:
+    if head_dim_qk != head_dim_v:
+        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        ):
             logger.debug("Disabling FlashAttention as it does not support MLA.")
         use_flash_attention = False
-    if use_flash_attention and (
+        qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
+        if use_fused_attention and qkv_layout_group != "hd_hd_hd":
+            logger.debug(
+                "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
+                qkv_layout,
+            )
+            use_fused_attention = False
+    if use_flash_attention_2 and (
         head_dim_qk > 256
         or head_dim_qk % 8 != 0
         or (
@@ -411,7 +486,7 @@ def get_attention_backend(
     ):
         if FlashAttentionUtils.is_installed:
             logger.debug(
-                "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
+                "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
                 "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
                 "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
@@ -419,23 +494,21 @@ def get_attention_backend(
                 head_dim_v,
                 ".".join([str(i) for i in device_compute_capability]),
             )
-        use_flash_attention = False
-    qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
-    if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
-        logger.debug(
-            "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
-            qkv_layout,
-        )
-        use_fused_attention = False
+        use_flash_attention_2 = False
+    if use_flash_attention_3 and (head_dim_qk > 128 or head_dim_v > 128):
+        if FlashAttentionUtils.v3_is_installed:
+            logger.debug("Disabling FlashAttention 3 for head_dim > 128")
+        use_flash_attention_3 = False
 
     # Filter: QKV layout
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
     if qkv_format == "thd":
         if use_unfused_attention:
             logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
             use_unfused_attention = False
-        if use_flash_attention and pad_between_seqs:
-            if FlashAttentionUtils.is_installed:
+        if pad_between_seqs:
+            if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+                use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+            ):
                 logger.debug(
                     "Disabling FlashAttention for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
@@ -443,9 +516,9 @@ def get_attention_backend(
             use_flash_attention = False
 
     # Filter: Dropout
-    if attention_dropout != 0.0 and use_flash_attention and FlashAttentionUtils.use_v3:
+    if attention_dropout != 0.0 and use_flash_attention_3:
         logger.debug("Disabling FlashAttention 3 for dropout")
-        FlashAttentionUtils.use_v3 = False
+        use_flash_attention_3 = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -464,42 +537,38 @@ def get_attention_backend(
             "Disabling UnfusedDotProductAttention as it does not support context parallelism"
         )
         use_unfused_attention = False
-    if context_parallel and use_flash_attention:
-        if fp8 and fp8_meta["recipe"].fp8_dpa:
-            if FlashAttentionUtils.is_installed:
+    if context_parallel and (use_flash_attention_2 or use_flash_attention_3):
+        if FlashAttentionUtils.is_installed or FlashAttentionUtils.v3_is_installed:
+            if fp8 and fp8_meta["recipe"].fp8_dpa:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with FP8"
                 )
-            use_flash_attention = False
-        if "bottom_right" in attn_mask_type:
-            if FlashAttentionUtils.is_installed:
+                use_flash_attention = False
+            if "bottom_right" in attn_mask_type:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal_bottom_right masking"
                 )
-            use_flash_attention = False
-        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
-            if FlashAttentionUtils.is_installed:
+                use_flash_attention = False
+            elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " causal masking for cross-attention"
                 )
-            use_flash_attention = False
-        elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
-            if FlashAttentionUtils.is_installed:
+                use_flash_attention = False
+            elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with bias"
                     " type of %s",
                     core_attention_bias_type,
                 )
-            use_flash_attention = False
-        elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
-            if FlashAttentionUtils.is_installed:
+                use_flash_attention = False
+            elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
                 logger.debug(
                     "Disabling FlashAttention as it does not support context parallelism with"
                     " attention bias for THD format"
                 )
-            use_flash_attention = False
+                use_flash_attention = False
 
     if context_parallel and use_fused_attention:
         if "bottom_right" in attn_mask_type:
@@ -552,61 +621,25 @@ def get_attention_backend(
     # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
     #                             | [b, h, sq, skv]                      |
     if attn_mask_type == "arbitrary":
-        if use_flash_attention and FlashAttentionUtils.is_installed:
+        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        ):
             logger.debug("Disabling FlashAttention for arbitrary mask")
         use_flash_attention = False
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for arbitrary mask")
         use_fused_attention = False
     if (
-        use_flash_attention
-        and FlashAttentionUtils.use_v3
+        (use_flash_attention_2 or use_flash_attention_3)
         and attn_mask_type in ["causal", "padding_causal"]
         and max_seqlen_q != max_seqlen_kv
     ):
         logger.warning(
-            "Disabling FlashAttention 3 as it only supports bottom-right-diagonal "
-            "causal mask since flash-attn 2.1. See "
+            "Disabling FlashAttention as it only supports bottom-right-diagonal "
+            "causal mask since flash-attn 2.1 (our minimum supported version). See "
             "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
         )
-        FlashAttentionUtils.use_v3 = False
-    if (
-        use_flash_attention
-        and attn_mask_type in ["causal", "padding_causal"]
-        and max_seqlen_q != max_seqlen_kv
-    ):
-        if FlashAttentionUtils.v2_1_plus:
-            logger.warning(
-                "Disabling FlashAttention as it only supports bottom-right-diagonal "
-                "causal mask since flash-attn 2.1. See "
-                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-            )
-            use_flash_attention = False
-        if not FlashAttentionUtils.is_installed:
-            FlashAttentionUtils.max_version = PkgVersion("2.1")
-    if (
-        use_flash_attention
-        and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
-        and max_seqlen_q != max_seqlen_kv
-    ):
-        if not FlashAttentionUtils.is_installed:
-            FlashAttentionUtils.version_required = PkgVersion("2.1")
-        elif not FlashAttentionUtils.v2_1_plus and not FlashAttentionUtils.use_v3:
-            logger.warning(
-                "Disabling FlashAttention as it only supports top-left-diagonal "
-                "causal mask before flash-attn 2.1. See "
-                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-            )
-            use_flash_attention = False
-    if (
-        use_flash_attention
-        and FlashAttentionUtils.use_v3
-        and fp8
-        and fp8_meta["recipe"].fp8_dpa
-        and "padding" in attn_mask_type
-    ):
-        logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
-        FlashAttentionUtils.use_v3 = False
+        use_flash_attention = False
 
     # Filter: Sliding window attention
     #    backend                 |      window_size       | diagonal alignment
@@ -637,19 +670,14 @@ def get_attention_backend(
                     "with s_q > s_kv for cross-attention"
                 )
                 use_fused_attention = False
-        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if FlashAttentionUtils.use_v3:
-                logger.debug(
-                    "Disabling FlashAttention 3 as it does not support sliding window attention"
-                )
-                FlashAttentionUtils.use_v3 = False
+        if use_flash_attention_2 and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
             if not FlashAttentionUtils.is_installed:
                 FlashAttentionUtils.version_required = PkgVersion("2.3")
             elif not FlashAttentionUtils.v2_3_plus:
                 logger.debug(
                     "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
                 )
-                use_flash_attention = False
+                use_flash_attention_2 = False
 
     # Filter: Attention bias
     #    backend                 |      bias types              | ALiBi diagonal alignment
@@ -660,21 +688,25 @@ def get_attention_backend(
     #                            |                              | bottom_right (converts to a 'post_scale_bias' bias)
     # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
     #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
-    if use_flash_attention and core_attention_bias_type == "alibi":
-        if FlashAttentionUtils.use_v3:
-            logger.debug("Disabling FlashAttention 3 for ALiBi")
-            FlashAttentionUtils.use_v3 = False
-        if not FlashAttentionUtils.is_installed:
-            FlashAttentionUtils.version_required = PkgVersion("2.4")
-        elif not FlashAttentionUtils.v2_4_plus:
-            logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
-            use_flash_attention = False
+    if core_attention_bias_type == "alibi":
+        if use_flash_attention_3:
+            if FlashAttentionUtils.v3_is_installed:
+                logger.debug("Disabling FlashAttention 3 for ALiBi")
+            use_flash_attention_3 = False
+        if use_flash_attention_2:
+            if not FlashAttentionUtils.is_installed:
+                FlashAttentionUtils.version_required = PkgVersion("2.4")
+            elif not FlashAttentionUtils.v2_4_plus:
+                logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
+                use_flash_attention_2 = False
 
-    if use_flash_attention and (
+    if (
         core_attention_bias_type not in ["no_bias", "alibi"]
         or core_attention_bias_shape is not None
     ):
-        if FlashAttentionUtils.is_installed:
+        if (use_flash_attention_2 and FlashAttentionUtils.is_installed) or (
+            use_flash_attention_3 and FlashAttentionUtils.v3_is_installed
+        ):
             logger.debug("Disabling FlashAttention for pre/post_scale_bias")
         use_flash_attention = False
 
@@ -779,16 +811,16 @@ def get_attention_backend(
     #                              | otherwise: no
     #     sub-backend 2            | no
     # UnfusedDotProductAttention   | yes
-    if use_flash_attention and deterministic:
+    if use_flash_attention_2 and deterministic:
         if not FlashAttentionUtils.is_installed:
             FlashAttentionUtils.version_required = PkgVersion("2.4.1")
-        elif not FlashAttentionUtils.v2_4_1_plus and not FlashAttentionUtils.use_v3:
+        elif not FlashAttentionUtils.v2_4_1_plus:
             logger.warning(
                 "Disabling FlashAttention as version <2.4.1 does not support deterministic "
                 "execution. To use FlashAttention with deterministic behavior, "
                 "please install flash-attn >= 2.4.1."
             )
-            use_flash_attention = False
+            use_flash_attention_2 = False
     if use_fused_attention and deterministic:
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
             logger.debug("Disabling FusedAttention for determinism reasons")
@@ -805,29 +837,46 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons")
             use_fused_attention = False
 
-    # All available backends
-    available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+    # use_flash_attention may have been set above
+    use_flash_attention_2 = use_flash_attention and use_flash_attention_2
+    use_flash_attention_3 = use_flash_attention and use_flash_attention_3
 
     # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
     # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
     # does, we recommend users to install flash-attn if not installed already.
-    if not use_fused_attention and use_flash_attention and not FlashAttentionUtils.is_installed:
-        logger.warning(
-            "flash-attn may provide important feature support or performance improvement."
-            " Please install flash-attn %s.",
-            _get_supported_versions(
-                FlashAttentionUtils.version_required,
-                FlashAttentionUtils.max_version,
-            ),
-        )
-    if use_flash_attention and not FlashAttentionUtils.is_installed:
-        use_flash_attention = False
-        available_backends[0] = False
+    if not use_fused_attention:
+        if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed:
+            logger.warning(
+                "flash-attn v3 may provide important feature support or performance improvement."
+                " Please install flash-attn v3 by \n%s",
+                FlashAttentionUtils.v3_installation_steps,
+            )
+        elif use_flash_attention_2 and not FlashAttentionUtils.is_installed:
+            logger.warning(
+                "flash-attn may provide important feature support or performance improvement."
+                " Please install flash-attn %s by pip3 install flash-attn==<version>.",
+                _get_supported_versions(
+                    FlashAttentionUtils.version_required,
+                    FlashAttentionUtils.max_version,
+                ),
+            )
+    # All available backends
+    if use_flash_attention_2 and not FlashAttentionUtils.is_installed:
+        use_flash_attention_2 = False
+    if use_flash_attention_3 and not FlashAttentionUtils.v3_is_installed:
+        use_flash_attention_3 = False
+    use_flash_attention = use_flash_attention_2 or use_flash_attention_3
+    available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
+    if use_flash_attention_2:
+        flash_attention_backend = FlashAttentionUtils.version
+    if use_flash_attention_3:
+        flash_attention_backend = FlashAttentionUtils.fa3_version
 
     logger.debug(
-        "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
+        "Available backends = {FlashAttention=%s%s, FusedAttention=%s%s,"
         " UnfusedDotProductAttention=%s}",
         bool(available_backends[0]),
+        (f" ({str(flash_attention_backend)})" if flash_attention_backend is not None else ""),
         bool(available_backends[1]),
         (
             f" (sub-backend {int(fused_attention_backend)})"
@@ -838,26 +887,10 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if (
-        use_flash_attention
-        and use_fused_attention
-        and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-    ):
-        if device_compute_capability >= (9, 0):
-            logger.debug(
-                "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-                "for performance reasons"
-            )
-            use_flash_attention = False
-    if (
-        use_flash_attention
-        and use_fused_attention
-        and fused_attention_backend == FusedAttnBackend["FP8"]
-        and FlashAttentionUtils.use_v3
-    ):
+    if use_flash_attention and use_fused_attention and device_compute_capability >= (9, 0):
         logger.debug(
-            "Disabling FlashAttention 3 to give FusedAttention preference for performance reasons "
-            "in FP8 execution"
+            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
+            "for performance reasons"
         )
         use_flash_attention = False
 
@@ -869,27 +902,64 @@ def get_attention_backend(
         use_unfused_attention = False
     selected_backend = "NoBackend"
     if use_flash_attention:
-        selected_backend = "FlashAttention"
+        selected_backend = f"FlashAttention ({str(flash_attention_backend)})"
     elif use_fused_attention:
         selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
     elif use_unfused_attention:
         selected_backend = "UnfusedDotProductAttention"
     logger.debug("Selected backend = %s", selected_backend)
 
-    """global _attention_backends
-    _attention_backends["use_flash_attention"] = use_flash_attention
-    _attention_backends["use_fused_attention"] = use_fused_attention
-    _attention_backends["fused_attention_backend"] = fused_attention_backend
-    _attention_backends["use_unfused_attention"] = use_unfused_attention
-    _attention_backends["backend_selection_requires_update"] = False"""
-
     return (
         use_flash_attention,
+        flash_attention_backend,
         use_fused_attention,
         fused_attention_backend,
         use_unfused_attention,
         available_backends,
     )
+
+
+@torch.no_grad()
+def get_padding_mask(
+    batch_size: int,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_kv: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_kv: int,
+):
+    """Convert cu_seqlens to attention_mask"""
+    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+    attention_mask_q = torch.Tensor([]).to(dtype=torch.bool)
+    attention_mask_kv = torch.Tensor([]).to(dtype=torch.bool)
+    for i in range(batch_size):
+        attention_mask_q = torch.cat(
+            [
+                attention_mask_q,
+                torch.Tensor([False] * seqlens_q[i] + [True] * (max_seqlen_q - seqlens_q[i]))
+                .to(dtype=torch.bool)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .unsqueeze(0),
+            ],
+            dim=0,
+        )
+        attention_mask_kv = torch.cat(
+            [
+                attention_mask_kv,
+                torch.Tensor([False] * seqlens_kv[i] + [True] * (max_seqlen_kv - seqlens_kv[i]))
+                .to(dtype=torch.bool)
+                .unsqueeze(0)
+                .unsqueeze(0)
+                .unsqueeze(0),
+            ],
+            dim=0,
+        )
+    attention_mask = (
+        attention_mask_q.to(device="cuda"),
+        attention_mask_kv.to(device="cuda"),
+    )
+    return attention_mask
 
 
 @torch.no_grad()
@@ -1400,11 +1470,46 @@ class UnpackTensor(torch.autograd.Function):
         return None, None, _pack_tensor(indices, grad_output)
 
 
+def get_qkv_format(
+    qkv_layout: str = "bshd_bshd_bshd",
+    inference_params: InferenceParams = None,
+) -> str:
+    """Get qkv format.
+
+    Parameters
+    ----------
+    qkv_layout: str
+       Memory layout of `q`, `k` and `v`. See get_qkv_layout() for more details.
+    inference_params: InferenceParams, default = `None`
+        InferenceParams related to KV caching.
+
+    Returns
+    ----------
+    qkv_format: str, default = `sbhd`
+        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}.
+    q_format: str
+        Format of the `q` tensor, {`bshd`, `sbhd`, `thd`}.
+    kv_format: str
+        Format of the `k` and `v` tensors, {`bshd`, `sbhd`, `thd`}.
+    """
+    splited = qkv_layout.replace("paged_kv_", "").split("_")
+    if inference_params is not None:
+        q_format = "".join([i for i in splited[0] if i.isalpha()])
+        kv_format = "".join([i for i in splited[1] if i.isalpha()])
+        qkv_format = q_format + "_2" + kv_format if q_format != kv_format else q_format
+    else:
+        qkv_format = "".join([i for i in splited[0] if i.isalpha()])
+        q_format = qkv_format
+        kv_format = qkv_format
+    return qkv_format, q_format, kv_format
+
+
 def get_qkv_layout(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
     qkv_format: str = "sbhd",
+    inference_params: InferenceParams = None,
 ) -> str:
     """Get qkv layout.
 
@@ -1421,20 +1526,33 @@ def get_qkv_layout(
         the sequence length dimension, `b` batch size, `h` the number of attention heads,
         `d` head size, and `t` the total number of tokens in a batch, i.e.
         `t = sum(s_i) for i = 0...b-1`.
+    inference_params: InferenceParams, default = `None`
+        InferenceParams related to KV caching.
 
     Returns
     ----------
     qkv_layout: str
-       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped to one of five
-       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk
-       of memory and that they are interleaved in the `2`nd dimension. `sbhd_sbh2d` means
-       `q` and `kv` are created in two chunks and that `q` itself is contiguous and `k`, `v`
-       are interleaved with each other in the `3`rd dimension, `k = kv[:,:,:,0,:]` and
-       `v = kv[:,:,:,1,:]`.
+       Memory layout of `q`, `k` and `v`. Each `qkv_layout` maps to a pair of `q_format` and
+       `kv_format` in {`bshd`, `sbhd`, `thd`}. The `paged_kv_` prefix is used to indicate that
+       paged KV caching is in play. A few examples of the layouts are as follows.
+
+       (1) `sb3hd` means `q`, `k`, `v` are created as one chunk of memory and that they are
+       interleaved in the `2`nd dimension. (2) `sbhd_sbh2d` means `q` and `kv` are created in
+       two chunks and that `q` itself is contiguous and `k`, `v` are interleaved with each other
+       in the `3`rd dimension, `k = kv[:,:,:,0,:]` and `v = kv[:,:,:,1,:]`. `q_format` and
+       `kv_format` in this case are still both `sbhd`. (3) `paged_kv_thd_bshd_bshd` means `q` is
+       created in `thd` and `k`, `v` are in `sbhd`. This is likely due to the cache format in
+       paged KV caching.
+
        Mapping:
-       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
-       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
+       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`, `paged_kv_sbhd_sbhd_sbhd`}
+       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`, `paged_kv_bshd_bshd_bshd`}
        `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
+       `sbhd_2bshd`: {`sbhd_bshd_bshd`, `paged_kv_sbhd_bshd_bshd`}
+       `bshd_2sbhd`: {`bshd_sbhd_sbhd`, `paged_kv_bshd_sbhd_sbhd`}
+       `thd_2bshd`: {`thd_bshd_bshd`, `paged_kv_thd_bshd_bshd`}
+       `thd_2sbhd`: {`thd_sbhd_sbhd`, `paged_kv_thd_sbhd_sbhd`}
+
     q: torch.Tensor
         Query tensor. It may be different from input `q` as we try to fit tensors to
         a supported layout.
@@ -1444,10 +1562,21 @@ def get_qkv_layout(
     v: torch.Tensor
         Value tensor. It may be different from input `v` as we try to fit tensors to
         a supported layout.
+    q_format: str
+        Format of the query tensor, {`bshd`, `sbhd`, `thd`}.
+    kv_format: str
+        Format of the key and value tensors, {`bshd`, `sbhd`, `thd`}.
     """
 
     check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
     assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
+    if "_2" in qkv_format:
+        q_format, kv_format = qkv_format.split("_2")
+        is_same_q_kv_format = False
+    else:
+        q_format = qkv_format
+        kv_format = qkv_format
+        is_same_q_kv_format = True
 
     def run_iteratively(q, k, v):
         # check data pointers
@@ -1534,7 +1663,10 @@ def get_qkv_layout(
             # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
             # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
             # check_ptrs_qk=True or check_ptrs_kv=True
-            qkv_layout = "_".join(list([qkv_format]) * 3)
+            if is_same_q_kv_format:
+                qkv_layout = "_".join(list([qkv_format]) * 3)
+            else:
+                qkv_layout = q_format + "_" + kv_format + "_" + kv_format
         else:
             qkv_layout = "not_supported"
 
@@ -1548,7 +1680,10 @@ def get_qkv_layout(
     if qkv_layout == "not_supported":
         raise RuntimeError("The provided qkv memory layout is not supported!")
 
-    return qkv_layout, q, k, v
+    if inference_params is not None and inference_params.is_paged:
+        qkv_layout = "paged_kv_" + qkv_layout
+
+    return qkv_layout, q, k, v, q_format, kv_format
 
 
 def check_set_window_size(

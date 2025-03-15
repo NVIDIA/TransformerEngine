@@ -68,7 +68,7 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
-from transformer_engine.pytorch.inference import InferenceParams
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
@@ -81,6 +81,7 @@ from transformer_engine.pytorch.dot_product_attention.inference import Inference
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
+
 
 # Setup Attention Logging
 attn_log.setup_logging()
@@ -3815,7 +3816,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
 
         # get q_format and kv_format for training and inference
-        qkv_format, q_format, _ = get_qkv_format(qkv_layout, inference_params)
+        qkv_format, q_format, _ = dpa_utils.get_qkv_format(qkv_layout, inference_params)
         if inference_params is not None and inference_params.is_paged:
             key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
 
@@ -3846,7 +3847,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         )
 
         if "padding" in attn_mask_type and attention_mask is None:
-            attention_mask = get_padding_mask(
+            attention_mask = dpa_utils.get_padding_mask(
                 batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
             )
         attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (

@@ -18,11 +18,9 @@ from transformer_engine.pytorch import fp8_autocast, fp8_model_init
 from transformer_engine.pytorch.transformer import (
     TransformerLayer,
 )
-from transformer_engine.pytorch.attention import (
-    DotProductAttention,
-    InferenceParams,
-    _flash_attn_3_is_installed,
-)
+from transformer_engine.pytorch.attention import DotProductAttention
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     init_method_normal,
@@ -411,7 +409,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     config = model_configs_infer[model]
     num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
     # flash-attn v2 requires page_size >= 256
-    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not fa_utils.v3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
         config_max_seqlen_kv = config.max_seqlen_kv
         config.max_seqlen_q = 256
@@ -422,7 +420,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     page_size = None
     total_num_pages = None
     if is_paged:
-        page_size = 256 if backend == "FlashAttention" and not _flash_attn_3_is_installed else 1
+        page_size = 256 if backend == "FlashAttention" and not fa_utils.v3_is_installed else 1
         config.max_seqlen_kv = round_up(config.max_seqlen_kv, page_size)
         total_num_pages = int(max_batch_size * config.max_seqlen_kv / page_size)
     else:
@@ -696,6 +694,6 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     sim.complete_times = sim.serving_times + sim.gen_lens
     sim.print_summary(logger)
 
-    if backend == "FlashAttention" and not _flash_attn_3_is_installed:
+    if backend == "FlashAttention" and not fa_utils.v3_is_installed:
         config.max_seqlen_q = config_max_seqlen_q
         config.max_seqlen_kv = config_max_seqlen_kv
