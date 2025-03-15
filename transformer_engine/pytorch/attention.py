@@ -2230,9 +2230,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         dk=dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
                         dv=dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
                     )
-                    if ctx.use_flash_attn_3 or (
-                        fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                    ):
+                    if ctx.use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                         fa_backward_kwargs["window_size"] = (-1, -1)
                     elif fa_utils.v2_7_0_plus:
                         fa_backward_kwargs["window_size_left"] = -1
@@ -2695,9 +2693,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_q=max_seqlen_q,
                             max_seqlen_kv=max_seqlen_kv_,
                         )
-                        if use_flash_attn_3 or (
-                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
-                        ):
+                        if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
                         elif fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
@@ -3853,13 +3849,15 @@ class UnfusedDotProductAttention(torch.nn.Module):
             attention_mask = get_padding_mask(
                 batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
             )
-        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = dpa_utils.get_full_mask(
-            max_seqlen_q,
-            max_seqlen_kv,
-            attn_mask_type=attn_mask_type,
-            attention_mask=attention_mask,
-            window_size=window_size,
-            attention_type=self.attention_type,
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
+            dpa_utils.get_full_mask(
+                max_seqlen_q,
+                max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                window_size=window_size,
+                attention_type=self.attention_type,
+            )
         )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -4203,7 +4201,9 @@ class FlashAttention(torch.nn.Module):
                             assert (
                                 attention_mask is not None
                             ), "Please provide attention_mask for padding!"
-                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(attention_mask)
+                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                                attention_mask
+                            )
                         else:
                             indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
                         cu_seqlens_kv = cu_seqlens_q
@@ -4215,7 +4215,9 @@ class FlashAttention(torch.nn.Module):
                             assert (
                                 attention_mask is not None
                             ), "Please provide attention_mask for padding!"
-                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(attention_mask[0])
+                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                                attention_mask[0]
+                            )
                             cu_seqlens_kv, indices_kv = dpa_utils.get_cu_seqlens_and_indices(
                                 attention_mask[1]
                             )
