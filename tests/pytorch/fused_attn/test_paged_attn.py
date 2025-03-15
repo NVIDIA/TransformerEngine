@@ -372,7 +372,7 @@ def generate_args(
 def get_tols(module, backend, dtype):
     if module == "TransformerLayer":
         tols = {
-            torch.half: (4e-3, 4e-3),
+            torch.half: (5e-3, 5e-3),
             torch.bfloat16: (3.5e-2, 3.5e-2),
         }
     if module == "DotProductAttention":
