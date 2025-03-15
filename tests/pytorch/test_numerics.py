@@ -1132,6 +1132,7 @@ class TestReturnBiasModule(nn.Module):
             return out + bias
         return self.te_module(x)
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
@@ -1320,9 +1321,13 @@ def test_layernorm_linear_accuracy(
 
     # Share params
     with torch.no_grad():
-        torch_ln_linear.layernorm.weight = Parameter(te_ln_linear.te_module.layer_norm_weight.clone())
+        torch_ln_linear.layernorm.weight = Parameter(
+            te_ln_linear.te_module.layer_norm_weight.clone()
+        )
         if normalization != "RMSNorm":
-            torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.te_module.layer_norm_bias.clone())
+            torch_ln_linear.layernorm.bias = Parameter(
+                te_ln_linear.te_module.layer_norm_bias.clone()
+            )
         torch_ln_linear.linear.weight = Parameter(te_ln_linear.te_module.weight.clone())
         if bias:
             torch_ln_linear.linear.bias = Parameter(te_ln_linear.te_module.bias.clone())
