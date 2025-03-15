@@ -35,10 +35,10 @@ from transformer_engine.pytorch import (
     RMSNorm,
     TransformerLayer,
     LayerNorm,
-    InferenceParams,
     Fp8Padding,
     Fp8Unpadding,
 )
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
