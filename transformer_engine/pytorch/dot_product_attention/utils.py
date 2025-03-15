@@ -92,7 +92,6 @@ class FlashAttentionUtils:
     Manage Flash Attention versioning information
     """
 
-    # Detect flash-attn v2 in the environment
     is_installed = False
     version = PkgVersion("0")
     version_required = PkgVersion("2.1.1")
@@ -137,7 +136,6 @@ class FlashAttentionUtils:
         FlashAttentionUtils.v2_6_0_plus = FlashAttentionUtils.version >= PkgVersion("2.6.0")
         FlashAttentionUtils.v2_7_0_plus = FlashAttentionUtils.version >= PkgVersion("2.7.0")
 
-    # Detect flash-attn v3 in the environment (Hopper only)
     @staticmethod
     def set_flash_attention_3_params():
         """

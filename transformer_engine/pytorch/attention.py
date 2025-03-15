@@ -85,7 +85,7 @@ from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_p
 # Setup Attention Logging
 attn_log.setup_logging()
 
-# Global vars for flash attn imports
+# Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
 flash_attn_func = None
 flash_attn_varlen_func = None
@@ -135,8 +135,6 @@ else:
             ),
             fa_utils.version,
         )
-
-# Detect flash-attn v3 in the environment (Hopper only)
 try:
     _flash_attn_3_version = PkgVersion(get_pkg_version("flash-attn-3"))
 except PackageNotFoundError:
