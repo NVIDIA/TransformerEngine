@@ -17,11 +17,23 @@ import torch
 import torch.distributed as dist
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+class multi_module_model(torch.nn.Module):
+    def __init__(self, module, num_layers, *args, **kwargs):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
 
 def _te_layer_argtype(name):
@@ -40,10 +52,12 @@ def _te_layer_argtype(name):
     return layer_map[name.lower()]
 
 
-def _get_layer_args(config, tp_group, tp_size, reference=False):
+def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
     hidden_size = config.num_heads * config.head_dim
     ffn_hidden_size = 4 * hidden_size
     qkv_size = 3 * hidden_size
+    if num_layers > 1 and config.layer_type != te.TransformerLayer:
+        raise ValueError("Stacked layers are only supported for te.TransformerLayer!")
     input_shape = [config.seq_length, config.batch_size, hidden_size]
     args = [hidden_size]
     kwargs = {
@@ -106,6 +120,9 @@ def _parse_args(argv=None, namespace=None):
         description="Test a Transformer Engine layer with GEMM+comm overlap via Userbuffers."
     )
     parser.add_argument("-l", "--layer-type", type=_te_layer_argtype, default=te.LayerNormMLP)
+    parser.add_argument(
+        "--num-layers", type=int, default=1, help="Number of identical layers to stack."
+    )
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
@@ -141,6 +158,13 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str.lower,
+        default="none",
+        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling"],
+        help="Quantization recipe",
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -341,7 +365,9 @@ def _train(opts):
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
     # Initialize the Transformer Engine layer with overlap
-    args, kwargs, input_shape = _get_layer_args(opts, nccl_world, opts.tp)
+    args, kwargs, input_shape = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers
+    )
     # Intialize userbuffers
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
@@ -359,7 +385,7 @@ def _train(opts):
     )
 
     with te.fp8_model_init(enabled=opts.fp8_init):
-        test_model = opts.layer_type(*args, **kwargs)
+        test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
     if WORLD_RANK == 0:
         pprint.pprint(kwargs)
@@ -367,9 +393,11 @@ def _train(opts):
     dist.barrier()
 
     # Initialize the reference model and copy all parameters
-    ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, opts.tp, reference=True)
+    ref_args, ref_kwargs, _ = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True
+    )
     with te.fp8_model_init(enabled=opts.fp8_init):
-        ref_model = opts.layer_type(*ref_args, **ref_kwargs)
+        ref_model = multi_module_model(opts.layer_type, opts.num_layers, *ref_args, **ref_kwargs)
     dist_print("Initialized reference model...", debug=True)
     for test_param, ref_param in zip(test_model.parameters(), ref_model.parameters()):
         with torch.no_grad():
@@ -379,7 +407,13 @@ def _train(opts):
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
-    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+    fp8_recipe = None
+    if opts.quantization == "fp8_delayed_scaling":
+        fp8_recipe = DelayedScaling(
+            fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max"
+        )
+    elif opts.quantization == "fp8_current_scaling":
+        fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
 
     # Prepare random input tensors
     test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
