@@ -77,7 +77,6 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 
 # Import attention utils
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
-from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
 from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
@@ -4129,7 +4128,7 @@ class FlashAttention(torch.nn.Module):
         context_parallel = cp_size > 1
 
         # get q_format and kv_format for training and inference
-        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+        qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
         # convert q, k, v to bshd if they are in sbhd; qkv_format doesn't change
         if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
@@ -5125,7 +5124,7 @@ class FusedAttention(torch.nn.Module):
         context_parallel = cp_size > 1
 
         # get q_format and kv_format for training and inference
-        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
+        qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
         page_table = None
         if inference_params is None:
@@ -5150,20 +5149,20 @@ class FusedAttention(torch.nn.Module):
                                 "Please provide attention_mask or cu_seqlens for padding!"
                             )
                         if self.attention_type == "self":
-                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
                             cu_seqlens_kv = cu_seqlens_q
                         else:
-                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
                 else:
                     if cu_seqlens_q is None:
-                        cu_seqlens_q = _get_full_cu_seqlens(
+                        cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_q,
                             query_layer.device,
                         )
                     if cu_seqlens_kv is None:
-                        cu_seqlens_kv = _get_full_cu_seqlens(
+                        cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
                             key_layer.device,
@@ -6046,9 +6045,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
-                            cu_seqlens_q = get_cu_seqlens(attention_mask)
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
                         else:
-                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
                     else:
                         cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                             batch_size,
@@ -6063,9 +6062,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask)
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask)
                         else:
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
                     else:
                         cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,

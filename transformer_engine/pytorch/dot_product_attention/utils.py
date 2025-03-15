@@ -115,11 +115,11 @@ class FlashAttentionUtils:
     # FA3 from FA 2.7.3+/hopper has different APIs than FA3 from 2.7.2/hopper
     # Please follow these instructions to install FA3
     v3_installation_steps = """\
-    (1) git clone https://github.com/Dao-AILab/flash-attention.git
-    (2) cd flash-attention/ && git checkout 39e7197 && cd hopper/ && python setup.py install
-    (3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-    (4) mkdir -p $python_path/flash_attn_3
-    (5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/39e71975642daab365a5a37c959182c93ed5fc8a/hopper/flash_attn_interface.py"""
+(1) git clone https://github.com/Dao-AILab/flash-attention.git
+(2) cd flash-attention/ && git checkout 39e7197 && cd hopper/ && python setup.py install
+(3) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+(4) mkdir -p $python_path/flash_attn_3
+(5) wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/39e71975642daab365a5a37c959182c93ed5fc8a/hopper/flash_attn_interface.py"""
 
     @staticmethod
     def set_flash_attention_version():
