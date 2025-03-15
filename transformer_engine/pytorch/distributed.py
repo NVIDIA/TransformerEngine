@@ -979,9 +979,8 @@ def _all_gather_mxfp8(
     # Cast input tensor to MXFP8 with required data
     if not isinstance(inp, MXFP8TensorBase):
         inp = quantizer(inp)
-    elif (
-        (quantizer.rowwise_usage and inp._rowwise_data is None)
-        or (quantizer.columnwise_usage and inp._columnwise_data is None)
+    elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
+        quantizer.columnwise_usage and inp._columnwise_data is None
     ):
         warnings.warn(
             "Input and quantizer do not have matching usages. "
