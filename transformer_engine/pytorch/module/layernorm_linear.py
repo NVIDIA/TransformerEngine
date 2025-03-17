@@ -383,6 +383,17 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
+            if cpu_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_object = weight
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
@@ -526,8 +537,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    origin_weight = ctx.weight_object
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    origin_weight.main_grad = main_grad
 
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
