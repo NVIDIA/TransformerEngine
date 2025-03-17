@@ -50,6 +50,7 @@ uint32_t _getAlignment(uintptr_t address) {
 
 inline void CreateCublasHandle(cublasLtHandle_t *handle) {
   NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
+}
 
 struct GemmParam {
   void *A;
