@@ -243,10 +243,6 @@ Tensor::Tensor(const std::string& name,
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
   NVTEShape columnwise_shape{nullptr, 0};
 
-  size_t block_scaling_dim = 0;
-  if (q_opts != nullptr) {
-    block_scaling_dim = q_opts->block_scaling_dim;
-  }
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
     // Transpose when tensor scaling
