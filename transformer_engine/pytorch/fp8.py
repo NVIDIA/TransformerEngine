@@ -56,7 +56,7 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     if (
         get_device_compute_capability() >= (9, 0)
         and get_device_compute_capability() < (10, 0)
-        and float(torch.version.cuda) >= 12.9
+        and float(torch.version.cuda) >= 12.8 # change from 12.9 to 12.8 because of using internal cublas version.
     ):
         return True, ""
     return False, "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
