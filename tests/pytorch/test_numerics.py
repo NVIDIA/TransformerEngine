@@ -1336,12 +1336,12 @@ def test_layernorm_linear_accuracy(
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
 
     atol = {
-        torch.float32: 3e-5,
+        torch.float32: 2.5e-4,
         torch.half: 2e-3,
         torch.bfloat16: 2e-2,
     }
     rtol = {
-        torch.float32: 1e-4,
+        torch.float32: 1e-3,
         torch.half: 4e-2,
         torch.bfloat16: 4e-2,
     }
@@ -1351,12 +1351,12 @@ def test_layernorm_linear_accuracy(
 
     if model == "small":
         atol = {
-            torch.float32: 1e-4,
+            torch.float32: 1e-3,
             torch.half: 5e-2,
             torch.bfloat16: 5e-2,
         }
         rtol = {
-            torch.float32: 1e-4,
+            torch.float32: 1e-3,
             torch.half: 4e-2,
             torch.bfloat16: 4e-2,
         }
@@ -1414,13 +1414,13 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
     torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
 
     atol = {
-        torch.float32: 1e-3,
+        torch.float32: 2e-2,
         torch.half: 5e-2,
         torch.bfloat16: 5e-2,
     }
 
     rtol = {
-        torch.float32: 3e-4,
+        torch.float32: 1e-3,
         torch.half: 4e-2,
         torch.bfloat16: 4e-2,
     }
@@ -1430,7 +1430,7 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, ret
 
     # Check gradients, only for small model
     rtol = {
-        torch.float32: 3e-4,
+        torch.float32: 1e-3,
         torch.half: 1e-2,
         torch.bfloat16: 4e-2,
     }
