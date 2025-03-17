@@ -1127,9 +1127,11 @@ class TestReturnBiasModule(nn.Module):
         self.bias = kwargs["bias"]
 
     def forward(self, x):
-        if self.bias and self.return_bias:
+        if self.return_bias:
             out, bias = self.te_module(x)
-            return out + bias
+            if self.bias:
+                out = out + bias
+            return out
         return self.te_module(x)
 
 
