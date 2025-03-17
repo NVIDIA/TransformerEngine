@@ -863,10 +863,14 @@ def _all_gather_fp8(
         # we cannot directly gather the transposed fp8 tensor
         # so we need to disable columnwise usage for the quantizer
         # and then set it back to the original value after quantizing
+        init_rowwise_usage = quantizer.rowwise_usage
         init_columnwise_usage = quantizer.columnwise_usage
-        quantizer.set_usage(columnwise=False)
+        quantizer.set_usage(rowwise=True, columnwise=False)
         inp = quantizer(inp)
-        quantizer.set_usage(columnwise=init_columnwise_usage)
+        quantizer.set_usage(
+            rowwise=init_rowwise_usage,
+            columnwise=init_columnwise_usage,
+        )
 
     # Construct output tensor
     out: Float8TensorBase
@@ -923,9 +927,34 @@ def _all_gather_mxfp8(
 ) -> tuple[MXFP8TensorBase, Optional[torch.distributed.Work]]:
     """All-gather MXFP8 tensor along first dimension."""
 
-    # Tensor dims
+    # Input tensor attributes
+    in_shape: Iterable[int]
+    device: torch.device
+    dtype: torch.dtype
+    if isinstance(inp, torch.Tensor):
+        in_shape = inp.size()
+        device = inp.device
+        dtype = inp.dtype
+    elif isinstance(inp, MXFP8TensorBase):
+        if inp._rowwise_data is not None:
+            in_shape = inp._rowwise_data.device.size()
+            device = inp._rowwise_data.device
+            dtype = inp._rowwise_data.dtype
+        elif inp._columnwise_data is not None:
+            in_shape = inp._columnwise_data.device.size()
+            device = inp._columnwise_data.device
+            dtype = inp._columnwise_data.dtype
+        else:
+            raise ValueError("Got MXFP8 input tensor without any data")
+        dtype = torch.bfloat16
+    else:
+        raise ValueError(
+            "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorBase, "
+            f"found {inp.__class__.__name__})"
+        )
+
+    # Output tensor shape
     world_size = get_distributed_world_size(process_group)
-    in_shape = list(inp.size())
     if out_shape is None:
         out_shape = [in_shape[0] * world_size] + in_shape[1:]
 
@@ -938,25 +967,20 @@ def _all_gather_mxfp8(
     ):
         out = torch.empty(
             out_shape,
-            dtype=inp.dtype,
-            device=inp.device,
+            dtype=dtype,
+            device=device,
             memory_format=torch.contiguous_format,
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
         return out, None
 
-    inp_dtype = inp.dtype
-    inp_device = inp.device
-
     # Cast input tensor to MXFP8 with required data
     if not isinstance(inp, MXFP8TensorBase):
         inp = quantizer(inp)
     elif (
-        inp.rowwise_data is None
-        and quantizer.rowwise_usage
-        or inp.columnwise_data is None
-        and quantizer.columnwise_usage
+        (quantizer.rowwise_usage and inp._rowwise_data is None)
+        or (quantizer.columnwise_usage and inp._columnwise_data is None)
     ):
         warnings.warn(
             "Input and quantizer do not have matching usages. "
@@ -965,65 +989,64 @@ def _all_gather_mxfp8(
         inp = quantizer(inp.dequantize())
 
     # Construct MXFP8 output tensor
-    out = quantizer.make_empty(out_shape, dtype=inp_dtype, device=inp_device)
+    out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
-    # Async op handle
-    handle = None
+    # Coalesce NCCL collectives
+    with torch.distributed._coalescing_manager(
+        group=process_group,
+        device=device,
+        async_ops=async_op,
+    ) as coalescing_manager:
 
-    # Gather MXFP8 data for row-wise usage
-    if quantizer.rowwise_usage:
+        # Gather MXFP8 data for row-wise usage
+        if quantizer.rowwise_usage:
 
-        # Remove padding from MXFP8 scale-inverses
-        in_scale_inv = inp._rowwise_scale_inv
-        out_scale_inv = out._rowwise_scale_inv
-        flattened_in_shape0 = math.prod(in_shape[:-1])
-        if in_scale_inv.size(0) != flattened_in_shape0:
-            in_scale_inv = in_scale_inv[:flattened_in_shape0]
-            out_scale_inv[flattened_in_shape0 * world_size :].zero_()
-            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._rowwise_scale_inv
+            out_scale_inv = out._rowwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1])
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
-        # Launch all-gathers
-        if handle is not None:
-            handle.wait()
-        torch.distributed.all_gather_into_tensor(
-            out_scale_inv,
-            in_scale_inv,
-            group=process_group,
-        )
-        handle = torch.distributed.all_gather_into_tensor(
-            out._rowwise_data,
-            inp._rowwise_data,
-            group=process_group,
-            async_op=async_op,
-        )
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._rowwise_data,
+                inp._rowwise_data,
+                group=process_group,
+            )
 
-    # Gather MXFP8 data for column-wise usage
-    if quantizer.columnwise_usage:
+        # Gather MXFP8 data for column-wise usage
+        if quantizer.columnwise_usage:
 
-        # Remove padding from MXFP8 scale-inverses
-        in_scale_inv = inp._columnwise_scale_inv
-        out_scale_inv = out._columnwise_scale_inv
-        flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
-        if in_scale_inv.size(0) != flattened_in_shape0:
-            in_scale_inv = in_scale_inv[:flattened_in_shape0]
-            out_scale_inv[flattened_in_shape0 * world_size :].zero_()
-            out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
+            # Remove padding from MXFP8 scale-inverses
+            in_scale_inv = inp._columnwise_scale_inv
+            out_scale_inv = out._columnwise_scale_inv
+            flattened_in_shape0 = math.prod(in_shape[:-1]) // 32
+            if in_scale_inv.size(0) != flattened_in_shape0:
+                in_scale_inv = in_scale_inv[:flattened_in_shape0]
+                out_scale_inv[flattened_in_shape0 * world_size :].zero_()
+                out_scale_inv = out_scale_inv[: flattened_in_shape0 * world_size]
 
-        # Launch all-gathers
-        if handle is not None:
-            handle.wait()
-        torch.distributed.all_gather_into_tensor(
-            out_scale_inv,
-            in_scale_inv,
-            group=process_group,
-        )
-        handle = torch.distributed.all_gather_into_tensor(
-            out._columnwise_data,
-            inp._columnwise_data,
-            group=process_group,
-            async_op=async_op,
-        )
+            # Launch all-gathers
+            torch.distributed.all_gather_into_tensor(
+                out_scale_inv,
+                in_scale_inv,
+                group=process_group,
+            )
+            torch.distributed.all_gather_into_tensor(
+                out._columnwise_data,
+                inp._columnwise_data,
+                group=process_group,
+            )
 
+    handle = coalescing_manager if async_op else None
     return out, handle
 
 
