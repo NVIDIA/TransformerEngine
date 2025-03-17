@@ -51,8 +51,12 @@ def _load_library():
         so_dir = get_te_path() / "transformer_engine"
         so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
     except StopIteration:
-        so_dir = get_te_path()
-        so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        try:
+            so_dir = get_te_path() / "transformer_engine" / "wheel_lib"
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
+        except StopIteration:
+            so_dir = get_te_path()
+            so_path = next(so_dir.glob(f"{module_name}.*.{extension}"))
 
     spec = importlib.util.spec_from_file_location(module_name, so_path)
     solib = importlib.util.module_from_spec(spec)
@@ -74,7 +78,13 @@ from transformer_engine.pytorch.attention import DotProductAttention
 from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
 from transformer_engine.pytorch.transformer import TransformerLayer
-from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+from transformer_engine.pytorch.permutation import (
+    moe_permute,
+    moe_permute_with_probs,
+    moe_unpermute,
+    moe_sort_chunks_by_index,
+    moe_sort_chunks_by_index_with_probs,
+)
 from transformer_engine.pytorch.fp8 import fp8_autocast
 from transformer_engine.pytorch.fp8 import fp8_model_init
 from transformer_engine.pytorch.graph import make_graphed_callables
