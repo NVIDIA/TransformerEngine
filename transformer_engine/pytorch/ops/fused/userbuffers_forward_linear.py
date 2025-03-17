@@ -19,8 +19,6 @@ from ...module.base import (
     get_ub,
     get_workspace,
     _2X_ACC_FPROP,
-    _2X_ACC_DGRAD,
-    _2X_ACC_WGRAD,
 )
 from ...tensor.quantized_tensor import QuantizedTensor, Quantizer
 from ...tensor.float8_tensor import Float8Quantizer
@@ -31,11 +29,6 @@ from ..op import (
     FusedOperation,
     FusibleOperation,
     OperationContext,
-)
-from .._common import (
-    convert_tensor,
-    get_fp8_meta_from_fp8_tensor,
-    reshape,
 )
 
 

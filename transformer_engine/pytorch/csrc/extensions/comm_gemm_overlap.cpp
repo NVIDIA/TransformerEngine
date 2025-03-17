@@ -166,7 +166,8 @@ void CommOverlap::copy_into_buffer(const at::Tensor &input, bool local_chunk) {
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
                "(input_size=", input_size, ", tensor_parallel_size=", _tp_size, ", ubuf_size=",
                ubuf_size, ")");
-    dst_ptr += (ubuf_size / _tp_size) * _tp_id * element_size;
+    dst_ptr = (reinterpret_cast<char *>(dst_ptr)
+               + (ubuf_size / _tp_size) * _tp_id * element_size);
   } else {
     NVTE_CHECK(input_size == ubuf_size,
                "Tried to copy an invalid tensor into a Userbuffers buffer ",
@@ -208,7 +209,8 @@ at::Tensor CommOverlap::get_buffer(bool local_chunk,
   // Data pointer
   void *ubuf_ptr = _ubuf.dptr();
   if (local_chunk) {
-    ubuf_ptr += ubuf_size / _tp_size * _tp_id * _ubuf.element_size();
+    ubuf_ptr = (reinterpret_cast<char *>(ubuf_ptr)
+                + (ubuf_size / _tp_size) * _tp_id * _ubuf.element_size());
   }
 
   // Construct PyTorch tensor

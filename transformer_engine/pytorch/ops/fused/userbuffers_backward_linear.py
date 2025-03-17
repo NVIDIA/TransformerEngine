@@ -11,23 +11,23 @@ import warnings
 
 import torch
 
-from transformer_engine_torch import CommOverlapAlgo
+from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
 from ...distributed import get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
-from ...module.base import get_ub, get_workspace
-from ...tensor.quantized_tensor import Quantizer
+from ...module.base import (
+    fill_userbuffers_buffer_for_all_gather,
+    get_ub,
+    get_workspace,
+    _2X_ACC_DGRAD,
+    _2X_ACC_WGRAD,
+)
+from ...tensor.quantized_tensor import QuantizedTensor, Quantizer
 from ...tensor.mxfp8_tensor import MXFP8Quantizer
 from ...utils import canonicalize_device, canonicalize_dtype, clear_tensor_data
 from ..basic import BasicLinear, Bias, ReduceScatter
 from ..op import FusedOperation, FusibleOperation, OperationContext
-from .._common import (
-    convert_tensor,
-    get_fp8_meta_from_fp8_tensor,
-    is_float8_tensor,
-    reshape,
-)
 
 
 class UserbuffersBackwardLinear(FusedOperation):
@@ -87,6 +87,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         input: Optional[torch.Tensor],  # pylint: disable=redefined-builtin
         weight: Optional[torch.Tensor],
         *,
+        input_requires_grad: bool = True,
         weight_requires_grad: bool = True,
         bias_requires_grad: bool = False,
         device: Optional[torch.device] = None,
@@ -171,14 +172,20 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         # Check device
         if device is None:
-            device = weight.device
+            if weight is not None:
+                device = weight.device
+            else:
+                device = grad_output.device
         device = canonicalize_device(device)
         if device.type != "cuda":
             raise ValueError(f"Only CUDA devices are supported (got {device})")
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype
+            if weight is not None:
+                dtype = weight.dtype
+            else:
+                dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
@@ -196,11 +203,19 @@ class UserbuffersBackwardLinear(FusedOperation):
         if not sequence_parallel:
             raise RuntimeError(f"Invalid configuration for Userbuffers ({sequence_parallel=})")
 
+        # dgrad GEMM is required
+        if not input_requires_grad:
+            warnings.warn(
+                "Linear input doesn't require gradient, "
+                "but Userbuffers implementation requires dgrad GEMM."
+            )
+            input_requires_grad = True
+
         # Check quantizers
         if with_quantized_compute:
             if weight_requires_grad and input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
-            if weight_quantizer is None:
+            if input_requires_grad and weight_quantizer is None:
                 raise ValueError("Missing quantizer for weight tensor")
             if grad_output_quantizer is None:
                 raise ValueError("Missing quantizer for grad output tensor")
@@ -242,7 +257,7 @@ class UserbuffersBackwardLinear(FusedOperation):
                 ub_type_wgrad = CommOverlapType.AG
                 with_wgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
-            if input_requires_grad and weight_requries_grad:
+            if input_requires_grad and weight_requires_grad:
                 with_bulk_overlap = True
                 ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
                 ub_type_dgrad = CommOverlapType.AG
@@ -250,10 +265,18 @@ class UserbuffersBackwardLinear(FusedOperation):
                 ub_comm_wgrad = get_ub(ub_comm_name + "_wgrad")
                 ub_type_wgrad = CommOverlapType.RS
                 with_wgrad_reduce_scatter_dx = True
+                if ub_comm_wgrad.is_fp8_ubuf():
+                    raise RuntimeError(
+                        "Userbuffers reduce-scatter is not supported with FP8 buffers"
+                    )
             else:
                 ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
                 ub_type_dgrad = CommOverlapType.RS
                 with_dgrad_reduce_scatter_dx = True
+                if ub_comm_dgrad.is_fp8_ubuf():
+                    raise RuntimeError(
+                        "Userbuffers reduce-scatter is not supported with FP8 buffers"
+                    )
 
         # Compute grad bias if needed
         # TODO: Fuse with grad output quantization
@@ -272,7 +295,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         dy_local = grad_output
         if with_quantized_compute:
             if not isinstance(dy_local, QuantizedTensor):
-                with_columnwise = weight_requries_grad
+                with_columnwise = weight_requires_grad
                 if (
                     with_columnwise
                     and with_dgrad_all_gather_dy
@@ -321,7 +344,6 @@ class UserbuffersBackwardLinear(FusedOperation):
                     x_local = x_local.to(dtype=dtype)
 
         # dgrad GEMM
-        input_requires_grad = True
         dx_local = None
         dx = None
         dy = None
@@ -330,7 +352,8 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Initialize grad output
             if with_dgrad_all_gather_dy:
-                grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                if grad_output_quantizer is not None:
+                    grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
                 dy, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_comm_dgrad,
                     dy_local,
@@ -342,18 +365,30 @@ class UserbuffersBackwardLinear(FusedOperation):
 
             # Construct grad input tensor if needed
             if with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx:
-                dx_local_size = list(dy.size())
+                dx_size = list(dy.size())
+                dx_size[-1] = w.size(-1)
+                dx_local_size = list(dx_size)
                 dx_local_size[0] //= tensor_parallel_size
-                dx_local_size[-1] = w.size(-1)
-                dx_local = torch.empty(
-                    dx_local_size,
-                    dtype=dtype,
-                    device=device,
-                )
+                if with_dgrad_reduce_scatter_dx:
+                    dx_local = torch.empty(
+                        dx_local_size,
+                        dtype=dtype,
+                        device=device,
+                    )
+                elif with_wgrad_reduce_scatter_dx:
+                    dx_local = ub_comm_wgrad.get_buffer(
+                        local_chunk=True,
+                        shape=dx_local_size,
+                    )
+                    dx = ub_comm_wgrad.get_buffer(
+                        local_chunk=False,
+                        shape=dx_size,
+                    )
 
             # Initialize input tensor if needed
             if with_dgrad_all_gather_x:
-                input_quantizer.set_usage(rowwise=False, columnwise=True)
+                if input_quantizer is not None:
+                    input_quantizer.set_usage(rowwise=False, columnwise=True)
                 x, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_comm_dgrad,
                     x_local,
@@ -369,23 +404,25 @@ class UserbuffersBackwardLinear(FusedOperation):
                 out_dtype=dtype,
                 quantization_params=grad_input_quantizer,
                 layout="NN",
+                out=dx,
                 use_split_accumulator=_2X_ACC_DGRAD,
                 grad=True,
                 ub=ub_comm_dgrad,
                 ub_type=ub_type_dgrad,
                 extra_output=dx_local if with_dgrad_reduce_scatter_dx else None,
-                bulk_output=with_bulk_overlap
+                bulk_overlap=with_bulk_overlap,
             )
             if not (with_dgrad_reduce_scatter_dx or with_wgrad_reduce_scatter_dx):
                 dx_local = dx
 
         # wgrad GEMM
-        grad_weight = None
+        dw = None
         if weight_requires_grad:
 
             # Initialize grad output
             if with_wgrad_all_gather_dy:
-                grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                if grad_output_quantizer is not None:
+                    grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
                 dy, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_comm_wgrad,
                     dy_local,
@@ -394,24 +431,24 @@ class UserbuffersBackwardLinear(FusedOperation):
                 )
             elif dy is None:
                 dy = dy_local
-            dy.update_usage(rowwise_usage=False, columnwise_usage=True)
+            if isinstance(dy, QuantizedTensor):
+                dy.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Initialize input tensor if needed
             if with_wgrad_all_gather_x:
-                input_quantizer.set_usage(rowwise=False, columnwise=True)
+                if input_quantizer is not None:
+                    input_quantizer.set_usage(rowwise=False, columnwise=True)
                 x, _ = fill_userbuffers_buffer_for_all_gather(
                     ub_comm_dgrad,
                     x_local,
                     input_quantizer,
                     tensor_parallel_group,
                 )
-
-            # Initialize grad input tensor if needed
-            if with_wgrad_reduce_scatter_dx:
-                ub_comm_wgrad.copy_into_buffer(dx, local_chunk=False)
+            if not (with_dgrad_all_gather_x or with_wgrad_all_gather_x):
+                x = x_local
 
             # Perform wgrad GEMM
-            grad_weight, *_ = general_gemm(
+            dw, *_ = general_gemm(
                 x,
                 dy,
                 get_workspace(),
@@ -422,9 +459,14 @@ class UserbuffersBackwardLinear(FusedOperation):
                 grad=True,
                 ub=ub_comm_wgrad,
                 ub_type=ub_type_wgrad,
-                extra_output=dx_local if with_wgrad_reduce_scatter_dx else None,
-                bulk_output=with_bulk_overlap,
+                bulk_overlap=with_bulk_overlap,
             )
+
+            # Bulk overlap reduce-scatter with non-FP8 buffer is
+            # in-place. Need to copy grad input tensor to avoid data
+            # corruption in Userbuffers buffer.
+            if with_wgrad_reduce_scatter_dx:
+                dx_local = dx_local.clone()
 
         # Compute grad bias if needed
         if db_async is not None:
@@ -432,7 +474,7 @@ class UserbuffersBackwardLinear(FusedOperation):
         if bias_requires_grad:
             extra_outputs["grad_bias"] = db
 
-        return grad_input, grad_weight, extra_outputs
+        return dx_local, dw, extra_outputs
 
     def fuser_backward(
         self,
@@ -475,7 +517,8 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Hackily workaround Userbuffers bug with non-FP8 dgrad
         # reduce-scatter overlap
         weight_requires_grad = linear_op_ctx.weight_requires_grad
-        if not linear_op_ctx.with_fp8_compute and not weight_requires_grad:
+        ### TODO Check
+        if not linear_op_ctx.with_quantized_compute and not weight_requires_grad:
             warnings.warn(
                 "There is a correctness bug when using Userbuffers "
                 "to overlap a dgrad reduce-scatter with a non-FP8 dgrad GEMM. "
@@ -493,18 +536,17 @@ class UserbuffersBackwardLinear(FusedOperation):
             weight=linear_op.weight,
             weight_requires_grad=weight_requires_grad,
             bias_requires_grad=(bias_op is not None),
-            device=linear_op.device,
             dtype=linear_op_ctx.dtype,
             grad_weight=grad_weight,
             accumulate_into_grad_weight=accumulate_into_main_grad,
             tensor_parallel_mode=self.tensor_parallel_mode,
             tensor_parallel_group=self.tensor_parallel_group,
             sequence_parallel=self.sequence_parallel,
-            with_quantized_compute=ctx.with_quantized_compute,
-            input_quantizer=ctx.input_quantizer,
-            weight_quantizer=ctx.weight_quantizer,
-            grad_output_quantizer=ctx.grad_output_quantizer,
-            grad_input_quantizer=ctx.grad_input_quantizer,
+            with_quantized_compute=linear_op_ctx.with_quantized_compute,
+            input_quantizer=linear_op_ctx.input_quantizer,
+            weight_quantizer=linear_op_ctx.weight_quantizer,
+            grad_output_quantizer=linear_op_ctx.grad_output_quantizer,
+            grad_input_quantizer=linear_op_ctx.grad_input_quantizer,
             ub_comm_name=linear_op._userbuffers_options["comm_name"],
         )
         grad_input, grad_weight, extra_outputs = retval
@@ -544,8 +586,6 @@ def fuse_userbuffers_backward_linear(
         Updated forward pass operations
 
     """
-
-    return ops  ### TODO Debug Userbuffers support
 
     # Return immediately if environment is not distributed
     if not torch.distributed.is_initialized() or torch.distributed.get_world_size() == 1:

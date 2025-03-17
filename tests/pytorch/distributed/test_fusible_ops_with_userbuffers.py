@@ -366,9 +366,9 @@ def _test_linear(
     forward_ops = model._module_groups[0]._forward_ops
     backward_ops = model._module_groups[0]._backward_ops
     assert len(forward_ops) == 1
-    # assert len(backward_ops) == 1  ### TODO Restore
+    assert len(backward_ops) == 1
     assert isinstance(forward_ops[0][0], UserbuffersForwardLinear)
-    # assert isinstance(backward_ops[0][0], UserbuffersBackwardLinear)  ### TODO Restore
+    assert isinstance(backward_ops[0][0], UserbuffersBackwardLinear)
 
     # Expected numerical error
     tols = dtype_tols(dtype)
@@ -406,7 +406,7 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
     for test_config in itertools.product(
         (False, True),  # bias
         ("row", "column"),  # tensor_parallel_mode
-        (False, True),  # weight_requires_grad
+        (True, False),  # weight_requires_grad
     ):
         if rank == 0:
             print(f"Running _test_linear with {test_config=}")

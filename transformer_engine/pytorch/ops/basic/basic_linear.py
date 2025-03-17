@@ -617,7 +617,10 @@ class BasicLinear(BasicOperation):
 
         # Check datatype
         if dtype is None:
-            dtype = weight.dtype
+            if weight is not None:
+                dtype = weight.dtype
+            else:
+                dtype = grad_output.dtype
         dtype = canonicalize_dtype(dtype)
         if dtype not in (torch.float32, torch.float16, torch.bfloat16):
             raise ValueError(f"Supported dtypes are float32, float16, bfloat16 (got {dtype})")
