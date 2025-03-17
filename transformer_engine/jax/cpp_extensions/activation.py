@@ -5,13 +5,13 @@
 from typing import Tuple, Sequence, Union, Callable
 import operator
 from functools import reduce, partial
+from packaging import version
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Activation_Type
@@ -27,6 +27,11 @@ from .misc import (
 )
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = ["act_lu", "dact_lu", "act_lu_fp8"]

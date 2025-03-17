@@ -213,7 +213,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_epsilon: float = 0.0,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.scale = torch.empty(1, dtype=torch.float32, device=device)
+        self.scale = torch.ones(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
@@ -428,21 +428,40 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
         self._transpose_invalid = False
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
-        assert rowwise_usage or columnwise_usage, "Could not disable all usages of the tensor"
-        if rowwise_usage:
-            assert self._data is not None, "Rowwise usage of the tensor was already disabled"
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
+        # Figure out what data is available and what is required
+        has_data = self._data is not None
+        has_data_transpose = self._transpose is not None and not self._transpose_invalid
+        needs_data = has_data
+        needs_data_transpose = has_data_transpose
+        if non_tn_fp8_gemm_supported():
+            if rowwise_usage is not None and rowwise_usage:
+                needs_data = True
+            if columnwise_usage is not None and columnwise_usage:
+                needs_data = True
+            needs_data_transpose = False
         else:
-            if not non_tn_fp8_gemm_supported():
-                if self._transpose is None or self._transpose_invalid:
-                    self._create_transpose()
-                self._data = None
-        if columnwise_usage:
-            if self._transpose is None or self._transpose_invalid:
-                assert self._data is not None, "The tensor does not hold any data anymore"
-                if not non_tn_fp8_gemm_supported():
-                    self._create_transpose()
-        else:
+            if rowwise_usage is not None:
+                needs_data = rowwise_usage
+            if columnwise_usage is not None:
+                needs_data_transpose = columnwise_usage
+
+        # Generate data that is required
+        if needs_data and not has_data:
+            raise RuntimeError("Cannot generate FP8 data, even from FP8 data transpose")
+        if needs_data_transpose and not has_data_transpose:
+            if not has_data:
+                raise RuntimeError("FP8 data is required to generate FP8 data transpose")
+            self._create_transpose()
+
+        # Delete data that is not required
+        if not needs_data:
+            self._data = None
+        if not needs_data_transpose:
             self._transpose = None
             self._transpose_invalid = True
 
