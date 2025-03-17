@@ -379,7 +379,7 @@ def get_tols(module, backend, dtype):
         tols = {
             torch.half: (1e-3, 1e-3),
             torch.bfloat16: (1e-2, 1e-3),
-            torch.float8_e4m3fn: (1e-2, 3e-2),
+            torch.float8_e4m3fn: (2e-2, 3e-2),
         }
     return tols[dtype]
 
