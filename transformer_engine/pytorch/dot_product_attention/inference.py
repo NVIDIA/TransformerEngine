@@ -120,7 +120,7 @@ class InferenceParams:
         Maximum context length in inference. 1 <= max_ctx_len <= max_seqlen_kv.
     qkv_format: str, default = "bshd"
         Format of the incoming query/key/value tensors in current iteration
-    cache_manager: KVCacheManager, default = None
+    custom_cache_manager: KVCacheManager, default = None
         Custom cache manager, with KVCacheManager as the base class.
     """
 
@@ -137,7 +137,7 @@ class InferenceParams:
         page_size: int = None,
         max_ctx_len: int = None,
         qkv_format: str = "bshd",
-        cache_manager: KVCacheManager = None,
+        custom_cache_manager: KVCacheManager = None,
     ):
         self.max_batch_size = max_batch_size
         self.max_seqlen_kv = max_seqlen_kv
@@ -148,8 +148,8 @@ class InferenceParams:
         self.is_paged = is_paged
 
         if not self.is_paged:
-            cls = cache_manager if cache_manager is not None else NonPagedKVCacheManager
-            self.cache_manager = cls(
+            cache_manager = custom_cache_manager if custom_cache_manager is not None else NonPagedKVCacheManager
+            self.cache_manager = cache_manager(
                 max_batch_size=self.max_batch_size,
                 max_seqlen=self.max_seqlen_kv,
                 num_heads=self.num_heads_kv,
@@ -169,8 +169,8 @@ class InferenceParams:
             ), "Paged KV cache requires total_num_pages = max_batch_size * max_pages_per_seq."
             self.total_num_pages = total_num_pages
 
-            cls = cache_manager if cache_manager is not None else PagedKVCacheManager
-            self.cache_manager = cls(
+            cache_manager = custom_cache_manager if custom_cache_manager is not None else PagedKVCacheManager
+            self.cache_manager = cache_manager(
                 total_num_pages=self.total_num_pages,
                 page_size=self.page_size,
                 num_heads=self.num_heads_kv,
