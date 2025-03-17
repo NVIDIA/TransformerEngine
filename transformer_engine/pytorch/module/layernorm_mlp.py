@@ -190,12 +190,12 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            if (
-                any([ub_overlap_ag, ub_overlap_rs])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+            if any([ub_overlap_ag, ub_overlap_rs]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
         activation_func = _act_func(
@@ -209,7 +209,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
-        # for standard fp8: layernorm output = FP8
+        # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
         # for return_layernorm_output: layernorm output = High precision, then cast to FP8
         #                              high precision layernorm output and output of the linear are returned
@@ -237,9 +237,19 @@ class _LayerNormMLP(torch.autograd.Function):
                     columnwise=backwards_needs_fc1_input,
                 )
 
+        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+        if (
+            fp8
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
+            fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+
         ub_obj_lnout = None
         ln_out = None
-        if ub_overlap_ag:
+        # For DelayScaling, output of normalization will be in fp8.
+        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
+        if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
         elif not with_quantized_norm:
@@ -262,6 +272,14 @@ class _LayerNormMLP(torch.autograd.Function):
         )
 
         ln_out_return = ln_out if return_layernorm_output else None
+
+        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
+        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
+        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+            ub_obj_lnout = get_ub("fc1_fprop")
+            ln_out_local = ln_out
+            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
+            fc1_input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -589,9 +607,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.delayed():
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors
@@ -658,10 +677,11 @@ class _LayerNormMLP(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_fc2_output_quantizer is not None:
-                ctx.grad_fc2_output_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=True,
-                )
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=True)
 
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
@@ -797,14 +817,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     )  # activation in high precision
 
                 if ctx.fp8:
-                    # TODO zhongboz: per-tensor current scaling has no bgrad fusion for now
-                    if isinstance(ctx.grad_fc1_output_quantizer, Float8CurrentScalingQuantizer):
-                        fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
-                        dact = ctx.grad_fc1_output_quantizer(dact)
-                    else:
-                        fc1_bias_grad, dact = tex.bgrad_quantize(
-                            dact, ctx.grad_fc1_output_quantizer
-                        )
+                    fc1_bias_grad, dact = tex.bgrad_quantize(dact, ctx.grad_fc1_output_quantizer)
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
                         True  # fc1_bias_grad is computed later, fused with wgrad gemm for the FC1
