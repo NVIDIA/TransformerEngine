@@ -14,6 +14,7 @@
 #include <mutex>
 
 #include "../common.h"
+#include "../util/handle_manager.h"
 #include "../util/logging.h"
 #include "common/util/cuda_runtime.h"
 
@@ -45,6 +46,10 @@ uint32_t _getAlignment(uintptr_t address) {
       return alignment;
     }
   }
+}
+
+inline void CreateCublasHandle(cublasLtHandle_t *handle) {
+  NVTE_CHECK_CUBLAS(cublasLtCreate(handle));
 }
 
 struct GemmParam {
@@ -140,6 +145,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 
 namespace transformer_engine {
 
+using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, int m, int n, int k, int lda,
                  int ldb, int ldd, cublasOperation_t transa, cublasOperation_t transb, bool grad,
@@ -192,8 +199,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   float zero = 0.0;
   float beta = (accumulate) ? one : zero;
 
-  cublasLtHandle_t handle;
-  NVTE_CHECK_CUBLAS(cublasLtCreate(&handle));
+  cublasLtHandle_t handle = cublasHandleManager::Instance().GetHandle();
 
   cublasLtMatmulDesc_t operationDesc = nullptr;
   cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;

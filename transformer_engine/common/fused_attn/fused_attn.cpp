@@ -419,7 +419,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
     t = input_QKV->data.shape[0];
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
@@ -501,7 +501,7 @@ void nvte_fused_attn_bwd_qkvpacked(const NVTETensor QKV, const NVTETensor O, con
     t = input_QKV->data.shape[0];
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType QKV_type = static_cast<NVTEDType>(input_QKV->data.dtype);
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
@@ -631,7 +631,7 @@ void nvte_fused_attn_fwd_kvpacked(
     }
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
@@ -726,7 +726,7 @@ void nvte_fused_attn_bwd_kvpacked(
     t_kv = input_KV->data.shape[0];
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_KV->data.dtype);
 
@@ -857,7 +857,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     }
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
@@ -949,7 +949,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     t_kv = input_K->data.shape[0];
   }
 
-  auto handle = cudnnExecutionPlanManager::Instance().GetCudnnHandle();
+  auto handle = cudnnExecutionPlanManager::Instance().GetHandle();
   const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
   const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
 
