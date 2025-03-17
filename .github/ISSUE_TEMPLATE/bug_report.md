@@ -25,7 +25,7 @@ A clear and concise description of what you expected to happen.
 **Environment overview (please complete the following information)**
 
  - Environment location: [Bare-metal, Docker, Cloud(specify cloud provider - AWS, Azure, GCP, Collab)]
- - Method of NeMo install: [pip install or from source]. Please specify exact commands you used to install.
+ - Method of Transformer Engine install: [pip install or from source]. Please specify exact commands you used to install.
  - If method of install is [Docker], provide `docker pull` & `docker run` commands used
 
 **Environment details**
@@ -35,6 +35,9 @@ Otherwise, please provide:
 - OS version
 - PyTorch version
 - Python version
+- Transformer Engine version
+- CUDA version
+- CUDNN version
 
 **Additional context**
 
