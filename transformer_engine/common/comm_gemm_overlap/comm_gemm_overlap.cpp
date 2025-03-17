@@ -454,9 +454,21 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
   size_t k = transa ? A.size(1) : A.size(0);
   size_t n = _ubuf.size(0);
   size_t m_chunk = m / _num_splits;
+  const std::vector<size_t> input_a_chunk_shape = (transa
+                                                   ? std::vector<size_t>{m_chunk, k}
+                                                   : std::vector<size_t>{k, m_chunk});
+  const std::vector<size_t> output_chunk_shape = {n, m_chunk};
   size_t input_a_chunk_size = m_chunk * k;
   size_t output_chunk_size = n * m_chunk;
   size_t workspace_size_chunk = workspace.numel() / _stream_compute.size();
+
+  // Helper function to get bias chunk if needed
+  auto maybe_get_bias_chunk = [this, &bias, m_chunk](size_t chunk_id) -> TensorWrapper {
+    if (bias.dptr() == nullptr) {
+      return TensorWrapper();
+    }
+    return get_tensor_chunk(bias, chunk_id * m_chunk, {m_chunk});
+  };
 
   // Catch up the default torch stream
   NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, stream_main));
@@ -467,18 +479,10 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
 
   assert(pre_gelu_out.numel() == 0);
 
-  // Helper function to get bias chunk if needed
-  auto maybe_get_bias_chunk = [this, &bias, m_chunk](size_t chunk_id) -> TensorWrapper {
-    if (bias.dptr() == nullptr) {
-      return TensorWrapper();
-    }
-    return get_tensor_chunk(bias, chunk_id * m_chunk, {m_chunk});
-  };
-
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
   if (_rs_overlap_first_gemm) {
-    auto input_a_chunk = get_tensor_chunk(A, 0, {m_chunk, k});
-    auto output_chunk = get_buffer_chunk_like(D, 0, {m, m_chunk});
+    auto input_a_chunk = get_tensor_chunk(A, 0, input_a_chunk_shape);
+    auto output_chunk = get_buffer_chunk_like(D, 0, output_chunk_shape);
     auto bias_chunk = maybe_get_bias_chunk(0);
     auto workspace_chunk = get_tensor_chunk(workspace, 0, {workspace_size_chunk});
 
@@ -487,8 +491,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
                      use_split_accumulator, _math_sms, _stream_compute[0]);
 
     for (int i = 1; i < _num_splits; i++) {
-      input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
-      output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
+      input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, input_a_chunk_shape);
+      output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, output_chunk_shape);
       bias_chunk = maybe_get_bias_chunk(i);
       workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});
@@ -536,8 +540,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     }
   } else {
     for (int i = 0; i < _num_splits; i++) {
-      auto input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, {m_chunk, k});
-      auto output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, {n, m_chunk});
+      auto input_a_chunk = get_tensor_chunk(A, i * input_a_chunk_size, input_a_chunk_shape);
+      auto output_chunk = get_buffer_chunk_like(D, i * output_chunk_size, output_chunk_shape);
       auto bias_chunk = maybe_get_bias_chunk(i);
       auto workspace_chunk = get_tensor_chunk(
           workspace, (i % _stream_compute.size()) * workspace_size_chunk, {workspace_size_chunk});

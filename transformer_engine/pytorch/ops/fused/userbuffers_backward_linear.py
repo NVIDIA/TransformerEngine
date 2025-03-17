@@ -517,7 +517,6 @@ class UserbuffersBackwardLinear(FusedOperation):
         # Hackily workaround Userbuffers bug with non-FP8 dgrad
         # reduce-scatter overlap
         weight_requires_grad = linear_op_ctx.weight_requires_grad
-        ### TODO Check
         if not linear_op_ctx.with_quantized_compute and not weight_requires_grad:
             warnings.warn(
                 "There is a correctness bug when using Userbuffers "
