@@ -148,7 +148,9 @@ class InferenceParams:
         self.is_paged = is_paged
 
         if not self.is_paged:
-            cache_manager = custom_cache_manager if custom_cache_manager is not None else NonPagedKVCacheManager
+            cache_manager = (
+                custom_cache_manager if custom_cache_manager is not None else NonPagedKVCacheManager
+            )
             self.cache_manager = cache_manager(
                 max_batch_size=self.max_batch_size,
                 max_seqlen=self.max_seqlen_kv,
@@ -169,7 +171,9 @@ class InferenceParams:
             ), "Paged KV cache requires total_num_pages = max_batch_size * max_pages_per_seq."
             self.total_num_pages = total_num_pages
 
-            cache_manager = custom_cache_manager if custom_cache_manager is not None else PagedKVCacheManager
+            cache_manager = (
+                custom_cache_manager if custom_cache_manager is not None else PagedKVCacheManager
+            )
             self.cache_manager = cache_manager(
                 total_num_pages=self.total_num_pages,
                 page_size=self.page_size,

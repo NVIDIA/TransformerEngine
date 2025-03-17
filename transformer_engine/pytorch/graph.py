@@ -94,7 +94,10 @@ def _make_graphed_callables(
     # Check training/inference
     is_training = all(c.training for c in callables)
     if not is_training and any(c.training for c in callables):
-        assert False, "make_graphed_callables only supports when modules are all in training or all in inference mode."
+        assert False, (
+            "make_graphed_callables only supports when modules are all in training or all in"
+            " inference mode."
+        )
 
     # Check sizes of args
     if _order is None:
