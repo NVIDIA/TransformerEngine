@@ -179,32 +179,6 @@ class UserbuffersForwardLinear(FusedOperation):
         if not sequence_parallel:
             raise RuntimeError(f"Invalid configuration for Userbuffers ({sequence_parallel=})")
 
-        # Check tensor dims
-        w_size = weight.size()
-        if len(w_size) != 2:
-            raise ValueError(f"Expected 2D weight tensor (got shape={tuple(w_size)})")
-        x_local_size = input.size()
-        if len(x_local_size) < 2:
-            raise ValueError(
-                f"Expected input tensor with at least 2 dims (got shape={tuple(x_size)})"
-            )
-        if x_local_size[-1] != w_size[1]:
-            raise ValueError(
-                f"Input tensor (shape={tuple(x_size)}) is not compatible with "
-                f"weight tensor (shape={tuple(w_size)})"
-            )
-        if tensor_parallel_mode == "row" and x_local_size[0] % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Input tensor (shape={tuple(x_size)}) is not compatible with "
-                f"row tensor parallelism (size={tensor_parallel_size})"
-            )
-        y_local_size = list(x_local_size)
-        if tensor_parallel_mode == "row":
-            y_local_size[0] //= tensor_parallel_size
-        else:
-            y_local_size[0] *= tensor_parallel_size
-        y_local_size[-1] = w_size[0]
-
         # Check quantizers
         if with_quantized_compute:
             if input_quantizer is None:
@@ -269,9 +243,12 @@ class UserbuffersForwardLinear(FusedOperation):
         if not with_quantized_compute and w.dtype != dtype:
             w = w.to(dtype=dtype)
 
-        # Construct output tensor
+        # Construct output tensor if needed
         reduce_scatter_output = None
         if with_ub_reduce_scatter:
+            y_local_size = list(x.size())
+            y_local_size[0] //= tensor_parallel_size
+            y_local_size[-1] = w.size(0)
             reduce_scatter_output = torch.empty(y_local_size, dtype=dtype, device=device)
 
         # Perform GEMM
