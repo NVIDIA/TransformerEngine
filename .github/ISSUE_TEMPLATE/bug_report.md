@@ -39,7 +39,9 @@ Otherwise, please provide:
 - CUDA version
 - CUDNN version
 
+**Device details**
+- GPU model
+
 **Additional context**
 
 Add any other context about the problem here.
-Example: GPU model
