@@ -2,8 +2,4 @@
 #
 # See LICENSE for license information.
 
-set -e
-
-: "${TE_PATH:=/opt/transformerengine}"
-
-python3 $TE_PATH/qa/L0_license/copyright_checker.py $TE_PATH
+"""Python interface for dot product attention"""

@@ -3,13 +3,13 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
 from typing import Tuple
+from packaging import version
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
-from jax import ffi
 
 import transformer_engine_jax
 from transformer_engine_jax import DType as TEDType
@@ -24,6 +24,11 @@ from .misc import (
     is_ffi_enabled,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP
+
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax import ffi  # pylint: disable=ungrouped-imports
+else:
+    from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
 __all__ = ["cast_fp8"]

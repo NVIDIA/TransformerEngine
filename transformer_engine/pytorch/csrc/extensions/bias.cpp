@@ -7,6 +7,7 @@
 #include "common.h"
 #include "pybind.h"
 #include "transformer_engine/cast.h"
+#include "transformer_engine/transformer_engine.h"
 
 namespace transformer_engine::pytorch {
 
@@ -42,6 +43,28 @@ std::vector<py::object> bgrad_quantize(const at::Tensor& input, py::handle py_qu
   workspace = makeTransformerEngineTensor(workspace_data_ptr, workspace.shape(), workspace.dtype());
 
   // Launch kernel
+  if (detail::IsFloat8CurrentScalingQuantizers(py_quantizer.ptr())) {
+    // my_quantizer here has to be a Float8CurrentScalingQuantizer
+    auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(quantizer.get());
+    nvte_compute_amax(input_tensor.data(), out_tensor.data(), at::cuda::getCurrentCUDAStream());
+    // check if we need to do amax reudction (depending on model parallel configs)
+    if (my_quantizer_cs->with_amax_reduction) {
+      c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
+      // construct torch tesnor from NVTEBasicTensor without reallocating memory
+      at::Tensor& amax_tensor_torch = my_quantizer_cs->amax;
+      std::vector<at::Tensor> tensors = {amax_tensor_torch};
+      // allreduce amax tensor
+      c10d::AllreduceOptions allreduce_opts;
+      allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
+      process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
+    }
+    QuantizationConfigWrapper quant_config;
+    quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
+    quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
+    nvte_compute_scale_from_amax(out_tensor.data(), quant_config, at::cuda::getCurrentCUDAStream());
+    // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+    out_tensor.set_amax(nullptr, DType::kFloat32, out_tensor.defaultShape);
+  }
   nvte_quantize_dbias(input_tensor.data(), out_tensor.data(), dbias_tensor.data(), workspace.data(),
                       at::cuda::getCurrentCUDAStream());
 
