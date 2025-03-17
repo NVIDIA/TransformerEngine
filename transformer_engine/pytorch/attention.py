@@ -5965,6 +5965,8 @@ class DotProductAttention(TransformerEngineBaseModule):
             if inference_params is not None:
                 assert self.layer_number is not None, "Layer number must be set!"
 
+                # convert top-left causal to bottom-right causal due to KV caching
+                # users can still use the same attention mask for inference as for training
                 assert "padding" in attn_mask_type, "KV caching requires padding mask!"
                 if attn_mask_type == "padding_causal":
                     attn_mask_type = attn_mask_type + "_bottom_right"
@@ -5979,6 +5981,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     for x in [query_layer, key_layer, value_layer]
                 ]
 
+                # get full K/V tensors from cache and adjust cu_seqlens, qkv_format based on the cache
                 (
                     key_layer,
                     value_layer,
@@ -5995,7 +5998,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                 cu_seqlens_q_padded = None
                 cu_seqlens_kv_padded = None
 
-            # get qkv_layout
+            # get qkv's memory layout
             if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
                 (
                     qkv_layout,
@@ -6027,7 +6030,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     inference_params=inference_params,
                 )
 
-            # adjust max_seqlen and cu_seqlens
+            # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
@@ -6898,7 +6901,7 @@ class MultiheadAttention(torch.nn.Module):
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         # =================================================
-        # Pre-allocate memory for key-values for inference
+        # Pre-allocate memory for key-value cache for inference
         # =================================================
 
         if (
