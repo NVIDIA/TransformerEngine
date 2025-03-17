@@ -12,7 +12,7 @@ jobs:
     name: 'Core'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.0.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:12.1.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -28,6 +28,7 @@ jobs:
         run: pip install . -v
         env:
           NVTE_FRAMEWORK: none
+          MAX_JOBS: 1
       - name: 'Sanity check'
         run: python3 -c "import transformer_engine"
         working-directory: /
@@ -35,7 +36,7 @@ jobs:
     name: 'PyTorch'
     runs-on: ubuntu-latest
     container:
-      image: nvcr.io/nvidia/cuda:12.5.0-devel-ubuntu22.04
+      image: nvcr.io/nvidia/cuda:12.8.0-devel-ubuntu22.04
       options: --user root
     steps:
       - name: 'Dependencies'
@@ -73,23 +74,3 @@ jobs:
           MAX_JOBS: 1
       - name: 'Sanity check'
         run: python tests/jax/test_sanity_import.py
-  paddle:
-    name: 'PaddlePaddle'
-    runs-on: ubuntu-latest
-    container:
-      image: nvcr.io/nvidia/paddlepaddle:24.10-py3
-      options: --user root
-    steps:
-      - name: 'Checkout'
-        uses: actions/checkout@v3
-        with:
-          submodules: recursive
-      - name: 'Build'
-        run: |
-          apt-get update
-          apt-get install -y libgoogle-glog-dev
-          pip install . -v
-        env:
-          NVTE_FRAMEWORK: paddle
-      - name: 'Sanity check'
-        run: python tests/paddle/test_sanity_import.py

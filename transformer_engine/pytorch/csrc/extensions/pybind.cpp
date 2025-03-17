@@ -4,14 +4,134 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#include "pybind.h"
+
+#include <Python.h>
+#include <pybind11/cast.h>
+#include <pybind11/detail/common.h>
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <stdexcept>
+
+#include "../common.h"
 #include "../extensions.h"
+#include "common.h"
+
+namespace transformer_engine::pytorch {
+
+PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
+PyTypeObject *Float8TensorBasePythonClass = nullptr;
+PyTypeObject *Float8QuantizerClass = nullptr;
+PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
+PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
+PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
+PyTypeObject *MXFP8QuantizerClass = nullptr;
+
+void init_float8_extension() {
+  if (Float8TensorPythonClass) return;
+  auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.float8_tensor");
+  Float8QuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Quantizer"));
+  Float8CurrentScalingQuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_module.ptr(), "Float8CurrentScalingQuantizer"));
+  Float8TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
+  auto fp8_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor._internal.float8_tensor_base");
+  Float8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorBase"));
+  NVTE_CHECK(Float8TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch Float8 extension.");
+}
+
+void init_mxfp8_extension() {
+  if (MXFP8TensorPythonClass) return;
+  auto fp8_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp8_tensor");
+  MXFP8QuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Quantizer"));
+  MXFP8TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Tensor"));
+  auto fp8_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base");
+  MXFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorBase"));
+  NVTE_CHECK(MXFP8TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MXFP8 extension.");
+}
+
+void init_extension() {
+  init_float8_extension();
+  init_mxfp8_extension();
+}
+
+}  // namespace transformer_engine::pytorch
+
 #include "common/util/pybind_helper.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
+  m.def("quantize", transformer_engine::pytorch::quantize, py::arg("tensor"), py::arg("quantizer"),
+        py::arg("output") = py::none(), py::arg("noop") = py::none());
+  m.def("dequantize", &transformer_engine::pytorch::dequantize, "Dequantize", py::arg("input"),
+        py::arg("otype"));
+  m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
+        "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
+  m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
+        py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
+        py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),
+        py::arg("gelu"), py::arg("gelu_in"), py::arg("grad"), py::arg("workspace"),
+        py::arg("workspace_size"), py::arg("accumulate"), py::arg("use_split_accumulator"),
+        py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
+        py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false);
+  m.def("rowwise_swizzle", &rowwise_swizzle, "Swizzle rowwise scale inverses.",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("columnwise_swizzle", &columnwise_swizzle, "Swizzle columnwise scale inverses.",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("gelu", transformer_engine::pytorch::gelu, "GeLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("relu", transformer_engine::pytorch::relu, "ReLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("geglu", transformer_engine::pytorch::geglu, "GeGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("qgeglu", transformer_engine::pytorch::qgeglu, "QuickGeGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("reglu", transformer_engine::pytorch::reglu, "ReGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("qgelu", transformer_engine::pytorch::qgelu, "QuickGELU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("srelu", transformer_engine::pytorch::srelu, "Squared ReLU activation", py::arg("input"),
+        py::arg("quantizer"));
+  m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("drelu", transformer_engine::pytorch::drelu, "Backward of ReLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dgeglu", transformer_engine::pytorch::dgeglu, "Backward of GeGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dqgeglu", transformer_engine::pytorch::dqgeglu, "Backward of QuickGeGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dreglu", transformer_engine::pytorch::dreglu, "Backward of ReGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dqgelu", transformer_engine::pytorch::dqgelu, "Backward of QuickGELU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dsrelu", transformer_engine::pytorch::dsrelu, "Backward of Squared ReLU", py::arg("grad"),
+        py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dbias_dsilu", transformer_engine::pytorch::dbias_dsilu, "DSiLU + DBias + Quantize",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dbias_drelu", transformer_engine::pytorch::dbias_drelu, "DReLU + DBias + Quantize",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dbias_dqgelu", transformer_engine::pytorch::dbias_dqgelu, "DQGeLU + DBias + Quantize",
+        py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("dbias_dsrelu", transformer_engine::pytorch::dbias_dsrelu,
+        "DSquaredReLU + DBias + Quantize", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("quantizer"));
 
   // Permutation functions
   m.def("moe_permute_fwd", moe_permute_fwd);
@@ -42,116 +162,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Other granular functions
-  m.def("layernorm_fwd_fp8", &layernorm_fwd_fp8, "LN FWD FP8",
-        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("weight"),
-        py::arg("bias"), py::arg("eps"), py::arg("scale"), py::arg("amax"), py::arg("scale_inv"),
-        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("layernorm_fwd_fp8_noalloc", &layernorm_fwd_fp8_noalloc, "LN FWD FP8",
-        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("weight"),
-        py::arg("bias"), py::arg("eps"), py::arg("scale"), py::arg("ln_out"), py::arg("amax"),
-        py::arg("scale_inv"), py::arg("otype"), py::arg("sm_margin"),
-        py::arg("zero_centered_gamma"), py::arg("scale_offset") = 0, py::arg("amax_offset") = 0,
-        py::arg("scale_inv_offset") = 0);
-  m.def("layernorm_bwd", &layernorm_bwd, "LN BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("layernorm_fwd", &layernorm_fwd, "LN FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("layernorm_fwd_noalloc", &layernorm_fwd_noalloc, "LN FWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("rmsnorm_fwd_fp8", &rmsnorm_fwd_fp8, "RMSNorm FWD FP8",
-        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("weight"),
-        py::arg("eps"), py::arg("scale"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
-        py::arg("sm_margin"), py::arg("zero_centered_gamma"), py::arg("scale_offset") = 0,
-        py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("rmsnorm_fwd_fp8_noalloc", &rmsnorm_fwd_fp8_noalloc, "RMSNorm FWD FP8",
-        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("weight"),
-        py::arg("eps"), py::arg("scale"), py::arg("ln_out"), py::arg("amax"), py::arg("scale_inv"),
-        py::arg("otype"), py::arg("sm_margin"), py::arg("zero_centered_gamma"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("rmsnorm_bwd", &rmsnorm_bwd, "RMSNorm BWD", py::call_guard<py::gil_scoped_release>());
-  m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm FWD", py::call_guard<py::gil_scoped_release>());
-  m.def("rmsnorm_fwd_noalloc", &rmsnorm_fwd_noalloc, "RMSNorm FWD",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_cast_transpose", &fused_cast_transpose, "Fused Cast + Transpose",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_cast_transpose_noop", &fused_cast_transpose_noop,
-        "Cast + Transpose with noop option", py::call_guard<py::gil_scoped_release>(),
-        py::arg("input"), py::arg("noop"), py::arg("scale"), py::arg("amax"), py::arg("scale_inv"),
-        py::arg("input_cast"), py::arg("input_transpose"), py::arg("otype"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("fused_cast_transpose_bgrad", &fused_cast_transpose_bgrad, "Fused Cast + Transpose + BGRAD",
-        py::call_guard<py::gil_scoped_release>(), py::arg("grad_output"), py::arg("scale"),
-        py::arg("amax"), py::arg("scale_inv"), py::arg("otype"), py::arg("scale_offset") = 0,
-        py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("fused_fp8_transpose_bgrad", &fused_fp8_transpose_bgrad, "Fused FP8 Transpose + BGRAD",
-        py::call_guard<py::gil_scoped_release>(), py::arg("grad_output"), py::arg("scale"),
-        py::arg("amax"), py::arg("scale_inv"), py::arg("otype"), py::arg("grad_bias_type"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("fused_cast_transpose_bgrad_dgelu", &fused_cast_transpose_bgrad_dgelu,
-        "Fused Cast + Transpose + BGRAD + DGELU", py::call_guard<py::gil_scoped_release>(),
-        py::arg("grad_output"), py::arg("gelu_input"), py::arg("scale"), py::arg("amax"),
-        py::arg("scale_inv"), py::arg("otype"), py::arg("scale_offset") = 0,
-        py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("fused_dswiglu_cast_transpose", &fused_dswiglu_cast_transpose,
-        "Fused SwiGLU backward + FP8 cast + FP8 transpose",
-        py::call_guard<py::gil_scoped_release>(), py::arg("grad_output"), py::arg("input"),
-        py::arg("grad_input"), py::arg("grad_input_transpose"), py::arg("scale"), py::arg("amax"),
-        py::arg("scale_inv"), py::arg("otype"), py::arg("scale_offset") = 0,
-        py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("fused_multi_cast_transpose", &fused_multi_cast_transpose,
-        "Fused Multi-tensor Cast + Transpose", py::call_guard<py::gil_scoped_release>());
-  m.def("fused_multi_cast_transpose_alloc", &fused_multi_cast_transpose_alloc,
-        "Fused Multi-tensor Cast + Transpose with allocating output tensors",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("cast_to_fp8", &cast_to_fp8, "Cast to FP8", py::call_guard<py::gil_scoped_release>(),
-        py::arg("input"), py::arg("scale"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("cast_to_fp8_noalloc", &cast_to_fp8_noalloc, "Cast to FP8",
-        py::call_guard<py::gil_scoped_release>(), py::arg("input"), py::arg("scale"),
-        py::arg("output"), py::arg("amax"), py::arg("scale_inv"), py::arg("otype"),
-        py::arg("scale_offset") = 0, py::arg("amax_offset") = 0, py::arg("scale_inv_offset") = 0);
-  m.def("cast_from_fp8", &cast_from_fp8, "Cast from FP8", py::call_guard<py::gil_scoped_release>(),
-        py::arg("input"), py::arg("scale_inv"), py::arg("itype"), py::arg("otype"),
-        py::arg("scale_inv_offset") = 0);
-  m.def("te_gemm", &te_gemm, "CublasLt GEMM");  /// TODO Think
-  m.def("te_grouped_gemm", &te_grouped_gemm, "Grouped GEMM");
-  m.def("fused_attn_fwd_qkvpacked", &fused_attn_fwd_qkvpacked,
-        "Fused Attention FP8/BF16/FP16 FWD with packed QKV",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_attn_bwd_qkvpacked", &fused_attn_bwd_qkvpacked,
-        "Fused Attention FP8/BF16/FP16 BWD with packed QKV",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_attn_fwd_kvpacked", &fused_attn_fwd_kvpacked,
-        "Fused Attention FP8/BF16/FP16 FWD with packed KV",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_attn_bwd_kvpacked", &fused_attn_bwd_kvpacked,
-        "Fused Attention FP8/BF16/FP16 BWD with packed KV",
-        py::call_guard<py::gil_scoped_release>());
+  m.def("layernorm_fwd", &layernorm_fwd, "LayerNorm", py::arg("input"), py::arg("weight"),
+        py::arg("bias"), py::arg("eps"), py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"),
+        py::arg("sm_margin"), py::arg("zero_centered_gamma"));
+  m.def("layernorm_bwd", &layernorm_bwd, "Backward of LayerNorm");
+  m.def("rmsnorm_fwd", &rmsnorm_fwd, "RMSNorm", py::arg("input"), py::arg("weight"), py::arg("eps"),
+        py::arg("ln_out"), py::arg("quantizer"), py::arg("otype"), py::arg("sm_margin"),
+        py::arg("zero_centered_gamma"));
+  m.def("rmsnorm_bwd", &rmsnorm_bwd, "Backward of RMSNorm");
+  m.def("fused_multi_quantize", &fused_multi_quantize, "Fused Multi-tensor Cast + Transpose",
+        py::arg("input_list"), py::arg("output_list"), py::arg("quantizer_list"), py::arg("otype"));
+
+  m.def("te_general_grouped_gemm", &te_general_grouped_gemm, "Grouped GEMM");
   m.def("fused_attn_fwd", &fused_attn_fwd,
-        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V",
-        py::call_guard<py::gil_scoped_release>());
+        "Fused Attention FP8/BF16/FP16 FWD with separate Q, K and V");
   m.def("fused_attn_bwd", &fused_attn_bwd,
-        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fp8_transpose_noalloc", &fp8_transpose_noalloc, "Transpose with FP8 I/O",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fp8_transpose_noalloc_noop", &fp8_transpose_noalloc_noop,
-        "Transpose with FP8 I/O with noop option.", py::call_guard<py::gil_scoped_release>());
-  m.def("gelu", &gelu, "GeLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("relu", &relu, "ReLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("geglu", &geglu, "GeGLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("reglu", &reglu, "ReGLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("swiglu", &swiglu, "SwiGLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("qgelu", &qgelu, "QuickGELU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("srelu", &srelu, "Squared ReLU with FP8 output", py::call_guard<py::gil_scoped_release>());
-  m.def("dgelu", &dgelu, "Backward of GeLU", py::call_guard<py::gil_scoped_release>());
-  m.def("drelu", &drelu, "Backward of ReLU", py::call_guard<py::gil_scoped_release>());
-  m.def("dgeglu", &dgeglu, "Backward of GeGLU", py::call_guard<py::gil_scoped_release>());
-  m.def("dreglu", &dreglu, "Backward of ReGLU", py::call_guard<py::gil_scoped_release>());
-  m.def("dswiglu", &dswiglu, "Backward of SwiGLU", py::call_guard<py::gil_scoped_release>());
-  m.def("dqgelu", &dqgelu, "Backward of QuickGELU", py::call_guard<py::gil_scoped_release>());
-  m.def("dsrelu", &dsrelu, "Backward of Squared ReLU", py::call_guard<py::gil_scoped_release>());
+        "Fused Attention FP8/BF16/FP16 BWD with separate Q, K and V");
+  m.def("fp8_transpose", &fp8_transpose, "Transpose with FP8 I/O", py::arg("input"),
+        py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_fwd", &fa_prepare_fwd, "Prepare QKV for Flash Attention",
         py::call_guard<py::gil_scoped_release>());
   m.def("fa_prepare_bwd", &fa_prepare_bwd, "Backward of QKV preparation for Flash Attention",
@@ -213,6 +241,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_adam", &multi_tensor_adam_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_adam_param_remainder", &multi_tensor_adam_param_remainder_cuda,
+        "Compute and apply gradient update to parameters for Adam optimizer"
+        "where the master parameters only store the remainder bits",
+        py::call_guard<py::gil_scoped_release>());
   m.def("multi_tensor_adam_fp8", &multi_tensor_adam_fp8_cuda,
         "Compute and apply gradient update to parameters for Adam optimizer",
         py::call_guard<py::gil_scoped_release>());
@@ -229,86 +261,68 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
 
   // Data structures
-  py::class_<transformer_engine::FP8TensorMeta>(m, "FP8TensorMeta")
+  py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")
       .def(py::init<>())
-      .def_readwrite("scale", &transformer_engine::FP8TensorMeta::scale)
-      .def_readwrite("scale_inv", &transformer_engine::FP8TensorMeta::scale_inv)
-      .def_readwrite("amax_history", &transformer_engine::FP8TensorMeta::amax_history);
+      .def_readwrite("scale", &transformer_engine::pytorch::FP8TensorMeta::scale)
+      .def_readwrite("scale_inv", &transformer_engine::pytorch::FP8TensorMeta::scale_inv)
+      .def_readwrite("amax_history", &transformer_engine::pytorch::FP8TensorMeta::amax_history);
 
-  py::enum_<transformer_engine::FP8FwdTensors>(m, "FP8FwdTensors")
-      .value("GEMM1_INPUT", transformer_engine::FP8FwdTensors::GEMM1_INPUT)
-      .value("GEMM1_WEIGHT", transformer_engine::FP8FwdTensors::GEMM1_WEIGHT)
-      .value("GEMM1_OUTPUT", transformer_engine::FP8FwdTensors::GEMM1_OUTPUT)
-      .value("GEMM2_INPUT", transformer_engine::FP8FwdTensors::GEMM2_INPUT)
-      .value("GEMM2_WEIGHT", transformer_engine::FP8FwdTensors::GEMM2_WEIGHT)
-      .value("GEMM2_OUTPUT", transformer_engine::FP8FwdTensors::GEMM2_OUTPUT)
-      .value("GEMM3_INPUT", transformer_engine::FP8FwdTensors::GEMM3_INPUT)
-      .value("GEMM3_WEIGHT", transformer_engine::FP8FwdTensors::GEMM3_WEIGHT)
-      .value("GEMM3_OUTPUT", transformer_engine::FP8FwdTensors::GEMM3_OUTPUT);
+  py::enum_<transformer_engine::pytorch::FP8FwdTensors>(m, "FP8FwdTensors")
+      .value("GEMM1_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_INPUT)
+      .value("GEMM1_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_WEIGHT)
+      .value("GEMM1_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM1_OUTPUT)
+      .value("GEMM2_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_INPUT)
+      .value("GEMM2_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_WEIGHT)
+      .value("GEMM2_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM2_OUTPUT)
+      .value("GEMM3_INPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_INPUT)
+      .value("GEMM3_WEIGHT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_WEIGHT)
+      .value("GEMM3_OUTPUT", transformer_engine::pytorch::FP8FwdTensors::GEMM3_OUTPUT);
 
-  py::enum_<transformer_engine::FP8BwdTensors>(m, "FP8BwdTensors")
-      .value("GRAD_OUTPUT1", transformer_engine::FP8BwdTensors::GRAD_OUTPUT1)
-      .value("GRAD_INPUT1", transformer_engine::FP8BwdTensors::GRAD_INPUT1)
-      .value("GRAD_OUTPUT2", transformer_engine::FP8BwdTensors::GRAD_OUTPUT2)
-      .value("GRAD_INPUT2", transformer_engine::FP8BwdTensors::GRAD_INPUT2)
-      .value("GRAD_OUTPUT3", transformer_engine::FP8BwdTensors::GRAD_OUTPUT3)
-      .value("GRAD_INPUT3", transformer_engine::FP8BwdTensors::GRAD_INPUT3);
+  py::enum_<transformer_engine::pytorch::FP8BwdTensors>(m, "FP8BwdTensors")
+      .value("GRAD_OUTPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT1)
+      .value("GRAD_INPUT1", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT1)
+      .value("GRAD_OUTPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT2)
+      .value("GRAD_INPUT2", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT2)
+      .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
+      .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
 
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
-      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>,
-                    std::optional<c10d::ProcessGroup *>>(),
+      .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("world_group"),
-           py::arg("intra_node_group") = py::none(), py::arg("inter_node_group") = py::none());
+           py::arg("intra_node_group") = py::none());
 
-  py::class_<CommOverlap>(m, "CommOverlap")
+  py::class_<CommOverlap, std::shared_ptr<CommOverlap>, transformer_engine::CommOverlapBase,
+             transformer_engine::CommOverlapCore>(m, "CommOverlap")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int, int, int,
-                    int, int, bool, bool>(),
+                    int, int, int, int, bool, bool, bool>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"),
            py::arg("num_splits") = 3, py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS,
-           py::arg("comm_cga_size") = 2, py::arg("num_comm_sm") = 16,
-           py::arg("set_sm_margin") = true, py::arg("atomic_gemm") = false)
-      .def("bulk_overlap", &CommOverlap::bulk_overlap, py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs", &CommOverlap::split_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs", &CommOverlap::atomic_gemm_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &CommOverlap::copy_input_to_ubuf,
-           py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &CommOverlap::get_ubuf_output,
-           py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &CommOverlap::set_ubuf_scale_inv,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlap::is_atomic_gemm, py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlap::is_p2p_overlap, py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlap::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>());
+           py::arg("comm_cga_size") = 2, py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0,
+           py::arg("num_comm_sm") = 16, py::arg("set_sm_margin") = true,
+           py::arg("atomic_gemm") = false, py::arg("rs_overlap_first_gemm") = false)
+      .def("copy_into_buffer", &CommOverlap::copy_into_buffer, py::arg("input"),
+           py::arg("quantizer"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlap::get_buffer, py::arg("quantizer"),
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
+      .def("set_buffer_params", &CommOverlap::set_buffer_params);
 
-  py::class_<CommOverlapP2P>(m, "CommOverlapP2P")
+  py::class_<CommOverlapP2P, std::shared_ptr<CommOverlapP2P>,
+             transformer_engine::CommOverlapP2PBase, transformer_engine::CommOverlapCore>(
+      m, "CommOverlapP2P")
       .def(py::init<const std::vector<size_t> &, at::ScalarType, CommOverlapHelper *, int,
-                    transformer_engine::CommOverlapType, int, int, int, bool, bool, bool, bool>(),
+                    transformer_engine::CommOverlapType, int, int, int, int, int, bool, bool, bool,
+                    bool>(),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
            py::arg("num_max_streams") = NVTE_COMM_OVERLAP_MAX_STREAMS, py::arg("comm_cga_size") = 1,
-           py::arg("num_comm_sm") = 1, py::arg("set_sm_margin") = false,
-           py::arg("atomic_gemm") = false, py::arg("use_ce") = true, py::arg("aggregate") = false)
-      .def("split_overlap_ag_p2p", &CommOverlapP2P::split_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("split_overlap_rs_p2p", &CommOverlapP2P::split_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_ag_p2p", &CommOverlapP2P::atomic_gemm_overlap_ag,
-           py::call_guard<py::gil_scoped_release>())
-      .def("atomic_gemm_overlap_rs_p2p", &CommOverlapP2P::atomic_gemm_overlap_rs,
-           py::call_guard<py::gil_scoped_release>())
-      .def("copy_input_to_ubuf", &CommOverlapP2P::copy_input_to_ubuf,
-           py::call_guard<py::gil_scoped_release>())
-      .def("get_ubuf_output", &CommOverlapP2P::get_ubuf_output,
-           py::call_guard<py::gil_scoped_release>())
-      .def("set_ubuf_scale_inv", &CommOverlapP2P::set_ubuf_scale_inv,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_fp8_ubuf", &CommOverlapP2P::is_fp8_ubuf, py::call_guard<py::gil_scoped_release>())
-      .def("is_atomic_gemm", &CommOverlapP2P::is_atomic_gemm,
-           py::call_guard<py::gil_scoped_release>())
-      .def("is_p2p_overlap", &CommOverlapP2P::is_p2p_overlap,
-           py::call_guard<py::gil_scoped_release>());
+           py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
+           py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
+           py::arg("use_ce") = true, py::arg("aggregate") = false)
+      .def("copy_into_buffer", &CommOverlapP2P::copy_into_buffer, py::arg("input"),
+           py::arg("quantizer"), py::arg("local_chunk") = false)
+      .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("quantizer"),
+           py::arg("local_chunk") = false, py::arg("shape") = std::nullopt)
+      .def("set_buffer_params", &CommOverlapP2P::set_buffer_params);
 }

@@ -7,6 +7,7 @@
 #include "transformer_engine/transpose.h"
 
 #include "extensions.h"
+#include "transformer_engine/cast.h"
 #include "xla/ffi/api/ffi.h"
 
 namespace transformer_engine {
@@ -89,13 +90,12 @@ void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size
   auto input_trans_shape = std::vector<size_t>{n, m};
 
   auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
-  auto input_cast_tensor =
+  auto output_tensor =
       TensorWrapper(input_cast, input_shape, desc.out_dtype, amax_out, scale, scale_inv);
-  auto input_cast_trans_tensor = TensorWrapper(input_cast_trans, input_trans_shape, desc.out_dtype,
-                                               amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(input_cast_trans, desc.out_dtype, input_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
 
-  nvte_cast_transpose(input_tensor.data(), input_cast_tensor.data(), input_cast_trans_tensor.data(),
-                      stream);
+  nvte_quantize(input_tensor.data(), output_tensor.data(), stream);
 }
 
 Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
@@ -131,11 +131,11 @@ Error_Type CastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
 
-  nvte_cast_transpose(input_tensor.data(), output_tensor.data(), output_trans_tensor.data(),
-                      stream);
+  nvte_quantize(input_tensor.data(), output_tensor.data(), stream);
+
   return ffi_with_cuda_error_check();
 }
 
@@ -159,15 +159,22 @@ pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hi
   auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
   auto dbias_shape = std::vector<size_t>{hidden_size};
 
-  auto input_tensor = TensorWrapper(nullptr, input_shape, in_dtype);
-  auto output_tensor = TensorWrapper(nullptr, output_shape, out_dtype);
-  auto output_trans_tensor = TensorWrapper(nullptr, output_trans_shape, out_dtype);
-  auto dbias_tensor = TensorWrapper(nullptr, dbias_shape, in_dtype);
+  // Evil hack to specify TE impl
+  // Note: nvte_quantize_dbias chooses its internal impl based on what
+  // pointers are allocated, e.g. whether to output with column-wise
+  // data. However, we don't have access to any allocated buffers in
+  // this function. We pass a dummy pointer as a workaround.
+  int temp = 0;
+
+  auto input_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), input_shape, in_dtype);
+  auto output_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), output_shape, out_dtype);
+  output_tensor.set_columnwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_trans_shape);
+  auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
 
   TensorWrapper dummy_workspace;
 
-  nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(), output_trans_tensor.data(),
-                            dbias_tensor.data(), dummy_workspace.data(), nullptr);
+  nvte_quantize_dbias(input_tensor.data(), output_tensor.data(), dbias_tensor.data(),
+                      dummy_workspace.data(), nullptr);
 
   auto work_shape = MakeShapeVector(dummy_workspace.shape());
   return pybind11::make_tuple(std::make_pair(work_shape, dummy_workspace.dtype()));
@@ -203,14 +210,14 @@ void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
   auto input_tensor = TensorWrapper(input, input_shape, desc.in_dtype);
   auto output_tensor =
       TensorWrapper(output, output_shape, desc.out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, desc.out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, desc.out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, desc.in_dtype);
 
   auto workspace = TensorWrapper(workspace_ptr, desc.wkshape.to_vector(), desc.wk_dtype);
 
-  nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(), output_trans_tensor.data(),
-                            dbias_tensor.data(), workspace.data(), stream);
+  nvte_quantize_dbias(input_tensor.data(), output_tensor.data(), dbias_tensor.data(),
+                      workspace.data(), stream);
 }
 
 Error_Type DBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,
@@ -253,13 +260,13 @@ Error_Type DBiasCastTransposeFFI(cudaStream_t stream, Buffer_Type input_buf, Buf
 
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto output_tensor = TensorWrapper(output, output_shape, out_dtype, amax_out, scale, scale_inv);
-  auto output_trans_tensor =
-      TensorWrapper(output_trans, output_trans_shape, out_dtype, amax_out, scale, scale_inv);
+  output_tensor.set_columnwise_data(output_trans, out_dtype, output_trans_shape);
+  output_tensor.set_columnwise_scale_inv(scale_inv, DType::kFloat32, std::vector<size_t>{1});
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);
   auto workspace_tensor = TensorWrapper(workspace, workspace_shape, workspace_dtype);
 
-  nvte_cast_transpose_dbias(input_tensor.data(), output_tensor.data(), output_trans_tensor.data(),
-                            dbias_tensor.data(), workspace_tensor.data(), stream);
+  nvte_quantize_dbias(input_tensor.data(), output_tensor.data(), dbias_tensor.data(),
+                      workspace_tensor.data(), stream);
   return ffi_with_cuda_error_check();
 }
 

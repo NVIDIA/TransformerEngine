@@ -7,7 +7,7 @@
 #include "extensions.h"
 
 at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
   AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
                  (input.scalar_type() == at::ScalarType::BFloat16),
@@ -38,7 +38,7 @@ at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor) {
 
 at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
                                    float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
@@ -65,7 +65,7 @@ at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_r
 }
 
 at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
   AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
@@ -105,7 +105,7 @@ at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, floa
 
 at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
                                           float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
@@ -132,7 +132,7 @@ at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor so
 }
 
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   AT_ASSERTM(input.dim() == 3, "expected 3D tensor");
   AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
@@ -159,7 +159,7 @@ at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float sc
 at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
                                                        at::Tensor softmax_results_,
                                                        float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   auto output_grads = output_grads_.contiguous();
   auto softmax_results = softmax_results_.contiguous();
@@ -188,7 +188,7 @@ at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
 }
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
   AT_ASSERTM(input.dim() == 4, "expected 4D tensor");
   AT_ASSERTM((input.scalar_type() == at::ScalarType::Half) ||
                  (input.scalar_type() == at::ScalarType::BFloat16),
@@ -220,7 +220,7 @@ at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float 
 at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grad_,
                                                          at::Tensor softmax_results_,
                                                          float scale_factor) {
-  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
 
   auto output_grads = output_grad_.contiguous();
   auto softmax_results = softmax_results_.contiguous();

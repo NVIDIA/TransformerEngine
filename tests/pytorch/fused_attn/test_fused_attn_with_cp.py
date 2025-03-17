@@ -3,17 +3,16 @@
 # See LICENSE for license information.
 
 import os
-import pytest
 import subprocess
-from test_fused_attn import ModelConfig
-from transformer_engine.pytorch.attention import (
-    _flash_attn_2_plus,
-    _flash_attn_2_3_plus,
-)
+
+import pytest
+import torch
 from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils
+from test_fused_attn import ModelConfig
 
 model_configs_flash_attn = {
     #   test:             b,  h, hg,   d,   sq,  skv,   p,     mask,      bias
@@ -38,7 +37,7 @@ model_configs_flash_attn = {
 
 def get_bash_arguments(num_gpus_per_node, **kwargs):
     args = [
-        "python",
+        "python3",
         "-m",
         "torch.distributed.launch",
         "--nproc-per-node=" + str(num_gpus_per_node),
@@ -51,13 +50,17 @@ def get_bash_arguments(num_gpus_per_node, **kwargs):
     return args
 
 
-@pytest.mark.skipif(not _flash_attn_2_plus, reason="Flash-attn 2.0+ is required.")
+@pytest.mark.skipif(not FlashAttentionUtils.v2_plus, reason="Flash-attn 2.0+ is required.")
 @pytest.mark.skipif(get_device_compute_capability() < (8, 0), reason="CP tests require sm80+.")
 @pytest.mark.parametrize("dtype", ["bf16", "fp16"])
 @pytest.mark.parametrize("model", model_configs_flash_attn.keys())
 @pytest.mark.parametrize("qkv_format", ["bshd", "sbhd", "thd"])
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
+    num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
+    if num_gpus > torch.cuda.device_count():
+        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+
     config = model_configs_flash_attn[model]
     if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
@@ -77,7 +80,7 @@ def test_cp_with_flash_attention(dtype, model, qkv_format, cp_comm_type):
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=num_gpus,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
@@ -115,28 +118,24 @@ model_configs_fused_attn = {
 @pytest.mark.parametrize("cp_comm_type", ["p2p", "all_gather", "a2a", "a2a+p2p"])
 @pytest.mark.parametrize("fp8_mha", [False, True])
 def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha):
+    num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
+    if num_gpus > torch.cuda.device_count():
+        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
+
     if qkv_format == "thd" and get_device_compute_capability() < (9, 0):
         pytest.skip("THD format is only supported on sm90+!")
     if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
         pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
     if dtype == "fp8" and get_device_compute_capability() < (9, 0):
         pytest.skip("FP8 attention is only supported on sm90+!")
-    if qkv_format == "thd" and get_cudnn_version() >= (9, 6, 0):
-        pytest.skip("THD format is not supported for cuDNN 9.6+!")
 
     config = model_configs_fused_attn[model]
-    if qkv_format == "thd" and config.num_heads != config.num_gqa_groups:
-        pytest.skip("THD format does not support QGA/MQA yet!")
     if qkv_format == "thd" and config.attn_bias_type == "post_scale_bias":
         pytest.skip("THD format does not support post_scale_bias yet!")
     if qkv_format == "thd" and cp_comm_type == "all_gather":
         pytest.skip("CP implementation with KV all-gather does not support THD format yet!")
     if qkv_format == "thd" and "a2a" in cp_comm_type:
         pytest.skip("CP implementation with QKVO A2A does not support THD format yet!")
-    if config.window_size != (-1, 0) and config.window_size != (-1, -1) and cp_comm_type != "a2a":
-        pytest.skip(
-            "Sliding window attention only can be supported with the implementation of QKVO A2A!"
-        )
     if dtype == "fp8" and cp_comm_type == "all_gather":
         pytest.skip(
             "CP implementation with KV all-gather does not support FP8 + context parallelism yet!"
@@ -147,6 +146,8 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
         pytest.skip("FP8 attention cannot work with bias yet!")
     if dtype == "fp8" and config.window_size != (-1, 0) and config.window_size != (-1, -1):
         pytest.skip("FP8 attention cannot work with sliding window yet!")
+    if "p2p" in cp_comm_type and config.window_size != (-1, 0) and config.window_size != (-1, -1):
+        pytest.skip("CP implementation with KV P2P does not support sliding window yet!")
     if cp_comm_type == "all_gather" and config.attn_bias_type != "no_bias":
         pytest.skip("CP implementation with KV all-gather does not support bias yet!")
     if "a2a" in cp_comm_type and config.attn_bias_type != "no_bias":
@@ -161,7 +162,7 @@ def test_cp_with_fused_attention(dtype, model, qkv_format, cp_comm_type, fp8_mha
 
     subprocess.run(
         get_bash_arguments(
-            num_gpus_per_node=4 if cp_comm_type == "a2a+p2p" else 2,
+            num_gpus_per_node=num_gpus,
             dtype=dtype,
             model=model,
             qkv_format=qkv_format,
