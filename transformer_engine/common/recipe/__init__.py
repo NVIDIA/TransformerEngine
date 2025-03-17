@@ -77,6 +77,10 @@ class Recipe:
         """Whether the given recipe is (per-tensor) current scaling."""
         return isinstance(self, Float8CurrentScaling)
 
+    def float8_per_tensor_scaling(self):
+        """Whether the given recipe is per-tensor scaling."""
+        return isinstance(self, (DelayedScaling, Float8CurrentScaling))
+
 
 @dataclass()
 class DelayedScaling(Recipe):
