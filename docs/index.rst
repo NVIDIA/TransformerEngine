@@ -46,6 +46,7 @@ Transformer Engine documentation
    examples/fp8_primer.ipynb
    examples/advanced_optimizations.ipynb
    examples/te_llama/tutorial_accelerate_hf_llama_with_te.ipynb
+   examples/onnx/onnx_export.ipynb
 
 .. toctree::
    :hidden:
