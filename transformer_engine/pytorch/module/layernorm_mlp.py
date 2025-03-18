@@ -139,7 +139,6 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
         fc1_bias: torch.Tensor,
-        use_fc1_bias: bool,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
         eps: float,
@@ -516,7 +515,6 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_fc1_bias = use_fc1_bias
             ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
@@ -1028,8 +1026,7 @@ class _LayerNormMLP(torch.autograd.Function):
             dgamma,
             dbeta,
             fc1_wgrad,
-            fc1_bias_grad if ctx.use_fc1_bias else None,
-            None,  # use_fc1_bias
+            fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
             fc2_bias_grad,
             None,  # eps
@@ -1451,7 +1448,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.layer_norm_bias,
                 fc1_weight,
                 fc1_bias,
-                self.use_bias,
                 fc2_weight,
                 fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
