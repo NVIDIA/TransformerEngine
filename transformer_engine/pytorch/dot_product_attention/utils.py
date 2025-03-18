@@ -1115,7 +1115,7 @@ def get_full_mask(
             actual_seqlens_kv - actual_seqlens_q + window_size[1]
         ).view(batch_size, 1, 1, 1)
     swa_mask = torch.logical_not(
-        torch.where(swa_left <= 0, 1, 0) - torch.where(swa_right < 0, 1, 0)
+        (swa_left <= 0) & ~(swa_right < 0)
     )
     if attention_mask is not None:
         attention_mask = torch.logical_or(swa_mask, attention_mask)
@@ -1310,14 +1310,18 @@ def get_full_cu_seqlens(
 
     """
     global _cu_seqlens_cache
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
+    def _get_cu_seqlens(batch_size, max_seqlen, device):
+        return torch.arange(
             0,
             (batch_size + 1) * max_seqlen,
             step=max_seqlen,
             dtype=torch.int32,
             device=device,
         )
+    if is_in_onnx_export_mode():
+        return _get_cu_seqlens(batch_size, max_seqlen, device)
+    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
+        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(batch_size, max_seqlen, device)
     return _cu_seqlens_cache[(batch_size, max_seqlen)]
 
 
