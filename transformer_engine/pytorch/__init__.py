@@ -45,15 +45,15 @@ def _load_library():
             "TransformerEngine package version mismatch. Found"
             f" {module_name} v{version(module_name)}, transformer-engine"
             f" v{version('transformer-engine')}, and transformer-engine-cu12"
-            f" v{version('transformer-engine-cu12')}. Install transformer-engine using 'pip install"
-            " transformer-engine[pytorch]==VERSION'"
+            f" v{version('transformer-engine-cu12')}. Install transformer-engine using "
+            "'pip3 install transformer-engine[pytorch]==VERSION'"
         )
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
             _logger.info(
-                "Could not find package %s. Install transformer-engine using 'pip"
-                " install transformer-engine[pytorch]==VERSION'",
+                "Could not find package %s. Install transformer-engine using "
+                "'pip3 install transformer-engine[pytorch]==VERSION'",
                 module_name,
             )
 
@@ -89,8 +89,8 @@ from transformer_engine.pytorch.module import Fp8Padding, Fp8Unpadding
 from transformer_engine.pytorch.module import initialize_ub
 from transformer_engine.pytorch.module import destroy_ub
 from transformer_engine.pytorch.attention import DotProductAttention
-from transformer_engine.pytorch.attention import InferenceParams
 from transformer_engine.pytorch.attention import MultiheadAttention
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.transformer import TransformerLayer
 from transformer_engine.pytorch.permutation import (
     moe_permute,

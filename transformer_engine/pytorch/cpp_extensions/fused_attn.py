@@ -9,6 +9,7 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine_torch import (
     NVTE_QKV_Layout,
+    NVTE_QKV_Format,
     NVTE_Bias_Type,
     NVTE_Mask_Type,
     NVTE_Fused_Attn_Backend,
@@ -31,6 +32,16 @@ TORCH_DType = {
     tex.DType.kInt32: torch.int32,
 }
 
+QKVFormat = {
+    "bshd": NVTE_QKV_Format.NVTE_BSHD,
+    "sbhd": NVTE_QKV_Format.NVTE_SBHD,
+    "thd": NVTE_QKV_Format.NVTE_THD,
+    "sbhd_2bshd": NVTE_QKV_Format.NVTE_SBHD_2BSHD,
+    "bshd_2sbhd": NVTE_QKV_Format.NVTE_BSHD_2SBHD,
+    "thd_2bshd": NVTE_QKV_Format.NVTE_THD_2BSHD,
+    "thd_2sbhd": NVTE_QKV_Format.NVTE_THD_2SBHD,
+}
+
 QKVLayout = {
     "sb3hd": NVTE_QKV_Layout.NVTE_SB3HD,
     "sbh3d": NVTE_QKV_Layout.NVTE_SBH3D,
@@ -47,6 +58,16 @@ QKVLayout = {
     "thd_t2hd": NVTE_QKV_Layout.NVTE_THD_T2HD,
     "thd_th2d": NVTE_QKV_Layout.NVTE_THD_TH2D,
     "thd_thd_thd": NVTE_QKV_Layout.NVTE_THD_THD_THD,
+    "sbhd_bshd_bshd": NVTE_QKV_Layout.NVTE_SBHD_BSHD_BSHD,
+    "bshd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_BSHD_SBHD_SBHD,
+    "thd_bshd_bshd": NVTE_QKV_Layout.NVTE_THD_BSHD_BSHD,
+    "thd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_THD_SBHD_SBHD,
+    "paged_kv_bshd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_BSHD_BSHD,
+    "paged_kv_bshd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_BSHD_SBHD_SBHD,
+    "paged_kv_sbhd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_BSHD_BSHD,
+    "paged_kv_sbhd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_SBHD_SBHD_SBHD,
+    "paged_kv_thd_bshd_bshd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_BSHD_BSHD,
+    "paged_kv_thd_sbhd_sbhd": NVTE_QKV_Layout.NVTE_Paged_KV_THD_SBHD_SBHD,
 }
 
 AttnBiasType = {
@@ -100,6 +121,8 @@ def fused_attn_fwd(
     attn_bias: torch.Tensor = None,
     cu_seqlens_q_padded: torch.Tensor = None,
     cu_seqlens_kv_padded: torch.Tensor = None,
+    page_table_k: torch.Tensor = None,
+    page_table_v: torch.Tensor = None,
     s_quantizer: Quantizer = None,
     o_quantizer: Quantizer = None,
     attn_scale: float = None,
@@ -148,6 +171,10 @@ def fused_attn_fwd(
                 cumulative sequence offsets for Q; shape [batch_size + 1]
     cu_seqlens_kv_padded: torch.Tensor, default = None
                 cumulative sequence offsets for KV; shape [batch_size + 1]
+    page_table_k: torch.Tensor, default = None
+                page table for K cache; shape [batch_size, max_pages_per_seq_k]
+    page_table_v: torch.Tensor, default = None
+                page table for V cache; shape [batch_size, max_pages_per_seq_v]
     s_quantizer: Quantizer, default = None
                 Quantizer object for the intermediate value S.
     o_quantizer: Quantizer, default = None
@@ -268,6 +295,8 @@ def fused_attn_fwd(
         fake_dtype,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
         s_quantizer,
         o_quantizer,
         attn_bias,

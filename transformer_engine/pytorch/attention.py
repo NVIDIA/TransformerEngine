@@ -12,17 +12,13 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
-import functools
 
-from dataclasses import dataclass, fields
 import numpy as np
 from packaging.version import Version as PkgVersion
 
 import torch
-import torch.nn.functional as F
 
 import transformer_engine_torch as tex
-import transformer_engine as te
 from transformer_engine.pytorch.utils import (
     get_cudnn_version,
     nvtx_range_pop,
@@ -31,18 +27,9 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     fused_attn_fwd,
     fused_attn_bwd,
-    QKVLayout,
-    AttnBiasType,
-    AttnMaskType,
     FusedAttnBackend,
     META_QKV,
-    META_DQKV,
     META_O,
-    META_DO,
-    META_S,
-    META_DP,
-    META_O_CP,
-    META_DQKV_CP,
 )
 from transformer_engine.pytorch.fp8 import (
     FP8GlobalStateManager,
@@ -81,6 +68,7 @@ from transformer_engine.pytorch.distributed import (
 )
 from transformer_engine.pytorch.jit import jit_fuser, no_torch_dynamo
 from transformer_engine.pytorch.graph import is_graph_capturing
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.tensor.quantized_tensor import (
     QuantizedTensor,
     prepare_for_saving,
@@ -88,46 +76,17 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
 )
 from transformer_engine.pytorch.export import is_in_onnx_export_mode, onnx_attention_mask_func
 
-# NVTE_DEBUG = 0/1 # disables/enables debug mode, default = 0
-_NVTE_DEBUG = int(os.getenv("NVTE_DEBUG", "0"))
-# NVTE_DEBUG_LEVEL = 0/1/2 # enables more and more verbose debug mode, default = 0
-_NVTE_DEBUG_LEVEL = int(os.getenv("NVTE_DEBUG_LEVEL", "0"))
-_log_level = _NVTE_DEBUG * _NVTE_DEBUG_LEVEL
-_log_levels = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
-_log_level = _log_levels[_log_level if _log_level in [0, 1, 2] else 2]
-_formatter = logging.Formatter("[%(levelname)-8s | %(name)-19s]: %(message)s")
-_stream_handler = logging.StreamHandler()
-_stream_handler.setFormatter(_formatter)
-fa_logger = logging.getLogger(__name__)
-fa_logger.setLevel(_log_level)
-if not fa_logger.hasHandlers():
-    fa_logger.addHandler(_stream_handler)
+# Import attention utils
+import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
+from transformer_engine.pytorch.dot_product_attention.utils import FlashAttentionUtils as fa_utils
+from transformer_engine.pytorch.dot_product_attention.utils import AttentionLogging as attn_log
+from transformer_engine.pytorch.dot_product_attention.rope import apply_rotary_pos_emb
 
 
-@functools.lru_cache(maxsize=None)
-def _get_supported_versions(version_min, version_max):
-    return ">= " + str(version_min) + ", " + "<= " + str(version_max)
+# Setup Attention Logging
+attn_log.setup_logging()
 
-
-_NVTE_FLASH_ATTN = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-_NVTE_FUSED_ATTN = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-_NVTE_UNFUSED_ATTN = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-
-# Detect flash-attn v2 in the environment
-_flash_attn_is_installed = False
-_flash_attn_version = PkgVersion("0")
-_flash_attn_version_required = PkgVersion("2.1.1")
-_flash_attn_version_required_blackwell = PkgVersion("2.7.3")
-_flash_attn_max_version = PkgVersion("2.7.4.post1")
-_flash_attn_2_plus = False
-_flash_attn_2_1_plus = False
-_flash_attn_2_3_plus = False
-_flash_attn_2_4_plus = False
-_flash_attn_2_4_1_plus = False
-_flash_attn_2_5_7_plus = False
-_flash_attn_2_6_0_plus = False
-_flash_attn_2_7_0_plus = False
-
+# Global vars for flash attn v2 and v3 imports
 flash_attn_cuda_bwd = None
 flash_attn_func = None
 flash_attn_varlen_func = None
@@ -135,23 +94,18 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
-
 try:
-    _flash_attn_version = PkgVersion(get_pkg_version("flash-attn"))
+    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v2 is not installed. To use, please install it by"
-            """ "pip install flash-attn".""",
-        )
+    pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
     if torch.cuda.is_available() and get_device_compute_capability() >= (10, 0):
-        if _flash_attn_version_required_blackwell <= _flash_attn_version <= _flash_attn_max_version:
-            _flash_attn_is_installed = True
-    elif _flash_attn_version_required <= _flash_attn_version <= _flash_attn_max_version:
-        _flash_attn_is_installed = True
+        if fa_utils.version_required_blackwell <= fa_utils.version <= fa_utils.max_version:
+            fa_utils.is_installed = True
+    elif fa_utils.version_required <= fa_utils.version <= fa_utils.max_version:
+        fa_utils.is_installed = True
 
-    if _flash_attn_is_installed:
+    if fa_utils.is_installed:
         from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd
@@ -163,179 +117,52 @@ else:
             _flash_attn_varlen_backward as _flash_attn_varlen_bwd,
         )
 
-        _flash_attn_2_plus = _flash_attn_version >= PkgVersion("2")
-        _flash_attn_2_1_plus = _flash_attn_version >= PkgVersion("2.1")
-        _flash_attn_2_3_plus = _flash_attn_version >= PkgVersion("2.3")
-        _flash_attn_2_4_plus = _flash_attn_version >= PkgVersion("2.4")
-        _flash_attn_2_4_1_plus = _flash_attn_version >= PkgVersion("2.4.1")
-        _flash_attn_2_5_7_plus = _flash_attn_version >= PkgVersion("2.5.7")
-        _flash_attn_2_6_0_plus = _flash_attn_version >= PkgVersion("2.6.0")
-        _flash_attn_2_7_0_plus = _flash_attn_version >= PkgVersion("2.7.0")
+        # Setup Flash attention utils
+        fa_utils.set_flash_attention_version()
     elif (
-        torch.cuda.is_available() and get_device_compute_capability() >= (8, 0) and _NVTE_FLASH_ATTN
+        torch.cuda.is_available()
+        and get_device_compute_capability() >= (8, 0)
+        and dpa_utils._NVTE_FLASH_ATTN
     ):
-        fa_logger.warning(
+        attn_log.fa_logger.warning(
             "Supported flash-attn versions are %s. Found flash-attn %s.",
-            _get_supported_versions(
+            dpa_utils._get_supported_versions(
                 (
-                    _flash_attn_version_required
+                    fa_utils.version_required
                     if get_device_compute_capability() < (10, 0)
-                    else _flash_attn_version_required_blackwell
+                    else fa_utils.version_required_blackwell
                 ),
-                _flash_attn_max_version,
+                fa_utils.max_version,
             ),
-            _flash_attn_version,
+            fa_utils.version,
         )
-
-# Detect flash-attn v3 in the environment
-# This section will be removed when FA3 is released as a regular FA package,
-# i.e. flashattn-hopper 3.0.0 as flash-attn 3.0.0
-_flash_attn_3_is_installed = False
-_flash_attn_3_version = PkgVersion("0")
-_flash_attn_3_0_0_beta = False
-_use_flash_attn_3 = False
-# TODO(cyang): update FA to 2.7.3 when its FA3 compilation issue is resolved
-# https://github.com/Dao-AILab/flash-attention/issues/1452
-_flash_attn_3_installation_steps = """\
-(1) pip install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
-(2) python_path=`python -c "import site; print(site.getsitepackages()[0])"`
-(3) mkdir -p $python_path/flashattn_hopper
-(4) wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py"""
 try:
-    _flash_attn_3_version = PkgVersion(get_pkg_version("flashattn-hopper"))
+    fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
 except PackageNotFoundError:
-    if torch.cuda.is_available() and get_device_compute_capability() >= (9, 0) and _NVTE_FLASH_ATTN:
-        fa_logger.debug(
-            "flash-attn v3 is not installed. To use, please install it by \n%s",
-            _flash_attn_3_installation_steps,
-        )
+    pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
 else:
-    from flashattn_hopper.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flashattn_hopper.flash_attn_interface import (
+    from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flash_attn_3.flash_attn_interface import (
         flash_attn_varlen_func as flash_attn_varlen_func_v3,
     )
-    from flashattn_hopper.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flashattn_hopper.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-    from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_forward as _flash_attn_varlen_fwd_v3,
+    from flash_attn_3.flash_attn_interface import (
+        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
     )
-    from flashattn_hopper.flash_attn_interface import (
-        _flash_attn_varlen_backward as _flash_attn_varlen_bwd_v3,
-    )
+    from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+    from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
-    _flash_attn_3_is_installed = True
-    _flash_attn_3_0_0_beta = PkgVersion("3.0.0b") < _flash_attn_3_version < PkgVersion("3.0.0")
-    _use_flash_attn_3 = True
+    fa_utils.set_flash_attention_3_params()
 
+# Global vars for available attention backends and ALiBi cache
 _attention_backends = {
     "attention_params": None,
     "use_flash_attention": None,
+    "flash_attention_backend": None,
     "use_fused_attention": None,
     "fused_attention_backend": None,
     "use_unfused_attention": None,
     "backend_selection_requires_update": False,
 }
-
-
-@dataclass(eq=True)
-class AttentionParams:
-    """
-    Attention parameters used to determine which backend to be used.
-
-    Parameters
-    ----------
-    qkv_type: Union[torch.Tensor, Float8Tensor], default = `torch.Tensor`
-        Type of query/key/value tensors, {`torch.Tensor`, `Float8Tensor`}.
-    qkv_dtype: torch.dtype, default = `torch.bfloat16`
-        Data type of query/key/value tensors.
-    qkv_layout: str, default = "sbh3d"
-        Query/key/value tensor memory layout.
-    batch_size: int, default = 1
-        Batch size.
-    num_heads: int, default = 16
-        Number of attention heads in the query tensor.
-    num_gqa_groups: int, default = 16
-        Number of attention heads in key and value tensors.
-    max_seqlen_q: int, default = 128
-        Maximum sequence length of the query tensor.
-    max_seqlen_kv: int, default = 128
-        Maximum sequence length of the key and value tensors.
-    head_dim_qk: int, default = 64
-        The size of each attention head in query and key tensors.
-    head_dim_v: int, default = 64
-        The size of each attention head in the value tensor.
-    attn_mask_type: str, default = `no_mask`
-        Attention mask type, {`no_mask`, `padding`, `causal`, `padding_causal`,
-        `causal_bottom_right`, `padding_causal_bottom_right`, `arbitrary`}
-    window_size: Tuple[int, int], default = None
-        Sliding window attention size.
-    alibi_slopes_shape: Optional[Union[torch.Size, List]], default = `None`
-        Tensor shape of :attr:`alibi_slopes` in `DotProductAttention`.
-    core_attention_bias_type: str, default = `no_bias`
-        Attention bias type, {`no_bias`, `pre_scale_bias`, `post_scale_bias`, `alibi`}.
-    core_attention_bias_shape: str, default = `1hss`
-        Attention bias shape, {`1hss`, `b1ss`, `bhss`}.
-    core_attention_bias_requires_grad: bool, default = `True`
-        Whether attention bias requires gradient.
-    pad_between_seqs: bool, default = `False`
-        Whether there is padding between sequences in a batch.
-        This only applies to `qkv_format=thd`.
-    attention_dropout: float, default = 0.0
-        Attention dropout.
-    context_parallel: bool, default = `False`
-        Whether context parallelism is used or not.
-    deterministic: bool, default = `False`
-        Whether to run `DotProductAttention` with determinism or not.
-    is_training: bool, default = `True`
-        Whether in training mode (`True`) or inference mode (`False`)
-    fp8: bool, default = `False`
-        Whether `DotProductAttention` is in an `fp8_autocast` region.
-    fp8_meta: Optional[Dict[str Any]], default = `None`
-        The FP8 metadata tensor of `DotProductAttention`.
-    """
-
-    qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
-    qkv_dtype: torch.dtype = torch.bfloat16
-    qkv_layout: str = "sbh3d"
-    batch_size: int = 1
-    num_heads: int = 16
-    num_gqa_groups: int = 16
-    max_seqlen_q: int = 128
-    max_seqlen_kv: int = 128
-    head_dim_qk: int = 64
-    head_dim_v: int = 64
-    attn_mask_type: str = "no_mask"
-    window_size: Union[Tuple[int, int], None] = None
-    alibi_slopes_shape: Union[torch.Size, List, None] = None
-    core_attention_bias_type: str = "no_bias"
-    core_attention_bias_shape: str = "1hss"
-    core_attention_bias_requires_grad: bool = True
-    pad_between_seqs: bool = False
-    attention_dropout: float = 0.0
-    context_parallel: bool = False
-    deterministic: bool = False
-    is_training: bool = True
-    fp8: bool = False
-    fp8_meta: Union[Dict[str, Any], None] = None
-
-    def __eq__(self, other):
-        """
-        Overwrite dataclass.__eq__ so that only fp8_meta["recipe"] is compared,
-        since all other entries of fp8_meta are unused in get_attention_backend.
-        """
-        if not isinstance(other, self.__class__):
-            return NotImplemented
-        for field in fields(self):
-            fname = field.name
-            sf = getattr(self, fname)
-            of = getattr(other, fname)
-            if fname != "fp8_meta":
-                if sf != of:
-                    return False
-            elif sf.get("recipe", None) != of.get("recipe", None):
-                return False
-        return True
-
 
 _alibi_cache = {
     "_num_heads": None,
@@ -348,1210 +175,12 @@ _alibi_cache = {
     "_alibi_bias_require_update": False,
 }
 
-
-__all__ = ["DotProductAttention", "InferenceParams", "MultiheadAttention"]
+__all__ = ["DotProductAttention", "MultiheadAttention"]
 
 
 def maybe_contiguous(tensor: torch.Tensor) -> torch.Tensor:
     """Make tensor contiguous if final stride is not 1."""
     return tensor.contiguous() if tensor.stride(-1) != 1 else tensor
-
-
-def get_attention_backend(
-    attention_params: AttentionParams = None,
-):
-    """
-    Select the appropriate attention backend/sub-backend based on user input and runtime environment.
-
-    Parameters
-    ----------
-    See `AttentionParams`.
-
-    Returns
-    ----------
-    use_flash_attention: bool
-        Whether the `FlashAttention` backend has been selected.
-    use_fused_attention: bool
-        Whether the `FusedAttention` backend has been selected.
-    fused_attention_backend: tex.NVTE_Fused_Attn_Backend
-        If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.
-    use_unfused_attention: bool
-        Whether the `UnfusedDotProductAttention` backend has been selected.
-    available_backends: List[bool]
-        All available backends that could support the provided input. A list of Booleans
-        in the form of [use_flash_attention, use_fused_attention, use_unfused_attention].
-    """
-    qkv_type = attention_params.qkv_type
-    qkv_dtype = attention_params.qkv_dtype
-    qkv_layout = attention_params.qkv_layout
-    batch_size = attention_params.batch_size
-    num_heads = attention_params.num_heads
-    num_gqa_groups = attention_params.num_gqa_groups
-    max_seqlen_q = attention_params.max_seqlen_q
-    max_seqlen_kv = attention_params.max_seqlen_kv
-    head_dim_qk = attention_params.head_dim_qk
-    head_dim_v = attention_params.head_dim_v
-    attn_mask_type = attention_params.attn_mask_type
-    window_size = attention_params.window_size
-    alibi_slopes_shape = attention_params.alibi_slopes_shape
-    core_attention_bias_type = attention_params.core_attention_bias_type
-    core_attention_bias_shape = attention_params.core_attention_bias_shape
-    core_attention_bias_requires_grad = attention_params.core_attention_bias_requires_grad
-    pad_between_seqs = attention_params.pad_between_seqs
-    attention_dropout = attention_params.attention_dropout
-    context_parallel = attention_params.context_parallel
-    deterministic = attention_params.deterministic
-    is_training = attention_params.is_training
-    fp8 = attention_params.fp8
-    fp8_meta = attention_params.fp8_meta
-
-    # Run config
-    logger = logging.getLogger("DotProductAttention")
-    logger.setLevel(_log_level)
-    if not logger.hasHandlers():
-        logger.addHandler(_stream_handler)
-    device_compute_capability = get_device_compute_capability()
-    cudnn_version = get_cudnn_version()
-    run_config = {
-        "transformer_engine_version": te.__version__,
-        "compute_capability": "sm"
-        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
-        "flash_attn_version": (
-            str(_flash_attn_version) if _flash_attn_is_installed else "not installed"
-        ),
-        "flash_attn_3_version": (
-            str(_flash_attn_3_version) if _flash_attn_3_is_installed else "not installed"
-        ),
-        "cudnn_version": ".".join([str(i) for i in cudnn_version]),
-    }
-    attention_params_dict = {
-        field.name: getattr(attention_params, field.name) for field in fields(attention_params)
-    }
-    run_config.update(attention_params_dict)
-    if fp8:
-        run_config["NVTE_FP8_DPA_BWD"] = int(os.getenv("NVTE_FP8_DPA_BWD", "1"))
-    logger.debug("Running with config=%s", run_config)
-
-    # The following sections check if `FlashAttention` supports the provided attention params,
-    # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
-    # necessary for performance/functionality, a warning will be issued to prompt users to
-    # install an appropriate FA version.
-    global _flash_attn_version_required, _flash_attn_max_version, _use_flash_attn_3
-
-    # Filter: Environment variables
-    use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
-    use_fused_attention = int(os.getenv("NVTE_FUSED_ATTN", "1"))
-    use_unfused_attention = int(os.getenv("NVTE_UNFUSED_ATTN", "1"))
-    if not use_flash_attention and _flash_attn_is_installed:
-        logger.debug("Disabling FlashAttention due to NVTE_FLASH_ATTN=0")
-    if not use_fused_attention:
-        logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
-    if not use_unfused_attention:
-        logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
-
-    # Filter: Compute capability
-    if device_compute_capability < (8, 0):
-        if use_flash_attention and _flash_attn_is_installed:
-            logger.debug("Disabling FlashAttention as it requires compute capability sm80+")
-        use_flash_attention = False
-        if use_fused_attention:
-            logger.debug("Disabling FusedAttention as it requires compute capability sm80+")
-            use_fused_attention = False
-    if device_compute_capability < (9, 0):
-        if use_flash_attention and _flash_attn_3_is_installed:
-            logger.debug("Disabling FlashAttention 3 as it requires compute capability sm90+")
-        _use_flash_attn_3 = False
-
-    # Filter: Data type
-    if qkv_dtype not in [torch.bfloat16, torch.float16] or qkv_type not in [
-        torch.Tensor,
-        Float8Tensor,
-    ]:
-        if use_flash_attention and _flash_attn_is_installed:
-            logger.debug(
-                "Disabling FlashAttention due to unsupported QKV data type. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-                "Found: qkv_dtype = %s.",
-                qkv_dtype,
-            )
-        use_flash_attention = False
-        if use_fused_attention:
-            logger.debug(
-                "Disabling FusedAttention due to unsupported QKV data type. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16}. "
-                "Found: qkv_dtype = %s.",
-                qkv_dtype,
-            )
-            use_fused_attention = False
-
-    # Filter: Execution type
-    if fp8 and fp8_meta["recipe"].fp8_dpa:
-        if use_flash_attention and not _use_flash_attn_3:
-            if _flash_attn_is_installed:
-                logger.debug("Disabling FlashAttention as FlashAttention 2 does not support FP8")
-            use_flash_attention = False
-        if use_flash_attention and _use_flash_attn_3 and is_training:
-            logger.debug(
-                "Disabling FlashAttention as FlashAttention 3 does not support FP8 training"
-            )
-            use_flash_attention = False
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention as it does not support FP8")
-            use_unfused_attention = False
-
-    # Filter: Head dimension
-    if use_flash_attention and head_dim_qk != head_dim_v:
-        if _flash_attn_is_installed:
-            logger.debug("Disabling FlashAttention as it does not support MLA.")
-        use_flash_attention = False
-    if use_flash_attention and (
-        head_dim_qk > 256
-        or head_dim_qk % 8 != 0
-        or (
-            head_dim_qk > 192
-            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
-        )
-    ):
-        if _flash_attn_is_installed:
-            logger.debug(
-                "Disabling FlashAttention due to unsupported head_dim_qk and head_dim_v. "
-                "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-                "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
-                "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
-                head_dim_qk,
-                head_dim_v,
-                ".".join([str(i) for i in device_compute_capability]),
-            )
-        use_flash_attention = False
-    qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
-    if use_fused_attention and head_dim_qk != head_dim_v and qkv_layout_group != "hd_hd_hd":
-        logger.debug(
-            "Disabling FusedAttention as MLA is not supported with qkv_layout = %s",
-            qkv_layout,
-        )
-        use_fused_attention = False
-
-    # Filter: QKV layout
-    qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
-    if qkv_format == "thd":
-        if use_unfused_attention:
-            logger.debug("Disabling UnfusedDotProductAttention for qkv_format = thd")
-            use_unfused_attention = False
-        if use_flash_attention and pad_between_seqs:
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd when there is "
-                    "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
-                )
-            use_flash_attention = False
-
-    # Filter: Dropout
-    if attention_dropout != 0.0 and use_flash_attention and _use_flash_attn_3:
-        logger.debug("Disabling FlashAttention 3 for dropout")
-        _use_flash_attn_3 = False
-
-    # Filter: Context parallelism
-    # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
-    # ----------------------------------------------------------------------------------------------------
-    # bshd, sbhd | self-attention:             | no_bias, post_scale_bias | FlashAttention, FusedAttention
-    #            |     no_mask, causal         |                          |
-    #            | cross-attention:            |                          |
-    #            |     no_mask                 |                          |
-    # thd        | self-attention:             | no_bias                  | FlashAttention, FusedAttention
-    #            |     padding, padding_causal |                          | if no padding between sequences,
-    #            | cross-attention:            |                          | FusedAttention
-    #            |     padding                 |                          | if there is padding between sequences
-    # Note: context parallelism requires seq_len % (cp_size * 2) == 0 for each sequence in q, k, v.
-    if context_parallel and use_unfused_attention:
-        logger.debug(
-            "Disabling UnfusedDotProductAttention as it does not support context parallelism"
-        )
-        use_unfused_attention = False
-    if context_parallel and use_flash_attention:
-        if fp8 and fp8_meta["recipe"].fp8_dpa:
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with FP8"
-                )
-            use_flash_attention = False
-        if "bottom_right" in attn_mask_type:
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with"
-                    " causal_bottom_right masking"
-                )
-            use_flash_attention = False
-        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with"
-                    " causal masking for cross-attention"
-                )
-            use_flash_attention = False
-        elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with bias"
-                    " type of %s",
-                    core_attention_bias_type,
-                )
-            use_flash_attention = False
-        elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
-            if _flash_attn_is_installed:
-                logger.debug(
-                    "Disabling FlashAttention as it does not support context parallelism with"
-                    " attention bias for THD format"
-                )
-            use_flash_attention = False
-
-    if context_parallel and use_fused_attention:
-        if "bottom_right" in attn_mask_type:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with"
-                " causal_bottom_right masking"
-            )
-            use_fused_attention = False
-        elif "causal" in attn_mask_type and max_seqlen_q != max_seqlen_kv:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with causal"
-                " masking for cross-attention"
-            )
-            use_fused_attention = False
-        elif core_attention_bias_type not in ["no_bias", "post_scale_bias"]:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with bias type"
-                " of %s",
-                core_attention_bias_type,
-            )
-            use_fused_attention = False
-        elif qkv_format == "thd" and core_attention_bias_type != "no_bias":
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with attention"
-                " bias for THD format"
-            )
-            use_fused_attention = False
-        elif head_dim_qk != head_dim_v:
-            logger.debug(
-                "Disabling FusedAttention as it does not support context parallelism with MLA"
-            )
-            use_fused_attention = False
-
-    # Filter: Attention mask
-    # attn_mask_type              | attention_mask                       | supported backends
-    # ----------------------------------------------------------------------------------------
-    # no_mask                     | None                                 | All
-    # padding                     |                                      | All
-    #     self-attention          | One tensor in shape [b, 1, 1, sq]    |
-    #     cross-attention         | Tuple of two tensors in shapes       |
-    #                             | [b, 1, 1, sq] and [b, 1, 1, skv]     |
-    # causal                      | None                                 |
-    #     self-attention          |                                      | All
-    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
-    # padding_causal              | Same as "padding"                    |
-    #     self-attention          |                                      | All
-    #     cross-attention         |                                      | FusedAttention, UnfusedDotProductAttention
-    # causal_bottom_right         | None                                 | All
-    # padding_causal_bottom_right | Same as "padding"                    | All
-    # arbitrary                   | One tensor in shape broadcastable to | UnfusedDotProductAttention
-    #                             | [b, h, sq, skv]                      |
-    if attn_mask_type == "arbitrary":
-        if use_flash_attention and _flash_attn_is_installed:
-            logger.debug("Disabling FlashAttention for arbitrary mask")
-        use_flash_attention = False
-        if use_fused_attention:
-            logger.debug("Disabling FusedAttention for arbitrary mask")
-        use_fused_attention = False
-    if (
-        use_flash_attention
-        and _use_flash_attn_3
-        and attn_mask_type in ["causal", "padding_causal"]
-        and max_seqlen_q != max_seqlen_kv
-    ):
-        logger.warning(
-            "Disabling FlashAttention 3 as it only supports bottom-right-diagonal "
-            "causal mask since flash-attn 2.1. See "
-            "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-        )
-        _use_flash_attn_3 = False
-    if (
-        use_flash_attention
-        and attn_mask_type in ["causal", "padding_causal"]
-        and max_seqlen_q != max_seqlen_kv
-    ):
-        if _flash_attn_2_1_plus:
-            logger.warning(
-                "Disabling FlashAttention as it only supports bottom-right-diagonal "
-                "causal mask since flash-attn 2.1. See "
-                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-            )
-            use_flash_attention = False
-        if not _flash_attn_is_installed:
-            _flash_attn_max_version = PkgVersion("2.1")
-    if (
-        use_flash_attention
-        and attn_mask_type in ["causal_bottom_right", "padding_causal_bottom_right"]
-        and max_seqlen_q != max_seqlen_kv
-    ):
-        if not _flash_attn_is_installed:
-            _flash_attn_version_required = PkgVersion("2.1")
-        elif not _flash_attn_2_1_plus and not _use_flash_attn_3:
-            logger.warning(
-                "Disabling FlashAttention as it only supports top-left-diagonal "
-                "causal mask before flash-attn 2.1. See "
-                "https://github.com/Dao-AILab/flash-attention#21-change-behavior-of-causal-flag"
-            )
-            use_flash_attention = False
-    if (
-        use_flash_attention
-        and _use_flash_attn_3
-        and fp8
-        and fp8_meta["recipe"].fp8_dpa
-        and "padding" in attn_mask_type
-    ):
-        logger.debug("Disabling FlashAttention 3 for FP8 and padding masks")
-        _use_flash_attn_3 = False
-
-    # Filter: Sliding window attention
-    #    backend                 |      window_size       | diagonal alignment
-    # ---------------------------------------------------------------------------------
-    # FlashAttention             | (-1, -1) or (>=0, >=0) | bottom right
-    # FusedAttention             | (-1,  0) or (>=0, 0)   | top left
-    # UnfusedDotProductAttention | (-1, -1) or (>=0, >=0) | both;
-    #                            |                        | converts window_size to an 'arbitrary' mask
-    if window_size is None:
-        window_size = check_set_window_size(attn_mask_type, window_size)
-    else:
-        if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention"
-                    " for FP8"
-                )
-                use_fused_attention = False
-            elif window_size[1] != 0 or attention_dropout != 0.0:
-                logger.debug(
-                    "Disabling FusedAttention as it only supports sliding window attention "
-                    "with (left, 0) and no dropout"
-                )
-                use_fused_attention = False
-            elif max_seqlen_q > max_seqlen_kv:
-                logger.debug(
-                    "Disabling FusedAttention as it does not support sliding window attention "
-                    "with s_q > s_kv for cross-attention"
-                )
-                use_fused_attention = False
-        if use_flash_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-            if _use_flash_attn_3:
-                logger.debug(
-                    "Disabling FlashAttention 3 as it does not support sliding window attention"
-                )
-                _use_flash_attn_3 = False
-            if not _flash_attn_is_installed:
-                _flash_attn_version_required = PkgVersion("2.3")
-            elif not _flash_attn_2_3_plus:
-                logger.debug(
-                    "Disabling FlashAttention as sliding window attention requires flash-attn 2.3+"
-                )
-                use_flash_attention = False
-
-    # Filter: Attention bias
-    #    backend                 |      bias types              | ALiBi diagonal alignment
-    # ---------------------------------------------------------------------------------
-    # FlashAttention             | no_bias, alibi/alibi_slopes  | bottom right
-    # FusedAttention             | no_bias, post_scale_bias     |
-    #                            | alibi/alibi_slopes           | top left,
-    #                            |                              | bottom_right (converts to a 'post_scale_bias' bias)
-    # UnfusedDotProductAttention | no_bias, pre/post_scale_bias |
-    #                            | alibi/alibi_slopes           | both; converts to a 'post_scale_bias' bias
-    if use_flash_attention and core_attention_bias_type == "alibi":
-        if _use_flash_attn_3:
-            logger.debug("Disabling FlashAttention 3 for ALiBi")
-            _use_flash_attn_3 = False
-        if not _flash_attn_is_installed:
-            _flash_attn_version_required = PkgVersion("2.4")
-        elif not _flash_attn_2_4_plus:
-            logger.debug("Disabling FlashAttention as ALiBi requires flash-attn 2.4+")
-            use_flash_attention = False
-
-    if use_flash_attention and (
-        core_attention_bias_type not in ["no_bias", "alibi"]
-        or core_attention_bias_shape is not None
-    ):
-        if _flash_attn_is_installed:
-            logger.debug("Disabling FlashAttention for pre/post_scale_bias")
-        use_flash_attention = False
-
-    fu_core_attention_bias_type = core_attention_bias_type
-    fu_core_attention_bias_shape = core_attention_bias_shape
-    fu_core_attention_bias_requires_grad = core_attention_bias_requires_grad
-    if (
-        use_fused_attention
-        and core_attention_bias_type == "alibi"
-        and (alibi_slopes_shape is not None or max_seqlen_q != max_seqlen_kv)
-    ):
-        fu_core_attention_bias_type = "post_scale_bias"
-        fu_core_attention_bias_requires_grad = False
-        if alibi_slopes_shape is None:
-            fu_core_attention_bias_shape = "1hss"
-        elif len(alibi_slopes_shape) == 1 and alibi_slopes_shape[0] == num_heads:
-            fu_core_attention_bias_shape = "1hss"
-        elif (
-            len(alibi_slopes_shape) == 2
-            and alibi_slopes_shape[0] == batch_size
-            and alibi_slopes_shape[1] == num_heads
-        ):
-            fu_core_attention_bias_shape = "bhss"
-
-    if (
-        use_fused_attention
-        and fu_core_attention_bias_type == "post_scale_bias"
-        and fu_core_attention_bias_shape != "1hss"
-    ):
-        if fu_core_attention_bias_requires_grad:
-            # remove this line when cuDNN adds bwd support for
-            # [1, 1, s, s], [b, 1, s, s] and [b, h, s, s]
-            logger.debug("Disabling FusedAttention for dBias in [1, H, S, S] shape")
-            use_fused_attention = False
-        else:
-            # max512 backend will only support [1, h, s, s]
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-
-    # Filter: cuDNN support
-    fused_attention_backend = None
-    if use_fused_attention:
-        q_type = TE_DType[qkv_dtype]
-        kv_type = q_type
-        if fp8 and fp8_meta["recipe"].fp8_dpa:
-            q_type = get_fp8_te_dtype(fp8_meta["recipe"], fprop_tensor=True)
-            kv_type = q_type
-        fused_attention_backend = tex.get_fused_attn_backend(
-            q_type,
-            kv_type,
-            QKVLayout[qkv_layout],
-            AttnBiasType[fu_core_attention_bias_type],
-            AttnMaskType[attn_mask_type],
-            attention_dropout,
-            num_heads,
-            num_gqa_groups,
-            max_seqlen_q,
-            max_seqlen_kv,
-            head_dim_qk,
-            head_dim_v,
-            window_size[0],
-            window_size[1],
-        )
-        if fused_attention_backend == FusedAttnBackend["No_Backend"]:
-            logger.debug("Disabling FusedAttention as no backend supports the provided input")
-            use_fused_attention = False
-            fused_attention_backend = None
-        if (
-            use_fused_attention
-            and window_size is not None
-            and window_size[0] != -1
-            and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
-        ):
-            logger.debug(
-                "Disabling FusedAttention as only sub-backend %s does not support "
-                "slidng window attention",
-                int(fused_attention_backend),
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-        if (
-            use_fused_attention
-            and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
-            and fu_core_attention_bias_type == "post_scale_bias"
-            and fu_core_attention_bias_shape != "1hss"
-        ):
-            logger.debug(
-                "Disabling FusedAttention as cuDNN sub-backend 0 only supports post_scale_bias in"
-                " [1, H, S, S] shape"
-            )
-            use_fused_attention = False
-            fused_attention_backend = None
-
-    # Filter: Determinism
-    # backend                      | deterministic
-    # ---------------------------------------------
-    # FlashAttention               |
-    #     flash-attn >=2.0, <2.4.1 | no
-    #     flash-attn >=2.4.1       | yes
-    # FusedAttention               |
-    #     sub-backend 0            | yes
-    #     sub-backend 1            | workspace optimization path and sm90+: yes;
-    #                              | otherwise: no
-    #     sub-backend 2            | no
-    # UnfusedDotProductAttention   | yes
-    if use_flash_attention and deterministic:
-        if not _flash_attn_is_installed:
-            _flash_attn_version_required = PkgVersion("2.4.1")
-        elif not _flash_attn_2_4_1_plus and not _use_flash_attn_3:
-            logger.warning(
-                "Disabling FlashAttention as version <2.4.1 does not support deterministic "
-                "execution. To use FlashAttention with deterministic behavior, "
-                "please install flash-attn >= 2.4.1."
-            )
-            use_flash_attention = False
-    if use_fused_attention and deterministic:
-        if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
-            logger.debug("Disabling FusedAttention for determinism reasons")
-            use_fused_attention = False
-        if (
-            fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-            and is_training
-            and (
-                device_compute_capability < (9, 0)
-                or core_attention_bias_requires_grad
-                or cudnn_version < (8, 9, 5)
-            )
-        ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
-            use_fused_attention = False
-
-    # All available backends
-    available_backends = [use_flash_attention, use_fused_attention, use_unfused_attention]
-
-    # `FusedAttention` and `FlashAttention` are faster backends than `UnfusedDotProductAttention`.
-    # When `FusedAttention` does not support the provided attention params, and `FlashAttention`
-    # does, we recommend users to install flash-attn if not installed already.
-    if not use_fused_attention and use_flash_attention and not _flash_attn_is_installed:
-        logger.warning(
-            "flash-attn may provide important feature support or performance improvement."
-            " Please install flash-attn %s.",
-            _get_supported_versions(
-                _flash_attn_version_required,
-                _flash_attn_max_version,
-            ),
-        )
-    if use_flash_attention and not _flash_attn_is_installed:
-        use_flash_attention = False
-        available_backends[0] = False
-
-    logger.debug(
-        "Available backends = {FlashAttention=%s, FusedAttention=%s%s,"
-        " UnfusedDotProductAttention=%s}",
-        bool(available_backends[0]),
-        bool(available_backends[1]),
-        (
-            f" (sub-backend {int(fused_attention_backend)})"
-            if fused_attention_backend is not None
-            else ""
-        ),
-        bool(available_backends[2]),
-    )
-
-    # Select FusedAttention for performance
-    if (
-        use_flash_attention
-        and use_fused_attention
-        and fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]
-    ):
-        if device_compute_capability >= (9, 0):
-            logger.debug(
-                "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-                "for performance reasons"
-            )
-            use_flash_attention = False
-    if (
-        use_flash_attention
-        and use_fused_attention
-        and fused_attention_backend == FusedAttnBackend["FP8"]
-        and _use_flash_attn_3
-    ):
-        logger.debug(
-            "Disabling FlashAttention 3 to give FusedAttention preference for performance reasons "
-            "in FP8 execution"
-        )
-        use_flash_attention = False
-
-    # Selected backend
-    if use_flash_attention:
-        use_fused_attention = False
-        use_unfused_attention = False
-    elif use_fused_attention:
-        use_unfused_attention = False
-    selected_backend = "NoBackend"
-    if use_flash_attention:
-        selected_backend = "FlashAttention"
-    elif use_fused_attention:
-        selected_backend = f"FusedAttention (sub-backend {int(fused_attention_backend)})"
-    elif use_unfused_attention:
-        selected_backend = "UnfusedDotProductAttention"
-    logger.debug("Selected backend = %s", selected_backend)
-
-    global _attention_backends
-    _attention_backends["use_flash_attention"] = use_flash_attention
-    _attention_backends["use_fused_attention"] = use_fused_attention
-    _attention_backends["fused_attention_backend"] = fused_attention_backend
-    _attention_backends["use_unfused_attention"] = use_unfused_attention
-    _attention_backends["backend_selection_requires_update"] = False
-
-    return (
-        use_flash_attention,
-        use_fused_attention,
-        fused_attention_backend,
-        use_unfused_attention,
-        available_backends,
-    )
-
-
-class InferenceParams:  # pylint: disable=too-few-public-methods
-    """
-    Inference parameters that are passed to the main model in order
-    to efficiently calculate and store the context during inference.
-
-    Parameters
-    ----------
-    max_batch_size : int
-                    maximum batch size during inference.
-    max_sequence_length : int
-                         maximum sequence length during inference.
-    """
-
-    def __init__(self, max_batch_size, max_sequence_length):
-        self.max_sequence_length = max_sequence_length
-        self.max_batch_size = max_batch_size
-        self.sequence_len_offset = 0
-        self.batch_size_offset = 0
-        self.key_value_memory_dict = {}
-
-    def swap_key_value_dict(self, batch_indices):
-        """
-        Reorders the KV cache using the specified batch indices.
-
-        Parameters
-        ----------
-        batch_indices : List[int]
-                       Sequence of indices to reorder along the batch dimensions of
-                       the KV cache. Must have a length equal to the batch size.
-        """
-        if len(self.key_value_memory_dict) == 0:
-            raise ValueError("should not swap when dict in empty")
-
-        for layer_number, inference_memory in self.key_value_memory_dict.items():
-            inference_key_memory, inference_value_memory = inference_memory
-            assert (
-                len(batch_indices) == inference_key_memory.shape[1]
-            )  # make sure batch size is the same
-            new_inference_key_memory = inference_key_memory[:, batch_indices]
-            new_inference_value_memory = inference_value_memory[:, batch_indices]
-            self.key_value_memory_dict[layer_number] = (
-                new_inference_key_memory,
-                new_inference_value_memory,
-            )
-
-
-@torch.no_grad()
-def get_full_mask(
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
-    attn_mask_type: str = "no_mask",
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
-    window_size: Tuple[int, int] = None,
-    attention_type: str = "self",
-    bottom_right_alignment: bool = True,
-) -> torch.Tensor:
-    """
-    Get full attention mask in [..., max_seqlen_q, max_seqlen_kv] shape, based on `attn_mask_type`,
-    `attention_mask`, and `window_size`. For sliding window attention, the diagonal alignment depends
-    on both `attn_mask_type` and `bottom_right_alignment`, as detailed below.::
-
-       attn_mask_type              output shape                                 diagonal alignment
-       --------------------------------------------------------------------------------------------
-       no_mask                     [1, 1, max_seqlen_q, max_seqlen_kv]          follow bottom_right_alignment
-       causal                      [1, 1, max_seqlen_q, max_seqlen_kv]          always top left
-       causal_bottom_right         [1, 1, max_seqlen_q, max_seqlen_kv]          always bottom right
-       padding                     [batch_size, 1, max_seqlen_q, max_seqlen_kv] follow bottom_right_alignment
-       padding_causal              [batch_size, 1, max_seqlen_q, max_seqlen_kv] always top left
-       padding_causal_bottom_right [batch_size, 1, max_seqlen_q, max_seqlen_kv] always bottom right
-       arbitrary                   same as attention_mask                       follow bottom_right_alignment
-
-    .. note::
-
-    For "padding_bottom_right" mask, or "padding" mask with `bottom_right_alignment` = True, the bottom right
-    diagonal comes from the bottom right corner of the [actual_seqlens_q[i], actual_seqlens_kv[i]] matrix,
-    i = 0,...,batch_size-1, not the [max_seqlen_q, max_seqlen_kv] matrix. For example, with max_seqlen_q = 4,
-    max_seqlen_kv = 4, attn_mask_type = "padding", attention_type = "cross", and attention_mask = (
-    [[False, False,  True, True], [False, False, False, False]],
-    [[False, False, False, True], [False,  True,  True,  True]]), the returned full attention mask has [2, 4, 4]
-    shape and is,::
-
-      [[[False, False, False, True],
-        [False, False, False, True],
-        [ True,  True,  True, True],
-        [ True,  True,  True, True]],
-       [[False,  True,  True, True],
-        [False,  True,  True, True],
-        [False,  True,  True, True],
-        [False,  True,  True, True]]]
-
-    Parameters
-    ----------
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    attn_mask_type: str, default = `no_mask`
-        Attention mask type, {"`no_mask`", "`padding`", "`causal`", "`padding_causal`",
-        "`causal_bottom_right`", "`padding_causal_bottom_right`", "`arbitrary`"}
-    attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
-        default = `None`
-        Boolean tensor(s) used to mask out attention softmax input. Please see DotProductAttention
-        for the requirements of `attention_mask` for different `attn_mask_type`s.
-    window_size: Tuple[int, int], default = `None`
-        Sliding window size for local attention, where query at position i attends to keys
-        in [i + seqlen_k - seqlen_q - window_size[0], i + seqlen_k - seqlen_q
-        + window_size[1]] inclusive. Special cases (-1, -1) and (-1, 0) mean no sliding
-        window and causal mask specifically. Both `causal` and `causal_bottom_right` masks
-        map to `window_size = (-1, 0)` and Transformer Engine distinguishes them based on
-        `attn_mask_type`.
-    attention_type: str, default = "self"
-        Attention type, {"self", "cross"}
-    bottom_right_alignment: bool, default = `True`
-        Whether to align the diagonal of the sliding window attention to the bottom right (`True`)
-        or top left (`False`) corner of the softmax matrix. Ignored if `attn_mask_type` explicitly
-        specifies "causal" or "causal_bottom_right".
-
-    Returns
-    ----------
-    attn_mask_type: str
-        For sliding window attention (>=0, >0), "arbitrary"; otherwise, the same as input `attn_mask_type`
-    attention_mask: torch.Tensor
-        The full attention mask based on `attn_mask_type`, `attention_mask` and `window_size`
-    actual_seqlens_q: torch.Tensor
-        For padding masks, the actual sequence lengths for queries, in shape [batch_size].
-        For other masks, `None`.
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        For padding masks, the actual sequence lengths for keys and values, in shape [batch_size].
-        For other masks, `None`.
-    """
-    # perform basic checks
-    change_type = window_size is not None and (
-        window_size[0] != -1 or window_size[1] not in [-1, 0]
-    )
-    if window_size is None:
-        window_size = (-1, -1)
-    if "causal" in attn_mask_type:
-        window_size = (window_size[0], 0)
-    window_size = (
-        max_seqlen_kv if window_size[0] == -1 else window_size[0],
-        max_seqlen_q if window_size[1] == -1 else window_size[1],
-    )
-
-    # apply padding mask
-    actual_seqlens_q = None
-    actual_seqlens_kv = None
-    if "padding" in attn_mask_type:
-        if attention_type == "self":
-            attention_mask = torch.logical_or(
-                attention_mask.squeeze(1).unsqueeze(3), attention_mask
-            )
-        else:
-            attention_mask = torch.logical_or(
-                attention_mask[0].squeeze(1).unsqueeze(3), attention_mask[1]
-            )
-        m = attention_mask.logical_not()
-        actual_seqlens_q = m[:, 0, :, 0].sum(dim=1)
-        actual_seqlens_kv = m[:, 0, 0, :].sum(dim=1)
-
-    # apply SWA mask
-    mask = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-        1, 1, max_seqlen_q, 1
-    ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(1, 1, 1, max_seqlen_kv)
-    swa_left = None
-    swa_right = None
-    if attn_mask_type == "causal_bottom_right" or (
-        attn_mask_type in ["no_mask", "arbitrary"] and bottom_right_alignment
-    ):
-        swa_left = mask + max_seqlen_kv - max_seqlen_q - window_size[0]
-        swa_right = mask + max_seqlen_kv - max_seqlen_q + window_size[1]
-    elif attn_mask_type in ["causal", "padding_causal"] or (
-        attn_mask_type in ["no_mask", "padding", "arbitrary"] and not bottom_right_alignment
-    ):
-        swa_left = mask - window_size[0]
-        swa_right = mask + window_size[1]
-    elif attn_mask_type == "padding_causal_bottom_right" or (
-        attn_mask_type == "padding" and bottom_right_alignment
-    ):
-        batch_size = attention_mask.shape[0]
-        swa_left = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q - window_size[0]
-        ).view(batch_size, 1, 1, 1)
-        swa_right = mask.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv) + (
-            actual_seqlens_kv - actual_seqlens_q + window_size[1]
-        ).view(batch_size, 1, 1, 1)
-    swa_mask = torch.logical_not((swa_left <= 0) & ~(swa_right < 0))
-    if attention_mask is not None:
-        attention_mask = torch.logical_or(swa_mask, attention_mask)
-    else:
-        attention_mask = swa_mask
-
-    # change mask type
-    if change_type:
-        attn_mask_type = "arbitrary"
-
-    return attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv
-
-
-@torch.no_grad()
-def get_alibi(
-    num_heads: int,
-    max_seqlen_q: int,
-    max_seqlen_kv: int,
-    actual_seqlens_q: Optional[torch.Tensor] = None,
-    actual_seqlens_kv: Optional[torch.Tensor] = None,
-    alibi_slopes: Optional[torch.Tensor] = None,
-    bias_dtype: Optional[torch.dtype] = None,
-    bottom_right_alignment: bool = True,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Parameters
-    ----------
-    num_heads: int
-        Number of heads.
-    max_seqlen_q: int
-        Maximum sequence length for queries.
-    max_seqlen_kv: int
-        Maximum sequence length for keys and values.
-    actual_seqlens_q: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for queries, in shape [batch_size].
-    actual_seqlens_kv: Optional[torch.Tensor], default = `None`
-        Actual sequence lengths for keys and values, in shape [batch_size].
-    alibi_slopes: Optional[torch.Tensor], default = `None`
-        Custom ALiBi slopes, FP32, CUDA tensor, in shape [num_heads] or [batch_size, num_heads].
-    bias_dtype: Optional[torch.dtype], default = `None`
-        Dtype of the generated ALiBi bias. If None, use torch.float32.
-    bottom_right_alignment: bool, default = `True`
-        Whether to align the diagonal of the ALiBi bias to the bottom right corner of
-        the matrix (`True`) or top left (`False`).
-
-    Returns
-    ----------
-    alibi_slopes: torch.Tensor
-        ALiBi slopes in FP32 and shape [num_heads] or [batch_size, num_heads].
-    alibi_bias: torch.Tensor
-        ALiBi bias in FP32 or `bias_dtype`. Its shape is
-        (1) [1, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in [num_heads] shape,
-        and `actual_seqlens_q` and `actual_seqlens_kv` are `None`; or
-        (2) [batch_size, num_heads, max_seqlen_q, max_seqlen_kv] if `alibi_slopes` is in
-        [batch_size, num_heads] shape, or, if `alibi_slopes` is in [num_heads] shape and
-        `actual_seqlens_q` and `actual_seqlens_kv` are not `None`.
-    """
-    global _alibi_cache
-    if _alibi_cache["_alibi_slopes_require_update"]:
-        if alibi_slopes is not None:
-            _alibi_cache["_alibi_slopes"] = alibi_slopes
-        else:
-            n = 2 ** math.floor(math.log2(num_heads))
-            m_0 = 2.0 ** (-8.0 / n)
-            m = torch.pow(m_0, torch.arange(1, 1 + n))
-
-            if n < num_heads:
-                m_hat_0 = 2.0 ** (-4.0 / n)
-                m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (num_heads - n), 2))
-                m = torch.cat([m, m_hat])
-
-            _alibi_cache["_alibi_slopes"] = m.to(dtype=torch.float32, device="cuda")
-        _alibi_cache["_num_heads"] = num_heads
-        _alibi_cache["_alibi_slopes_require_update"] = False
-
-    if _alibi_cache["_alibi_bias_require_update"]:
-        assert _alibi_cache["_alibi_slopes"] is not None, "ALiBi slopes can not be None!"
-        if _alibi_cache["_alibi_slopes"].dim() == 1:
-            slopes_shape = torch.Size([1, _alibi_cache["_alibi_slopes"].shape[0], 1, 1])
-        elif _alibi_cache["_alibi_slopes"].dim() == 2:
-            slopes_shape = torch.Size([*_alibi_cache["_alibi_slopes"].shape[:], 1, 1])
-        else:
-            raise ValueError("ALiBi slopes cannot exceed 2 dimensions.")
-
-        bias = torch.arange(max_seqlen_q, dtype=torch.int32, device="cuda").view(
-            1, 1, max_seqlen_q, 1
-        ) - torch.arange(max_seqlen_kv, dtype=torch.int32, device="cuda").view(
-            1, 1, 1, max_seqlen_kv
-        )
-        if actual_seqlens_q is None and actual_seqlens_kv is None:
-            if bottom_right_alignment:
-                bias = bias + max_seqlen_kv - max_seqlen_q
-        elif actual_seqlens_q is not None and actual_seqlens_kv is not None:
-            batch_size = actual_seqlens_q.shape[0]
-            bias = bias.expand(batch_size, 1, max_seqlen_q, max_seqlen_kv)
-            if bottom_right_alignment:
-                bias = bias + (actual_seqlens_kv - actual_seqlens_q).view(batch_size, 1, 1, 1)
-        else:
-            assert (
-                False
-            ), "actual_seqlens_q and actual_seqlens_kv need to be both None or torch.Tensors!"
-        bias = bias.abs().mul(-1)
-        bias = bias * _alibi_cache["_alibi_slopes"].view(slopes_shape)
-        _alibi_cache["_max_seqlen_q"], _alibi_cache["_max_seqlen_kv"] = max_seqlen_q, max_seqlen_kv
-        _alibi_cache["_bottom_right_alignment"] = bottom_right_alignment
-        bias_dtype = torch.float32 if bias_dtype is None else bias_dtype
-        _alibi_cache["_alibi_bias"] = bias.contiguous().to(dtype=bias_dtype, device="cuda")
-        _alibi_cache["_alibi_bias_require_update"] = False
-
-    return _alibi_cache["_alibi_slopes"], _alibi_cache["_alibi_bias"]
-
-
-def get_cu_seqlens(mask: torch.Tensor) -> torch.Tensor:
-    """
-    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
-    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
-    the samples in a batch.
-    """
-    mask = mask.squeeze(1).squeeze(1)
-    reduced_mask = mask.logical_not().sum(dim=1)
-    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.cat((zero, cu_seqlens))
-
-    return cu_seqlens
-
-
-def get_cu_seqlens_and_indices(mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Given a padding mask of shape [batch_size, 1, 1, max_seqlen], returns an int32
-    tensor of shape [batch_size + 1] containing the cumulative sequence lengths of
-    the samples in a batch, and another int32 tensor of shape [batch_size * max_seqlen, 1, 1]
-    containing the indices for the valid tokens.
-    """
-    mask = mask.squeeze(1).squeeze(1)
-    bs, seqlen = mask.shape
-
-    reduced_mask = mask.logical_not().sum(dim=1)
-    cu_seqlens = reduced_mask.cumsum(dim=0).to(torch.int32)
-    zero = torch.zeros(1, dtype=torch.int32, device="cuda")
-    cu_seqlens = torch.cat((zero, cu_seqlens))
-
-    mask = mask.reshape(-1)
-    indices = mask.logical_not().nonzero()
-    indices = indices.unsqueeze(-1)
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices, pad=(0, 0, 0, 0, 0, pad_amount), mode="constant", value=float(bs * seqlen)
-    )
-
-    return cu_seqlens, indices
-
-
-def get_indices(max_seqlen: int, cu_seqlens: torch.Tensor) -> torch.Tensor:
-    """
-    Given max_seqlen and cu_seqlens of shape [batch_size + 1], returns an int32
-    tensor of shape [batch_size * max_seqlen, 1, 1] containing the indices for
-    the valid tokens in a batch.
-    """
-    bs = len(cu_seqlens) - 1
-    seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
-    indices = [i * max_seqlen + ii for i, j in enumerate(seqlens) for ii in range(j)]
-    indices = torch.Tensor(indices).unsqueeze(1).unsqueeze(1).to(dtype=torch.int64, device="cuda")
-
-    num_nonzeros = indices.shape[0]
-    pad_amount = bs * max_seqlen - num_nonzeros
-    indices = F.pad(
-        input=indices,
-        pad=(0, 0, 0, 0, 0, pad_amount),
-        mode="constant",
-        value=float(bs * max_seqlen),
-    )
-
-    return indices
-
-
-_cu_seqlens_cache = {}
-
-
-def _get_full_cu_seqlens(
-    batch_size: int,
-    max_seqlen: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Cumulative sequence lengths in full data batch
-
-    All sequences in batch have the maximum sequence length.
-
-    """
-    global _cu_seqlens_cache
-
-    if is_in_onnx_export_mode():
-        return torch.arange(
-            0,
-            (batch_size + 1) * max_seqlen,
-            step=max_seqlen,
-            dtype=torch.int32,
-            device=device,
-        )
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = torch.arange(
-            0,
-            (batch_size + 1) * max_seqlen,
-            step=max_seqlen,
-            dtype=torch.int32,
-            device=device,
-        )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
-
-
-@jit_fuser
-def pack_tensor(
-    indices: torch.Tensor,
-    tensor: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Packs the given tensor using the `indices`.
-    """
-    padding_indice = torch.zeros(
-        1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
-    )
-    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    if isinstance(tensor, Float8Tensor):
-        tensor_data = torch.cat((tensor._data, padding_indice), dim=0)
-        gathered_data = torch.gather(tensor_data, 0, indices)
-
-        packed = Float8Tensor.make_like(tensor, data=gathered_data, shape=gathered_data.shape)
-    else:
-        tensor = torch.cat((tensor, padding_indice), dim=0)
-
-        packed = torch.gather(tensor, 0, indices)
-    return packed
-
-
-@jit_fuser
-def pack_2_tensors(
-    indices: torch.Tensor,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Packs the given 2 tensors using the `indices`.
-    """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
-    return t1_packed, t2_packed
-
-
-@jit_fuser
-def pack_3_tensors(
-    indices: torch.Tensor,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Packs the given 3 tensors using the `indices`.
-    """
-    t1_packed = pack_tensor(indices, t1)
-    t2_packed = pack_tensor(indices, t2)
-    t3_packed = pack_tensor(indices, t3)
-    return t1_packed, t2_packed, t3_packed
-
-
-@jit_fuser
-def unpack_tensor(
-    indices: torch.Tensor,
-    dim0: int,
-    tensor: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Inverse of `pack_tensor`.
-    """
-    indices = indices.repeat(1, tensor.shape[1], tensor.shape[2])
-    unpacked = torch.zeros(
-        dim0 + 1, tensor.shape[1], tensor.shape[2], dtype=tensor.dtype, device=tensor.device
-    )
-    if isinstance(tensor, Float8Tensor):
-        unpacked.scatter_(0, indices, tensor._data)
-        unpacked_data = unpacked[0:-1, :, :]
-        unpacked = Float8Tensor.make_like(tensor, data=unpacked_data, shape=unpacked_data.shape)
-    else:
-        unpacked.scatter_(0, indices, tensor)
-        unpacked = unpacked[0:-1, :, :]
-    return unpacked
-
-
-@jit_fuser
-def unpack_2_tensors(
-    indices: torch.Tensor,
-    dim0: int,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Inverse of `pack_2_tensors`.
-    """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
-    return t1_unpacked, t2_unpacked
-
-
-@jit_fuser
-def unpack_3_tensors(
-    indices: torch.Tensor,
-    dim0: int,
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Inverse of `pack_3_tensors`.
-    """
-    t1_unpacked = unpack_tensor(indices, dim0, t1)
-    t2_unpacked = unpack_tensor(indices, dim0, t2)
-    t3_unpacked = unpack_tensor(indices, dim0, t3)
-    return t1_unpacked, t2_unpacked, t3_unpacked
-
-
-class PackTensors(torch.autograd.Function):
-    """
-    Autograd function to pack tensors.
-    """
-
-    @staticmethod
-    def forward(
-        ctx, indices: torch.Tensor, *tensors: Tuple[torch.Tensor, ...]
-    ) -> Union[Tuple[torch.Tensor, ...], torch.Tensor]:
-        # pylint: disable=missing-function-docstring
-        assert 1 <= len(tensors) <= 3, f"Packing {len(tensors)} tensors not supported."
-        ctx.save_for_backward(indices)
-        ctx.dim0 = tensors[0].shape[0]
-        if len(tensors) == 1:
-            return pack_tensor(indices, *tensors)
-        if len(tensors) == 2:
-            return pack_2_tensors(indices, *tensors)
-        return pack_3_tensors(indices, *tensors)
-
-    @staticmethod
-    def backward(ctx, *grad_outputs: Tuple[torch.Tensor, ...]):
-        # pylint: disable=missing-function-docstring
-        (indices,) = ctx.saved_tensors
-        if len(grad_outputs) == 1:
-            return None, unpack_tensor(indices, ctx.dim0, *grad_outputs)
-        if len(grad_outputs) == 2:
-            return None, *unpack_2_tensors(indices, ctx.dim0, *grad_outputs)
-        return None, *unpack_3_tensors(indices, ctx.dim0, *grad_outputs)
-
-
-class UnpackTensor(torch.autograd.Function):
-    """
-    Autograd function to unpack a tensor.
-    """
-
-    @staticmethod
-    def forward(
-        ctx,
-        indices: torch.Tensor,
-        dim0: int,
-        tensor: torch.Tensor,
-    ) -> torch.Tensor:
-        # pylint: disable=missing-function-docstring
-        ctx.save_for_backward(indices)
-        return unpack_tensor(indices, dim0, tensor)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        # pylint: disable=missing-function-docstring
-        (indices,) = ctx.saved_tensors
-        return None, None, pack_tensor(indices, grad_output)
 
 
 def flash_attn_p2p_communicate(
@@ -1818,49 +447,6 @@ def flash_attn_a2a_communicate(
     return a2a_outputs[0] if len(a2a_inputs) == 1 else a2a_outputs
 
 
-def get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False):
-    """Get the list of quantizers used in attention from the quantizers list."""
-    if not fp8:
-        num_of_nones = 8 if cp_specific_quantizers else 6
-        return [None] * num_of_nones
-    QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
-    QKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    O_quantizer = quantizers["scaling_fwd"][META_O]
-    O_quantizer.set_usage(rowwise=True, columnwise=False)
-    S_quantizer = quantizers["scaling_fwd"][META_S]
-    S_quantizer.internal = True
-    S_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = True
-    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer = quantizers["scaling_bwd"][META_DO]
-    dO_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer.internal = True
-    dP_quantizer = quantizers["scaling_bwd"][META_DP]
-    dP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dP_quantizer.interal = True
-    dQKV_CP_quantizer = quantizers["scaling_bwd"][META_DQKV_CP]
-    dQKV_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dQKV_CP_quantizer.internal = True
-    O_CP_quantizer = quantizers["scaling_fwd"][META_O_CP]
-    O_CP_quantizer.set_usage(rowwise=True, columnwise=False)
-
-    if cp_specific_quantizers:
-        return (
-            QKV_quantizer,
-            O_quantizer,
-            O_CP_quantizer,
-            S_quantizer,
-            dQKV_quantizer,
-            dQKV_CP_quantizer,
-            dO_quantizer,
-            dP_quantizer,
-        )
-
-    return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
-
-
 _cu_seqlens_info_with_cp_cache = {}
 
 
@@ -1878,6 +464,89 @@ def _get_cu_seqlens_info_with_cp(
             cu_seqlens // (cp_size * 2),
         )
     return _cu_seqlens_info_with_cp_cache[(batch_size, max_seqlen, cp_size)]
+
+
+def get_fa_args(
+    forward: bool,
+    use_flash_attn_3: bool,
+    qkv_format: str,
+    cu_seqlens_q=None,
+    cu_seqlens_kv=None,
+    max_seqlen_q=None,
+    max_seqlen_kv=None,
+    dq=None,
+    dk=None,
+    dv=None,
+):
+    """Get forward/backward arguments for flash-attn v2 and v3."""
+    if use_flash_attn_3:
+        if forward:
+            if qkv_format == "thd":
+                return [
+                    *[None] * 4,  # k_new, v_new, qv, out
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    *[None] * 3,  # cu_seqlens_k_new, seqused_q, seqused_k
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    *[None]
+                    * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+                ]
+            return [
+                *[None]
+                * 9,  # k_new, v_new, qv, out, cu_seqlens_q, cu_seqlens_kv, cu_seqlens_k_new, seqused_q, seqused_k
+                max_seqlen_q,
+                max_seqlen_kv,
+                *[None]
+                * 8,  # page_table, kv_batch_idx, leftpad_k, rotary_cos, rotary_sin, q_descale, k_descale, v_descale
+            ]
+        if qkv_format == "thd":
+            return [
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                None,  # sequed_q
+                None,  # sequed_k
+                max_seqlen_q,
+                max_seqlen_kv,
+                dq,
+                dk,
+                dv,
+            ]
+        return [
+            None,  # cu_seqlens_q
+            None,  # cu_seqlens_kv
+            None,  # sequed_q
+            None,  # sequed_k
+            max_seqlen_q,
+            max_seqlen_kv,
+            dq,
+            dk,
+            dv,
+        ]
+    if forward:
+        if qkv_format == "thd":
+            return [
+                cu_seqlens_q,
+                cu_seqlens_kv,
+                max_seqlen_q,
+                max_seqlen_kv,
+            ]
+        return []
+    if qkv_format == "thd":
+        return [
+            dq,
+            dk,
+            dv,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+        ]
+    return [
+        dq,
+        dk,
+        dv,
+    ]
 
 
 class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
@@ -1920,6 +589,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         cp_stream,
         quantizers,
         pad_between_seqs,
+        use_flash_attn_3,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
@@ -1995,7 +665,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             dQKV_CP_quantizer,
             dO_quantizer,
             dP_quantizer,
-        ) = get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
+        ) = dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=True)
 
         if fp8:
             if use_fused_attention:
@@ -2078,16 +748,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             if use_fused_attention:
                 softmax_lse_in_packed_format = get_cudnn_version() >= (9, 6, 0)
             else:
-                softmax_lse_in_packed_format = _flash_attn_2_6_0_plus or _use_flash_attn_3
+                softmax_lse_in_packed_format = fa_utils.v2_6_0_plus or use_flash_attn_3
 
         flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
-            if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+            if use_flash_attn_3:
+                flash_attn_fwd = (
+                    _flash_attn_fwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
             else:
                 if qkv_format == "thd":
@@ -2096,16 +765,16 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
-                if (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus) or _use_flash_attn_3:
+                if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                     fa_forward_kwargs["window_size"] = (-1, 0) if causal else (-1, -1)
-                elif _flash_attn_2_7_0_plus:
+                elif fa_utils.v2_7_0_plus:
                     fa_forward_kwargs["window_size_left"] = -1
                     fa_forward_kwargs["window_size_right"] = 0 if causal else -1
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_forward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_5_7_plus and qkv_format == "thd":
+                if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_forward_kwargs["softcap"] = 0.0
 
         # Flash Attn inputs
@@ -2249,14 +918,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
-                                fa_forward_args_thd = []
-                                if qkv_format == "thd":
-                                    fa_forward_args_thd = [
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q,
-                                        max_seqlen_kv,
-                                    ]
+                                fa_forward_args_thd = get_fa_args(
+                                    True,
+                                    use_flash_attn_3,
+                                    qkv_format,
+                                    cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                    max_seqlen_q=max_seqlen_q,
+                                    max_seqlen_kv=max_seqlen_kv,
+                                )
                                 fa_outputs = flash_attn_fwd(
                                     q_inputs[i % 2],
                                     (
@@ -2273,15 +943,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     causal=True,
                                     **fa_forward_kwargs,
                                 )
-                                if not _flash_attn_2_7_0_plus:
+                                if not fa_utils.v2_7_0_plus:
                                     out_per_step[i] = fa_outputs[4]
                                     softmax_lse_per_step[i] = fa_outputs[5]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[7]
                                 else:
                                     out_per_step[i] = fa_outputs[0]
                                     softmax_lse_per_step[i] = fa_outputs[1]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[3]
                         elif i <= rank:
                             if pad_between_seqs:
@@ -2379,19 +1049,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
-                                fa_forward_args_thd = []
-                                if qkv_format == "thd":
-                                    fa_forward_args_thd = [
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q,
-                                        max_seqlen_kv // 2,
-                                    ]
-                                if _use_flash_attn_3 or (
-                                    _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                                fa_forward_args_thd = get_fa_args(
+                                    True,
+                                    use_flash_attn_3,
+                                    qkv_format,
+                                    cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                    max_seqlen_q=max_seqlen_q,
+                                    max_seqlen_kv=max_seqlen_kv // 2,
+                                )
+                                if use_flash_attn_3 or (
+                                    fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
                                 ):
                                     fa_forward_kwargs["window_size"] = (-1, -1)
-                                elif _flash_attn_2_7_0_plus:
+                                elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
                                 fa_outputs = flash_attn_fwd(
@@ -2410,15 +1081,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     causal=False,
                                     **fa_forward_kwargs,
                                 )
-                                if not _flash_attn_2_7_0_plus:
+                                if not fa_utils.v2_7_0_plus:
                                     out_per_step[i] = fa_outputs[4]
                                     softmax_lse_per_step[i] = fa_outputs[5]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[7]
                                 else:
                                     out_per_step[i] = fa_outputs[0]
                                     softmax_lse_per_step[i] = fa_outputs[1]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[3]
                         else:
                             if pad_between_seqs:
@@ -2525,19 +1196,20 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                     attn_biases[i] = rest[0] if len(rest) > 0 else None
                             else:
-                                fa_forward_args_thd = []
-                                if qkv_format == "thd":
-                                    fa_forward_args_thd = [
-                                        cu_seqlens_q_per_step[i],
-                                        cu_seqlens_kv_per_step[i],
-                                        max_seqlen_q // 2,
-                                        max_seqlen_kv,
-                                    ]
-                                if _use_flash_attn_3 or (
-                                    _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                                fa_forward_args_thd = get_fa_args(
+                                    True,
+                                    use_flash_attn_3,
+                                    qkv_format,
+                                    cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                    cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                    max_seqlen_q=max_seqlen_q // 2,
+                                    max_seqlen_kv=max_seqlen_kv,
+                                )
+                                if use_flash_attn_3 or (
+                                    fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
                                 ):
                                     fa_forward_kwargs["window_size"] = (-1, -1)
-                                elif _flash_attn_2_7_0_plus:
+                                elif fa_utils.v2_7_0_plus:
                                     fa_forward_kwargs["window_size_left"] = -1
                                     fa_forward_kwargs["window_size_right"] = -1
                                 fa_outputs = flash_attn_fwd(
@@ -2556,15 +1228,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                     causal=False,
                                     **fa_forward_kwargs,
                                 )
-                                if not _flash_attn_2_7_0_plus:
+                                if not fa_utils.v2_7_0_plus:
                                     out_per_step[i] = fa_outputs[4]
                                     softmax_lse_per_step[i] = fa_outputs[5]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[7]
                                 else:
                                     out_per_step[i] = fa_outputs[0]
                                     softmax_lse_per_step[i] = fa_outputs[1]
-                                    if not _use_flash_attn_3:
+                                    if not use_flash_attn_3:
                                         rng_states[i] = fa_outputs[3]
                     else:
                         if pad_between_seqs:
@@ -2647,14 +1319,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 softmax_lse_per_step[i], rng_states[i], *rest = aux_ctx_tensors
                                 attn_biases[i] = rest[0] if len(rest) > 0 else None
                         else:
-                            fa_forward_args_thd = []
-                            if qkv_format == "thd":
-                                fa_forward_args_thd = [
-                                    cu_seqlens_q_per_step[i],
-                                    cu_seqlens_kv_per_step[i],
-                                    max_seqlen_q,
-                                    max_seqlen_kv,
-                                ]
+                            fa_forward_args_thd = get_fa_args(
+                                True,
+                                use_flash_attn_3,
+                                qkv_format,
+                                cu_seqlens_q=cu_seqlens_q_per_step[i],
+                                cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                                max_seqlen_q=max_seqlen_q,
+                                max_seqlen_kv=max_seqlen_kv,
+                            )
                             fa_outputs = flash_attn_fwd(
                                 q,
                                 (
@@ -2671,15 +1344,15 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                                 causal=False,
                                 **fa_forward_kwargs,
                             )
-                            if not _flash_attn_2_7_0_plus:
+                            if not fa_utils.v2_7_0_plus:
                                 out_per_step[i] = fa_outputs[4]
                                 softmax_lse_per_step[i] = fa_outputs[5]
-                                if not _use_flash_attn_3:
+                                if not use_flash_attn_3:
                                     rng_states[i] = fa_outputs[7]
                             else:
                                 out_per_step[i] = fa_outputs[0]
                                 softmax_lse_per_step[i] = fa_outputs[1]
-                                if not _use_flash_attn_3:
+                                if not use_flash_attn_3:
                                     rng_states[i] = fa_outputs[3]
 
             if i > 0:
@@ -2871,6 +1544,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        ctx.use_flash_attn_3 = use_flash_attn_3
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
 
         return out_ret
@@ -3043,11 +1717,10 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
-            if _use_flash_attn_3:
-                if ctx.qkv_format == "thd":
-                    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                else:
-                    flash_attn_bwd = _flash_attn_bwd_v3
+            if ctx.use_flash_attn_3:
+                flash_attn_bwd = (
+                    _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
@@ -3055,11 +1728,11 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_backward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_4_1_plus:
+                if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
 
         for i in range(cp_size):
@@ -3185,22 +1858,34 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     else:
                         dq_ = torch.empty_like(q_)
                         dkv_ = torch.empty_like(kv_)
-                        fa_backward_args_thd = []
-                        if ctx.qkv_format == "thd":
-                            fa_backward_args_thd = [
-                                cu_seqlens_q_per_step[cp_size - i - 1],
-                                cu_seqlens_kv_per_step[cp_size - i - 1],
-                                ctx.max_seqlen_q,
-                                ctx.max_seqlen_kv,
-                            ]
-                        if _use_flash_attn_3 or (
-                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        fa_backward_args_thd = get_fa_args(
+                            False,
+                            ctx.use_flash_attn_3,
+                            ctx.qkv_format,
+                            cu_seqlens_q=cu_seqlens_q_per_step[cp_size - i - 1],
+                            cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - i - 1],
+                            max_seqlen_q=ctx.max_seqlen_q,
+                            max_seqlen_kv=ctx.max_seqlen_kv,
+                            dq=dq_,
+                            dk=(
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            ),
+                            dv=(
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            ),
+                        )
+                        if ctx.use_flash_attn_3 or (
+                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
                         ):
                             fa_backward_kwargs["window_size"] = (-1, 0)
-                        elif _flash_attn_2_7_0_plus:
+                        elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
                             fa_backward_kwargs["window_size_right"] = 0
-                        if not _use_flash_attn_3:
+                        if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
                         flash_attn_bwd(
                             dout_,
@@ -3209,9 +1894,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             softmax_lse,
-                            dq_,
-                            dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
-                            dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
                             *fa_backward_args_thd,
                             causal=True,
                             **fa_backward_kwargs,
@@ -3302,22 +1984,34 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     else:
                         dq_ = torch.empty_like(q_)
                         dkv_ = torch.empty_like(kv_)
-                        fa_backward_args_thd = []
-                        if ctx.qkv_format == "thd":
-                            fa_backward_args_thd = [
-                                cu_seqlens_q_per_step[cp_size - i - 1],
-                                cu_seqlens_kv_per_step[cp_size - i - 1],
-                                ctx.max_seqlen_q,
-                                ctx.max_seqlen_kv // 2,
-                            ]
-                        if _use_flash_attn_3 or (
-                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        fa_backward_args_thd = get_fa_args(
+                            False,
+                            ctx.use_flash_attn_3,
+                            ctx.qkv_format,
+                            cu_seqlens_q=cu_seqlens_q_per_step[cp_size - i - 1],
+                            cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - i - 1],
+                            max_seqlen_q=ctx.max_seqlen_q,
+                            max_seqlen_kv=ctx.max_seqlen_kv // 2,
+                            dq=dq_,
+                            dk=(
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            ),
+                            dv=(
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            ),
+                        )
+                        if ctx.use_flash_attn_3 or (
+                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
                         ):
                             fa_backward_kwargs["window_size"] = (-1, -1)
-                        if _flash_attn_2_7_0_plus:
+                        elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
                             fa_backward_kwargs["window_size_right"] = -1
-                        if not _use_flash_attn_3:
+                        if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
                         flash_attn_bwd(
                             dout_,
@@ -3326,9 +2020,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             softmax_lse,
-                            dq_,
-                            dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
-                            dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
                             *fa_backward_args_thd,
                             causal=False,
                             **fa_backward_kwargs,
@@ -3421,22 +2112,34 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                     else:
                         dq_ = torch.empty_like(q_)
                         dkv_ = torch.empty_like(kv_)
-                        fa_backward_args_thd = []
-                        if ctx.qkv_format == "thd":
-                            fa_backward_args_thd = [
-                                cu_seqlens_q_per_step[cp_size - i - 1],
-                                cu_seqlens_kv_per_step[cp_size - i - 1],
-                                ctx.max_seqlen_q // 2,
-                                ctx.max_seqlen_kv,
-                            ]
-                        if _use_flash_attn_3 or (
-                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
+                        fa_backward_args_thd = get_fa_args(
+                            False,
+                            ctx.use_flash_attn_3,
+                            ctx.qkv_format,
+                            cu_seqlens_q=cu_seqlens_q_per_step[cp_size - i - 1],
+                            cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - i - 1],
+                            max_seqlen_q=ctx.max_seqlen_q // 2,
+                            max_seqlen_kv=ctx.max_seqlen_kv,
+                            dq=dq_,
+                            dk=(
+                                dkv_[..., 0, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[0]
+                            ),
+                            dv=(
+                                dkv_[..., 1, :, :]
+                                if ctx.qkv_format in ["bshd", "sbhd"]
+                                else dkv_[1]
+                            ),
+                        )
+                        if ctx.use_flash_attn_3 or (
+                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
                         ):
                             fa_backward_kwargs["window_size"] = (-1, -1)
-                        elif _flash_attn_2_7_0_plus:
+                        elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = -1
                             fa_backward_kwargs["window_size_right"] = -1
-                        if not _use_flash_attn_3:
+                        if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
                         flash_attn_bwd(
                             dout_,
@@ -3445,9 +2148,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                             kv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv_[1],
                             out_,
                             softmax_lse_,
-                            dq_,
-                            dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
-                            dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
                             *fa_backward_args_thd,
                             causal=False,
                             **fa_backward_kwargs,
@@ -3517,20 +2217,24 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 else:
                     dq_ = torch.empty_like(q)
                     dkv_ = torch.empty_like(kv)
-                    fa_backward_args_thd = []
-                    if ctx.qkv_format == "thd":
-                        fa_backward_args_thd = [
-                            cu_seqlens_q_per_step[cp_size - i - 1],
-                            cu_seqlens_kv_per_step[cp_size - i - 1],
-                            ctx.max_seqlen_q,
-                            ctx.max_seqlen_kv,
-                        ]
-                    if _use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                    fa_backward_args_thd = get_fa_args(
+                        False,
+                        ctx.use_flash_attn_3,
+                        ctx.qkv_format,
+                        cu_seqlens_q=cu_seqlens_q_per_step[cp_size - i - 1],
+                        cu_seqlens_kv=cu_seqlens_kv_per_step[cp_size - i - 1],
+                        max_seqlen_q=ctx.max_seqlen_q,
+                        max_seqlen_kv=ctx.max_seqlen_kv,
+                        dq=dq_,
+                        dk=dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
+                        dv=dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
+                    )
+                    if ctx.use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                         fa_backward_kwargs["window_size"] = (-1, -1)
-                    elif _flash_attn_2_7_0_plus:
+                    elif fa_utils.v2_7_0_plus:
                         fa_backward_kwargs["window_size_left"] = -1
                         fa_backward_kwargs["window_size_right"] = -1
-                    if not _use_flash_attn_3:
+                    if not ctx.use_flash_attn_3:
                         fa_backward_kwargs["rng_state"] = rng_states[cp_size - i - 1]
                     flash_attn_bwd(
                         dout,
@@ -3539,9 +2243,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                         kv[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else kv[1],
                         out,
                         softmax_lse,
-                        dq_,
-                        dkv_[..., 0, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[0],
-                        dkv_[..., 1, :, :] if ctx.qkv_format in ["bshd", "sbhd"] else dkv_[1],
                         *fa_backward_args_thd,
                         causal=False,
                         **fa_backward_kwargs,
@@ -3781,6 +2482,7 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -3839,6 +2541,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         window_size,
         cp_group,
         cp_stream,
+        use_flash_attn_3,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
@@ -3858,17 +2561,14 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         assert attn_bias_type == "no_bias", f"{attn_bias_type} bias type is not supported!"
         assert q.shape[-1] % 8 == 0, "Hidden size per attention head should be multiple of 8!"
         assert (
-            use_fused_attention or _flash_attn_2_3_plus
+            use_fused_attention or fa_utils.v2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
-            if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+            if use_flash_attn_3:
+                flash_attn_fwd = _flash_attn_fwd_v3
             else:
                 if qkv_format == "thd":
                     flash_attn_fwd = _flash_attn_varlen_fwd
@@ -3876,11 +2576,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_forward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_5_7_plus and qkv_format == "thd":
+                if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_forward_kwargs["softcap"] = 0.0
 
         assert qkv_format != "thd", f"{qkv_format} format is not supported!"
@@ -3954,7 +2654,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                     )
                     max_seqlen_kv_ = seq_end_idx - seq_start_idx
                     if use_fused_attention or qkv_format == "thd":
-                        cu_seqlens_kv_per_step[i] = _get_full_cu_seqlens(
+                        cu_seqlens_kv_per_step[i] = dpa_utils.get_full_cu_seqlens(
                             k.shape[1], max_seqlen_kv_, k.device
                         )
                     k_, v_ = [x[seq_start_idx:seq_end_idx] for x in [k_ag, v_ag]]
@@ -3983,19 +2683,18 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             window_size=window_size_per_step[i],
                         )
                     else:
-                        fa_forward_args_thd = []
-                        if qkv_format == "thd":
-                            fa_forward_args_thd = [
-                                cu_seqlens_q,
-                                cu_seqlens_kv_per_step[i],
-                                max_seqlen_q,
-                                max_seqlen_kv_,
-                            ]
-                        if _use_flash_attn_3 or (
-                            _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus
-                        ):
+                        fa_forward_args_thd = get_fa_args(
+                            True,
+                            use_flash_attn_3,
+                            qkv_format,
+                            cu_seqlens_q=cu_seqlens_q,
+                            cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                            max_seqlen_q=max_seqlen_q,
+                            max_seqlen_kv=max_seqlen_kv_,
+                        )
+                        if use_flash_attn_3 or (fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus):
                             fa_forward_kwargs["window_size"] = window_size_per_step[i]
-                        elif _flash_attn_2_7_0_plus:
+                        elif fa_utils.v2_7_0_plus:
                             fa_forward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_forward_kwargs["window_size_right"] = window_size_per_step[i][1]
                         fa_outputs = flash_attn_fwd(
@@ -4006,15 +2705,15 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             causal=causal,
                             **fa_forward_kwargs,
                         )
-                        if not _flash_attn_2_7_0_plus:
+                        if not fa_utils.v2_7_0_plus:
                             out_per_step[i] = fa_outputs[4]
                             softmax_lse_per_step[i] = fa_outputs[5]
-                            if not _use_flash_attn_3:
+                            if not use_flash_attn_3:
                                 rng_states[i] = fa_outputs[7]
                         else:
                             out_per_step[i] = fa_outputs[0]
                             softmax_lse_per_step[i] = fa_outputs[1]
-                            if not _use_flash_attn_3:
+                            if not use_flash_attn_3:
                                 rng_states[i] = fa_outputs[3]
 
             if i > 0:
@@ -4059,6 +2758,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.deterministic = deterministic
         ctx.use_fused_attention = use_fused_attention
+        ctx.use_flash_attn_3 = use_flash_attn_3
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVAllGather.forward")
         return out
 
@@ -4114,11 +2814,8 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
-            if _use_flash_attn_3:
-                if ctx.qkv_format == "thd":
-                    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                else:
-                    flash_attn_bwd = _flash_attn_bwd_v3
+            if ctx.use_flash_attn_3:
+                flash_attn_bwd = _flash_attn_bwd_v3
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
                 if ctx.qkv_format == "thd":
@@ -4126,11 +2823,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                 else:
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_backward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_4_1_plus:
+                if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
 
         for i in range(len(local_seq_chunk_ids) + 1):
@@ -4179,19 +2876,25 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                         dq_per_step[i], dk_per_step[i], dv_per_step[i] = [
                             torch.empty_like(x) for x in [q_, k_, v_]
                         ]
-                        fa_backward_args_thd = []
-                        if ctx.qkv_format == "thd":
-                            fa_backward_args_thd = [
-                                cu_seqlens_q,
-                                cu_seqlens_kv_per_step[i],
-                                ctx.max_seqlen_q,
-                                max_seqlen_kv,
-                            ]
-                        if not _use_flash_attn_3:
+                        fa_backward_args_thd = get_fa_args(
+                            False,
+                            ctx.use_flash_attn_3,
+                            ctx.qkv_format,
+                            cu_seqlens_q=cu_seqlens_q,
+                            cu_seqlens_kv=cu_seqlens_kv_per_step[i],
+                            max_seqlen_q=ctx.max_seqlen_q,
+                            max_seqlen_kv=max_seqlen_kv,
+                            dq=dq_per_step[i],
+                            dk=dk_per_step[i],
+                            dv=dv_per_step[i],
+                        )
+                        if not ctx.use_flash_attn_3:
                             fa_backward_kwargs["rng_state"] = rng_states[i]
-                        if _flash_attn_2_3_plus and not _flash_attn_2_7_0_plus:
+                        if ctx.use_flash_attn_3 or (
+                            fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus
+                        ):
                             fa_backward_kwargs["window_size"] = window_size_per_step[i]
-                        if _flash_attn_2_7_0_plus:
+                        elif fa_utils.v2_7_0_plus:
                             fa_backward_kwargs["window_size_left"] = window_size_per_step[i][0]
                             fa_backward_kwargs["window_size_right"] = window_size_per_step[i][1]
                         flash_attn_bwd(
@@ -4201,9 +2904,6 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             v_,
                             out_,
                             softmax_lse_per_step[i],
-                            dq_per_step[i],
-                            dk_per_step[i],
-                            dv_per_step[i],
                             *fa_backward_args_thd,
                             causal="causal" in ctx.attn_mask_type,
                             **fa_backward_kwargs,
@@ -4271,6 +2971,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -4307,6 +3008,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         cp_group,
         cp_stream,
         quantizers,
+        use_flash_attn_3,
     ):
         # pylint: disable=missing-function-docstring
         nvtx_range_push("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
@@ -4325,17 +3027,14 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             window_size == (-1, 0)
             or window_size == (-1, -1)
             or use_fused_attention
-            or _flash_attn_2_3_plus
+            or fa_utils.v2_3_plus
         ), "Sliding window attention only can work with FusedAttention or FlashAttention >= 2.3!"
 
         flash_attn_fwd = None
         if not use_fused_attention:
             fa_forward_kwargs = {"softmax_scale": softmax_scale}
-            if _use_flash_attn_3:
-                if qkv_format == "thd":
-                    flash_attn_fwd = _flash_attn_varlen_fwd_v3
-                else:
-                    flash_attn_fwd = _flash_attn_fwd_v3
+            if use_flash_attn_3:
+                flash_attn_fwd = _flash_attn_fwd_v3
                 fa_forward_kwargs["window_size"] = window_size
             else:
                 if qkv_format == "thd":
@@ -4344,16 +3043,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                     flash_attn_fwd = _flash_attn_fwd
                 fa_forward_kwargs["dropout_p"] = dropout_p
                 fa_forward_kwargs["return_softmax"] = False
-                if _use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                     fa_forward_kwargs["window_size"] = window_size
-                elif _flash_attn_2_7_0_plus:
+                elif fa_utils.v2_7_0_plus:
                     fa_forward_kwargs["window_size_left"] = window_size[0]
                     fa_forward_kwargs["window_size_right"] = window_size[1]
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_forward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_5_7_plus and qkv_format == "thd":
+                if fa_utils.v2_5_7_plus and qkv_format == "thd":
                     fa_forward_kwargs["block_table"] = None
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_forward_kwargs["softcap"] = 0.0
 
         assert (
@@ -4375,7 +3074,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         is_output_fp8 = False
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
         if fp8:
             if use_fused_attention:
@@ -4449,14 +3148,15 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if fp8:
                 out = out._data
         else:
-            fa_forward_args_thd = []
-            if qkv_format == "thd":
-                fa_forward_args_thd = [
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    max_seqlen_q,
-                    max_seqlen_kv,
-                ]
+            fa_forward_args_thd = get_fa_args(
+                True,
+                use_flash_attn_3,
+                qkv_format,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+            )
             fa_outputs = flash_attn_fwd(
                 q,
                 k,
@@ -4465,12 +3165,12 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 causal=causal,
                 **fa_forward_kwargs,
             )
-            if not _flash_attn_2_7_0_plus:
+            if not fa_utils.v2_7_0_plus:
                 out, softmax_lse = fa_outputs[4], fa_outputs[5]
-                rng_state = fa_outputs[7] if not _use_flash_attn_3 else None
+                rng_state = fa_outputs[7] if not use_flash_attn_3 else None
             else:
                 out, softmax_lse = fa_outputs[0], fa_outputs[1]
-                rng_state = fa_outputs[3] if not _use_flash_attn_3 else None
+                rng_state = fa_outputs[3] if not use_flash_attn_3 else None
             aux_ctx_tensors = [softmax_lse, rng_state]
 
         chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size, out.device)
@@ -4553,6 +3253,7 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.fp8_meta = fp8_meta
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
+        ctx.use_flash_attn_3 = use_flash_attn_3
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         return out_ret
 
@@ -4641,11 +3342,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         flash_attn_bwd = None
         if not ctx.use_fused_attention:
             fa_backward_kwargs = {"softmax_scale": ctx.softmax_scale}
-            if _use_flash_attn_3:
-                if ctx.qkv_format == "thd":
-                    flash_attn_bwd = _flash_attn_varlen_bwd_v3
-                else:
-                    flash_attn_bwd = _flash_attn_bwd_v3
+            if ctx.use_flash_attn_3:
+                flash_attn_bwd = (
+                    _flash_attn_bwd_v3  # pylint: disable=possibly-used-before-assignment
+                )
                 fa_backward_kwargs["window_size"] = ctx.window_size
                 fa_backward_kwargs["deterministic"] = ctx.deterministic
             else:
@@ -4654,16 +3354,16 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 else:
                     flash_attn_bwd = _flash_attn_bwd
                 fa_backward_kwargs["dropout_p"] = ctx.dropout_p
-                if _use_flash_attn_3 or (_flash_attn_2_3_plus and not _flash_attn_2_7_0_plus):
+                if fa_utils.v2_3_plus and not fa_utils.v2_7_0_plus:
                     fa_backward_kwargs["window_size"] = ctx.window_size
-                elif _flash_attn_2_7_0_plus:
+                elif fa_utils.v2_7_0_plus:
                     fa_backward_kwargs["window_size_left"] = ctx.window_size[0]
                     fa_backward_kwargs["window_size_right"] = ctx.window_size[1]
-                if _flash_attn_2_4_plus:
+                if fa_utils.v2_4_plus:
                     fa_backward_kwargs["alibi_slopes"] = None
-                if _flash_attn_2_4_1_plus:
+                if fa_utils.v2_4_1_plus:
                     fa_backward_kwargs["deterministic"] = ctx.deterministic
-                if _flash_attn_2_6_0_plus:
+                if fa_utils.v2_6_0_plus:
                     fa_backward_kwargs["softcap"] = 0.0
 
         if ctx.use_fused_attention:
@@ -4722,15 +3422,19 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         else:
             softmax_lse, rng_state = aux_ctx_tensors
             dq, dk, dv = [torch.empty_like(x) for x in [q, k, v]]
-            fa_backward_args_thd = []
-            if ctx.qkv_format == "thd":
-                fa_backward_args_thd = [
-                    cu_seqlens_q,
-                    cu_seqlens_kv,
-                    ctx.max_seqlen_q,
-                    ctx.max_seqlen_kv,
-                ]
-            if not _use_flash_attn_3:
+            fa_backward_args_thd = get_fa_args(
+                False,
+                ctx.use_flash_attn_3,
+                ctx.qkv_format,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=ctx.max_seqlen_q,
+                max_seqlen_kv=ctx.max_seqlen_kv,
+                dq=dq,
+                dk=dk,
+                dv=dv,
+            )
+            if not ctx.use_flash_attn_3:
                 fa_backward_kwargs["rng_state"] = rng_state
             flash_attn_bwd(
                 dout,
@@ -4739,9 +3443,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
                 v,
                 out,
                 softmax_lse,
-                dq,
-                dk,
-                dv,
                 *fa_backward_args_thd,
                 causal=causal,
                 **fa_backward_kwargs,
@@ -4828,6 +3529,7 @@ def attn_forward_func_with_cp(
     fp8_meta=None,
     quantizers=None,
     pad_between_seqs=False,
+    use_flash_attn_3=False,
 ) -> torch.Tensor:
     """
     Attention implementation with context parallelism.
@@ -4895,235 +3597,29 @@ def attn_forward_func_with_cp(
     ]
 
     if cp_comm_type in ["p2p", "a2a+p2p"]:
-        args += [fp8, fp8_meta, cp_group, cp_global_ranks, cp_stream, quantizers, pad_between_seqs]
+        args += [
+            fp8,
+            fp8_meta,
+            cp_group,
+            cp_global_ranks,
+            cp_stream,
+            quantizers,
+            pad_between_seqs,
+            use_flash_attn_3,
+        ]
         out = AttnFuncWithCPAndKVP2P.apply(*args)
     elif cp_comm_type == "all_gather":
         args.pop(5)
         args.pop(8)
-        args += [window_size, cp_group, cp_stream]
+        args += [window_size, cp_group, cp_stream, use_flash_attn_3]
         out = AttnFuncWithCPAndKVAllGather.apply(*args)
     elif cp_comm_type == "a2a":
-        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers]
+        args += [window_size, fp8, fp8_meta, cp_group, cp_stream, quantizers, use_flash_attn_3]
         out = AttnFuncWithCPAndQKVOA2A.apply(*args)
     else:
         raise ValueError(f"Unsupported communication type: {cp_comm_type}!")
 
     return out
-
-
-class RotaryPositionEmbedding(torch.nn.Module):
-    """
-    Implements Rotary Position Embedding from https://arxiv.org/abs/2104.09864.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        rotary_percent: float = 1.0,
-        seq_len_interpolation_factor: Optional[int] = None,
-        pretrained_max_position_embeddings: Optional[int] = None,
-        rotary_base: float = 10000.0,
-    ):
-        """
-        Parameters
-        ----------
-        dim: int
-            rotary embedding dimension
-        rotary_percent: float
-            Percent of rotary dimension to use for rotary position embeddings.
-        seq_len_interpolation_factor: int
-            if not None, discrete positions will be interpolated by this factor via the trick in
-            https://arxiv.org/abs/2306.15595
-        pretrained_max_position_embeddings: int
-            pre-trained max_position_embeddings before position interpolation
-        """
-        super().__init__()
-        if rotary_percent < 1.0:
-            dim = int(dim * rotary_percent)
-        self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        self.rotary_base = rotary_base
-        inv_freq = 1.0 / (
-            self.rotary_base
-            ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
-                / dim
-            )
-        )
-        self.register_buffer("inv_freq", inv_freq)
-        self.pretrained_max_position_embeddings = pretrained_max_position_embeddings
-
-    def forward(self, max_seq_len: int, offset: int = 0):
-        """
-        Create rotary position embedding frequencies
-
-        Parameters
-        ----------
-        max_seq_len: int
-            sequence length of a sample
-        offset: int, default = 0
-            fixed offset for freqencies
-        """
-        seq = (
-            torch.arange(max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-            + offset
-        )
-
-        if (
-            self.pretrained_max_position_embeddings is not None
-            and self.seq_len_interpolation_factor is not None
-        ):
-            if (
-                max_seq_len
-                > self.pretrained_max_position_embeddings * self.seq_len_interpolation_factor
-            ):
-                # dynamic linear scaling (length > position we have learned)
-                seq *= 1 / (max_seq_len / self.pretrained_max_position_embeddings)
-            else:
-                # fixed linear scaling
-                seq *= 1 / self.seq_len_interpolation_factor
-
-        freqs = torch.einsum("i , j -> i j", seq, self.inv_freq)
-        # first part even vector components, second part odd vector components,
-        #  2 * dim in dimension size
-        emb = torch.cat((freqs, freqs), dim=-1)
-        # emb [seq_length, .., dim]
-        return emb.reshape(emb.size(0), 1, 1, emb.size(1))
-
-
-class FusedRoPEFunc(torch.autograd.Function):
-    """
-    Function for FusedRoPE
-
-    This implementation assumes the input tensor to be in `sbhd`, `bshd` or `thd` format and
-    the RoPE tensor to be of shape (s, 1, 1, d). It accepts arbitrary memory layouts to avoid
-    the expensive `.contiguous()` calls, thus it may not achieve the best memory access pattern.
-    """
-
-    @staticmethod
-    def forward(
-        ctx,
-        t: torch.Tensor,
-        freqs: torch.Tensor,
-        tensor_format: str = "sbhd",
-        cu_seqlens: Union[torch.Tensor, None] = None,
-        cp_size: int = 1,
-        cp_rank: int = 0,
-    ) -> torch.Tensor:
-        # pylint: disable=missing-function-docstring
-        if freqs.dtype != torch.float32:
-            freqs = freqs.float()
-        if tensor_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, False)
-        elif tensor_format == "bshd":
-            output = tex.fused_rope_forward(t.transpose(0, 1), freqs, True).transpose(0, 1)
-        elif tensor_format == "thd":
-            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, cp_size, cp_rank)
-        else:
-            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
-        ctx.save_for_backward(freqs, cu_seqlens)
-        ctx.tensor_format = tensor_format
-        ctx.cp_size = cp_size
-        ctx.cp_rank = cp_rank
-
-        return output
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        # pylint: disable=missing-function-docstring
-        freqs, cu_seqlens = ctx.saved_tensors
-        if ctx.tensor_format == "sbhd":
-            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
-        elif ctx.tensor_format == "bshd":
-            grad_input = tex.fused_rope_backward(
-                grad_output.transpose(0, 1), freqs, True
-            ).transpose(0, 1)
-        elif ctx.tensor_format == "thd":
-            grad_input = tex.fused_rope_thd_backward(
-                grad_output, cu_seqlens, freqs, ctx.cp_size, ctx.cp_rank
-            )
-        else:
-            raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
-
-        return grad_input, None, None, None, None, None
-
-
-def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """
-    change sign so the last dimension becomes [-odd, +even]
-    """
-    x = x.view(x.shape[:-1] + torch.Size((2, x.shape[-1] // 2)))
-    x1, x2 = x.unbind(dim=-2)
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    tensor_format: str = "sbhd",
-    fused: bool = False,
-    cu_seqlens: Union[torch.Tensor, None] = None,
-    cp_size: int = 1,
-    cp_rank: int = 0,
-) -> torch.Tensor:
-    """
-    Apply rotary positional embedding tensor to the input tensor.
-
-    Parameters
-    ----------
-    t: torch.Tensor
-        Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
-        rotary positional embedding will be applied.
-    freqs: torch.Tensor
-        Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-        with `s2 >= s` and `d2 <= d`.
-    fused: bool, default = False
-        Whether to use a fused applying RoPE implementation.
-    tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
-        is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
-        of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-    cu_seqlens: torch.Tensor, default = None.
-        Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-        dtype torch.int32. Only valid when `tensor_format` is 'thd'.
-        Should be `cu_seqlens_padded` when cp_size > 1.
-    cp_size: int, default = 1.
-        Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    cp_rank: int, default = 0.
-        Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
-    """
-    if fused:
-        assert (
-            tensor_format != "thd" or cu_seqlens is not None
-        ), "cu_seqlens must not be None when tensor_format is 'thd'."
-        return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens, cp_size, cp_rank)
-
-    assert tensor_format in ("sbhd", "bshd"), (
-        "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
-        f"when fused is False, got {tensor_format}."
-    )
-
-    max_seq_len = freqs.shape[0]
-    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-    # Only apply the rotary embeddings up to the sequence length of the running
-    # input.
-    assert (
-        cur_seq_len <= max_seq_len
-    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
-    if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
-    # cos/sin first then dtype conversion for better precision
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
-
-    rot_dim = freqs.shape[-1]
-    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
-
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * cos_) + (_rotate_half(t) * sin_)
-    return torch.cat((t, t_pass), dim=-1)
 
 
 class _SplitAlongDim(torch.autograd.Function):
@@ -5311,14 +3807,35 @@ class UnfusedDotProductAttention(torch.nn.Module):
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """Unfused attention fprop"""
         assert (
             qkv_layout in QKVLayouts
         ), f"UnfusedDotProductAttention does not support qkv_layout = {qkv_layout}!"
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+
+        # get q_format and kv_format for training and inference
+        qkv_format, q_format, _ = dpa_utils.get_qkv_format(qkv_layout, inference_params)
+        if inference_params is not None and inference_params.is_paged:
+            key_layer, value_layer = inference_params.convert_paged_to_nonpaged(self.layer_number)
+
         if qkv_format == "bshd":
             # convert to sbhd and use sbhd implementation for now
+            query_layer, key_layer, value_layer = [
+                x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
+            ]
+        if qkv_format == "sbhd_2bshd":
+            key_layer, value_layer = [x.transpose(0, 1) for x in [key_layer, value_layer]]
+
+        total_tokens, batch_size = None, None
+        if qkv_format == "thd_2bshd":
+            total_tokens, batch_size = query_layer.shape[0], key_layer.shape[0]
+            query_layer = tex.convert_thd_to_bshd(
+                query_layer,
+                cu_seqlens_q,
+                batch_size,
+                inference_params.max_ctx_len,
+            )
             query_layer, key_layer, value_layer = [
                 x.transpose(0, 1) for x in [query_layer, key_layer, value_layer]
             ]
@@ -5328,13 +3845,19 @@ class UnfusedDotProductAttention(torch.nn.Module):
             key_layer.shape[0],
         )
 
-        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = get_full_mask(
-            max_seqlen_q,
-            max_seqlen_kv,
-            attn_mask_type=attn_mask_type,
-            attention_mask=attention_mask,
-            window_size=window_size,
-            attention_type=self.attention_type,
+        if "padding" in attn_mask_type and attention_mask is None:
+            attention_mask = dpa_utils.get_padding_mask(
+                batch_size, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+            )
+        attn_mask_type, attention_mask, actual_seqlens_q, actual_seqlens_kv = (
+            dpa_utils.get_full_mask(
+                max_seqlen_q,
+                max_seqlen_kv,
+                attn_mask_type=attn_mask_type,
+                attention_mask=attention_mask,
+                window_size=window_size,
+                attention_type=self.attention_type,
+            )
         )
 
         batch_size, seqlen = query_layer.shape[1], query_layer.shape[0]
@@ -5405,7 +3928,8 @@ class UnfusedDotProductAttention(torch.nn.Module):
             if core_attention_bias_type == "post_scale_bias":
                 assert core_attention_bias is not None, "core_attention_bias should not be None!"
             if core_attention_bias_type == "alibi":
-                _, core_attention_bias = get_alibi(
+                _, core_attention_bias = dpa_utils.get_alibi(
+                    _alibi_cache,
                     output_size[1],
                     output_size[2],
                     output_size[3],
@@ -5461,19 +3985,34 @@ class UnfusedDotProductAttention(torch.nn.Module):
         # change view [b, np, sq, hn]
         context_layer = context_layer.view(*output_size)
 
-        if qkv_format == "sbhd":
+        if q_format == "sbhd":
             # [b, np, sq, hn] --> [sq, b, np, hn]
             context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
 
             # [sq, b, np, hn] --> [sq, b, hp]
             context_layer = context_layer.view(seqlen, batch_size, -1)
 
-        if qkv_format == "bshd":
+        if q_format == "bshd":
             # [b, np, sq, hn] --> [b, sq, np, hn]
             context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
 
             # [b, sq, np, hn] --> [b, sq, hp]
             context_layer = context_layer.view(batch_size, seqlen, -1)
+
+        if q_format == "thd":
+            # [b, np, sq, hn] --> [b, sq, np, hn]
+            context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+
+            # [b, sq, np, hn] --> [tq, np, hn]
+            context_layer = tex.convert_bshd_to_thd(
+                context_layer,
+                cu_seqlens_q,
+                total_tokens,
+            )
+
+            # [tq, np, hn] --> [tq, hp]
+            context_layer = context_layer.view(total_tokens, -1)
+
         return context_layer
 
 
@@ -5512,205 +4051,6 @@ class _PrepareQKVForFA(torch.autograd.Function):
         return dq, dk, dv
 
 
-def get_qkv_layout(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    qkv_format: str = "sbhd",
-) -> str:
-    """Get qkv layout.
-
-    Parameters
-    ----------
-    q: torch.Tensor
-        Query tensor.
-    k: torch.Tensor
-        Key tensor.
-    v: torch.Tensor
-        Value tensor.
-    qkv_format: str, default = `sbhd`
-        Dimension format for `q`, `k` and `v`, {`sbhd`, `bshd`, `thd`}. `s` stands for
-        the sequence length dimension, `b` batch size, `h` the number of attention heads,
-        `d` head size, and `t` the total number of tokens in a batch, i.e.
-        `t = sum(s_i) for i = 0...b-1`.
-
-    Returns
-    ----------
-    qkv_layout: str
-       Memory layout of `q`, `k` and `v`. Each `qkv_format` can be mapped to one of five
-       memory layouts. For example, `sb3hd` means `q`, `k`, `v` are created as one chunk
-       of memory and that they are interleaved in the `2`nd dimension. `sbhd_sbh2d` means
-       `q` and `kv` are created in two chunks and that `q` itself is contiguous and `k`, `v`
-       are interleaved with each other in the `3`rd dimension, `k = kv[:,:,:,0,:]` and
-       `v = kv[:,:,:,1,:]`.
-       Mapping:
-       `sbhd`: {`sb3hd`, `sbh3d`, `sbhd_sb2hd`, `sbhd_sbh2d`, `sbhd_sbhd_sbhd`}
-       `bshd`: {`bs3hd`, `bsh3d`, `bshd_bs2hd`, `bshd_bsh2d`, `bshd_bshd_bshd`}
-       `thd` : {`t3hd`, `th3d`, `thd_t2hd`, `thd_th2d`, `thd_thd_thd`}
-    q: torch.Tensor
-        Query tensor. It may be different from input `q` as we try to fit tensors to
-        a supported layout.
-    k: torch.Tensor
-        Key tensor. It may be different from input `k` as we try to fit tensors to
-        a supported layout.
-    v: torch.Tensor
-        Value tensor. It may be different from input `v` as we try to fit tensors to
-        a supported layout.
-    """
-
-    check_last_dim_contiguous = all(x.stride(-1) == 1 for x in [q, k, v])
-    assert check_last_dim_contiguous, "q, k and v must have stride 1 in their last dimension!"
-
-    def run_iteratively(q, k, v):
-        # check data pointers
-        data_ptr = q.untyped_storage().data_ptr()
-        check_ptrs_qkv = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k, v])
-        check_ptrs_qk = all(x.untyped_storage().data_ptr() == data_ptr for x in [q, k])
-        data_ptr = k.untyped_storage().data_ptr()
-        check_ptrs_kv = all(x.untyped_storage().data_ptr() == data_ptr for x in [k, v])
-
-        # check tensor shapes
-        shape = q.shape
-        check_shapes_qkv = all(shape == x.shape for x in [q, k, v])
-        shape = k.shape
-        check_shapes_kv = shape[:-1] == v.shape[:-1]
-
-        # check tensor strides
-        stride = q.stride()
-        check_strides_qkv = all(stride == x.stride() for x in [q, k, v])
-        check_strides_kv = tuple(sk / k.shape[-1] for sk in k.stride()[:-1]) == tuple(
-            sv / v.shape[-1] for sv in v.stride()[:-1]
-        )
-
-        # check tensor offsets for h3d and 3hd layouts
-        prod_h_d = q.shape[-1] * q.shape[-2]
-        check_3hd_offsets = all(x.storage_offset() == i * prod_h_d for i, x in enumerate([q, k, v]))
-        check_h3d_offsets = all(
-            x.storage_offset() == i * q.shape[-1] for i, x in enumerate([q, k, v])
-        )
-
-        # check tensor offsets for hd_h2d and hd_2hd layouts
-        prod_all_dims = [np.prod(x.shape) for x in [q, k]]
-        offset = prod_all_dims[0] if check_ptrs_qkv else 0
-        prod_h_d = k.shape[-1] * k.shape[-2]
-        check_2hd_offsets = all(
-            x.storage_offset() == (offset + i * prod_h_d) for i, x in enumerate([k, v])
-        )
-        check_h2d_offsets = all(
-            x.storage_offset() == (offset + i * k.shape[-1]) for i, x in enumerate([k, v])
-        )
-
-        # check tensor offsets for hd_hd_hd layouts
-        check_hd_offsets_qkv = (
-            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k, v]))
-            if check_ptrs_qkv
-            else all(x.storage_offset() == 0 for i, x in enumerate([q, k, v]))
-        )
-        check_hd_offsets_qk = (
-            all(x.storage_offset() == sum(prod_all_dims[:i]) for i, x in enumerate([q, k]))
-            if not check_ptrs_qkv and check_ptrs_qk
-            else all(x.storage_offset() == 0 for i, x in enumerate([q, k]))
-        )
-        check_hd_offsets_kv = (
-            all(x.storage_offset() == sum(prod_all_dims[1 : i + 1]) for i, x in enumerate([k, v]))
-            if not check_ptrs_qkv and check_ptrs_kv
-            else all(x.storage_offset() == 0 for i, x in enumerate([k, v]))
-        )
-
-        if check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_3hd_offsets:
-            # sb3hd, bs3hd, t3hd
-            # one chunk of memory, qkv, with q, k, v interleaved at dim=-3 in qkv
-            qkv_layout = qkv_format[:-2] + "3" + qkv_format[-2:]
-        elif check_ptrs_qkv and check_strides_qkv and check_shapes_qkv and check_h3d_offsets:
-            # sbh3d, bsh3d, th3d
-            # one chunk of memory, qkv, with q, k, v interleaved at dim=-2 in qkv
-            qkv_layout = qkv_format[:-1] + "3" + qkv_format[-1:]
-        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_2hd_offsets:
-            # sbhd_sb2hd, bshd_bs2hd, thd_t2hd
-            # two chunks of memory, q and kv, with k, v interleaved at dim=-3 in kv
-            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
-            # have the same data pointer, i.e. check_ptrs_qkv=True
-            qkv_layout = qkv_format + "_" + qkv_format[:-2] + "2" + qkv_format[-2:]
-        elif check_ptrs_kv and check_strides_kv and check_shapes_kv and check_h2d_offsets:
-            # sbhd_sbh2d, bshd_bsh2d, thd_th2d
-            # two chunks of memory, q and kv, with k, v interleaved at dim=-2 in kv
-            # q and kv may be disjoint or consecutive in memory, and when consecutive, they may
-            # have the same data pointer, i.e. check_ptrs_qkv=True
-            qkv_layout = qkv_format + "_" + qkv_format[:-1] + "2" + qkv_format[-1:]
-        elif (
-            check_strides_kv
-            and check_shapes_kv
-            and (check_hd_offsets_qkv or check_hd_offsets_kv or check_hd_offsets_qk)
-        ):
-            # sbhd_sbhd_sbhd, bshd_bshd_bshd, thd_thd_thd
-            # three chunks of memory, q, k and v, which may be disjoint or consecutive, and
-            # when consecutive, they may have the same data pointer, i.e. check_ptrs_qkv=True or
-            # check_ptrs_qk=True or check_ptrs_kv=True
-            qkv_layout = "_".join(list([qkv_format]) * 3)
-        else:
-            qkv_layout = "not_supported"
-
-        return qkv_layout
-
-    if not is_in_onnx_export_mode():
-        qkv_layout = run_iteratively(q, k, v)
-    else:
-        qkv_layout = "not_supported"
-    if qkv_layout == "not_supported":
-        # force q,k,v to be contiguous and run get_layout again
-        q, k, v = [x.contiguous() for x in [q, k, v]]
-        qkv_layout = run_iteratively(q, k, v)
-    if qkv_layout == "not_supported":
-        raise RuntimeError("The provided qkv memory layout is not supported!")
-
-    return qkv_layout, q, k, v
-
-
-def check_set_window_size(
-    attn_mask_type: str,
-    window_size: Tuple[int, int] = None,
-):
-    """Check if sliding window size is compliant with attention mask type.
-    If not, set it to the appropriate size.
-
-         attn_mask_type                              |   window_size
-    -------------------------------------------------------------------------
-    no_mask, padding, arbitrary                      | (-1, -1) or (>=0, >=0)
-    causal, padding_causal                           | (-1,  0) or (>=0, 0)
-    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
-    """
-    orig_window_size = window_size
-    if "causal" in attn_mask_type:
-        if orig_window_size is None:
-            window_size = (-1, 0)
-        elif orig_window_size == (-1, -1) or (
-            orig_window_size[0] >= 0 and orig_window_size[1] != 0
-        ):
-            window_size = (orig_window_size[0], 0)
-            warnings.warn(
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
-            )
-        elif orig_window_size != (-1, 0) and (orig_window_size[0] < 0 or orig_window_size[1] != 0):
-            assert False, (
-                "window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + attn_mask_type
-            )
-    elif attn_mask_type in ["no_mask", "padding", "arbitrary"]:
-        if orig_window_size is None:
-            window_size = (-1, -1)
-        elif orig_window_size == (-1, 0):
-            window_size = (-1, -1)
-            warnings.warn(
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
-            )
-        elif orig_window_size != (-1, -1) and (orig_window_size[0] < 0 or orig_window_size[1] < 0):
-            assert False, (
-                "window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + attn_mask_type
-            )
-    else:
-        assert False, "Invalid attn_mask_type: " + attn_mask_type
-    return window_size
-
-
 class FlashAttention(torch.nn.Module):
     """Dot product attention, using HazyResearch flash-attn package:
     https://github.com/Dao-AILab/flash-attention
@@ -5727,13 +4067,13 @@ class FlashAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
 
-        if _flash_attn_is_installed:
+        if fa_utils.is_installed:
             assert (
-                _flash_attn_version >= _flash_attn_version_required
-            ), f"FlashAttention minimum version {_flash_attn_version_required} is required."
+                fa_utils.version >= fa_utils.version_required
+            ), f"FlashAttention minimum version {fa_utils.version_required} is required."
             assert (
-                _flash_attn_version <= _flash_attn_max_version
-            ), f"FlashAttention maximum version {_flash_attn_max_version} is supported."
+                fa_utils.version <= fa_utils.max_version
+            ), f"FlashAttention maximum version {fa_utils.max_version} is supported."
 
         self.softmax_scale = softmax_scale
         self.attention_dropout_ctx = attention_dropout_ctx
@@ -5742,9 +4082,9 @@ class FlashAttention(torch.nn.Module):
         self.layer_number = 1 if layer_number is None else layer_number
         self.deterministic = deterministic
         self.logger = logging.getLogger("FlashAttention")
-        self.logger.setLevel(_log_level)
+        self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(_stream_handler)
+            self.logger.addHandler(attn_log._stream_handler)
 
     def forward(
         self,
@@ -5767,6 +4107,8 @@ class FlashAttention(torch.nn.Module):
         fp8: bool = False,
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
+        inference_params: Optional[InferenceParams] = None,
+        flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -5789,8 +4131,10 @@ class FlashAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+        # get q_format and kv_format for training and inference
+        qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
+        # convert q, k, v to bshd if they are in sbhd; qkv_format doesn't change
         if all(not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
             if qkv_format == "sbhd":
                 # For now just 128, will make it more general in the future
@@ -5804,8 +4148,11 @@ class FlashAttention(torch.nn.Module):
                     )
                 else:
                     query_layer, key_layer, value_layer = [
-                        x.transpose(0, 1) for x in (query_layer, key_layer, value_layer)
+                        x.transpose(0, 1).contiguous()
+                        for x in (query_layer, key_layer, value_layer)
                     ]
+            elif q_format == "sbhd" and kv_format == "bshd":
+                query_layer = query_layer.transpose(0, 1).contiguous()
             if context_parallel:
                 query_layer, key_layer, value_layer = [
                     x.contiguous() for x in (query_layer, key_layer, value_layer)
@@ -5813,85 +4160,129 @@ class FlashAttention(torch.nn.Module):
         else:
             if qkv_format == "sbhd":
                 query_layer._data, key_layer._data, value_layer._data = [
-                    x.transpose(0, 1)
+                    x.transpose(0, 1).contiguous()
                     for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
                 query_layer, key_layer, value_layer = [
                     Float8Tensor.make_like(x, data=x._data, shape=x._data.shape)
                     for x in (query_layer, key_layer, value_layer)
                 ]
+            elif q_format == "sbhd" and kv_format == "bshd":
+                query_layer._data = query_layer._data.transpose(0, 1).contiguous()
+                query_layer = Float8Tensor.make_like(
+                    query_layer, data=query_layer._data, shape=query_layer._data.shape
+                )
             if context_parallel:
                 query_layer._data, key_layer._data, value_layer._data = [
                     x.contiguous() for x in (query_layer._data, key_layer._data, value_layer._data)
                 ]
 
-        batch_size = query_layer.shape[0]
+        # get batch_size, max_seqlen and cu_seqlens
+        batch_size, context_len = None, None
+        if inference_params is None:
+            if qkv_format in ["sbhd", "bshd"]:
+                batch_size = query_layer.shape[0]
+                max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
+                max_seqlen_q *= cp_size
+                max_seqlen_kv *= cp_size
 
-        if qkv_format in ["sbhd", "bshd"]:
-            max_seqlen_q, max_seqlen_kv = query_layer.shape[1], key_layer.shape[1]
-            max_seqlen_q *= cp_size
-            max_seqlen_kv *= cp_size
-
-            if "padding" in attn_mask_type:
-                assert not context_parallel, "Padding mask not supported with context parallelism!"
-                # [b * s, h, d]
-                query_layer, key_layer, value_layer = [
-                    x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
-                    for x in [query_layer, key_layer, value_layer]
-                ]
-
-                if self.attention_type == "self":
+                if "padding" in attn_mask_type:
                     assert (
-                        max_seqlen_q == max_seqlen_kv
-                    ), "Maximum sequence length for Q and KV should be the same."
-                    if cu_seqlens_q is None:
+                        not context_parallel
+                    ), "Padding mask not supported with context parallelism!"
+
+                    # [b * s, h, d]
+                    query_layer, key_layer, value_layer = [
+                        x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
+                        for x in [query_layer, key_layer, value_layer]
+                    ]
+
+                    if self.attention_type == "self":
                         assert (
-                            attention_mask is not None
-                        ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask)
+                            max_seqlen_q == max_seqlen_kv
+                        ), "Maximum sequence length for Q and KV should be the same."
+                        if cu_seqlens_q is None:
+                            assert (
+                                attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                                attention_mask
+                            )
+                        else:
+                            indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                        cu_seqlens_kv = cu_seqlens_q
+                        query_layer, key_layer, value_layer = dpa_utils.PackTensors.apply(
+                            indices_q, query_layer, key_layer, value_layer
+                        )
                     else:
-                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                    cu_seqlens_kv = cu_seqlens_q
-                    query_layer, key_layer, value_layer = PackTensors.apply(
-                        indices_q, query_layer, key_layer, value_layer
+                        if cu_seqlens_q is None or cu_seqlens_kv is None:
+                            assert (
+                                attention_mask is not None
+                            ), "Please provide attention_mask for padding!"
+                            cu_seqlens_q, indices_q = dpa_utils.get_cu_seqlens_and_indices(
+                                attention_mask[0]
+                            )
+                            cu_seqlens_kv, indices_kv = dpa_utils.get_cu_seqlens_and_indices(
+                                attention_mask[1]
+                            )
+                        else:
+                            indices_q = dpa_utils.get_indices(max_seqlen_q, cu_seqlens_q)
+                            indices_kv = dpa_utils.get_indices(max_seqlen_kv, cu_seqlens_kv)
+                        query_layer = dpa_utils.PackTensors.apply(indices_q, query_layer)
+                        key_layer, value_layer = dpa_utils.PackTensors.apply(
+                            indices_kv, key_layer, value_layer
+                        )
+                else:
+                    # Cumulative sequence lengths for unpadded data
+                    if cu_seqlens_q is None:
+                        cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_q,
+                            query_layer.device,
+                        )
+                    if cu_seqlens_kv is None:
+                        cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_kv,
+                            key_layer.device,
+                        )
+            elif qkv_format == "thd":
+                assert (
+                    cu_seqlens_q is not None and cu_seqlens_kv is not None
+                ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
+                if max_seqlen_q is None:
+                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+                    max_seqlen_q = seqlens_q.max().item()
+                if max_seqlen_kv is None:
+                    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                    max_seqlen_kv = seqlens_kv.max().item()
+        else:
+            if qkv_format in ["sbhd_2bshd", "bshd"]:
+                # q is in bshd in both cases from conversion above or the original input
+                batch_size, context_len = query_layer.shape[:2]
+                cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+                cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
+                # convert from bshd to thd_2bshd for flash_attn_varlen_func/_with_kvcache;
+                # kernel assumes tensor is contiguous
+                if isinstance(query_layer, Float8Tensor):
+                    query_layer._data = tex.convert_bshd_to_thd(
+                        query_layer._data,
+                        cu_seqlens_q,
+                        batch_size * context_len,
+                    )
+                    query_layer = Float8Tensor.make_like(
+                        query_layer, data=query_layer._data, shape=query_layer._data.shape
                     )
                 else:
-                    if cu_seqlens_q is None or cu_seqlens_kv is None:
-                        assert (
-                            attention_mask is not None
-                        ), "Please provide attention_mask for padding!"
-                        cu_seqlens_q, indices_q = get_cu_seqlens_and_indices(attention_mask[0])
-                        cu_seqlens_kv, indices_kv = get_cu_seqlens_and_indices(attention_mask[1])
-                    else:
-                        indices_q = get_indices(max_seqlen_q, cu_seqlens_q)
-                        indices_kv = get_indices(max_seqlen_kv, cu_seqlens_kv)
-                    query_layer = PackTensors.apply(indices_q, query_layer)
-                    key_layer, value_layer = PackTensors.apply(indices_kv, key_layer, value_layer)
-            else:
-                # Cumulative sequence lengths for unpadded data
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_q,
-                        query_layer.device,
+                    query_layer = tex.convert_bshd_to_thd(
+                        query_layer,
+                        cu_seqlens_q,
+                        batch_size * context_len,
                     )
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_kv,
-                        key_layer.device,
-                    )
-        elif qkv_format == "thd":
-            assert (
-                cu_seqlens_q is not None and cu_seqlens_kv is not None
-            ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
-            if max_seqlen_q is None:
-                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                max_seqlen_q = seqlens_q.max().item()
-            if max_seqlen_kv is None:
-                seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                max_seqlen_kv = seqlens_kv.max().item()
 
+        use_flash_attn_3 = False
+        if flash_attention_backend is not None and flash_attention_backend > PkgVersion("3.0.0b"):
+            use_flash_attn_3 = True
         if context_parallel and all(
             not isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]
         ):
@@ -5922,6 +4313,7 @@ class FlashAttention(torch.nn.Module):
                     window_size=window_size,
                     quantizers=quantizers,
                     pad_between_seqs=False,
+                    use_flash_attn_3=use_flash_attn_3,
                 )
         else:
 
@@ -5934,32 +4326,77 @@ class FlashAttention(torch.nn.Module):
                         tensor.activation_offloading = True
 
             with self.attention_dropout_ctx():
-                fa_optional_forward_kwargs = {}
-                if _flash_attn_2_3_plus:
-                    fa_optional_forward_kwargs["window_size"] = window_size
-                if _flash_attn_2_4_plus:
-                    fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
-                if _flash_attn_2_4_1_plus:
-                    fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                #       | API                     | use cases
+                # ----------------------------------------------------------------------
+                # FA v2 | flash_attn_func         | bshd/sbhd + not padding
+                #       | flash_attn_varlen_func  | bshd/sbhd + padding
+                #       |                         | thd + padding
+                #       |                         | KV cache (not-paged/paged), i.e.
+                #       |                         |     bshd/sbhd/thd + padding
+                # FA v3 | flash_attn_func         | bshd/sbhd + not padding
+                #       | flash_attn_varlen_func  | bshd/sbhd + padding
+                #       |                         | thd + padding
+                #       | flash_attn_with_kvcache | KV cache (not-paged/paged), i.e.
+                #       |                         |     bshd/sbhd/thd + padding
                 fa_optional_forward_args_thd = []
                 if qkv_format in ["bshd", "sbhd"] and "padding" not in attn_mask_type:
-                    func = flash_attn_func if not _use_flash_attn_3 else flash_attn_func_v3
-                else:
-                    if _flash_attn_2_5_7_plus:
-                        fa_optional_forward_kwargs["block_table"] = None
                     func = (
-                        flash_attn_varlen_func
-                        if not _use_flash_attn_3
-                        else flash_attn_varlen_func_v3
+                        flash_attn_func if not use_flash_attn_3 else flash_attn_func_v3
+                    )  # pylint: disable=possibly-used-before-assignment
+                else:
+                    if not use_flash_attn_3:
+                        func = flash_attn_varlen_func
+                    elif inference_params is None:
+                        func = flash_attn_varlen_func_v3  # pylint: disable=possibly-used-before-assignment
+                    else:
+                        func = flash_attn_with_kvcache_v3  # pylint: disable=possibly-used-before-assignment
+                    if not use_flash_attn_3 or inference_params is None:
+                        fa_optional_forward_args_thd.append(cu_seqlens_q)
+                        fa_optional_forward_args_thd.append(cu_seqlens_kv)
+                        fa_optional_forward_args_thd.append(max_seqlen_q)
+                        fa_optional_forward_args_thd.append(max_seqlen_kv)
+                if not use_flash_attn_3:
+                    fa_optional_forward_kwargs = {}
+                    if fa_utils.v2_3_plus:
+                        fa_optional_forward_kwargs["window_size"] = window_size
+                    if fa_utils.v2_4_plus:
+                        fa_optional_forward_kwargs["alibi_slopes"] = alibi_slopes
+                    if fa_utils.v2_4_1_plus:
+                        fa_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if inference_params is not None:
+                        # use block_table kwarg to support thd_2bshd for non-paged
+                        fa_optional_forward_kwargs["block_table"] = (
+                            inference_params.cache_manager.page_table[:batch_size]
+                            if inference_params.is_paged
+                            else inference_params.cache_manager.batch_indices_post_step.unsqueeze(
+                                1
+                            )[:batch_size]
+                        )
+                    output = func(
+                        query_layer,
+                        key_layer,
+                        value_layer,
+                        *fa_optional_forward_args_thd,
+                        self.attention_dropout if self.training else 0.0,
+                        softmax_scale=self.softmax_scale,
+                        causal="causal" in attn_mask_type,
+                        **fa_optional_forward_kwargs,
                     )
-                    fa_optional_forward_args_thd.append(cu_seqlens_q)
-                    fa_optional_forward_args_thd.append(cu_seqlens_kv)
-                    fa_optional_forward_args_thd.append(max_seqlen_q)
-                    fa_optional_forward_args_thd.append(max_seqlen_kv)
-                if _use_flash_attn_3:
+                else:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
-                    fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
+                    if inference_params is None:
+                        fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
+                    else:
+                        fa_3_optional_forward_kwargs["cu_seqlens_q"] = cu_seqlens_q
+                        fa_3_optional_forward_kwargs["max_seqlen_q"] = max_seqlen_q
+                        cache_seqlens = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
+                        fa_3_optional_forward_kwargs["cache_seqlens"] = cache_seqlens
+                        # flash_attn_with_kvcache accepts thd_2bshd for non-paged
+                        if inference_params.is_paged:
+                            fa_3_optional_forward_kwargs["page_table"] = (
+                                inference_params.cache_manager.page_table[:batch_size]
+                            )
                     if fp8:
                         QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
                         torch_dtype = get_fp8_torch_dtype(fp8_meta["recipe"], fprop_tensor=True)
@@ -5984,21 +4421,23 @@ class FlashAttention(torch.nn.Module):
                             query_layer, key_layer, value_layer = (
                                 QKV_quantizer(x) for x in [query_layer, key_layer, value_layer]
                             )
-                        fa_3_optional_forward_kwargs["descale_q"] = (
-                            query_layer._scale_inv.unsqueeze(0)
+                        batch_size = cu_seqlens_q.shape[0] - 1
+                        num_heads_k = key_layer.shape[-2]
+                        fa_3_optional_forward_kwargs["q_descale"] = (
+                            query_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
-                        fa_3_optional_forward_kwargs["descale_k"] = key_layer._scale_inv.unsqueeze(
+                        fa_3_optional_forward_kwargs["k_descale"] = key_layer._scale_inv.unsqueeze(
                             0
-                        )
-                        fa_3_optional_forward_kwargs["descale_v"] = (
-                            value_layer._scale_inv.unsqueeze(0)
+                        ).repeat(batch_size, num_heads_k)
+                        fa_3_optional_forward_kwargs["v_descale"] = (
+                            value_layer._scale_inv.unsqueeze(0).repeat(batch_size, num_heads_k)
                         )
                         query_layer, key_layer, value_layer = (
                             convert_to_torch_float8(x, torch_dtype)
                             for x in [query_layer, key_layer, value_layer]
                         )
                     try:
-                        output, _ = func(
+                        output = func(
                             query_layer,
                             key_layer,
                             value_layer,
@@ -6007,13 +4446,15 @@ class FlashAttention(torch.nn.Module):
                             causal="causal" in attn_mask_type,
                             **fa_3_optional_forward_kwargs,
                         )
+                        if isinstance(output, (List, Tuple)):
+                            output = output[0]
                     except TypeError as e:
-                        if _flash_attn_3_0_0_beta:
+                        if fa_utils.v3_0_0_beta:
                             e.args = (
                                 e.args[0]
                                 + ". Please update your flash-attn v3 (beta) installation as it "
                                 + "may have added more supported arguments to its API. \n"
-                                + _flash_attn_3_installation_steps,
+                                + fa_utils.v3_installation_steps,
                             ) + e.args[1:]
                         raise
 
@@ -6022,22 +4463,30 @@ class FlashAttention(torch.nn.Module):
                     if fp8 and fp8_meta["recipe"].fp8_mha:
                         O_quantizer = quantizers["scaling_fwd"][META_O]
                         output = O_quantizer(output)
-                else:
-                    output = func(
-                        query_layer,
-                        key_layer,
-                        value_layer,
-                        *fa_optional_forward_args_thd,
-                        self.attention_dropout if self.training else 0.0,
-                        softmax_scale=self.softmax_scale,
-                        causal="causal" in attn_mask_type,
-                        **fa_optional_forward_kwargs,
-                    )
 
-        if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type:
-            output = UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+        if inference_params is None:
+            if qkv_format in ["sbhd", "bshd"] and "padding" in attn_mask_type:
+                output = dpa_utils.UnpackTensor.apply(indices_q, batch_size * max_seqlen_q, output)
+        elif qkv_format in ["bshd", "sbhd_2bshd"]:
+            # all KV caching cases use thd_2bshd for calculation
+            # convert results back to bshd from thd_2bshd
+            if isinstance(query_layer, Float8Tensor):
+                output._data = tex.convert_thd_to_bshd(
+                    output._data,
+                    cu_seqlens_q,
+                    batch_size,
+                    context_len,
+                )
+                output = Float8Tensor.make_like(output, data=output._data, shape=output._data.shape)
+            else:
+                output = tex.convert_thd_to_bshd(
+                    output,
+                    cu_seqlens_q,
+                    batch_size,
+                    context_len,
+                )
 
-        if qkv_format == "sbhd":
+        if q_format == "sbhd":
             # (bs)hd -> bs(hd) -> sb(hd)
             if fp8 and fp8_meta["recipe"].fp8_mha:
                 output_data = (
@@ -6052,10 +4501,10 @@ class FlashAttention(torch.nn.Module):
                 )
             else:
                 output = output.view(batch_size, max_seqlen_q // cp_size, -1).transpose(0, 1)
-        elif qkv_format == "bshd":
+        elif q_format == "bshd":
             # (bs)hd -> bs(hd)
             output = output.reshape(batch_size, max_seqlen_q // cp_size, -1)
-        elif qkv_format == "thd":
+        elif q_format == "thd":
             # thd -> t(hd)
             output = output.reshape(output.shape[0], -1)
 
@@ -6106,10 +4555,11 @@ class FusedAttnFunc(torch.autograd.Function):
         cu_seqlens_kv,
         cu_seqlens_q_padded,
         cu_seqlens_kv_padded,
+        page_table_k,
+        page_table_v,
         q,
         k,
         v,
-        qkv_dtype,
         attn_bias,
         attn_scale,
         dropout_p,
@@ -6130,10 +4580,14 @@ class FusedAttnFunc(torch.autograd.Function):
         # "fp8_mha" decides outputs in fp8, while inputs are inferred from the real dtype
         is_input_fp8 = False
         is_output_fp8 = fp8_meta["recipe"].fp8_mha if "recipe" in fp8_meta else False
+
+        # FP16/BF16 attn:                  fake_dtype = torch.float16 or torch.bfloat16
+        # FP8 attn, is_output_fp8 = False: fake_dtype = torch.float16 or torch.bfloat16
+        # FP8 attn, is_output_fp8 = True:  fake_dtype = torch.float8_e4m3fn
         fake_dtype = q.dtype
 
         QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer = (
-            get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
+            dpa_utils.get_attention_quantizers(fp8, quantizers, cp_specific_quantizers=False)
         )
         if fp8:
             fused_attention_backend = FusedAttnBackend["FP8"]
@@ -6147,7 +4601,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 q_fp8, k_fp8, v_fp8 = q, k, v
             else:
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
-                qkv_group = len(qkv_layout.split("_"))
+                qkv_group = len(qkv_layout.replace("paged_kv_", "").split("_"))
                 match qkv_group:
                     case 1:
                         dim = qkv_layout.find("3")
@@ -6168,6 +4622,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         v_fp8 = QKV_quantizer(v)
                     case _:
                         raise "Invalid qkv_layout " + qkv_layout
+            # q_fp8, k_fp8, v_fp8, out_fp8: torch.float8_e4m3fn
             out_fp8, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -6182,6 +4637,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias,
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
+                None,
+                None,
                 S_quantizer,
                 O_quantizer,
                 attn_scale,
@@ -6197,12 +4654,14 @@ class FusedAttnFunc(torch.autograd.Function):
                 out_ret = out_fp8
             else:
                 out_ret = out_fp8.dequantize().view(out_fp8.shape)
+            # is_output_fp8 = False: out_save.dtype = torch.float16 or torch.bfloat16
+            # is_output_fp8 = True:  out_save.dtype = torch.float8_e4m3fn
             out_save = out_ret
 
             if not int(os.getenv("NVTE_FP8_DPA_BWD", "1")):
                 # 1: qkv packed, 2: kv packed, 3: qkv separate
                 if is_input_fp8:
-                    qkv_group = len(qkv_layout.split("_"))
+                    qkv_group = len(qkv_layout.replace("paged_kv_", "").split("_"))
                     if qkv_group == 1:
                         dim = qkv_layout.find("3")
                         qkv = _combine_tensors([q, k, v], dim)
@@ -6211,7 +4670,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         q, k, v = _SplitAlongDim.apply(qkv_no_fp8, dim, [1, 1, 1], True)
                     if qkv_group == 2:
                         q = q.dequantize()
-                        dim = qkv_layout.split("_")[1].find("2")
+                        dim = qkv_layout.replace("paged_kv_", "").split("_")[1].find("2")
                         kv = _combine_tensors([k, v], dim)
                         kv_c = kv.view(-1, kv.shape[-3] * kv.shape[-2] * kv.shape[-1])
                         kv_no_fp8 = kv.dequantize()
@@ -6225,7 +4684,7 @@ class FusedAttnFunc(torch.autograd.Function):
 
             fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
         else:
-
+            # q, k, v, out_ret: torch.float16 or torch.bfloat16
             out_ret, aux_ctx_tensors = fused_attn_fwd(
                 is_training,
                 max_seqlen_q,
@@ -6240,6 +4699,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_bias,
                 cu_seqlens_q_padded,
                 cu_seqlens_kv_padded,
+                page_table_k,
+                page_table_v,
                 None,  # s_quantizer
                 None,  # o_quantizer
                 attn_scale,
@@ -6294,8 +4755,6 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
-        ctx.fake_dtype = fake_dtype
-        ctx.qkv_dtype = qkv_dtype
         ctx.attn_scale = attn_scale
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
@@ -6318,6 +4777,11 @@ class FusedAttnFunc(torch.autograd.Function):
             assert isinstance(
                 d_out, Float8Tensor
             ), "Gradient of the DPA output must be in Float8Tensor type for FP8 MHA."
+
+        # FP16/BF16 attn:                  fake_dtype = torch.float16 or torch.bfloat16
+        # FP8 attn, is_output_fp8 = False: fake_dtype = torch.float16 or torch.bfloat16
+        # FP8 attn, is_output_fp8 = True:  fake_dtype = torch.float8_e5m2
+        fake_dtype = d_out.dtype
 
         d_out = d_out.contiguous()
         (
@@ -6378,6 +4842,9 @@ class FusedAttnFunc(torch.autograd.Function):
                         d_out_fp8 = d_out
                     else:
                         d_out_fp8 = ctx.dO_quantizer(d_out)
+                    dqkv_dtype = TE_DType[d_out_fp8._data.dtype]
+                    # q_fp8, k_fp8, v_fp8, out_fp8:      torch.float8_e4m3fn
+                    # d_out_fp8, dq_fp8, dk_fp8, dv_fp8: torch.float8_e5m2
                     dq_fp8, dk_fp8, dv_fp8, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6388,8 +4855,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         v_fp8,
                         out_fp8,
                         d_out_fp8,
-                        ctx.fake_dtype,
-                        ctx.qkv_dtype,
+                        fake_dtype,
+                        dqkv_dtype,
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
@@ -6407,8 +4874,10 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.deterministic,
                     )
 
+                    # is_input_fp8 = False: dq, dk, dv: torch.float16 or torch.bfloat16
+                    # is_input_fp8 = True:  dq, dk, dv: torch.float8_e5m2
                     if not ctx.is_input_fp8:
-                        qkv_group = len(ctx.qkv_layout.split("_"))
+                        qkv_group = len(ctx.qkv_layout.replace("paged_kv_", "").split("_"))
                         if qkv_group == 1:
                             dim = ctx.qkv_layout.find("3")
                             dqkv_fp8_data = _combine_tensors(
@@ -6437,6 +4906,8 @@ class FusedAttnFunc(torch.autograd.Function):
                 else:
                     if isinstance(d_out, QuantizedTensor):
                         d_out = d_out.dequantize()
+                    dqkv_dtype = TE_DType[d_out.dtype]
+                    # q, k, v, out, d_out, dq, dk, dv: torch.float16 or torch.bfloat16
                     dq, dk, dv, *rest = fused_attn_bwd(
                         ctx.max_seqlen_q,
                         ctx.max_seqlen_kv,
@@ -6447,8 +4918,8 @@ class FusedAttnFunc(torch.autograd.Function):
                         v,
                         out,
                         d_out,
-                        ctx.fake_dtype,
-                        ctx.qkv_dtype,
+                        fake_dtype,
+                        dqkv_dtype,
                         aux_ctx_tensors,
                         ctx.fused_attention_backend,
                         cu_seqlens_q_padded,
@@ -6476,10 +4947,11 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
+                None,
+                None,
                 dq,
                 dk,
                 dv,
-                None,
                 None,
                 None,
                 None,
@@ -6507,10 +4979,11 @@ class FusedAttnFunc(torch.autograd.Function):
             None,
             None,
             None,
+            None,
+            None,
             dq,
             dk,
             dv,
-            None,
             rest[0],
             None,
             None,
@@ -6629,6 +5102,7 @@ class FusedAttention(torch.nn.Module):
         fp8_meta: Optional[Dict[str, Any]] = None,
         quantizers=None,
         pad_between_seqs: bool = False,
+        inference_params: Optional[InferenceParams] = None,
     ) -> torch.Tensor:
         """fused attention fprop"""
         assert (
@@ -6653,63 +5127,64 @@ class FusedAttention(torch.nn.Module):
                 cp_size *= get_distributed_world_size(group)
         context_parallel = cp_size > 1
 
-        qkv_format = "".join([i for i in qkv_layout.split("_")[0] if i.isalpha()])
+        # get q_format and kv_format for training and inference
+        qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
-        if qkv_format in ["sbhd", "bshd"]:
-            if qkv_format == "sbhd":
-                batch_size, max_seqlen_q, max_seqlen_kv = (
-                    query_layer.shape[1],
-                    query_layer.shape[0],
-                    key_layer.shape[0],
-                )
-            if qkv_format == "bshd":
-                batch_size, max_seqlen_q, max_seqlen_kv = (
-                    query_layer.shape[0],
-                    query_layer.shape[1],
-                    key_layer.shape[1],
-                )
-            max_seqlen_q *= cp_size
-            max_seqlen_kv *= cp_size
-            if "padding" in attn_mask_type:
-                assert not context_parallel, "Padding mask not supported with context parallelism!"
-
-                if cu_seqlens_q is None or cu_seqlens_kv is None:
-                    if attention_mask is None:
-                        raise RuntimeError(
-                            "Please provide attention_mask or cu_seqlens for padding!"
+        page_table = None
+        if inference_params is None:
+            if qkv_format in ["sbhd", "bshd"]:
+                if qkv_format == "sbhd":
+                    batch_size = query_layer.shape[1]
+                    max_seqlen_q = query_layer.shape[0]
+                    max_seqlen_kv = key_layer.shape[0]
+                if qkv_format == "bshd":
+                    batch_size = query_layer.shape[0]
+                    max_seqlen_q = query_layer.shape[1]
+                    max_seqlen_kv = key_layer.shape[1]
+                max_seqlen_q *= cp_size
+                max_seqlen_kv *= cp_size
+                if "padding" in attn_mask_type:
+                    assert (
+                        not context_parallel
+                    ), "Padding mask not supported with context parallelism!"
+                    if cu_seqlens_q is None or cu_seqlens_kv is None:
+                        if attention_mask is None:
+                            raise RuntimeError(
+                                "Please provide attention_mask or cu_seqlens for padding!"
+                            )
+                        if self.attention_type == "self":
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
+                            cu_seqlens_kv = cu_seqlens_q
+                        else:
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
+                else:
+                    if cu_seqlens_q is None:
+                        cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_q,
+                            query_layer.device,
                         )
-                    if self.attention_type == "self":
-                        cu_seqlens_q = get_cu_seqlens(attention_mask)
-                        cu_seqlens_kv = cu_seqlens_q
-                    else:
-                        cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                        cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
-            else:
-                if cu_seqlens_q is None:
-                    cu_seqlens_q = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_q,
-                        query_layer.device,
-                    )
-                if cu_seqlens_kv is None:
-                    cu_seqlens_kv = _get_full_cu_seqlens(
-                        batch_size,
-                        max_seqlen_kv,
-                        key_layer.device,
-                    )
-        if qkv_format == "thd":
-            assert (
-                max_seqlen_q is not None
-                and max_seqlen_kv is not None
-                and cu_seqlens_q is not None
-                and cu_seqlens_kv is not None
-            ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
+                    if cu_seqlens_kv is None:
+                        cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
+                            batch_size,
+                            max_seqlen_kv,
+                            key_layer.device,
+                        )
+            if qkv_format == "thd":
+                assert (
+                    max_seqlen_q is not None
+                    and max_seqlen_kv is not None
+                    and cu_seqlens_q is not None
+                    and cu_seqlens_kv is not None
+                ), "max_seqlen_q/kv and cu_seqlens_q/kv can not be None when qkv_format is thd!"
+        elif inference_params.is_paged:
+            page_table = inference_params.cache_manager.page_table
 
-        if qkv_format == "thd" and (cu_seqlens_q_padded is None or cu_seqlens_kv_padded is None):
+        if (q_format == "thd" or "padding" in attn_mask_type) and cu_seqlens_q_padded is None:
             cu_seqlens_q_padded = cu_seqlens_q
+        if (kv_format == "thd" or "padding" in attn_mask_type) and cu_seqlens_kv_padded is None:
             cu_seqlens_kv_padded = cu_seqlens_kv
-
-        qkv_dtype = TE_DType[query_layer.dtype]
 
         use_FAv2_bwd = (
             self.use_FAv2_bwd
@@ -6779,10 +5254,11 @@ class FusedAttention(torch.nn.Module):
                     cu_seqlens_kv,
                     cu_seqlens_q_padded,
                     cu_seqlens_kv_padded,
+                    page_table,
+                    page_table,
                     query_layer,
                     key_layer,
                     value_layer,
-                    qkv_dtype,
                     core_attention_bias,
                     self.softmax_scale,
                     self.attention_dropout if self.training else 0.0,
@@ -6956,15 +5432,15 @@ class DotProductAttention(TransformerEngineBaseModule):
         super().__init__()
 
         self.logger = logging.getLogger("DotProductAttention")
-        self.logger.setLevel(_log_level)
+        self.logger.setLevel(attn_log._log_level)
         if not self.logger.hasHandlers():
-            self.logger.addHandler(_stream_handler)
+            self.logger.addHandler(attn_log._stream_handler)
         self.qkv_format = qkv_format
         attn_mask_type = attn_mask_type.replace(",", "_")
         if attn_mask_type == "causal_padding":
             attn_mask_type = "padding_causal"
         self.attn_mask_type = attn_mask_type
-        self.window_size = check_set_window_size(attn_mask_type, window_size)
+        self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
         if tp_group is None:
             self.tp_size = tp_size
             if tp_size == 1:
@@ -7168,14 +5644,14 @@ class DotProductAttention(TransformerEngineBaseModule):
         query_layer: torch.Tensor,
         key_layer: torch.Tensor,
         value_layer: torch.Tensor,
-        attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
-        qkv_format: Optional[str] = None,
-        cu_seqlens_q: Optional[torch.Tensor] = None,
-        cu_seqlens_kv: Optional[torch.Tensor] = None,
-        cu_seqlens_q_padded: Optional[torch.Tensor] = None,
-        cu_seqlens_kv_padded: Optional[torch.Tensor] = None,
-        max_seqlen_q: Optional[int] = None,
-        max_seqlen_kv: Optional[int] = None,
+        attention_mask: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]] = None,
+        qkv_format: str = None,
+        cu_seqlens_q: torch.Tensor = None,
+        cu_seqlens_kv: torch.Tensor = None,
+        cu_seqlens_q_padded: torch.Tensor = None,
+        cu_seqlens_kv_padded: torch.Tensor = None,
+        max_seqlen_q: int = None,
+        max_seqlen_kv: int = None,
         attn_mask_type: Optional[str] = None,
         window_size: Optional[Tuple[int, int]] = None,
         checkpoint_core_attention: bool = False,
@@ -7364,6 +5840,16 @@ class DotProductAttention(TransformerEngineBaseModule):
             num_gemms=3,
             allow_non_contiguous=True,
         ) as query_layer:
+            # checks for RNG
+            if self.rng_states_tracker is not None and is_graph_capturing():
+                assert isinstance(
+                    self.rng_states_tracker, CudaRNGStatesTracker
+                ), "Unsupported RNG states tracker."
+                assert (
+                    graph_safe_rng_available()
+                ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
+
+            # checks for FP8
             if self.fp8:
                 if self.fp8_meta["recipe"].fp8_mha:
                     if not self.fp8_meta["recipe"].fp8_dpa:
@@ -7372,7 +5858,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                             """Forcing fp8_meta["recipe"].fp8_dpa=True due to """
                             """fp8_meta["recipe"].fp8_mha=True"""
                         )
-
             if self.fp8 and self.fp8_meta["recipe"].fp8_dpa:
                 forward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=True)
                 backward_dtype = get_fp8_te_dtype(self.fp8_meta["recipe"], fprop_tensor=False)
@@ -7384,6 +5869,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     tex.DType.kFloat8E5M2,
                 ], """DotProductAttention only supports "E4M3" and "E5M2" FP8 data types."""
 
+            # checks for q/k/v shapes
             assert (
                 query_layer.is_cuda and key_layer.is_cuda and value_layer.is_cuda
             ), "DotProductAttention only supports CUDA tensors."
@@ -7393,18 +5879,26 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 key_layer.shape[:-1] == value_layer.shape[:-1]
             ), "Keys and values must have the same batch size, sequence length and number of heads!"
+            num_attention_heads = query_layer.shape[-2]
+            num_gqa_groups = key_layer.shape[-2]
             assert (
-                key_layer.shape[-1] == self.hidden_size_per_attention_head_k
-            ), f"Keys have head_dim = {key_layer.shape[-1]}, "
+                query_layer.shape[-1] == key_layer.shape[-1]
+            ), "Queries and keys must have the same head dimension!"
+            head_dim_qk, head_dim_v = query_layer.shape[-1], value_layer.shape[-1]
+            assert (
+                head_dim_qk == self.hidden_size_per_attention_head_k
+            ), f"Keys have head_dim = {head_dim_qk}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_k}!"
             assert (
-                value_layer.shape[-1] == self.hidden_size_per_attention_head_v
-            ), f"Values have head_dim = {value_layer.shape[-1]}, "
+                head_dim_v == self.hidden_size_per_attention_head_v
+            ), f"Values have head_dim = {head_dim_v}, "
             "but expected head_dim = {self.hidden_size_per_attention_head_v}!"
+            assert num_gqa_groups == self.num_gqa_groups_per_partition, (
+                "Keys and values must have num_gqa_group ="
+                f" {self.num_gqa_groups_per_partition} heads! Found {num_gqa_groups}."
+            )
 
-            if qkv_format is None:
-                qkv_format = self.qkv_format
-
+            # checks for attention mask
             if attn_mask_type is None:
                 attn_mask_type = self.attn_mask_type
             else:
@@ -7414,82 +5908,40 @@ class DotProductAttention(TransformerEngineBaseModule):
             assert (
                 attn_mask_type in AttnMaskTypes
             ), f"Attention mask type {attn_mask_type} is not supported!"
-            if qkv_format == "thd":
-                assert (
-                    "padding" in attn_mask_type
-                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
 
+            # checks for sliding window
             if window_size is None:
                 window_size = self.window_size
-            window_size = check_set_window_size(attn_mask_type, window_size)
+            window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
 
-            if self.rng_states_tracker is not None and is_graph_capturing():
-                assert isinstance(
-                    self.rng_states_tracker, CudaRNGStatesTracker
-                ), "Unsupported RNG states tracker."
-                assert (
-                    graph_safe_rng_available()
-                ), "Upgrade PyTorch version to get RNG manipulation support for cuda graph capture."
-
-            if inference_params is not None:
-                assert self.layer_number is not None, "Layer number must be set!"
-
-                # convert causal to causal_bottom_right in inference when KV-caching is in use
-                # so users can run with the same attn_mask_type for training and inference
-                if attn_mask_type in ["causal", "padding_causal"]:
-                    attn_mask_type = attn_mask_type + "_bottom_right"
-
-                if qkv_format == "bshd":
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-
-                (
-                    inference_key_memory,
-                    inference_value_memory,
-                ) = inference_params.key_value_memory_dict[self.layer_number]
-
-                batch_start = inference_params.batch_size_offset
-                batch_end = batch_start + key_layer.size(1)
-                assert batch_end <= inference_key_memory.size(1)
-
-                sequence_start = inference_params.sequence_len_offset
-                sequence_end = sequence_start + key_layer.size(0)
-                assert sequence_end <= inference_key_memory.size(0)
-
-                # Copy keys and values into KV-cache
-                inference_key_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = (
-                    key_layer
-                )
-                inference_value_memory[sequence_start:sequence_end, batch_start:batch_end, ...] = (
-                    value_layer
-                )
-                key_layer = inference_key_memory[:sequence_end, batch_start:batch_end, ...]
-                value_layer = inference_value_memory[:sequence_end, batch_start:batch_end, ...]
-
-                if qkv_format == "bshd":
-                    key_layer = key_layer.transpose(0, 1)
-                    value_layer = value_layer.transpose(0, 1)
-
-                key_layer = key_layer.contiguous()
-                value_layer = value_layer.contiguous()
-
-            assert (
-                key_layer.shape[-2] == self.num_gqa_groups_per_partition
-                and value_layer.shape[-2] == self.num_gqa_groups_per_partition
-            ), (
-                "Keys and values must have num_gqa_group ="
-                f" {self.num_gqa_groups_per_partition} heads!"
-            )
+            # checks for qkv_format
+            if qkv_format is None:
+                qkv_format = self.qkv_format
             assert qkv_format in [
                 "sbhd",
                 "bshd",
                 "thd",
             ], "DotProductAttention only supports qkv_format = {'sbhd', 'bshd', 'thd'}!"
-
+            batch_size = None
+            if qkv_format in ["sbhd", "bshd"]:
+                assert all(
+                    len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
+                ), f"Queries, keys and values must be 4D tensors when {qkv_format=}!"
+                if qkv_format == "sbhd":
+                    batch_size = query_layer.shape[1]
+                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
+                else:
+                    batch_size = query_layer.shape[0]
+                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
+                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
             if qkv_format == "thd":
                 assert all(
                     len(x.shape) == 3 for x in (query_layer, key_layer, value_layer)
                 ), "Queries, keys and values must be 3D tensors when qkv_format = thd!"
+                assert (
+                    "padding" in attn_mask_type
+                ), "Attention mask type must be padding or padding_causal for qkv_format=thd!"
                 assert (
                     cu_seqlens_q is not None and cu_seqlens_kv is not None
                 ), "cu_seqlens_q and cu_seqlens_kv can not be None when qkv_format = thd!"
@@ -7515,6 +5967,76 @@ class DotProductAttention(TransformerEngineBaseModule):
                         seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
                     max_seqlen_kv = int((seqlens_kv.max().item() + 63) // 64 * 64)
 
+            # update KV cache and retrieve saved tokens from cache for inference
+            if inference_params is not None:
+                assert self.layer_number is not None, "Layer number must be set!"
+
+                # convert top-left causal to bottom-right causal due to KV caching
+                # users can still use the same attention mask for inference as for training
+                assert "padding" in attn_mask_type, "KV caching requires padding mask!"
+                if attn_mask_type == "padding_causal":
+                    attn_mask_type = attn_mask_type + "_bottom_right"
+
+                self.attention_type = "cross"
+                self.flash_attention.attention_type = self.attention_type
+                self.fused_attention.attention_type = self.attention_type
+                self.unfused_attention.attention_type = self.attention_type
+
+                query_layer, key_layer, value_layer = [
+                    x.contiguous() if not x.is_contiguous() else x
+                    for x in [query_layer, key_layer, value_layer]
+                ]
+
+                # get full K/V tensors from cache and adjust cu_seqlens, qkv_format based on the cache
+                (
+                    key_layer,
+                    value_layer,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    max_seqlen_kv,
+                    qkv_format,
+                ) = inference_params.step(
+                    self.layer_number,
+                    key_layer,
+                    value_layer,
+                    qkv_format,
+                )
+                cu_seqlens_q_padded = None
+                cu_seqlens_kv_padded = None
+
+            # get qkv's memory layout
+            if all(isinstance(x, Float8Tensor) for x in [query_layer, key_layer, value_layer]):
+                (
+                    qkv_layout,
+                    query_layer._data,
+                    key_layer._data,
+                    value_layer._data,
+                    q_format,
+                    kv_format,
+                ) = dpa_utils.get_qkv_layout(
+                    query_layer._data,
+                    key_layer._data,
+                    value_layer._data,
+                    qkv_format=qkv_format,
+                    inference_params=inference_params,
+                )
+            else:
+                (
+                    qkv_layout,
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    q_format,
+                    kv_format,
+                ) = dpa_utils.get_qkv_layout(
+                    query_layer,
+                    key_layer,
+                    value_layer,
+                    qkv_format=qkv_format,
+                    inference_params=inference_params,
+                )
+
+            # adjust max_seqlen and cu_seqlens for CP
             cp_size = 1
             if isinstance(self.cp_group, dist_group_type):
                 cp_size = get_distributed_world_size(self.cp_group)
@@ -7522,69 +6044,42 @@ class DotProductAttention(TransformerEngineBaseModule):
                 for group in self.cp_group:
                     cp_size *= get_distributed_world_size(group)
             context_parallel = cp_size > 1
-
-            if qkv_format in ["sbhd", "bshd"]:
-                assert all(
-                    len(x.shape) == 4 for x in (query_layer, key_layer, value_layer)
-                ), f"Queries, keys and values must be 4D tensors when qkv_format = {qkv_format}!"
-                if qkv_format == "sbhd":
-                    max_seqlen_q = query_layer.shape[0] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[0] if max_seqlen_kv is None else max_seqlen_kv
-                    batch_size = query_layer.shape[1]
-                else:
-                    max_seqlen_q = query_layer.shape[1] if max_seqlen_q is None else max_seqlen_q
-                    max_seqlen_kv = key_layer.shape[1] if max_seqlen_kv is None else max_seqlen_kv
-                    batch_size = query_layer.shape[0]
+            if q_format in ["sbhd", "bshd"]:
                 max_seqlen_q *= cp_size
-                max_seqlen_kv *= cp_size
-                if cu_seqlens_q is not None:
-                    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-                    assert all(
-                        seqlens_q <= max_seqlen_q
-                    ), """Sequence lengths indicated by cu_seqlens_q must be no greater than
-                        the sequence dimension in 'query_layer'!"""
-                if cu_seqlens_kv is not None:
-                    seqlens_kv = cu_seqlens_kv[1:] - cu_seqlens_kv[:-1]
-                    assert all(
-                        seqlens_kv <= max_seqlen_kv
-                    ), """Sequence lengths indicated by cu_seqlens_kv must be no greater than
-                        the sequence dimension in 'key_layer' and 'value_layer'!"""
-                if cu_seqlens_q is None or cu_seqlens_kv is None:
+                if cu_seqlens_q is None:
                     if "padding" in attn_mask_type:
                         assert (
                             attention_mask is not None
                         ), "Please provide attention_mask for padding!"
                         if self.attention_type == "self":
-                            cu_seqlens_q = get_cu_seqlens(attention_mask)
-                            cu_seqlens_kv = cu_seqlens_q
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask)
                         else:
-                            cu_seqlens_q = get_cu_seqlens(attention_mask[0])
-                            cu_seqlens_kv = get_cu_seqlens(attention_mask[1])
+                            cu_seqlens_q = dpa_utils.get_cu_seqlens(attention_mask[0])
                     else:
-                        cu_seqlens_q = _get_full_cu_seqlens(
+                        cu_seqlens_q = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_q,
                             query_layer.device,
                         )
-                        cu_seqlens_kv = _get_full_cu_seqlens(
+            if kv_format in ["sbhd", "bshd"]:
+                max_seqlen_kv *= cp_size
+                if cu_seqlens_kv is None:
+                    if "padding" in attn_mask_type:
+                        assert (
+                            attention_mask is not None
+                        ), "Please provide attention_mask for padding!"
+                        if self.attention_type == "self":
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask)
+                        else:
+                            cu_seqlens_kv = dpa_utils.get_cu_seqlens(attention_mask[1])
+                    else:
+                        cu_seqlens_kv = dpa_utils.get_full_cu_seqlens(
                             batch_size,
                             max_seqlen_kv,
                             key_layer.device,
                         )
 
-            if (
-                isinstance(query_layer, Float8Tensor)
-                and isinstance(key_layer, Float8Tensor)
-                and isinstance(value_layer, Float8Tensor)
-            ):
-                qkv_layout, query_layer._data, key_layer._data, value_layer._data = get_qkv_layout(
-                    query_layer._data, key_layer._data, value_layer._data, qkv_format=qkv_format
-                )
-            else:
-                qkv_layout, query_layer, key_layer, value_layer = get_qkv_layout(
-                    query_layer, key_layer, value_layer, qkv_format=qkv_format
-                )
-
+            # set ALiBi attributes
             global _alibi_cache
             if alibi_slopes is not None:
                 assert (
@@ -7608,6 +6103,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _alibi_cache["_alibi_slopes_require_update"] = True
                     _alibi_cache["_alibi_bias_require_update"] = True
 
+            # detect bias shape
             core_attention_bias_shape = None
             if core_attention_bias is not None:
                 if (
@@ -7643,17 +6139,18 @@ class DotProductAttention(TransformerEngineBaseModule):
                 else:
                     pad_between_seqs = False
 
-            attention_params = AttentionParams(
+            # gather attention params for get_attention_backend
+            attention_params = dpa_utils.AttentionParams(
                 qkv_type=type(query_layer),
                 qkv_dtype=query_layer.dtype,
                 qkv_layout=qkv_layout,
                 batch_size=batch_size,
-                num_heads=query_layer.shape[-2],
-                num_gqa_groups=key_layer.shape[-2],
+                num_heads=num_attention_heads,
+                num_gqa_groups=num_gqa_groups,
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
-                head_dim_qk=query_layer.shape[-1],
-                head_dim_v=value_layer.shape[-1],
+                head_dim_qk=head_dim_qk,
+                head_dim_v=head_dim_v,
                 attn_mask_type=attn_mask_type,
                 window_size=window_size,
                 alibi_slopes_shape=alibi_slopes.shape if alibi_slopes is not None else None,
@@ -7669,9 +6166,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                 is_training=self.training,
                 fp8=self.fp8,
                 fp8_meta=self.fp8_meta,
+                inference_params=inference_params,
             )
-            global _attention_backends, _use_flash_attn_3
-
+            global _attention_backends
             if is_in_onnx_export_mode():
                 # We do not want to call get_attention_backend() in ONNX mode
                 # and we want to avoid using any global variables like _attention_backends.
@@ -7686,18 +6183,26 @@ class DotProductAttention(TransformerEngineBaseModule):
                     _attention_backends["attention_params"] = attention_params
                     _attention_backends["backend_selection_requires_update"] = True
                 if _attention_backends["backend_selection_requires_update"]:
-                    _use_flash_attn_3 = _flash_attn_3_is_installed
                     (
                         use_flash_attention,
+                        flash_attention_backend,
                         use_fused_attention,
                         fused_attention_backend,
                         use_unfused_attention,
                         _,
-                    ) = get_attention_backend(attention_params)
+                    ) = dpa_utils.get_attention_backend(attention_params)
+                    # Set global _attention_backends var using return value
+                    # from get_attention_backend()
+                    _attention_backends["use_flash_attention"] = use_flash_attention
+                    _attention_backends["flash_attention_backend"] = flash_attention_backend
+                    _attention_backends["use_fused_attention"] = use_fused_attention
+                    _attention_backends["fused_attention_backend"] = fused_attention_backend
+                    _attention_backends["use_unfused_attention"] = use_unfused_attention
+                    _attention_backends["backend_selection_requires_update"] = False
                     if use_flash_attention:
                         self.logger.info(
                             "Running with FlashAttention backend (version %s)",
-                            _flash_attn_version if not _use_flash_attn_3 else _flash_attn_3_version,
+                            flash_attention_backend,
                         )
                     elif use_fused_attention:
                         self.logger.info(
@@ -7708,13 +6213,20 @@ class DotProductAttention(TransformerEngineBaseModule):
                         self.logger.info("Running with UnfusedDotProductAttention backend")
                 else:
                     use_flash_attention = _attention_backends["use_flash_attention"]
+                    flash_attention_backend = _attention_backends["flash_attention_backend"]
                     use_fused_attention = _attention_backends["use_fused_attention"]
                     fused_attention_backend = _attention_backends["fused_attention_backend"]
                     use_unfused_attention = _attention_backends["use_unfused_attention"]
 
+            # raise exception if no backend is available
+            if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
+                raise ValueError("No dot product attention support for the provided inputs!")
+
+            # run attention
             if use_flash_attention:
                 if core_attention_bias_type == "alibi":
-                    alibi_slopes, _ = get_alibi(
+                    alibi_slopes, _ = dpa_utils.get_alibi(
+                        _alibi_cache,
                         query_layer.shape[-2],
                         max_seqlen_q,
                         max_seqlen_kv,
@@ -7740,6 +6252,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
+                    inference_params=inference_params,
+                    flash_attention_backend=flash_attention_backend,
                 )
 
             if use_fused_attention:
@@ -7749,7 +6263,8 @@ class DotProductAttention(TransformerEngineBaseModule):
                     alibi_slopes is not None or max_seqlen_q != max_seqlen_kv
                 ):
                     fu_core_attention_bias_type = "post_scale_bias"
-                    _, fu_core_attention_bias = get_alibi(
+                    _, fu_core_attention_bias = dpa_utils.get_alibi(
+                        _alibi_cache,
                         query_layer.shape[-2],
                         max_seqlen_q,
                         max_seqlen_kv,
@@ -7757,6 +6272,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         bias_dtype=query_layer.dtype,
                         bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
                     )
+                # checkpoint_core_attention=False
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
                         self.fused_attention,
@@ -7783,7 +6299,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                         cp_comm_type=self.cp_comm_type,
                         fp8=self.fp8 and self.fp8_meta["recipe"].fp8_dpa,
                         fp8_meta=self.fp8_meta,
+                        quantizers=self.quantizers,
                         pad_between_seqs=pad_between_seqs,
+                        inference_params=inference_params,
                     )
                 return self.fused_attention(
                     query_layer,
@@ -7811,6 +6329,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                     fp8_meta=self.fp8_meta,
                     quantizers=self.quantizers,
                     pad_between_seqs=pad_between_seqs,
+                    inference_params=inference_params,
                 )
 
             from .cpu_offload import CPUOffloadEnabled
@@ -7836,6 +6355,7 @@ class DotProductAttention(TransformerEngineBaseModule):
                         core_attention_bias_type=core_attention_bias_type,
                         core_attention_bias=core_attention_bias,
                         alibi_slopes=alibi_slopes,
+                        inference_params=inference_params,
                     )
                 return self.unfused_attention(
                     query_layer,
@@ -7850,9 +6370,9 @@ class DotProductAttention(TransformerEngineBaseModule):
                     core_attention_bias_type=core_attention_bias_type,
                     core_attention_bias=core_attention_bias,
                     alibi_slopes=alibi_slopes,
+                    inference_params=inference_params,
                 )
-
-            raise ValueError("No dot product attention support for the provided inputs!")
+            return None
 
 
 class MultiheadAttention(torch.nn.Module):
@@ -8035,8 +6555,8 @@ class MultiheadAttention(torch.nn.Module):
 
         self.qkv_format = qkv_format
         self.attn_mask_type = attn_mask_type
-        self.window_size = check_set_window_size(attn_mask_type, window_size)
-        self.layer_number = layer_number
+        self.window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
+        self.layer_number = 1 if layer_number is None else layer_number
         self.input_layernorm = input_layernorm
         self.attention_type = attention_type
         self.get_rng_state_tracker = get_rng_state_tracker
@@ -8203,19 +6723,6 @@ class MultiheadAttention(torch.nn.Module):
             ub_overlap_ag=ub_overlap_ag,
             ub_name="proj",
             **common_gemm_kwargs,
-        )
-
-    def _allocate_memory(
-        self, inference_max_sequence_len: int, batch_size: int, dtype: torch.dtype
-    ) -> torch.Tensor:
-        """Allocates memory for KV cache."""
-        return torch.empty(
-            inference_max_sequence_len,
-            batch_size,
-            self.num_gqa_groups_per_partition,
-            self.hidden_size_per_attention_head,
-            dtype=dtype,
-            device=torch.cuda.current_device(),
         )
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -8395,7 +6902,7 @@ class MultiheadAttention(torch.nn.Module):
             attn_mask_type = self.attn_mask_type
         if window_size is None:
             window_size = self.window_size
-        window_size = check_set_window_size(attn_mask_type, window_size)
+        window_size = dpa_utils.check_set_window_size(attn_mask_type, window_size)
 
         if "padding" in attn_mask_type and attention_mask is not None:
             for mask in attention_mask:
@@ -8406,31 +6913,14 @@ class MultiheadAttention(torch.nn.Module):
         ), f"core_attention_bias_type {core_attention_bias_type} is not supported!"
 
         # =================================================
-        # Pre-allocate memory for key-values for inference
+        # Pre-allocate memory for key-value cache for inference
         # =================================================
 
-        if inference_params and self.layer_number is not None:
-            assert (
-                self.qkv_format != "thd"
-            ), "qkv_format == thd is not supported for an inference with KV-cache!"
-            if self.layer_number not in inference_params.key_value_memory_dict:
-                inf_max_seq_len = inference_params.max_sequence_length
-                inf_max_batch_size = inference_params.max_batch_size
-                inference_key_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
-                inference_value_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size, hidden_states.dtype
-                )
-                inference_params.key_value_memory_dict[self.layer_number] = (
-                    inference_key_memory,
-                    inference_value_memory,
-                )
-            else:
-                (
-                    inference_key_memory,
-                    inference_value_memory,
-                ) = inference_params.key_value_memory_dict[self.layer_number]
+        if (
+            inference_params is not None
+            and self.layer_number not in inference_params.cache_manager.cache
+        ):
+            inference_params.allocate_memory(self.layer_number)
 
         # ======================
         # Query, Key, and Value
@@ -8598,9 +7088,12 @@ class MultiheadAttention(torch.nn.Module):
                 elif self.qkv_format == "bshd":
                     sequence_length = key_layer.size(1)
                 else:
-                    raise ValueError(f"QKV format {self.qkv_format} not supported for KV caching.")
+                    raise ValueError(
+                        f"qkv_format={self.qkv_format} not supported for KV caching and RoPE."
+                    )
 
-                sequence_start = inference_params.sequence_len_offset
+                sequence_start = inference_params.get_seqlens_pre_step()
+                # sequence_start = inference_params.seqlens[0]
                 sequence_end = sequence_start + sequence_length
 
                 q_pos_emb = q_pos_emb[sequence_start:sequence_end, ...]

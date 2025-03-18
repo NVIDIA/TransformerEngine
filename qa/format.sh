@@ -11,5 +11,5 @@ set -e
 
 cd $TE_PATH
 
-pip install pre-commit
-pre-commit run --all-files
+pip3 install pre-commit
+python3 -m pre_commit run --all-files
