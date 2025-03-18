@@ -37,8 +37,7 @@ namespace transformer_engine::pytorch {
 namespace detail {
 
 bool is_low_precision(const DType type) {
-  return type == DType::kFloat8E4M3 ||
-         type == DType::kFloat8E5M2;
+  return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2;
 }
 
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
@@ -101,8 +100,8 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   TensorWrapper A_tensor = makeTransformerEngineTensor(A, none);
   TensorWrapper B_tensor = makeTransformerEngineTensor(B, none);
 
-  const bool low_precision = detail::is_low_precision(A_tensor.dtype()) ||
-                             detail::is_low_precision(B_tensor.dtype());
+  const bool low_precision =
+      detail::is_low_precision(A_tensor.dtype()) || detail::is_low_precision(B_tensor.dtype());
 
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
