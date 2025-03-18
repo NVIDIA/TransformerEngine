@@ -44,6 +44,7 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     get_cudnn_version,
 )
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 from transformer_engine.pytorch.jit import jit_fuser
 
@@ -1684,7 +1685,10 @@ def get_qkv_layout(
 
         return qkv_layout
 
-    qkv_layout = run_iteratively(q, k, v)
+    if not is_in_onnx_export_mode():
+        qkv_layout = run_iteratively(q, k, v)
+    else:
+        qkv_layout = "not_supported"
     if qkv_layout == "not_supported":
         # force q,k,v to be contiguous and run get_layout again
         q, k, v = [x.contiguous() for x in [q, k, v]]
