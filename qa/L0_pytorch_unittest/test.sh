@@ -21,6 +21,8 @@ set -x
 : ${TE_PATH:=/opt/transformerengine}
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install onnxruntime==1.20.1 || error_exit "Failed to install onnxruntime"
+pip3 install onnxruntime_extensions==0.13.0 || error_exit "Failed to install onnxruntime_extensions"
 
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py || test_fail "test_recipe.py"
