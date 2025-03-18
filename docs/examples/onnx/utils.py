@@ -9,12 +9,13 @@ Utility functions for ONNX export.
 import time
 import torch
 
+
 def _measure_time(f):
 
     time_taken = []
-    num_iterations = 10 
-    f() # warm-up
-    
+    num_iterations = 10
+    f()  # warm-up
+
     for _ in range(num_iterations):
         start_time = time.time()
         f()
