@@ -49,8 +49,7 @@ struct MultiCastTransposeArgs {
   int num_tensors;
 };
 
-template <int nvec_in, int nvec_out, bool aligned, typename CType,
-          typename IType, typename OType>
+template <int nvec_in, int nvec_out, bool aligned, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(threads_per_block)
     multi_fp8_quantize_kernel(MultiCastTransposeArgs args) {
   using IVec = Vec<IType, nvec_in>;
