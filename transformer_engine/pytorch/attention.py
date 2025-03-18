@@ -3780,7 +3780,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        mask_func = lambda x, y: onnx_attention_mask_func(x, y) if is_in_onnx_export_mode() else attention_mask_func(x, y)
+        mask_func = lambda x, y: (
+            onnx_attention_mask_func(x, y)
+            if is_in_onnx_export_mode()
+            else attention_mask_func(x, y)
+        )
         self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -3950,7 +3954,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             )
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
-        
+
         attention_probs = self.scale_mask_softmax(
             matmul_result, attention_mask, attn_mask_type, softmax_scale
         )
