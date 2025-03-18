@@ -18,8 +18,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
   init_extension();
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
-  std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
   std::vector<py::object> py_output_objects_list;
+  std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
   if (output_list.has_value()) {
     py_output_objects_list = output_list.value();
   }
@@ -49,8 +49,8 @@ std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
     }
     if (input_tensor.numel() == 0) continue;
 
-    nvte_tensor_output_list.push_back(output_tensor.data());
-    nvte_tensor_input_list.push_back(input_tensor.data());
+    nvte_tensor_output_list.emplace_back(output_tensor.data());
+    nvte_tensor_input_list.emplace_back(input_tensor.data());
     tensor_wrappers.emplace_back(std::move(input_tensor));
     tensor_wrappers.emplace_back(std::move(output_tensor));
   }

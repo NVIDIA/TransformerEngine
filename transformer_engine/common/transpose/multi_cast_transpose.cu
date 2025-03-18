@@ -49,7 +49,7 @@ struct MultiCastTransposeArgs {
   int num_tensors;
 };
 
-template <int nvec_in, int nvec_out, bool aligned, bool return_transpose, typename CType,
+template <int nvec_in, int nvec_out, bool aligned, typename CType,
           typename IType, typename OType>
 __global__ void __launch_bounds__(threads_per_block)
     multi_fp8_quantize_kernel(MultiCastTransposeArgs args) {
@@ -149,7 +149,7 @@ __global__ void __launch_bounds__(threads_per_block)
     }
   }
 
-  if constexpr (return_transpose) {
+  if (args.output_t_list[tensor_id] != nullptr) {
     OType* output_t = reinterpret_cast<OType*>(args.output_t_list[tensor_id]);
     // Copy transposed output from registers to global memory
     __shared__ OVecT shared_output_t[THREADS_PER_WARP][THREADS_PER_WARP + 1];
@@ -260,35 +260,26 @@ void multi_fp8_quantize(const std::vector<Tensor*> input_list, std::vector<Tenso
   kernel_args_unaligned.num_tensors = 0;
   kernel_args_unaligned.block_range[0] = 0;
 
-#define LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args, aligned, return_transpose)              \
-  do {                                                                                        \
-    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(                                                     \
-        itype, InputType,                                                                     \
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(                                                \
-            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType); \
-            constexpr int nvec_out = desired_store_size / sizeof(OutputType);                 \
-            const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];            \
-            multi_fp8_quantize_kernel<nvec_in, nvec_out, aligned, return_transpose, fp32,     \
-                                      InputType, OutputType>                                  \
-            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args);););                    \
+#define LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args, aligned)                                 \
+  do {                                                                                         \
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(                                                      \
+        itype, InputType,                                                                      \
+        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(                                                 \
+            otype, OutputType, constexpr int nvec_in = desired_load_size / sizeof(InputType);  \
+            constexpr int nvec_out = desired_store_size / sizeof(OutputType);                  \
+            const int n_blocks = kernel_args.block_range[kernel_args.num_tensors];             \
+            multi_fp8_quantize_kernel<nvec_in, nvec_out, aligned, fp32, InputType, OutputType> \
+            <<<n_blocks, threads_per_block, 0, stream>>>(kernel_args);););                     \
   } while (0)
 
   for (size_t tensor_id = 0; tensor_id < input_list.size(); ++tensor_id) {
     // Launch kernel if argument struct is full
     if (kernel_args_aligned.num_tensors == kMaxTensorsPerKernel) {
-      if (has_transpose) {
-        LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true, true);
-      } else {
-        LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true, false);
-      }
+      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true);
       kernel_args_aligned.num_tensors = 0;
     }
     if (kernel_args_unaligned.num_tensors == kMaxTensorsPerKernel) {
-      if (has_transpose) {
-        LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false, true);
-      } else {
-        LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false, false);
-      }
+      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false);
       kernel_args_unaligned.num_tensors = 0;
     }
 
@@ -320,18 +311,10 @@ void multi_fp8_quantize(const std::vector<Tensor*> input_list, std::vector<Tenso
 
   // Launch kernel
   if (kernel_args_aligned.num_tensors > 0) {
-    if (has_transpose) {
-      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true, true);
-    } else {
-      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true, false);
-    }
+    LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_aligned, true);
   }
   if (kernel_args_unaligned.num_tensors > 0) {
-    if (has_transpose) {
-      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false, true);
-    } else {
-      LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false, false);
-    }
+    LAUNCH_MULTI_FP8_QUANTIZE_KERNEL(kernel_args_unaligned, false);
   }
 }
 
