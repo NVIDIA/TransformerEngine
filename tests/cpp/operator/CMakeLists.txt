@@ -17,6 +17,14 @@ add_executable(test_operator
                test_cast_transpose_current_scaling.cu
                test_cast_transpose_dbias.cu
                test_cast_transpose_dbias_dgelu.cu
+               test_cast_transpose_dgeglu.cu
+               test_act.cu
+               test_normalization.cu
+               test_normalization_mxfp8.cu
+               test_multi_cast_transpose.cu
+               test_multi_padding.cu
+               test_causal_softmax.cu
+               test_swizzle.cu
                ../test_common.cu)
 
 find_package(OpenMP REQUIRED)
