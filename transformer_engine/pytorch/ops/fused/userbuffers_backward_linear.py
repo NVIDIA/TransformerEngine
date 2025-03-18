@@ -514,26 +514,12 @@ class UserbuffersBackwardLinear(FusedOperation):
         else:
             accumulate_into_main_grad = False
 
-        # Hackily workaround Userbuffers bug with non-FP8 dgrad
-        # reduce-scatter overlap
-        weight_requires_grad = linear_op_ctx.weight_requires_grad
-        if not linear_op_ctx.with_quantized_compute and not weight_requires_grad:
-            warnings.warn(
-                "There is a correctness bug when using Userbuffers "
-                "to overlap a dgrad reduce-scatter with a non-FP8 dgrad GEMM. "
-                "Hackily working around by overlapping dgrad reduce-scatter "
-                "with wgrad GEMM, even though wgrad isn't needed. "
-                "Please contact Transformer Engine team "
-                "if you encounter this use-case."
-            )
-            weight_requires_grad = True
-
         # Linear backward pass
         retval = UserbuffersBackwardLinear._functional_backward(
             grad_output=grad_output,
             input=x_local,
             weight=linear_op.weight,
-            weight_requires_grad=weight_requires_grad,
+            weight_requires_grad=linear_op_ctx.weight_requires_grad,
             bias_requires_grad=(bias_op is not None),
             dtype=linear_op_ctx.dtype,
             grad_weight=grad_weight,

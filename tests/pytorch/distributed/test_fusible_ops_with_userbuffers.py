@@ -308,14 +308,7 @@ def _test_linear(
         if tensor_parallel_mode == "column":
             userbuffers_options = {}
             if not weight_requires_grad:
-                if quantized_compute:
-                    userbuffers_options["comm_name"] = "fc1"
-                else:
-                    # There is a correctness bug with overlapping
-                    # dgrad reduce-scatter with dgrad GEMM. Fall back
-                    # to overlapping dgrad reduce-scatter with wgrad
-                    # GEMM, even though wgrad isn't needed.
-                    userbuffers_options["comm_name"] = "qkv"
+                userbuffers_options["comm_name"] = "fc1"
             else:
                 userbuffers_options["comm_name"] = "qkv"
             linear_op = te_ops.BasicLinear(
@@ -405,7 +398,7 @@ def run_parallel_tests(model_config: ModelConfig) -> None:
     # Linear op
     for test_config in itertools.product(
         (False, True),  # bias
-        ("row", "column"),  # tensor_parallel_mode
+        ("column", "row"),  # tensor_parallel_mode
         (True, False),  # weight_requires_grad
     ):
         if rank == 0:
@@ -502,7 +495,7 @@ def main() -> None:
         group = world_group()  # Initialize NCCL
         bootstrap_backend = "mpi" if launcher() == "ompi" else "nccl"
         userbuffer_configs = {
-            "fc1_dgrad": {"method": "pipeline"},  # Overlap dgrad RS with dgrad GEMM
+            "fc1_dgrad": {"method": "ring_exchange", "fp8_buf": False},  # Overlap dgrad RS with dgrad GEMM
         }
         te.module.base.initialize_ub(
             [
