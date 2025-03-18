@@ -433,8 +433,7 @@ class _LayerNormMLP(torch.autograd.Function):
         )
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
-
-        if is_grad_enabled:
+        else:
             if cpu_offloading:
                 if fp8 and fc1_weight_final is not None:
                     set_offloading_param(fc1_weight_final, "weight_offloading", True)
