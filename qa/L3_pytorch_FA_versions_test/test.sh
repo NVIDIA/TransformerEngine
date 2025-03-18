@@ -17,7 +17,7 @@ if [ $sm_arch -gt 90 ]
 then
   FA_versions=(2.7.3)
 else
-  FA_versions=(2.1.1 2.3.0 2.4.1 2.5.7 2.7.3 3.0.0b1)
+  FA_versions=(2.3.0 2.4.1 2.5.7 2.7.3 3.0.0b1)
 fi
 
 for fa_version in "${FA_versions[@]}"
@@ -28,10 +28,12 @@ do
   then
     pip3 install flash-attn==${fa_version}
   else
-    pip3 install "git+https://github.com/Dao-AILab/flash-attention.git@v2.7.2#egg=flashattn-hopper&subdirectory=hopper"
-    python_path=`python3 -c "import site; print(site.getsitepackages()[0])"`
-    mkdir -p $python_path/flashattn_hopper
-    wget -P $python_path/flashattn_hopper https://raw.githubusercontent.com/Dao-AILab/flash-attention/v2.7.2/hopper/flash_attn_interface.py
+    git clone https://github.com/Dao-AILab/flash-attention.git
+    cd flash-attention/ && git checkout 27f501d && cd hopper/ && python setup.py install
+    python_path=`python -c "import site; print(site.getsitepackages()[0])"`
+    mkdir -p $python_path/flash_attn_3
+    wget -P $python_path/flash_attn_3 https://raw.githubusercontent.com/Dao-AILab/flash-attention/27f501dbe011f4371bff938fe7e09311ab3002fa/hopper/flash_attn_interface.py
+    cd ../../
   fi
 
   # Run tests
