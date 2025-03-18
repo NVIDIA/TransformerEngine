@@ -12,7 +12,7 @@ variables:
       value: gitlab-master.nvidia.com:5005/dl/dgx/pytorch:main-py3-devel
     JAX_IMAGE:
       description: Base Docker container for JAX build
-      value: gitlab-master.nvidia.com:5005/dl/dgx/jax:jax-2025-03-14
+      value: gitlab-master.nvidia.com:5005/dl/dgx/jax:jax-2025-03-13
 
     # variables that may be overridden by the pipeline vars
     GH_BRANCH:
