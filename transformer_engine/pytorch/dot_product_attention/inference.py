@@ -100,7 +100,7 @@ class InferenceParams:
     ----------
     max_batch_size: int
         Maximum batch size in inference
-    max_seqlen_kv: int
+    max_sequence_length: int
         Maximum sequence length in inference
     num_heads_kv: int
         Number of attention heads in keys and values
@@ -117,7 +117,7 @@ class InferenceParams:
     page_size: int, default = None
         Page size of the KV cache. Required for is_paged = True.
     max_ctx_len: int, default = None
-        Maximum context length in inference. 1 <= max_ctx_len <= max_seqlen_kv.
+        Maximum context length in inference. 1 <= max_ctx_len <= max_sequence_length.
     qkv_format: str, default = "bshd"
         Format of the incoming query/key/value tensors in current iteration
     custom_cache_manager: KVCacheManager, default = None
@@ -127,7 +127,7 @@ class InferenceParams:
     def __init__(
         self,
         max_batch_size: int,
-        max_seqlen_kv: int,
+        max_sequence_length: int,
         num_heads_kv: int = 16,
         head_dim_k: int = 64,
         dtype: torch.dtype = torch.bfloat16,
@@ -140,7 +140,7 @@ class InferenceParams:
         custom_cache_manager: KVCacheManager = None,
     ):
         self.max_batch_size = max_batch_size
-        self.max_seqlen_kv = max_seqlen_kv
+        self.max_sequence_length = max_sequence_length
         self.num_heads_kv = num_heads_kv
         self.head_dim_k = head_dim_k
         self.dtype = dtype
@@ -153,7 +153,7 @@ class InferenceParams:
             )
             self.cache_manager = cache_manager(
                 max_batch_size=self.max_batch_size,
-                max_seqlen=self.max_seqlen_kv,
+                max_seqlen=self.max_sequence_length,
                 num_heads=self.num_heads_kv,
                 head_dim_k=self.head_dim_k,
                 dtype=self.dtype,
@@ -163,9 +163,9 @@ class InferenceParams:
             assert page_size is not None, "Paged KV cache requires page_size is not None."
             self.page_size = page_size
             assert (
-                max_seqlen_kv % page_size == 0
-            ), "Paged KV cache requires max_seqlen_kv % page_size = 0."
-            max_pages_per_seq = max_seqlen_kv // page_size
+                max_sequence_length % page_size == 0
+            ), "Paged KV cache requires max_sequence_length % page_size = 0."
+            max_pages_per_seq = max_sequence_length // page_size
             assert (
                 total_num_pages == self.max_batch_size * max_pages_per_seq
             ), "Paged KV cache requires total_num_pages = max_batch_size * max_pages_per_seq."
@@ -181,7 +181,7 @@ class InferenceParams:
                 head_dim_k=self.head_dim_k,
                 dtype=self.dtype,
                 max_batch_size=self.max_batch_size,
-                max_seqlen=self.max_seqlen_kv,
+                max_seqlen=self.max_sequence_length,
                 head_dim_v=self.head_dim_v,
             )
 
@@ -231,7 +231,7 @@ class InferenceParams:
             f"dtype={self.dtype}, "
             f"is_paged={self.is_paged}, "
             f"max_batch_size={self.max_batch_size}, "
-            f"max_seqlen={self.max_seqlen_kv}, "
+            f"max_seqlen={self.max_sequence_length}, "
             f"num_heads={self.num_heads_kv}, "
             f"head_dim_k={self.head_dim_k}, "
             f"head_dim_v={self.head_dim_v}"
@@ -241,8 +241,8 @@ class InferenceParams:
         """
         Allocate memory for the cache. For layer layer_number,
         - NonPagedKVCacheManager:
-          - K cache: [max_batch_size, max_seqlen_kv, num_heads_kv, head_dim_k]
-          - V cache: [max_batch_size, max_seqlen_kv, num_heads_kv, head_dim_v]
+          - K cache: [max_batch_size, max_sequence_length, num_heads_kv, head_dim_k]
+          - V cache: [max_batch_size, max_sequence_length, num_heads_kv, head_dim_v]
         - PagedKVCacheManager:
           - K cache: [total_num_pages, page_size, num_heads_kv, head_dim_k]
           - V cache: [total_num_pages, page_size, num_heads_kv, head_dim_v]
@@ -348,7 +348,7 @@ class InferenceParams:
             Updated cumulative sequence lengths for key and value, [batch_size + 1]
         max_seqlen_q: int
             Update maximum sequence length for query
-        max_seqlen_kv: int
+        max_sequence_length: int
             Update maximum sequence length for key and value
         qkv_format: str
             Updated qkv_format, e.g. 'thd' format becomes 'thd_2bshd' after step()
@@ -373,7 +373,7 @@ class InferenceParams:
             v_cache,
             self.cu_seqlens_q,
             self.cu_seqlens_kv,
-            self.max_seqlen_kv,
+            self.max_sequence_length,
             self.output_qkv_format,
         )
 

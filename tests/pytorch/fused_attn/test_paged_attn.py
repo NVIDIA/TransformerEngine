@@ -437,7 +437,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     # initialize inference_params
     inference_params = InferenceParams(
         max_batch_size=max_batch_size,
-        max_seqlen_kv=config.max_seqlen_kv,
+        max_sequence_length=config.max_seqlen_kv,
         num_heads_kv=config.num_gqa_groups,
         head_dim_k=config.head_dim_qk,
         head_dim_v=config.head_dim_v,
