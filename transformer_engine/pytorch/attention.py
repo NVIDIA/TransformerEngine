@@ -4961,8 +4961,6 @@ class FusedAttnFunc(torch.autograd.Function):
                 None,
                 None,
                 None,
-                None,
-                None,
             )
         # else, return (dqkv, dbias)
         return (
@@ -4979,8 +4977,6 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             rest[0],
-            None,
-            None,
             None,
             None,
             None,
