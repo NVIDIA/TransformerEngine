@@ -185,6 +185,28 @@ struct Tensor {
           return data.shape;
         }
         break;
+      case NVTE_BLOCK_SCALING_1D:
+      case NVTE_BLOCK_SCALING_2D: {
+        if (!has_data() && has_columnwise_data()) {
+          std::vector<size_t> shape;
+          size_t ndim = columnwise_data.shape.size();
+          shape.reserve(ndim);
+          for (size_t i = 0; i + 1 < ndim; ++i) {
+            shape.push_back(columnwise_data.shape[i + 1]);
+          }
+          if (ndim > 0) {
+            shape.push_back(columnwise_data.shape[0]);
+          }
+          return shape;
+        } else {
+          // NOTE: We may have removed the data pointer from
+          // data by setting usage. In that case, we return
+          // the non-null shape. It is our best guess at the most
+          // recent shape.
+          return data.shape;
+        }
+        break;
+      }
       default:
         NVTE_ERROR("Cannot parse tensor shape with scaling mode \"", to_string(scaling_mode), "\"");
         return {};

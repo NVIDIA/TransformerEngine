@@ -87,17 +87,37 @@ TensorWrapper NVTETensorFromMXFP8Tensor(py::handle tensor, Quantizer *quantizer)
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp8_dtype").cast<DType>();
   bool is_2D_scaled = tensor.attr("_is_2D_scaled").cast<bool>();
-  auto ret = TensorWrapper(is_2D_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
 
   bool rowwise_usage = !(tensor.attr("_rowwise_data").is_none());
   bool columnwise_usage = !(tensor.attr("_columnwise_data").is_none());
+
+  std::vector<size_t> initial_rowwise_shape;
+  if (rowwise_usage) {
+    initial_rowwise_shape = getTensorShape(tensor.attr("_rowwise_data").cast<at::Tensor>());
+  } else if (columnwise_usage) {
+    std::vector<size_t> columnwise_shape =
+        getTensorShape(tensor.attr("_columnwise_data").cast<at::Tensor>());
+
+    // Even though we don't have rowwise data, we want to store the
+    // rowwise shape so that nvte_tensor_shape can return an allocated
+    // vector.
+    initial_rowwise_shape.reserve(columnwise_shape.size());
+    for (size_t i = 0; i + 1 < columnwise_shape.size(); ++i) {
+      initial_rowwise_shape.push_back(columnwise_shape[i + 1]);
+    }
+    if (columnwise_shape.size() > 0) {
+      initial_rowwise_shape.push_back(columnwise_shape[0]);
+    }
+  }
+
+  auto ret = TensorWrapper(is_2D_scaled ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D,
+                           initial_rowwise_shape);
 
   if (rowwise_usage) {
     const at::Tensor &data_rowwise = tensor.attr("_rowwise_data").cast<at::Tensor>();
     const at::Tensor &scale_inv_rowwise = tensor.attr("_rowwise_scale_inv").cast<at::Tensor>();
     void *scale_inv_rowwise_dptr = scale_inv_rowwise.data_ptr();
-    const auto &shape = getTensorShape(data_rowwise);
-    ret.set_rowwise_data(data_rowwise.data_ptr(), dtype, shape);
+    ret.set_rowwise_data(data_rowwise.data_ptr(), dtype, initial_rowwise_shape);
 
     const auto scale_inv_rowwise_shape = getTensorShape(scale_inv_rowwise);
     ret.set_rowwise_scale_inv(scale_inv_rowwise_dptr, DType::kFloat32, scale_inv_rowwise_shape);
