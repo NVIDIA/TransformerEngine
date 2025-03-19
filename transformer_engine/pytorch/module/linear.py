@@ -291,6 +291,17 @@ class _Linear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
+            if cpu_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_object = weight
+
             # TODO(ksivamani): Check memory usage
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
@@ -392,9 +403,11 @@ class _Linear(torch.autograd.Function):
                 else None
             )
 
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight = torch.nn.Parameter(weight, weight.requires_grad)
-                weight.main_grad = main_grad
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    weight = ctx.weight_object
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    weight.main_grad = main_grad
 
             # Gather intermediate/activation tensors if needed
             # NOTE: weight_fp8 = weight when ctx.fp8 == False and torch.disttributed.FSDP already
