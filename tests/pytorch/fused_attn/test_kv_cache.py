@@ -392,9 +392,9 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
-def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
+def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
     reset_rng_states()
-    logger = logging.getLogger("test_paged_attn")
+    logger = logging.getLogger("test_kv_cache")
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         fp8_format=recipe.Format.HYBRID,
