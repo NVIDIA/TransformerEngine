@@ -431,6 +431,7 @@ class GroupedLinear(TransformerEngineBaseModule):
 
     Note: GroupedLinear doesn't really handle the TP communications inside. The `tp_size` and
           `parallel_mode` are used to determine the shapes of weights and biases.
+          The TP communication should be handled in the dispatch and combine stages of MoE models.
     """
 
     def __init__(
