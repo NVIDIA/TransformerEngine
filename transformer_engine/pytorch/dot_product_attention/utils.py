@@ -461,6 +461,9 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        if use_fused_attention and cudnn_version == (9, 8, 0):
+            logger.debug("Disabling FusedAttention for cuDNN 9.8 due to known numerical issues")
+            use_fused_attention = False
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
