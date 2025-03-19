@@ -203,10 +203,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::call_guard<py::gil_scoped_release>());
   m.def("fused_rope_backward", &fused_rope_backward, "Fused Apply RoPE BWD",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_forward", &fused_rope_thd_forward, "Fused Apply RoPE FWD for thd format",
-        py::call_guard<py::gil_scoped_release>());
-  m.def("fused_rope_thd_backward", &fused_rope_thd_backward, "Fused Apply RoPE BWD for thd format",
-        py::call_guard<py::gil_scoped_release>());
 
   // Misc
   m.def("get_cublasLt_version", &get_cublasLt_version, "Get cublasLt version",

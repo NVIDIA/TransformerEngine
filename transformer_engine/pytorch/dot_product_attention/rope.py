@@ -7,7 +7,12 @@ Rotary Position Embedding implementation of different types along with helper fu
 """
 from typing import Optional, Tuple, Union
 import torch
+
+from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 import transformer_engine_torch as tex
+
+
+__all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb"]
 
 
 class RotaryPositionEmbedding(torch.nn.Module):
@@ -108,17 +113,17 @@ class FusedRoPEFunc(torch.autograd.Function):
         cp_size: int = 1,
         cp_rank: int = 0,
     ) -> torch.Tensor:
-        # pylint: disable=missing-function-docstring
+        """Fused RoPE forward."""
         if freqs.dtype != torch.float32:
             freqs = freqs.float()
-        if tensor_format == "sbhd":
-            output = tex.fused_rope_forward(t, freqs, False)
-        elif tensor_format == "bshd":
-            output = tex.fused_rope_forward(t.transpose(0, 1), freqs, True).transpose(0, 1)
-        elif tensor_format == "thd":
-            output = tex.fused_rope_thd_forward(t, cu_seqlens, freqs, cp_size, cp_rank)
-        else:
-            raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+        assert tensor_format in (
+            "sbhd",
+            "bshd",
+            "thd",
+        ), f"Unsupported tensor_format: {tensor_format}."
+        output = tex.fused_rope_forward(
+            t, freqs, QKVFormat[tensor_format], cu_seqlens, cp_size, cp_rank
+        )
         ctx.save_for_backward(freqs, cu_seqlens)
         ctx.tensor_format = tensor_format
         ctx.cp_size = cp_size
@@ -128,20 +133,11 @@ class FusedRoPEFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
-        # pylint: disable=missing-function-docstring
+        """Fused RoPE backward."""
         freqs, cu_seqlens = ctx.saved_tensors
-        if ctx.tensor_format == "sbhd":
-            grad_input = tex.fused_rope_backward(grad_output, freqs, False)
-        elif ctx.tensor_format == "bshd":
-            grad_input = tex.fused_rope_backward(
-                grad_output.transpose(0, 1), freqs, True
-            ).transpose(0, 1)
-        elif ctx.tensor_format == "thd":
-            grad_input = tex.fused_rope_thd_backward(
-                grad_output, cu_seqlens, freqs, ctx.cp_size, ctx.cp_rank
-            )
-        else:
-            raise ValueError(f"Unsupported tensor_format: {ctx.tensor_format}.")
+        grad_input = tex.fused_rope_backward(
+            grad_output, freqs, QKVFormat[ctx.tensor_format], cu_seqlens, ctx.cp_size, ctx.cp_rank
+        )
 
         return grad_input, None, None, None, None, None
 
@@ -149,10 +145,83 @@ class FusedRoPEFunc(torch.autograd.Function):
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
     change sign so the last dimension becomes [-odd, +even]
+    Args:
+        x: torch.Tensor. Input tensor.
+
+    Returns:
+        Tensor: Tensor rotated half
     """
-    x = x.view(x.shape[:-1] + torch.Size((2, x.shape[-1] // 2)))
-    x1, x2 = x.unbind(dim=-2)
+    x1, x2 = torch.chunk(x, 2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary_pos_emb_base(
+    t: torch.Tensor,
+    freqs: torch.Tensor,
+    tensor_format: str = "sbhd",
+) -> torch.Tensor:
+    """
+    Base implementation of applying rotary positional embedding tensor to the input tensor.
+
+    Parameters
+    ----------
+    t: torch.Tensor
+       Input tensor of shape `[s, b, h, d]` or `[b, s, h, d]`, on which rotary positional embedding
+       will be applied.
+    freqs: torch.Tensor
+           Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
+           with `s2 >= s` and `d2 <= d`.
+    tensor_format: {'sbhd', 'bshd'}, default = 'sbhd'
+                   Should be `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
+                   of shape `[seq, bs, ...]`.
+    """
+    max_seq_len = freqs.shape[0]
+    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
+
+    # Only apply the rotary embeddings up to the sequence length of the running
+    # input.
+    assert (
+        cur_seq_len <= max_seq_len
+    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
+    freqs = freqs[:cur_seq_len]
+    if tensor_format == "bshd":
+        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
+    # cos/sin first then dtype conversion for better precision
+    cos_ = torch.cos(freqs).to(t.dtype)
+    sin_ = torch.sin(freqs).to(t.dtype)
+
+    rot_dim = freqs.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * cos_) + (_rotate_half(t) * sin_)
+    return torch.cat((t, t_pass), dim=-1)
+
+
+def _get_freqs_on_this_cp_rank(
+    freqs: torch.Tensor, seqlen: int, cp_size: int, cp_rank: int
+) -> torch.Tensor:
+    """Get the position embedding on the current context parallel rank.
+
+    Args:
+        freqs: torch.Tensor. Positional embedding tensor in shape `[s2, 1, 1, d2]`.
+        seqlen: int. Length of the current sequence.
+        cp_size: int. Context parallel world size.
+        cp_rank: int. Context parallel rank.
+    """
+    if cp_size > 1:
+        cp_seg = seqlen // 2
+        full_seqlen = cp_size * seqlen
+        return torch.cat(
+            [
+                freqs[cp_rank * cp_seg : (cp_rank + 1) * cp_seg],
+                freqs[full_seqlen - (cp_rank + 1) * cp_seg : full_seqlen - cp_rank * cp_seg],
+            ]
+        )
+    else:
+        return freqs[:seqlen]
 
 
 def apply_rotary_pos_emb(
@@ -189,37 +258,33 @@ def apply_rotary_pos_emb(
     cp_rank: int, default = 0.
         Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
     """
+    assert (
+        tensor_format != "thd" or cu_seqlens is not None
+    ), "cu_seqlens must not be None when tensor_format is 'thd'."
+
     if fused:
-        assert (
-            tensor_format != "thd" or cu_seqlens is not None
-        ), "cu_seqlens must not be None when tensor_format is 'thd'."
         return FusedRoPEFunc.apply(t, freqs, tensor_format, cu_seqlens, cp_size, cp_rank)
 
-    assert tensor_format in ("sbhd", "bshd"), (
-        "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
-        f"when fused is False, got {tensor_format}."
+    # Unfused THD format
+    if tensor_format == "thd":
+        cu_seqlens = cu_seqlens // cp_size
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        return torch.cat(
+            [
+                _apply_rotary_pos_emb_base(
+                    x.unsqueeze(1), _get_freqs_on_this_cp_rank(freqs, x.size(0), cp_size, cp_rank)
+                )
+                for x in torch.split(t, seqlens)
+            ]
+        ).squeeze(1)
+
+    # Unfused SBHD/BSHD format
+    if tensor_format == "sbhd":
+        seqlen = t.size(0)
+    elif tensor_format == "bshd":
+        seqlen = t.size(1)
+    else:
+        raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
+    return _apply_rotary_pos_emb_base(
+        t, _get_freqs_on_this_cp_rank(freqs, seqlen, cp_size, cp_rank), tensor_format
     )
-
-    max_seq_len = freqs.shape[0]
-    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-    # Only apply the rotary embeddings up to the sequence length of the running
-    # input.
-    assert (
-        cur_seq_len <= max_seq_len
-    ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
-    if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
-    # cos/sin first then dtype conversion for better precision
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
-
-    rot_dim = freqs.shape[-1]
-    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
-
-    # first part is cosine component
-    # second part is sine component, need to change signs with _rotate_half method
-    t = (t * cos_) + (_rotate_half(t) * sin_)
-    return torch.cat((t, t_pass), dim=-1)

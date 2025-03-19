@@ -265,16 +265,14 @@ void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reductio
  **************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const bool transpose_output_memory);
+                              const NVTE_QKV_Format qkv_format,
+                              const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                              const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const bool transpose_output_memory);
-
-at::Tensor fused_rope_thd_forward(const at::Tensor &input, const at::Tensor &cu_seqlens,
-                                  const at::Tensor &freqs, const int cp_size, const int cp_rank);
-
-at::Tensor fused_rope_thd_backward(const at::Tensor &output_grads, const at::Tensor &cu_seqlens,
-                                   const at::Tensor &freqs, const int cp_size, const int cp_rank);
+                               const NVTE_QKV_Format qkv_format,
+                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
+                               const int cp_rank);
 
 /***************************************************************************************************
  * Miscellaneous
