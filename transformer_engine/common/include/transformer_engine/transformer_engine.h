@@ -109,6 +109,19 @@ typedef void *NVTETensor;
  */
 NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode);
 
+/*! \brief Create a new TE tensor.
+ *
+ * Create a new TE tensor. Before use its parameters need to be set.
+ * TE tensors are just wrappers on top of raw data and do not
+ * own memory.
+ *
+ *  \param[in] scaling_mode    Scaling mode of the tensor.
+ *  \param[in] initial_shape   Shape to initialize tensor with.
+ *
+ *  \return A new TE tensor.
+ */
+NVTETensor nvte_create_tensor_with_shape(NVTEScalingMode scaling_mode, NVTEShape initial_shape);
+
 /*! \brief Destroy a TE tensor.
  *
  * Since the TE tensor does not own memory, the underlying
@@ -460,6 +473,10 @@ class TensorWrapper {
    */
   explicit TensorWrapper(const NVTEScalingMode scaling_mode = NVTE_DELAYED_TENSOR_SCALING)
       : tensor_(nvte_create_tensor(scaling_mode)) {}
+
+  TensorWrapper(const NVTEScalingMode scaling_mode, const std::vector<size_t> &rowwise_shape)
+      : tensor_(nvte_create_tensor_with_shape(
+            scaling_mode, NVTEShape{rowwise_shape.data(), rowwise_shape.size()})) {}
 
   /*! \brief TensorWrapper destructor. */
   ~TensorWrapper() { nvte_destroy_tensor(tensor_); }
