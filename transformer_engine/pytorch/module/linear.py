@@ -196,7 +196,7 @@ class _Linear(torch.autograd.Function):
                 weightmat = module.get_weight_workspace(
                     tensor=weight,
                     quantizer=weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
+                    cache_name=(None if update_workspace else "weight"),
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
