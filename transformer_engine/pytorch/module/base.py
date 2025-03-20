@@ -957,6 +957,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         out = None
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+            if (out is not None and 
+                (
+                    (out._rowwise_data is None and quantizer.rowwise_usage) \
+                    or \
+                    (out._columnwise_data is None and quantizer.columnwise_usage)
+                )
+            ):
+                out = None
+                del self._fp8_workspaces[cache_name]
 
         # Gather cached Fp8 workspace if it's distributed
         # NOTE: FSDP sharding is supported only for Fp8 buffers and will not work
