@@ -74,6 +74,7 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from transformer_engine.pytorch.export import is_in_onnx_export_mode, onnx_attention_mask_func
 
 # Import attention utils
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
@@ -3779,7 +3780,14 @@ class UnfusedDotProductAttention(torch.nn.Module):
         self.attention_dropout_ctx = attention_dropout_ctx
         self.layer_number = layer_number
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(attention_mask_func)
+        def mask_func(x, y):
+            return (
+                onnx_attention_mask_func(x, y)
+                if is_in_onnx_export_mode()
+                else attention_mask_func(x, y)
+            )
+
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(mask_func)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -3886,13 +3894,18 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # preallocting result tensor: [b * np, sq, sk]
+        # WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
+        is_bf16 = query_layer.dtype == torch.bfloat16
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            dtype=query_layer.dtype,
+            dtype=torch.float32 if is_in_onnx_export_mode() and is_bf16 else query_layer.dtype,
             device=torch.cuda.current_device(),
         )
+
+        if is_in_onnx_export_mode() and is_bf16:
+            matmul_result = matmul_result.bfloat16()
 
         scale = self.softmax_scale
         if apply_qk_layer_scaling:
@@ -3941,9 +3954,9 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
                 dtype=query_layer.dtype
             )
-
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
+
         attention_probs = self.scale_mask_softmax(
             matmul_result, attention_mask, attn_mask_type, softmax_scale
         )
@@ -6163,47 +6176,54 @@ class DotProductAttention(TransformerEngineBaseModule):
                 inference_params=inference_params,
             )
             global _attention_backends
-            if (
-                _attention_backends["attention_params"] is None
-                or attention_params != _attention_backends["attention_params"]
-            ):
-                _attention_backends["attention_params"] = attention_params
-                _attention_backends["backend_selection_requires_update"] = True
-            if _attention_backends["backend_selection_requires_update"]:
-                (
-                    use_flash_attention,
-                    flash_attention_backend,
-                    use_fused_attention,
-                    fused_attention_backend,
-                    use_unfused_attention,
-                    _,
-                ) = dpa_utils.get_attention_backend(attention_params)
-                # Set global _attention_backends var using return value
-                # from get_attention_backend()
-                _attention_backends["use_flash_attention"] = use_flash_attention
-                _attention_backends["flash_attention_backend"] = flash_attention_backend
-                _attention_backends["use_fused_attention"] = use_fused_attention
-                _attention_backends["fused_attention_backend"] = fused_attention_backend
-                _attention_backends["use_unfused_attention"] = use_unfused_attention
-                _attention_backends["backend_selection_requires_update"] = False
-                if use_flash_attention:
-                    self.logger.info(
-                        "Running with FlashAttention backend (version %s)",
-                        flash_attention_backend,
-                    )
-                elif use_fused_attention:
-                    self.logger.info(
-                        "Running with FusedAttention backend (sub-backend %s)",
-                        int(fused_attention_backend),
-                    )
-                elif use_unfused_attention:
-                    self.logger.info("Running with UnfusedDotProductAttention backend")
+            if is_in_onnx_export_mode():
+                # We do not want to call get_attention_backend() in ONNX mode
+                # and we want to avoid using any global variables like _attention_backends.
+                use_flash_attention = False
+                use_fused_attention = False
+                use_unfused_attention = True
             else:
-                use_flash_attention = _attention_backends["use_flash_attention"]
-                flash_attention_backend = _attention_backends["flash_attention_backend"]
-                use_fused_attention = _attention_backends["use_fused_attention"]
-                fused_attention_backend = _attention_backends["fused_attention_backend"]
-                use_unfused_attention = _attention_backends["use_unfused_attention"]
+                if (
+                    _attention_backends["attention_params"] is None
+                    or attention_params != _attention_backends["attention_params"]
+                ):
+                    _attention_backends["attention_params"] = attention_params
+                    _attention_backends["backend_selection_requires_update"] = True
+                if _attention_backends["backend_selection_requires_update"]:
+                    (
+                        use_flash_attention,
+                        flash_attention_backend,
+                        use_fused_attention,
+                        fused_attention_backend,
+                        use_unfused_attention,
+                        _,
+                    ) = dpa_utils.get_attention_backend(attention_params)
+                    # Set global _attention_backends var using return value
+                    # from get_attention_backend()
+                    _attention_backends["use_flash_attention"] = use_flash_attention
+                    _attention_backends["flash_attention_backend"] = flash_attention_backend
+                    _attention_backends["use_fused_attention"] = use_fused_attention
+                    _attention_backends["fused_attention_backend"] = fused_attention_backend
+                    _attention_backends["use_unfused_attention"] = use_unfused_attention
+                    _attention_backends["backend_selection_requires_update"] = False
+                    if use_flash_attention:
+                        self.logger.info(
+                            "Running with FlashAttention backend (version %s)",
+                            flash_attention_backend,
+                        )
+                    elif use_fused_attention:
+                        self.logger.info(
+                            "Running with FusedAttention backend (sub-backend %s)",
+                            int(fused_attention_backend),
+                        )
+                    elif use_unfused_attention:
+                        self.logger.info("Running with UnfusedDotProductAttention backend")
+                else:
+                    use_flash_attention = _attention_backends["use_flash_attention"]
+                    flash_attention_backend = _attention_backends["flash_attention_backend"]
+                    use_fused_attention = _attention_backends["use_fused_attention"]
+                    fused_attention_backend = _attention_backends["fused_attention_backend"]
+                    use_unfused_attention = _attention_backends["use_unfused_attention"]
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
@@ -6326,7 +6346,6 @@ class DotProductAttention(TransformerEngineBaseModule):
                     "Attention activation Offloading is only implemented"
                     "with Flash Attention and Fused Attention!"
                 )
-
             if use_unfused_attention:
                 if checkpoint_core_attention:
                     return self._checkpointed_attention_forward(
@@ -6969,8 +6988,10 @@ class MultiheadAttention(torch.nn.Module):
             # not qkv_weight_interleaved:
             #  [sq, b, (np/ng + 2), ng, hn]
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            query_layer, key_layer, value_layer = _SplitAlongDim.apply(
-                mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+            fn = _SplitAlongDim.apply
+            n = []
+            query_layer, key_layer, value_layer = fn(
+                *n, mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
             )
 
             if self.qkv_format == "thd":
@@ -6985,6 +7006,7 @@ class MultiheadAttention(torch.nn.Module):
                     x.reshape(x.size(0), x.size(1), -1, self.hidden_size_per_attention_head)
                     for x in (query_layer, key_layer, value_layer)
                 )
+
         elif self.attention_type == "cross":
             # Attention heads [sk, b, h] --> [sk, b, (ng * 2 * hn)]
             mixed_kv_layer = self.key_value(
@@ -6992,7 +7014,6 @@ class MultiheadAttention(torch.nn.Module):
                 is_first_microbatch=is_first_microbatch,
                 fp8_output=fp8_mha and rotary_pos_emb is None,
             )
-
             if self.qkv_weight_interleaved:
                 # [sq, b, (ng * 2 * hn)] --> [sq, b, ng, 2 * hn]
                 new_tensor_shape = mixed_kv_layer.size()[:-1] + (
@@ -7107,7 +7128,6 @@ class MultiheadAttention(torch.nn.Module):
         # ===========================
         # Core attention computation
         # ===========================
-
         context_layer = self.core_attention(
             query_layer,
             key_layer,

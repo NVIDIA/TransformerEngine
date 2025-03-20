@@ -21,6 +21,8 @@ set -x
 : ${TE_PATH:=/opt/transformerengine}
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
+pip3 install onnxruntime==1.20.1 || error_exit "Failed to install onnxruntime"
+pip3 install onnxruntime_extensions==0.13.0 || error_exit "Failed to install onnxruntime_extensions"
 
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_sanity.py || test_fail "test_sanity.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_recipe.py || test_fail "test_recipe.py"
@@ -34,6 +36,7 @@ python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_gqa.py || test_fail "test_gq
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_fused_optimizer.py || test_fail "test_fused_optimizer.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_multi_tensor.py || test_fail "test_multi_tensor.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_fusible_ops.py || test_fail "test_fusible_ops.py"
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_onnx_export.py || test_fail "test_onnx_export.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_permutation.py || test_fail "test_permutation.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_parallel_cross_entropy.py || test_fail "test_parallel_cross_entropy.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_cpu_offloading.py || test_fail "test_cpu_offloading.py"

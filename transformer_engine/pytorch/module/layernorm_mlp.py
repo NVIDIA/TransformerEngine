@@ -70,6 +70,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
+from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_layernorm, onnx_gemm
 
 __all__ = ["LayerNormMLP"]
 
@@ -1413,6 +1414,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
+        if is_in_onnx_export_mode():
+            return self.onnx_forward(inp)
 
         if FP8GlobalStateManager.fp8_graph_capturing():
             skip_fp8_weight_update = FP8GlobalStateManager.get_skip_fp8_weight_update_tensor()
@@ -1562,6 +1565,87 @@ class LayerNormMLP(TransformerEngineBaseModule):
             grad_fc2_output_quantizer,
             grad_input_quantizer,
         )
+
+    def onnx_forward(self, inp: torch.Tensor) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """
+        ONNX-compatible version of the forward function that provides numerical equivalence
+        while only using operations that have defined ONNX symbolic translations.
+        This simplified implementation is designed specifically for inference scenarios.
+        """
+        assert_warmed_up(self)
+        (
+            fc1_input_quantizer,
+            fc1_weight_quantizer,
+            fc2_input_quantizer,
+            fc2_weight_quantizer,
+            output_quantizer,
+            *_,
+        ) = self._get_quantizers()
+        inp_dtype = inp.dtype
+
+        fc1_weight = self.fc1_weight
+        fc1_bias = self.fc1_bias if self.use_bias else None
+        fc2_weight = self.fc2_weight
+        fc2_bias = self.fc2_bias if self.use_bias else None
+
+        # layernorm + fp8 cast
+        ln_out, ln_out_return = onnx_layernorm(
+            inp,
+            self.layer_norm_weight,
+            self.layer_norm_bias,
+            self.eps,
+            self.normalization,
+            self.zero_centered_gamma,
+            inp_dtype,
+            self.return_layernorm_output,
+            fc1_input_quantizer,
+        )
+
+        if fc1_weight_quantizer is not None:
+            fc1_weight_q = fc1_weight_quantizer.onnx_quantize(fc1_weight)
+            fc1_weight = fc1_weight_quantizer.onnx_dequantize(fc1_weight_q)
+        fc1_weight = fc1_weight.to(inp_dtype)
+
+        fc1_out = onnx_gemm(fc1_weight, ln_out, fc1_bias)
+
+        fc1_out = fc1_out.to(torch.float32)  # activation is computed in fp32
+
+        activation_map = {
+            "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "relu": torch.nn.functional.relu,
+            "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "reglu": lambda x: torch.nn.functional.relu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "swiglu": lambda x: torch.nn.functional.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
+            * x.chunk(2, -1)[1],
+            "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
+            "srelu": torch.nn.functional.softplus,
+        }
+        if self.activation not in activation_map:
+            raise ValueError(f"Unsupported activation in onnx export: {self.activation}")
+        act_out = activation_map[self.activation](fc1_out)
+        if fc2_weight_quantizer is not None:
+            fc2_weight_q = fc2_weight_quantizer.onnx_quantize(fc2_weight)
+            fc2_weight = fc2_weight_quantizer.onnx_dequantize(fc2_weight_q)
+        fc2_weight = fc2_weight.to(inp_dtype)
+
+        if fc2_input_quantizer is not None:
+            act_out_q = fc2_input_quantizer.onnx_quantize(act_out)
+            act_out = fc2_input_quantizer.onnx_dequantize(act_out_q)
+        act_out = act_out.to(inp_dtype)
+
+        fc2_out = onnx_gemm(fc2_weight, act_out, fc2_bias)
+
+        if output_quantizer is not None:
+            raise NotImplementedError("ONNX export of quantized output is not supported")
+
+        if self.return_layernorm_output:
+            if self.return_bias:
+                return fc2_out, fc2_bias.to(inp_dtype), ln_out_return
+            return fc2_out, ln_out_return
+        if self.return_bias:
+            return fc2_out, fc2_bias.to(inp_dtype)
+        return fc2_out
 
     def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
         """Customize quantizers based on current scaling recipe + layernorm_mlp."""
