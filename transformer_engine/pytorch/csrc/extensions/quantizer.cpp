@@ -109,6 +109,7 @@ std::pair<TensorWrapper, py::object> Float8Quantizer::create_tensor(
   }
   const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
   opts = opts.dtype(torch::kFloat32);
+  // TODO: Replace with an empty tensor.
   at::Tensor scale_inv = at::reciprocal(scale);
   py::object ret;
   if (internal) {

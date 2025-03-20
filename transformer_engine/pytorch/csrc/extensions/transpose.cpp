@@ -6,27 +6,38 @@
 
 #include <optional>
 
-#include "ATen/core/TensorBody.h"
 #include "extensions.h"
+#include "pybind.h"
 
-std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
-                                             std::optional<std::vector<py::handle>> output_list,
+namespace transformer_engine::pytorch {
+
+std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
+                                             std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list,
                                              transformer_engine::DType otype) {
-  using namespace transformer_engine::pytorch;
+  init_extension();
   std::vector<NVTETensor> nvte_tensor_input_list;
   std::vector<NVTETensor> nvte_tensor_output_list;
   std::vector<py::object> py_output_objects_list;
   std::vector<transformer_engine::TensorWrapper> tensor_wrappers;
-  auto none = py::none();
+  if (output_list.has_value()) {
+    py_output_objects_list = output_list.value();
+  }
+
+  // Choose implementation
+  // Note: Currently only have fused kernel for FP8 per-tensor scaling
+  bool with_fused_kernel = true;
 
   // create TE tensors from input
-  for (int i = 0; i < input_list.size(); i++) {
-    auto input_tensor = makeTransformerEngineTensor(input_list[i], none);
+  for (size_t i = 0; i < input_list.size(); i++) {
+    auto input_tensor = makeTransformerEngineTensor(input_list[i]);
     const NVTEShape input_shape = input_tensor.shape();
 
     transformer_engine::TensorWrapper output_tensor;
 
+    if (!detail::IsFloat8Quantizers(quantizer_list[i].ptr())) {
+      with_fused_kernel = false;
+    }
     if (output_list == std::nullopt) {
       std::unique_ptr<Quantizer> quantizer = convert_quantizer(quantizer_list[i]);
       std::vector<size_t> output_shape(input_shape.data, input_shape.data + input_shape.ndim);
@@ -48,29 +59,13 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
   NVTE_CHECK(nvte_tensor_output_list.size() == nvte_tensor_input_list.size(),
              "Number of input and output tensors must match");
 
-  // Choose implementation
-  // Note: Currently only have fused kernel for FP8 cast-transpose
-  bool with_fused_kernel = true;
-  for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-    const auto& tensor = nvte_tensor_output_list[i];
-    if (nvte_tensor_scaling_mode(tensor) != NVTE_DELAYED_TENSOR_SCALING) {
-      with_fused_kernel = false;
-      break;
-    }
-    if (nvte_tensor_columnwise_data(tensor) == nullptr) {
-      with_fused_kernel = false;
-      break;
-    }
-  }
-
   // Launch TE kernel
   if (with_fused_kernel) {
-    nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                              nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+    nvte_multi_quantize(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
+                        nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
   } else {
-    for (size_t i = 0; i < nvte_tensor_output_list.size(); i++) {
-      nvte_quantize(nvte_tensor_input_list[i], nvte_tensor_output_list[i],
-                    at::cuda::getCurrentCUDAStream());
+    for (size_t i = 0; i < py_output_objects_list.size(); i++) {
+      quantize(input_list[i], quantizer_list[i], py_output_objects_list[i], std::nullopt);
     }
   }
   return py_output_objects_list;
@@ -78,7 +73,7 @@ std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output) {
-  using namespace transformer_engine::pytorch;
+  init_extension();
 
   const auto dim = input.dim();
   NVTE_CHECK(dim >= 2, "Need at least 2D tensor to transpose.");
@@ -105,3 +100,5 @@ at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
 
   return out;
 }
+
+}  // namespace transformer_engine::pytorch
