@@ -13,7 +13,7 @@
     }                                                                \
   } while (false)
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   ::testing::InitGoogleTest(&argc, argv);
   CHECK_MPI(MPI_Init(&argc, &argv));
   auto ret = RUN_ALL_TESTS();
@@ -25,5 +25,7 @@ TEST(TestCommGemm, Rank) {
   int rank = -1;
   CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &rank));
   EXPECT_EQ(rank, 0);
-  nvte_comm_gemm();
+  auto* ctx = nvte_comm_gemm_ctx_create();
+  nvte_comm_gemm(ctx);
+  nvte_comm_gemm_ctx_destroy(ctx);
 }

@@ -8,6 +8,17 @@
 
 #include "../util/logging.h"
 
-void nvte_comm_gemm() {
+struct CommGemmCtx {
+};
+
+CommGemmCtx* nvte_comm_gemm_ctx_create() {
+  return nullptr;
+}
+
+void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) {
+  delete ctx;
+}
+
+void nvte_comm_gemm(CommGemmCtx* ctx) {
   // TODO:
 }
