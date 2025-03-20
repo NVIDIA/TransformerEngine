@@ -20,5 +20,5 @@ if [ -z "${CPP_ONLY}" ]
 then
   cd $TE_PATH
   echo "Checking Python files"
-  python3 -m pylint --recursive=y transformer_engine/common transformer_engine/pytorch
+  python3 -m pylint --recursive=y transformer_engine/common transformer_engine/pytorch transformer_engine/debug
 fi
