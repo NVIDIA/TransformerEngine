@@ -348,7 +348,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
-            # Input with column-wise usage is needed for dgrad GEMM.
+            # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
                 if isinstance(ln_out, QuantizedTensor):
                     # For sequence parallel in vanilla FP8, rowwise data is
@@ -356,6 +356,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
+            
+            # Weight with column-wise usage is needed for dgrad GEMM.
+            if inp.requires_grad:
+                if isinstance(weightmat, QuantizedTensor):
+                    weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 if fp8 and weightmat is not None:
