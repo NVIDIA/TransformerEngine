@@ -448,6 +448,14 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
             extra_output=rs_out,
         )
+
+        # Weight with column-wise usage is needed for dgrad GEMM.
+        if is_grad_enabled and inp.requires_grad:
+            if isinstance(fc1_weight_final, QuantizedTensor):
+                fc1_weight_final.update_usage(columnwise_usage=True)
+            if isinstance(fc2_weight_final, QuantizedTensor):
+                fc2_weight_final.update_usage(columnwise_usage=True)
+
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
         else:
