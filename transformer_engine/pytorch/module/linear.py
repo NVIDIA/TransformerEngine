@@ -192,11 +192,12 @@ class _Linear(torch.autograd.Function):
                     weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
                 # FP8 cast to workspace buffer
+                mode = "training" if (is_grad_enabled and inp.requires_grad) else "inference"
                 update_workspace = is_first_microbatch is None or is_first_microbatch
                 weightmat = module.get_weight_workspace(
                     tensor=weight,
                     quantizer=weight_quantizer,
-                    cache_name=(None if update_workspace else "weight"),
+                    cache_name=(None if is_first_microbatch is None else f"weight_{mode}"),
                     update_workspace=update_workspace,
                     skip_update_flag=skip_fp8_weight_update,
                     fsdp_group=fsdp_group,
