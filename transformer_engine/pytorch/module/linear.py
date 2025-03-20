@@ -278,7 +278,7 @@ class _Linear(torch.autograd.Function):
             if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensor):
                     weightmat.update_usage(columnwise_usage=True)
-                    
+
             if cpu_offloading:
                 set_offloading_param(weight, "weight_offloading", True)
                 set_offloading_param(weightmat, "weight_offloading", True)

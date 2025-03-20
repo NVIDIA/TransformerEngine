@@ -356,7 +356,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
-            
+
             # Weight with column-wise usage is needed for dgrad GEMM.
             if inp.requires_grad:
                 if isinstance(weightmat, QuantizedTensor):
