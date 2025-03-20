@@ -40,6 +40,7 @@ python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_cpu_offloading.py || test_fa
 NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 python3 -m pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_fused_attn.py || test_fail "test_fused_attn.py"
 NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=1 python3 -m pytest -o log_cli=true --log-cli-level=INFO -v -s $TE_PATH/tests/pytorch/fused_attn/test_paged_attn.py || test_fail "test_paged_attn.py"
 python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_fp8_model_init.py || test_fail "test_fp8_model_init.py"
+python3 -m pytest -v -s $TE_PATH/tests/pytorch/test_replace_raw_data.py || test_fail "test_replace_raw_data.py"
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"
