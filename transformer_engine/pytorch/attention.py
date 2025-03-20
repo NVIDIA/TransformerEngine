@@ -6203,7 +6203,7 @@ class DotProductAttention(TransformerEngineBaseModule):
 
             # raise exception if no backend is available
             if sum([use_flash_attention, use_fused_attention, use_unfused_attention]) == 0:
-                raise ValueError("No dot product attention support for the provided inputs!")
+                raise ValueError("No dot product attention backend is available for the provided inputs. Please run with NVTE_DEBUG=1 NVTE_DEBUG_LEVEL=2 to find out the reasons for disabling all backends.")
 
             # run attention
             if use_flash_attention:
