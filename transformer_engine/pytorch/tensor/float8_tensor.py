@@ -465,13 +465,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
             self._transpose = None
             self._transpose_invalid = True
 
-    def replace_raw_data(self, new_raw_data: torch.Tensor):
-        old_raw_data = self._data
-        assert old_raw_data.dtype == new_raw_data.dtype, "The data types of raw data don't match"
-        new_raw_data.detach().copy_(old_raw_data)
-        self._data = new_raw_data
-        del old_raw_data
-
     def clone(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         assert self._data is not None

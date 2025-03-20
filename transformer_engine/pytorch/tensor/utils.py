@@ -4,12 +4,38 @@
 
 import torch
 
-from .float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
-from .mxfp8_tensor import MXFP8Quantizer
+from .quantized_tensor import QuantizedTensor
+from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
+from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
+
+
+def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
+    r"""Replace the original raw data of a QuantizedTensor with the new raw data passed in.
+
+    Replace the original raw data with the incoming new_raw_data. This is useful when we need
+    to place multiple different tensors in a continuous buffer, such as in data parallel
+    zero-1 scenarios. This function modifies only the address space of the underlying raw data
+    and should not alter any attributes or values of the input tensor.
+    """
+    if isinstance(tensor, Float8Tensor):
+        old_raw_data = tensor._data
+        assert old_raw_data.dtype == new_raw_data.dtype, "The data types of raw data don't match"
+        new_raw_data.detach().copy_(old_raw_data)
+        tensor._data = new_raw_data
+        del old_raw_data
+    elif isinstance(tensor, MXFP8Tensor):
+        raise NotImplementedError(
+            f"replace_raw_data for MXFP8Tensor is not supported yet"
+        )
+    else:
+        raise ValueError(
+            f"replace_raw_data for {type(tensor)} is not supported yet"
+        )
+    # TODO: Add NV sub-channel support here.
 
 
 def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, group):
