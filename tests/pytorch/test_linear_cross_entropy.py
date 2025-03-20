@@ -181,7 +181,8 @@ class TestLinearCrossEntropy:
         self.hidden_size = 4096
         self.vocab_size = 152064
         self.dtype = torch.bfloat16
-        
+        self.ignore_index = -100 # this is the default value in torch's cross entropy
+
     def generate_forward_input(self):
         hidden = (torch.empty((self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
                 .uniform_(-0.5, 0.5)
@@ -190,6 +191,8 @@ class TestLinearCrossEntropy:
                 .uniform_(-0.5, 0.5)
                 .requires_grad_())
         labels = torch.randint(0, self.vocab_size, (self.num_tokens,), device="cuda")
+        pad_labels = torch.nn.functional.pad(labels, (0, 1), value=self.ignore_index)
+        labels = pad_labels[..., 1:].contiguous()
         return hidden, weight, labels
 
     def generate_backward_input(self):
@@ -222,7 +225,7 @@ class TestLinearCrossEntropy:
             torch_forward_latency.append(start_event.elapsed_time(end_event))
 
             start_event.record()
-            kernel_logprobs = linear_cross_entropy(hidden, weight, labels)
+            kernel_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", None, self.ignore_index)
             end_event.record()
             torch.cuda.synchronize()
             kernel_forward_latency.append(start_event.elapsed_time(end_event))
@@ -295,7 +298,7 @@ class TestLinearCrossEntropy:
 
         print()
         torch.cuda.reset_peak_memory_stats()
-        kernel_logprobs = linear_cross_entropy(hidden, weight, labels)
+        kernel_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", None, self.ignore_index)
         torch.cuda.synchronize()
         kernel_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
         print(f"[INFO]: Kernel Forward pass peak memory: {kernel_max_memory:.2f} MB")
@@ -345,15 +348,32 @@ class _TorchLinearCrossEntropy(torch.autograd.Function):
         batch_size = whole_logits.size(0)
         vocab_size = whole_logits.size(1)
         
-        # Create one-hot encoding for labels
+        # Create mask for valid labels (not ignore_index)
+        ignore_index = -100  # Default value for ignore_index in PyTorch
+        valid_mask = (labels != ignore_index).float().unsqueeze(1)
+        
+        # Count valid tokens for normalization
+        num_valid_tokens = valid_mask.sum()
+        
+        # Create one-hot encoding for labels, only for valid positions
         one_hot = torch.zeros_like(whole_logits)
-        one_hot.scatter_(1, labels.unsqueeze(1), 1)
+        valid_labels = labels.clone()
+        valid_labels[labels == ignore_index] = 0  # Temporary replace with valid index for scatter
+        one_hot.scatter_(1, valid_labels.unsqueeze(1), 1)
+        one_hot = one_hot * valid_mask  # Zero out positions with ignore_index
         
         # Apply softmax to get probabilities
         probs = torch.nn.functional.softmax(whole_logits, dim=1)
         
         # Calculate gradient of cross entropy w.r.t. logits
-        grad_logits = (probs - one_hot) * grad_output / batch_size
+        # Only consider valid tokens for normalization
+        if num_valid_tokens > 0:
+            grad_logits = (probs - one_hot) * grad_output / num_valid_tokens
+        else:
+            grad_logits = torch.zeros_like(probs)
+        
+        # Zero out gradients for tokens with ignore_index
+        grad_logits = grad_logits * valid_mask
         
         # Get the local portion of the gradient
         local_size = weight.size(1)
@@ -368,7 +388,7 @@ class _TorchLinearCrossEntropy(torch.autograd.Function):
           
 
 class _TestTensorParallel:
-    def __init__(self):
+    def __init__(self, ignore_index: typing.Optional[int] = None):
         dist.init_process_group(backend="nccl")
         self.group = dist.group.WORLD
 
@@ -378,12 +398,16 @@ class _TestTensorParallel:
         torch.cuda.set_device(device)
         print(f"[INFO]: Local rank: {self.local_rank}, World size: {self.world_size}")
 
+        self.ignore_index_opt = ignore_index
+
     def generate_hyper(self):
         self.num_tokens = 80
         self.hidden_size = 4096
         self.vocab_size = 152064
         self.dtype = torch.bfloat16
         self.iterations = 5
+        # -100 is the default value in torch's cross entropy
+        self.ignore_index = self.ignore_index_opt if self.ignore_index_opt is not None else -100
 
     def generate_forward_input(self):
         hidden = (torch.empty((self.num_tokens, self.hidden_size), dtype=self.dtype, device="cuda")
@@ -393,6 +417,9 @@ class _TestTensorParallel:
                 .uniform_(-0.5, 0.5)
                 .requires_grad_())
         labels = torch.randint(0, self.vocab_size * self.world_size, (self.num_tokens,), device="cuda")
+        if self.ignore_index_opt is not None:
+            pad_labels = torch.nn.functional.pad(labels, (0, 1), value=self.ignore_index)
+            labels = pad_labels[..., 1:].contiguous()
         return hidden, weight, labels
 
     def generate_backward_input(self):
@@ -599,7 +626,7 @@ class _TestTensorParallel:
             torch_logprobs = _TorchLinearCrossEntropy.apply(hidden, weight, labels, self.group)
 
             start_event.record()
-            custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group)
+            custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group, self.ignore_index)
             end_event.record()
             torch.cuda.synchronize()
             custom_forward_latency.append(start_event.elapsed_time(end_event))
@@ -651,7 +678,7 @@ class _TestTensorParallel:
         dist.broadcast(labels, src=0, group=self.group)
 
         torch.cuda.reset_peak_memory_stats()
-        custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group)
+        custom_logprobs = linear_cross_entropy(hidden, weight, labels, "mean", self.group, self.ignore_index)
         torch.cuda.synchronize()
         forward_max_memory = torch.cuda.max_memory_reserved() / 1024 / 1024
 
@@ -683,11 +710,14 @@ if __name__ == "__main__":
     # torchrun --standalone --nnodes=1 --nproc-per-node=2 tests/pytorch/test_linear_cross_entropy.py
     torch.manual_seed(233376)
 
-    tp_test = _TestTensorParallel()
+    ignore_index = -100 # this is the default value in torch's cross entropy
+    # ignore_index = None # comment this line if you want to test with ignore_index
+    tp_test = _TestTensorParallel(ignore_index)
 
     tp_test.verify_torch_correctness_with_single_gpu()
-    tp_test.verify_linear_combined_parallel_cross_entropy()
-    tp_test.check_linear_combined_parallel_cross_entropy_storage()
+    if ignore_index is None:
+        tp_test.verify_linear_combined_parallel_cross_entropy()
+        tp_test.check_linear_combined_parallel_cross_entropy_storage()
     tp_test.verify_linear_cross_entropy()
     tp_test.check_linear_cross_entropy_storage()
 

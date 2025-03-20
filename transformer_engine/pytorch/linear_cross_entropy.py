@@ -102,7 +102,8 @@ class LinearCrossEntropy(torch.autograd.Function):
                 weight: torch.Tensor,
                 labels: torch.Tensor,
                 reduction: typing.Optional[str] = "mean",
-                dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None) -> torch.Tensor:
+                dist_process_group: typing.Optional[torch.distributed.ProcessGroup] = None,
+                ignore_index: typing.Optional[int] = -100) -> torch.Tensor:
         """
         The forward pass of the Linear Cross Entropy.
         If dist_process_group is passed for distributed loss calculation,
@@ -121,14 +122,15 @@ class LinearCrossEntropy(torch.autograd.Function):
         with torch.cuda.nvtx.range("LinearCrossEntropy-forward"):
             REDUCTION = linear_cross_entropy_with_token_entropy_kernels.get_entropy_reduction_enum_number(reduction.lower())
 
-            logprobs, _maximum, _acc =\
+            logprobs, _maximum, _acc, _num_valid_tokens =\
                 linear_cross_entropy_kernels.efficient_entropy_forward(
                     hidden, weight, labels, REDUCTION,
-                    dist_process_group)
+                    dist_process_group, ignore_index)
 
-            ctx.save_for_backward(hidden, weight, labels, _maximum, _acc)
+            ctx.save_for_backward(hidden, weight, labels, _maximum, _acc, _num_valid_tokens)
             ctx.REDUCTION = REDUCTION
             ctx.dist_process_group = dist_process_group
+            ctx.ignore_index = ignore_index
 
         return logprobs
 
@@ -144,17 +146,19 @@ class LinearCrossEntropy(torch.autograd.Function):
             dweight (torch.Tensor): The gradient of the weight.
         """
         with torch.cuda.nvtx.range("LinearCrossEntropy-backward"):
-            (hidden, weight, labels, _maximum, _acc) = ctx.saved_tensors
+            (hidden, weight, labels, _maximum, _acc, _num_valid_tokens) = ctx.saved_tensors
             REDUCTION = ctx.REDUCTION
             dist_process_group = ctx.dist_process_group
+            ignore_index = ctx.ignore_index
             d_hidden, d_weight = linear_cross_entropy_kernels.efficient_entropy_backward(
                 dlogprobs,
                 hidden, weight, labels,
-                _maximum, _acc,
+                _maximum, _acc, _num_valid_tokens,
                 REDUCTION,
-                dist_process_group
+                dist_process_group,
+                ignore_index
             )
-        return d_hidden, d_weight, None, None, None
+        return d_hidden, d_weight, None, None, None, None
 
 
 linear_cross_entropy = LinearCrossEntropy.apply
