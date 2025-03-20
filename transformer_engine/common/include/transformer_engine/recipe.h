@@ -80,11 +80,9 @@ void nvte_delayed_scaling_recipe_amax_and_scale_update_after_reduction(
  *
  *  \param[in]     input               Input tensor. Must be unquantized.
  *  \param[in,out] output              Output tensor. Must be an FP8 tensor with per-tensor scaling.
- *  \param[in]     allow_empty_output  If true, the data ptr of output tensor can be empty.
  *  \param[in]     stream              CUDA stream used for the operation.
  */
-void nvte_compute_amax(const NVTETensor input, NVTETensor output, bool allow_empty_output,
-                       cudaStream_t stream);
+void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *

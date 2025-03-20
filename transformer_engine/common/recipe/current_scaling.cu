@@ -102,8 +102,7 @@ void launch_amax_kernel(const InputType *input, float *amax, const size_t N, cud
 }  // namespace
 }  // namespace transformer_engine
 
-void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, bool allow_empty_output,
-                       cudaStream_t stream) {
+void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaStream_t stream) {
   NVTE_API_CALL(nvte_compute_amax);
   using namespace transformer_engine;
 
@@ -137,7 +136,7 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, bool a
              "Output tensor for amax computation has invalid amax tensor  "
              "(expected FP32, got dtype=",
              to_string(output.amax.dtype), ")");
-  CheckOutputTensor(output, "output_compute_amax", allow_empty_output);
+  CheckOutputTensor(output, "output_compute_amax", true);
 
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(

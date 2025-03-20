@@ -49,7 +49,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
     // my_quantizer here has to be a Float8CurrentScalingQuantizer
     auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer*>(my_quantizer.get());
-    nvte_compute_amax(te_input.data(), te_output.data(), false, at::cuda::getCurrentCUDAStream());
+    nvte_compute_amax(te_input.data(), te_output.data(), at::cuda::getCurrentCUDAStream());
     // check if we need to do amax reudction (depending on model parallel configs)
     if (my_quantizer_cs->with_amax_reduction) {
       c10::intrusive_ptr<dist_group_type> process_group_ptr = my_quantizer_cs->amax_reduction_group;
@@ -106,7 +106,7 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
       transformer_engine::DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
       amax.data_ptr<float>());
 
-  nvte_compute_amax(te_input.data(), fake_te_output.data(), true, at::cuda::getCurrentCUDAStream());
+  nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
 }
 
 template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
