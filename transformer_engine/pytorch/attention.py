@@ -4676,7 +4676,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 if is_output_fp8:
                     out_save = out_fp8.dequantize()
 
-            fp8_tensors = (q_fp8, k_fp8, v_fp8, out_fp8)
+            fp8_tensors = (q_fp8.clone(), k_fp8.clone(), v_fp8.clone(), out_fp8.clone())
         else:
             # q, k, v, out_ret: torch.float16 or torch.bfloat16
             out_ret, aux_ctx_tensors = fused_attn_fwd(
