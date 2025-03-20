@@ -145,9 +145,7 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   at::Tensor scale_inv;
   at::Tensor amax;
   DType dtype;
-  bool with_computing_amax;
   bool with_amax_reduction;
-  bool with_computing_scale;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
   int amax_reduction_size;
   bool force_pow_2_scales = false;

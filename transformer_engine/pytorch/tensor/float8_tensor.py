@@ -191,12 +191,8 @@ class Float8CurrentScalingQuantizer(Quantizer):
     amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
-    """Whether to compute amax"""
-    with_computing_amax: bool
     """Whether to do amax reduction"""
     with_amax_reduction: bool
-    """Whether to compute scale from amax"""
-    with_computing_scale: bool
     amax_reduction_group: Optional[dist_group_type]
     amax_reduction_size: Optional[int]
     """Options about how to quantize the tensor"""
@@ -210,9 +206,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         *,
         rowwise: bool = True,
         columnwise: bool = True,
-        with_computing_amax: bool = True,
         with_amax_reduction: bool = False,
-        with_computing_scale: bool = True,
         amax_reduction_group: Optional[dist_group_type] = None,
         amax_reduction_size: Optional[int] = 1,
         force_pow_2_scales: bool = False,
@@ -222,9 +216,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.scale = torch.empty(1, dtype=torch.float32, device=device)
         self.amax = torch.empty(1, dtype=torch.float32, device=device)
         self.dtype = fp8_dtype
-        self.with_computing_amax = with_computing_amax
         self.with_amax_reduction = with_amax_reduction
-        self.with_computing_scale = with_computing_scale
         self.amax_reduction_group = amax_reduction_group
         self.amax_reduction_size = amax_reduction_size
         self.force_pow_2_scales = force_pow_2_scales

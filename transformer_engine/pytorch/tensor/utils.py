@@ -3,7 +3,6 @@
 # See LICENSE for license information.
 
 import torch
-import torch.distributed as dist
 
 from .float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Quantizer
@@ -151,6 +150,8 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
 def cast_master_weights_to_fp8_current_scaling(params, group):
     # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
     dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=params[0][0].device)
+    # Create a dummy amax buffer, it's needed by Float8Quantizer.
+    dummy_amax_buf = torch.empty(1, dtype=torch.float32, device=params[0][0].device)
 
     # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
     # NCCL kernels at once.
@@ -237,30 +238,18 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
 
         quantizer = model_weight._get_quantizer()
 
-        # Store the original states of quantizer.
-        with_computing_amax = quantizer.with_computing_amax
-        with_amax_reduction = quantizer.with_amax_reduction
-        with_computing_scale = quantizer.with_computing_scale
-
-        # Because we have done all-reduce on amaxes and updated scales and scale_invs, we skip these
-        # three steps (computing-amax, amax-reduction, computing-scale). The main purpose is to
-        # avoid launching an all-reduce operation for each weight.
-        quantizer.with_computing_amax = False
-        quantizer.with_amax_reduction = False
-        quantizer.with_computing_scale = False
-
         # master_weight may be smaller than model_weight because it could be distributed across
         # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
-        shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
-        shard_model_weight_fp8 = quantizer.create_tensor_from_data(
-            shard_model_weight_raw.view(1, -1),
-            model_weight.dtype,
+        temp_quantizer = Float8Quantizer(
+            scale=quantizer.scale,
+            amax=dummy_amax_buf,
+            fp8_dtype=quantizer.dtype,
+            columnwise=False,
         )
-
-        # Cast master weight to fp8.
-        quantizer.update_quantized(master_weight.view(1, -1), shard_model_weight_fp8)
-
-        # Restore the original states of quantizer.
-        quantizer.with_computing_amax = with_computing_amax
-        quantizer.with_amax_reduction = with_amax_reduction
-        quantizer.with_computing_scale = with_computing_scale
+        shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
+        shard_model_weight_fp8 = temp_quantizer.create_tensor_from_data(
+            data=shard_model_weight_raw,
+            fake_dtype=model_weight.dtype,
+            requires_grad=False,
+        )
+        temp_quantizer.update_quantized(master_weight.view(-1), shard_model_weight_fp8)
