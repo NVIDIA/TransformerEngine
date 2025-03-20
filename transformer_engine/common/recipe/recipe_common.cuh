@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef RECIPE_COMMON_CUH_
-#define RECIPE_COMMON_CUH_
+#ifndef TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
+#define TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
 
 #include <limits>
 
@@ -53,4 +53,4 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
 
 }  // namespace transformer_engine
 
-#endif  // RECIPE_COMMON_CUH_
+#endif  // TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
