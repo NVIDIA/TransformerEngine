@@ -285,6 +285,9 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
 
+    mock_groups = [dist.new_group(ranks=[i]) for i in range(world_size)]
+    mock_group = mock_groups[rank]
+
     linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
 
     # Create model with FP8 weights
@@ -333,12 +336,14 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         with te.fp8.fp8_autocast(
             enabled=quantization is not None,
             fp8_recipe=quantization_recipe(quantization),
+            fp8_group=mock_group,
         ):
             y_fp8 = model_fp8(x)
 
         with te.fp8_autocast(
             enabled=quantization is not None,
             fp8_recipe=quantization_recipe(quantization),
+            fp8_group=mock_group,
         ):
             y = model(x)
 
