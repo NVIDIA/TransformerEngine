@@ -28,13 +28,9 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         tensor._data = new_raw_data
         del old_raw_data
     elif isinstance(tensor, MXFP8Tensor):
-        raise NotImplementedError(
-            f"replace_raw_data for MXFP8Tensor is not supported yet"
-        )
+        raise NotImplementedError(f"replace_raw_data for MXFP8Tensor is not supported yet")
     else:
-        raise ValueError(
-            f"replace_raw_data for {type(tensor)} is not supported yet"
-        )
+        raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
     # TODO: Add NV sub-channel support here.
 
 

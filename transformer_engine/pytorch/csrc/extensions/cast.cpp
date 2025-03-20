@@ -64,8 +64,7 @@ py::object quantize(const at::Tensor& tensor, py::handle quantizer, const py::ob
     QuantizationConfigWrapper quant_config;
     quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
     quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
-    nvte_compute_scale_from_amax(te_output.data(), quant_config,
-                                 at::cuda::getCurrentCUDAStream());
+    nvte_compute_scale_from_amax(te_output.data(), quant_config, at::cuda::getCurrentCUDAStream());
     // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
     te_output.set_amax(nullptr, DType::kFloat32, te_output.defaultShape);
   }

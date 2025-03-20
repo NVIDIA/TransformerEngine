@@ -17,13 +17,13 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_replace_raw_data_for_float8tensor():
     fp8_quantizer = Float8Quantizer(
-        scale=torch.empty(1, dtype=torch.float32, device='cuda'),
-        amax=torch.empty(1, dtype=torch.float32, device='cuda'),
+        scale=torch.empty(1, dtype=torch.float32, device="cuda"),
+        amax=torch.empty(1, dtype=torch.float32, device="cuda"),
         fp8_dtype=TE_DType.kFloat8E4M3,
         rowwise=True,
-        columnwise=True
+        columnwise=True,
     )
-    fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device='cuda')
+    fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
 
     attrs_to_check = ["_quantizer", "_fp8_dtype", "_scale_inv", "_transpose", "_transpose_invalid"]
     attrs = {}
