@@ -191,7 +191,7 @@ class Float8CurrentScalingQuantizer(Quantizer):
     amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
-    """Whether to do amax reduction"""
+    """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
     amax_reduction_size: Optional[int]
