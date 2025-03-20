@@ -24,6 +24,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     attention_mask_func,
     is_bf16_compatible,
+    get_cudnn_version,
 )
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -2088,6 +2089,8 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
         pytest.skip("FusedAttention and FlashAttention do not support FP32")
     if use_RoPE:
         pytest.skip("KV cache does not support starting positions for RoPE")
+    if backend == "FusedAttention" and get_cudnn_version() == (9, 8, 0):
+        pytest.skip("Skip FusedAttention tests for cuDNN 9.8 due to known numerical issues")
 
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
