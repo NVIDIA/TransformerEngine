@@ -109,16 +109,6 @@ def make_row_id_map(
     return row_id_map
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-    ],
-    key=["hidden_size"],
-)
 @triton.jit
 def _permute_kernel(
     # pointers
@@ -164,6 +154,21 @@ def _permute_kernel(
         cur_pos += BLOCK_SIZE
 
 
+try:
+    _permute_kernel = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            triton.Config({"BLOCK_SIZE": 256}),
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+        ],
+        key=["hidden_size"],
+    )(_permute_kernel)
+except RuntimeError:
+    pass
+
+
 def permute_with_mask_map(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
@@ -201,16 +206,6 @@ def permute_with_mask_map(
     return output, permuted_probs
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-    ],
-    key=["hidden_size"],
-)
 @triton.jit
 def _unpermute_kernel(
     # pointers
@@ -297,6 +292,21 @@ def _unpermute_kernel(
         current_start += BLOCK_SIZE
 
 
+try:
+    _unpermute_kernel = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            triton.Config({"BLOCK_SIZE": 256}),
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+        ],
+        key=["hidden_size"],
+    )(_unpermute_kernel)
+except RuntimeError:
+    pass
+
+
 def unpermute_with_mask_map(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
@@ -348,16 +358,6 @@ def unpermute_with_mask_map(
     return output, unpermuted_probs
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-    ],
-    key=["hidden_size"],
-)
 @triton.jit
 def _unpermute_bwd_with_merging_probs_kernel(
     # pointers
@@ -450,6 +450,21 @@ def _unpermute_bwd_with_merging_probs_kernel(
             tl.store(merging_probs_grad_ptr + probs_grad_off, 0.0)
 
 
+try:
+    _unpermute_bwd_with_merging_probs_kernel = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            triton.Config({"BLOCK_SIZE": 256}),
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+        ],
+        key=["hidden_size"],
+    )(_unpermute_bwd_with_merging_probs_kernel)
+except RuntimeError:
+    pass
+
+
 def unpermute_with_mask_map_bwd_with_merging_probs(
     fwd_output_grad: torch.Tensor,
     row_id_map: torch.Tensor,
@@ -500,16 +515,6 @@ def unpermute_with_mask_map_bwd_with_merging_probs(
     return act_grad, merging_probs_grad
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-    ],
-    key=["hidden_size"],
-)
 @triton.jit
 def _sort_chunks_by_idxs_kernel(
     # pointers
@@ -589,6 +594,21 @@ def _sort_chunks_by_idxs_kernel(
         tl.store(permuted_probs_ptr + permuted_prob_off, prob)
 
 
+try:
+    _sort_chunks_by_idxs_kernel = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            triton.Config({"BLOCK_SIZE": 256}),
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+        ],
+        key=["hidden_size"],
+    )(_sort_chunks_by_idxs_kernel)
+except RuntimeError:
+    pass
+
+
 def sort_chunks_by_idx(
     inp: torch.Tensor,
     split_sizes: torch.Tensor,
@@ -628,18 +648,8 @@ def sort_chunks_by_idx(
     return output, row_id_map, permuted_probs
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-    ],
-    key=["hidden_size"],
-)
 @triton.jit
-def _sort_chunks_by_map(
+def _sort_chunks_by_map_kernel(
     # pointers
     input_ptr,
     output_ptr,
@@ -677,6 +687,21 @@ def _sort_chunks_by_map(
         tl.store(permuted_probs_ptr + permuted_prob_off, prob)
 
 
+try:
+    _sort_chunks_by_map_kernel = triton.autotune(
+        configs=[
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            triton.Config({"BLOCK_SIZE": 256}),
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+        ],
+        key=["hidden_size"],
+    )(_sort_chunks_by_map_kernel)
+except RuntimeError:
+    pass
+
+
 def sort_chunks_by_map(
     inp: torch.Tensor,
     row_id_map: torch.Tensor,
@@ -691,7 +716,7 @@ def sort_chunks_by_map(
     else:
         permuted_probs = None
     grid = (num_tokens,)
-    _sort_chunks_by_map[grid](
+    _sort_chunks_by_map_kernel[grid](
         inp,
         output,
         row_id_map,

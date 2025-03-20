@@ -11,16 +11,29 @@ import subprocess
 import argparse
 import warnings
 import pprint
+import yaml
 
 import torch
 import torch.distributed as dist
 
 import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import Format, DelayedScaling
+from transformer_engine.common.recipe import Format, DelayedScaling, Float8CurrentScaling
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+class multi_module_model(torch.nn.Module):
+    def __init__(self, module, num_layers, *args, **kwargs):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = torch.nn.ModuleList([module(*args, **kwargs) for _ in range(num_layers)])
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
 
 def _te_layer_argtype(name):
@@ -39,14 +52,16 @@ def _te_layer_argtype(name):
     return layer_map[name.lower()]
 
 
-def _get_layer_args(config, tp_group, tp_size, reference=False):
+def _get_layer_args(config, tp_group, tp_size, num_layers, reference=False):
     hidden_size = config.num_heads * config.head_dim
     ffn_hidden_size = 4 * hidden_size
     qkv_size = 3 * hidden_size
+    if num_layers > 1 and config.layer_type != te.TransformerLayer:
+        raise ValueError("Stacked layers are only supported for te.TransformerLayer!")
     input_shape = [config.seq_length, config.batch_size, hidden_size]
     args = [hidden_size]
     kwargs = {
-        "params_dtype": torch.float32,
+        "params_dtype": torch.float32 if not config.use_bf16_params else torch.bfloat16,
         "device": "cuda",
         "tp_group": tp_group,
         "tp_size": tp_size,
@@ -59,11 +74,18 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
         if config.linear_parallel_mode == "row":
             input_shape[-1] = ffn_hidden_size // tp_size
             args = [ffn_hidden_size, hidden_size]
+            if config.in_features is not None:
+                input_shape[-1] = config.in_features // tp_size
+                args = [config.in_features, hidden_size]
             kwargs["ub_name"] = "proj" if config.layer_type == te.Linear else "fc2"
+            kwargs["ub_name"] = kwargs["ub_name"] if config.ub_name is None else config.ub_name
         elif config.linear_parallel_mode == "column":
             input_shape[0] = config.seq_length // tp_size
-            args.append(qkv_size)
-            kwargs["ub_name"] = "qkv"
+            if config.out_features is not None:
+                args.append(config.out_features)
+            else:
+                args.append(qkv_size)
+            kwargs["ub_name"] = "qkv" if config.ub_name is None else config.ub_name
             kwargs["ub_overlap_rs_dgrad"] = config.overlap_rs_dgrad and not reference
             kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
             kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
@@ -87,6 +109,9 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
         kwargs["ub_bulk_dgrad"] = not config.overlap_rs_dgrad and not reference
         kwargs["ub_bulk_wgrad"] = not config.overlap_rs_dgrad and not reference
 
+    if config.ub_cfg is not None and isinstance(config.ub_cfg, str):
+        with open(config.ub_cfg, "r") as stream:
+            config.ub_cfg = yaml.safe_load(stream)
     return args, kwargs, input_shape
 
 
@@ -95,6 +120,9 @@ def _parse_args(argv=None, namespace=None):
         description="Test a Transformer Engine layer with GEMM+comm overlap via Userbuffers."
     )
     parser.add_argument("-l", "--layer-type", type=_te_layer_argtype, default=te.LayerNormMLP)
+    parser.add_argument(
+        "--num-layers", type=int, default=1, help="Number of identical layers to stack."
+    )
     parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
     parser.add_argument("-s", "--seq-length", type=int, default=1024, help="Input sequence length.")
     parser.add_argument(
@@ -103,9 +131,40 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument(
         "-d", "--head-dim", type=int, default=48, help="Dimension of each attention head."
     )
+    parser.add_argument(
+        "--in-features",
+        type=int,
+        default=None,
+        help="Optional input feature size for weight. Only used for Linear layer.",
+    )
+    parser.add_argument(
+        "--out-features",
+        type=int,
+        default=None,
+        help="Optional output feature size for weight. Only used for LayerNormLinear layer.",
+    )
+    parser.add_argument(
+        "--tp",
+        type=int,
+        default=None,
+        help="Optional tensor_model_parallel_size used to initialize UB.",
+    )
+    parser.add_argument(
+        "--use-bf16-params",
+        action="store_true",
+        default=False,
+        help="Use BF16 params instead of FP32.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed.")
     parser.add_argument(
         "--fp8", action="store_true", default=False, help="Enables the te.fp8_autocast() context."
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str.lower,
+        default="none",
+        choices=["none", "fp8_delayed_scaling", "fp8_current_scaling"],
+        help="Quantization recipe",
     )
     parser.add_argument(
         "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
@@ -131,6 +190,28 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--use-cuda-graphs", action="store_true", default=False, help="Use CUDA Graphs."
+    )
+    parser.add_argument(
+        "--ub-cfg", type=str, default=None, help="Optional TP config yaml file input."
+    )
+    parser.add_argument("--ub-name", type=str, default=None, help="Optional TP layer name.")
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        default=False,
+        help="Skip numerics check.",
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        default=False,
+        help="Benchmark comm-gemm overlap perf.",
+    )
+    parser.add_argument(
+        "--benchmark-iter",
+        type=int,
+        default=100,
+        help="Number of iterations for benchmarking perf.",
     )
     parser.add_argument(
         "--linear-parallel-mode",
@@ -223,8 +304,35 @@ def _train(opts):
         shell=True,
     )
 
-    if result.stdout == "0":  # Extra checks for non-MNNVL platforms
+    if result.stdout == "0" and opts.tp is None:  # Extra checks for non-MNNVL platforms
         assert WORLD_SIZE == LOCAL_SIZE
+
+    # Initialize torch.distributed tp process group
+    new_group_kwargs = {
+        "backend": "nccl",
+    }
+    if opts.tp is not None:
+        LOCAL_SIZE = opts.tp
+        tp_base_rank = (WORLD_RANK // LOCAL_SIZE) * LOCAL_SIZE
+        tp_rank_list = list(range(tp_base_rank, tp_base_rank + LOCAL_SIZE))
+        new_group_kwargs = {
+            "backend": "nccl",
+            "ranks": tp_rank_list,
+        }
+    else:
+        opts.tp = WORLD_SIZE
+
+    # Tensor dim overrides for tensors that do not require TP communication
+    if opts.in_features is not None:
+        assert opts.layer_type is te.Linear and opts.linear_parallel_mode == "row", (
+            "--in-features is only used to configure row-tensor-parallel Linear layers. Use"
+            " --num-heads or --head-dim for other cases."
+        )
+    if opts.out_features is not None:
+        assert opts.layer_type is te.LayerNormLinear and opts.linear_parallel_mode == "column", (
+            "--out-features is only used to configure column-tensor-parallel LayerNormLinear"
+            " layers. Use --num-heads or --head-dim for other cases."
+        )
 
     def dist_print(msg, src=None, end="\n", debug=False, error=False):
         if debug and not opts.debug:
@@ -253,9 +361,13 @@ def _train(opts):
         dist_init_kwargs["device_id"] = torch.device(f"cuda:{LOCAL_RANK}")
     assert dist.is_nccl_available()
     dist.init_process_group(**dist_init_kwargs)
-    nccl_world = dist.new_group(backend="nccl")
+    nccl_world = dist.new_group(**new_group_kwargs)
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
+    # Initialize the Transformer Engine layer with overlap
+    args, kwargs, input_shape = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers
+    )
     # Intialize userbuffers
     ub_cfgs = None
     if opts.overlap_rs_dgrad:
@@ -265,17 +377,15 @@ def _train(opts):
         }
     te.module.base.initialize_ub(
         [opts.seq_length * opts.batch_size, opts.num_heads * opts.head_dim],
-        WORLD_SIZE,
+        opts.tp,
         use_fp8=opts.fp8,
         dtype=torch.bfloat16,
         bootstrap_backend=opts.bootstrap_backend,
-        ub_cfgs=ub_cfgs,
+        ub_cfgs=ub_cfgs if opts.ub_cfg is None else opts.ub_cfg,
     )
 
-    # Initialize the Transformer Engine layer with overlap
-    args, kwargs, input_shape = _get_layer_args(opts, nccl_world, WORLD_SIZE)
     with te.fp8_model_init(enabled=opts.fp8_init):
-        test_model = opts.layer_type(*args, **kwargs)
+        test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)
     if WORLD_RANK == 0:
         pprint.pprint(kwargs)
@@ -283,9 +393,11 @@ def _train(opts):
     dist.barrier()
 
     # Initialize the reference model and copy all parameters
-    ref_args, ref_kwargs, _ = _get_layer_args(opts, nccl_world, WORLD_SIZE, reference=True)
+    ref_args, ref_kwargs, _ = _get_layer_args(
+        opts, nccl_world, opts.tp, num_layers=opts.num_layers, reference=True
+    )
     with te.fp8_model_init(enabled=opts.fp8_init):
-        ref_model = opts.layer_type(*ref_args, **ref_kwargs)
+        ref_model = multi_module_model(opts.layer_type, opts.num_layers, *ref_args, **ref_kwargs)
     dist_print("Initialized reference model...", debug=True)
     for test_param, ref_param in zip(test_model.parameters(), ref_model.parameters()):
         with torch.no_grad():
@@ -295,7 +407,13 @@ def _train(opts):
 
     # Fp8 recipe setup
     fp8_format = Format.HYBRID
-    fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
+    fp8_recipe = None
+    if opts.quantization == "fp8_delayed_scaling":
+        fp8_recipe = DelayedScaling(
+            fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max"
+        )
+    elif opts.quantization == "fp8_current_scaling":
+        fp8_recipe = Float8CurrentScaling(fp8_format=fp8_format)
 
     # Prepare random input tensors
     test_x = torch.randn(input_shape, dtype=torch.float32, device="cuda", requires_grad=True)
@@ -326,7 +444,8 @@ def _train(opts):
         with torch.cuda.graph(test_graph):
             test_out = run_fwd_bwd(test_model, test_x)
         test_graph.replay()
-        del test_graph
+        if not opts.benchmark:
+            del test_graph
     else:
         test_out = run_fwd_bwd(test_model, test_x)
     test_grads = [test_out, test_x.grad]
@@ -351,28 +470,46 @@ def _train(opts):
         if ref_param.requires_grad and "layer_norm" not in ref_name:
             ref_grads.append(ref_param.grad)
 
-    # Make sure we have the same number of gradients
     numerics_failed = torch.tensor([0], dtype=torch.uint8, device="cuda")
-    if len(test_grads) != len(ref_grads):
-        numerics_failed[0] = 1
-        numerics_info = (
-            "NUMERICAL CHECK FAILED: Incorrect number of gradients, "
-            + f"expected {len(ref_grads)} but got {len(test_grads)}."
-        )
-        dist_print(numerics_info, src=WORLD_RANK, error=True)
-    dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
+    if not opts.skip_verify:
+        # Make sure we have the same number of gradients
+        if len(test_grads) != len(ref_grads):
+            numerics_failed[0] = 1
+            numerics_info = (
+                "NUMERICAL CHECK FAILED: Incorrect number of gradients, "
+                + f"expected {len(ref_grads)} but got {len(test_grads)}."
+            )
+            dist_print(numerics_info, src=WORLD_RANK, error=True)
+        dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
 
-    # Now validate accuracy
-    if not bool(numerics_failed.item()):
-        for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-            rtol = 0.125 if opts.fp8 else 0.025
-            atol = 0.0625 if opts.fp8 else 0.00125
-            grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
-            dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
-            numerics_failed[0] = int(grad_failed)
-            dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
-            if bool(numerics_failed.item()) and not opts.debug:
-                break
+        # Now validate accuracy
+        if not bool(numerics_failed.item()):
+            for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
+                rtol = 0.125 if opts.fp8 else 0.025
+                atol = 0.0625 if opts.fp8 else 0.00125
+                grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
+                dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
+                numerics_failed[0] = int(grad_failed)
+                dist.all_reduce(numerics_failed, dist.ReduceOp.MAX, nccl_world)
+                if bool(numerics_failed.item()) and not opts.debug:
+                    break
+
+    if opts.benchmark:
+        # Warmup to not profile CPU overhead
+        for _ in range(100):
+            if opts.use_cuda_graphs:
+                test_graph.replay()
+            else:
+                test_out = run_fwd_bwd(test_model, test_x)
+        torch.cuda.cudart().cudaProfilerStart()
+        for _ in range(opts.benchmark_iter):
+            if opts.use_cuda_graphs:
+                test_graph.replay()
+            else:
+                test_out = run_fwd_bwd(test_model, test_x)
+        torch.cuda.cudart().cudaProfilerStop()
+        if opts.use_cuda_graphs:
+            del test_graph
 
     te.module.base.destroy_ub()
     dist_print("Destroying Userbuffers objects...", debug=True)

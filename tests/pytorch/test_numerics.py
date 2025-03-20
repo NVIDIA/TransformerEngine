@@ -2,9 +2,10 @@
 #
 # See LICENSE for license information.
 
+from collections import OrderedDict
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Tuple, Optional
 import pytest
 import copy
 import random
@@ -34,10 +35,10 @@ from transformer_engine.pytorch import (
     RMSNorm,
     TransformerLayer,
     LayerNorm,
-    InferenceParams,
     Fp8Padding,
     Fp8Unpadding,
 )
+from transformer_engine.pytorch.dot_product_attention.inference import InferenceParams
 from transformer_engine.pytorch.distributed import checkpoint as te_checkpoint
 from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
@@ -59,6 +60,8 @@ torch.cuda.manual_seed(seed)
 _cpu_rng_state = torch.get_rng_state()
 _cuda_rng_state = torch.cuda.get_rng_state()
 
+torch._dynamo.config.recompile_limit = 16
+
 
 class ModelConfig:
     def __init__(self, hidden_size, eps, num_attention_heads, embed, num_layers, seq_len):
@@ -77,9 +80,9 @@ model_configs = {
 
 model_configs_inference = {
     # hidden_size, eps, num_attention_heads, embed, num_layers, seq_len
-    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 16),
+    "126m": ModelConfig(768, 1e-5, 12, 64, 12, 256),
 }
-backends_inference = ["FlashAttention", "UnfusedAttention"]
+backends_inference = ["FlashAttention", "UnfusedAttention", "FusedAttention"]
 module_inference = ["TransformerLayer", "MultiheadAttention"]
 input_formats_inference = ["sbhd", "bshd"]
 
@@ -328,9 +331,9 @@ class TorchLayerNormLinear(nn.Module):
         in_features: int,
         out_features: int,
         eps: float,
-        bias: bool = True,
         normalization: str = "LayerNorm",
         zero_centered_gamma: bool = False,
+        bias: bool = True,
     ):
         super().__init__()
         if normalization == "LayerNorm":
@@ -344,7 +347,7 @@ class TorchLayerNormLinear(nn.Module):
         else:
             raise RuntimeError("Unsupported normalization")
 
-        self.linear = nn.Linear(in_features, out_features)
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(self.layernorm(x))
@@ -444,6 +447,7 @@ class TorchLayerNormMLP(nn.Module):
         eps: float = 1e-5,
         activation="gelu",
         normalization: str = "LayerNorm",
+        bias: bool = True,
     ):
         super().__init__()
         if normalization == "LayerNorm":
@@ -459,8 +463,8 @@ class TorchLayerNormMLP(nn.Module):
             fc1_output_features = ffn_hidden_size
             self.gelu = _supported_act[activation]
 
-        self.fc1 = nn.Linear(hidden_size, fc1_output_features)
-        self.fc2 = nn.Linear(ffn_hidden_size, hidden_size)
+        self.fc1 = nn.Linear(hidden_size, fc1_output_features, bias=bias)
+        self.fc2 = nn.Linear(ffn_hidden_size, hidden_size, bias=bias)
 
     def forward(self, x):
         t = self.gelu(self.fc1(self.ln(x)))
@@ -671,8 +675,6 @@ def test_gpt_full_activation_recompute(
         pytest.skip(reason_for_no_fp8)
     if recipe.mxfp8() and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if fp8 and recipe.float8_current_scaling():
-        pytest.skip("Float8 Current Scaling unsupported for full recompute.")
 
     config = model_configs[model]
 
@@ -1038,6 +1040,8 @@ def _test_granular_accuracy(block, bs, dtype, config):
     inp_hidden_states.retain_grad()
 
     out = block(inp_hidden_states)
+    if isinstance(out, (List, Tuple)):
+        out = out[0]
     loss = out.sum()
     loss.backward()
 
@@ -1116,32 +1120,53 @@ def test_dpa_accuracy(dtype, bs, model):
         assert_allclose(te_output, torch_output, atol=5e-2, rtol=1e-2)
 
 
+class TestReturnBiasModule(nn.Module):
+    def __init__(self, mod, **kwargs):
+        super().__init__()
+        self.te_module = mod(**kwargs)
+        self.return_bias = kwargs["return_bias"]
+        self.bias = kwargs["bias"]
+
+    def forward(self, x):
+        if self.return_bias:
+            out, bias = self.te_module(x)
+            if self.bias:
+                out = out + bias
+            return out
+        return self.te_module(x)
+
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
-def test_linear_accuracy(dtype, bs, model):
+@pytest.mark.parametrize("return_bias", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+def test_linear_accuracy(dtype, bs, model, return_bias, bias):
     config = model_configs[model]
 
-    te_linear = Linear(
-        config.hidden_size,
-        4 * config.hidden_size,
-        bias=True,
+    te_linear = TestReturnBiasModule(
+        Linear,
+        in_features=config.hidden_size,
+        out_features=4 * config.hidden_size,
         params_dtype=dtype,
+        return_bias=return_bias,
+        bias=bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_linear = torch.nn.Linear(
         config.hidden_size,
         4 * config.hidden_size,
-        bias=True,
+        bias=bias,
         device="cuda",
         dtype=dtype,
-    ).eval()
+    )
 
     # Share params
     with torch.no_grad():
-        torch_linear.weight = Parameter(te_linear.weight.clone())
-        torch_linear.bias = Parameter(te_linear.bias.clone())
+        torch_linear.weight = Parameter(te_linear.te_module.weight.clone())
+        if bias:
+            torch_linear.bias = Parameter(te_linear.te_module.bias.clone())
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_linear, bs, dtype, config)
@@ -1264,41 +1289,51 @@ def test_layernorm_accuracy(dtype, bs, model, eps, zero_centered_gamma):
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centered_gamma):
+@pytest.mark.parametrize("return_bias", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+def test_layernorm_linear_accuracy(
+    dtype, bs, model, normalization, zero_centered_gamma, return_bias, bias
+):
     config = model_configs[model]
 
-    te_ln_linear = LayerNormLinear(
-        config.hidden_size,
-        4 * config.hidden_size,
-        config.eps,
-        bias=True,
+    te_ln_linear = TestReturnBiasModule(
+        LayerNormLinear,
+        in_features=config.hidden_size,
+        out_features=4 * config.hidden_size,
+        eps=config.eps,
         normalization=normalization,
         params_dtype=dtype,
         zero_centered_gamma=zero_centered_gamma,
+        return_bias=return_bias,
+        bias=bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_ln_linear = (
         TorchLayerNormLinear(
             config.hidden_size,
             4 * config.hidden_size,
             config.eps,
-            bias=True,
             normalization=normalization,
             zero_centered_gamma=zero_centered_gamma,
+            bias=bias,
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     # Share params
     with torch.no_grad():
-        torch_ln_linear.layernorm.weight = Parameter(te_ln_linear.layer_norm_weight.clone())
+        torch_ln_linear.layernorm.weight = Parameter(
+            te_ln_linear.te_module.layer_norm_weight.clone()
+        )
         if normalization != "RMSNorm":
-            torch_ln_linear.layernorm.bias = Parameter(te_ln_linear.layer_norm_bias.clone())
-        torch_ln_linear.linear.weight = Parameter(te_ln_linear.weight.clone())
-        torch_ln_linear.linear.bias = Parameter(te_ln_linear.bias.clone())
+            torch_ln_linear.layernorm.bias = Parameter(
+                te_ln_linear.te_module.layer_norm_bias.clone()
+            )
+        torch_ln_linear.linear.weight = Parameter(te_ln_linear.te_module.weight.clone())
+        if bias:
+            torch_ln_linear.linear.bias = Parameter(te_ln_linear.te_module.bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_linear, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_linear, bs, dtype, config)
@@ -1338,17 +1373,22 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("activation", all_activations)
 @pytest.mark.parametrize("normalization", all_normalizations)
-def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
+@pytest.mark.parametrize("return_bias", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization, return_bias, bias):
     config = model_configs[model]
 
-    te_ln_mlp = LayerNormMLP(
-        config.hidden_size,
-        4 * config.hidden_size,
+    te_ln_mlp = TestReturnBiasModule(
+        LayerNormMLP,
+        hidden_size=config.hidden_size,
+        ffn_hidden_size=4 * config.hidden_size,
         activation=activation,
         normalization=normalization,
         params_dtype=dtype,
+        return_bias=return_bias,
+        bias=bias,
         device="cuda",
-    ).eval()
+    )
 
     torch_ln_mlp = (
         TorchLayerNormMLP(
@@ -1356,21 +1396,22 @@ def test_layernorm_mlp_accuracy(dtype, bs, model, activation, normalization):
             4 * config.hidden_size,
             activation=activation,
             normalization=normalization,
+            bias=bias,
         )
         .to(dtype=dtype)
         .cuda()
-        .eval()
     )
 
     # Share params
     with torch.no_grad():
-        torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.layer_norm_weight.clone())
+        torch_ln_mlp.ln.weight = Parameter(te_ln_mlp.te_module.layer_norm_weight.clone())
         if normalization != "RMSNorm":
-            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.layer_norm_bias.clone())
-        torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.fc1_weight.clone())
-        torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.fc1_bias.clone())
-        torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.fc2_weight.clone())
-        torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.fc2_bias.clone())
+            torch_ln_mlp.ln.bias = Parameter(te_ln_mlp.te_module.layer_norm_bias.clone())
+        torch_ln_mlp.fc1.weight = Parameter(te_ln_mlp.te_module.fc1_weight.clone())
+        torch_ln_mlp.fc2.weight = Parameter(te_ln_mlp.te_module.fc2_weight.clone())
+        if bias:
+            torch_ln_mlp.fc1.bias = Parameter(te_ln_mlp.te_module.fc1_bias.clone())
+            torch_ln_mlp.fc2.bias = Parameter(te_ln_mlp.te_module.fc2_bias.clone())
 
     te_outputs = _test_granular_accuracy(te_ln_mlp, bs, dtype, config)
     torch_outputs = _test_granular_accuracy(torch_ln_mlp, bs, dtype, config)
@@ -2039,14 +2080,25 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("input_format", input_formats_inference)
 @pytest.mark.parametrize("module", module_inference)
 @pytest.mark.parametrize("backend", backends_inference)
-def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend):
+@pytest.mark.parametrize("is_paged", [False, True])
+def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module, backend, is_paged):
+    reset_rng_states()
+
+    if backend in ["FusedAttention", "FlashAttention"] and dtype == torch.float32:
+        pytest.skip("FusedAttention and FlashAttention do not support FP32")
+    if use_RoPE:
+        pytest.skip("KV cache does not support starting positions for RoPE")
+
     os.environ["NVTE_FLASH_ATTN"] = "0"
     os.environ["NVTE_FUSED_ATTN"] = "0"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
 
     if backend == "FlashAttention":
         os.environ["NVTE_FLASH_ATTN"] = "1"
     elif backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+    elif backend == "UnfusedAttention":
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
 
     config = model_configs_inference[model_key]
 
@@ -2059,7 +2111,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     # Limits the max size of KV-cache
     B_max = B
-    S_max = S + 2
+    S_max = S
 
     if module == "TransformerLayer":
         model = TransformerLayer(
@@ -2089,7 +2141,17 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
             .eval()
         )
 
-    inference_params = InferenceParams(max_batch_size=B_max, max_sequence_length=S_max)
+    inference_params = InferenceParams(
+        max_batch_size=B_max,
+        max_seqlen_kv=S_max,
+        num_heads_kv=H,
+        head_dim_k=head_size,
+        dtype=dtype,
+        is_paged=is_paged,
+        total_num_pages=int(B_max * S_max / 256),
+        page_size=256,
+    )
+
     rotary_freqs = torch.randn((S_max, 1, 1, head_size), dtype=torch.float, device="cuda")
 
     input = torch.randn((S, B, D), dtype=dtype, device="cuda")
@@ -2102,22 +2164,39 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
     full_output = model(hidden_states=input, rotary_pos_emb=rotary_freqs if use_RoPE else None)
 
     # Incrementaly generate outputs using KV-cache
+    step_dict = OrderedDict(zip(list(range(B)), [1] * B))
     for i in range(S):
+        inference_params.pre_step(step_dict)
+
         if input_format == "sbhd":
             incremental_input = input[i].view(1, B, D)
         else:
             incremental_input = input[:, i, :].view(B, 1, D)
 
+        seqlens_q = torch.ones(B, dtype=torch.int32, device="cuda")
+        cu_seqlens_q = torch.zeros(B + 1, dtype=torch.int32, device="cuda")
+        cu_seqlens_q[1:] = torch.cumsum(seqlens_q, dim=0)
+        cu_seqlens_kv = cu_seqlens_q.clone()
+
+        mask_type = "padding"
+        kwargs = {}
+        if module == "TransformerLayer":
+            kwargs["self_attn_mask_type"] = mask_type
+        else:
+            kwargs["attn_mask_type"] = mask_type
         line_output = model(
             hidden_states=incremental_input,
             inference_params=inference_params,
             rotary_pos_emb=rotary_freqs if use_RoPE else None,
+            **kwargs,
+            max_seqlen_q=1,
+            max_seqlen_kv=S,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
         )
 
-        inference_params.sequence_len_offset += 1
-
         if input_format == "sbhd":
-            incremental_output[i] = line_output.view(B, D)
+            incremental_output[i, :, :] = line_output.view(B, D)
         else:
             incremental_output[:, i, :] = line_output.view(B, D)
 
