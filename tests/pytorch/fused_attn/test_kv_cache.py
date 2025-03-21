@@ -229,7 +229,7 @@ def get_model(
         attn_mask_type = "causal"
         qkv_format = "bshd"
     if mode == "inference":
-        attn_mask_type = "padding_causal" if backend != "FusedAttention" else "padding"
+        attn_mask_type = "padding_causal"
 
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
@@ -407,7 +407,7 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
     fp8_meta["recipe"] = fp8_recipe
 
     config = model_configs_infer[model]
-    num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
+    num_layers = 2 if module == "TransformerLayer" else 1
     # flash-attn v2 requires page_size >= 256
     if backend == "FlashAttention" and not fa_utils.v3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
