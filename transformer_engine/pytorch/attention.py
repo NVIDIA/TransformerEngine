@@ -5120,6 +5120,16 @@ class FusedAttention(torch.nn.Module):
         # get q_format and kv_format for training and inference
         qkv_format, q_format, kv_format = dpa_utils.get_qkv_format(qkv_layout, inference_params)
 
+        # cuDNN can work with 0-length sequences in the batch for both bshd/sbhd and thd formats
+        # however, for bshd/sbhd, q/k/v tensors need to have the same batch size as indicated by
+        # cu_seqlens, whereas thd does not have this requirement
+        # e.g. if q_format = bshd, and q.shape = [3, 1, 16, 64], we should have k.shape[0] =
+        # v.shape[0] = q.shape[0], and cu_seqlens_q.shape = cu_seqlens_kv.shape = [4]
+        if q_format in ["bshd", "sbhd"] or kv_format in ["bshd", "sbhd"]:
+            batch_size = query_layer.shape[0] if q_format == "bshd" else query_layer.shape[1]
+            cu_seqlens_q = cu_seqlens_q[: batch_size + 1]
+            cu_seqlens_kv = cu_seqlens_kv[: batch_size + 1]
+
         page_table = None
         if inference_params is None:
             if qkv_format in ["sbhd", "bshd"]:
