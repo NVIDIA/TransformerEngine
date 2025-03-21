@@ -12,6 +12,23 @@
 #include "common/common.h"
 #include "extensions.h"
 
+void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
+  using namespace transformer_engine;
+  using namespace transformer_engine::pytorch;
+
+  auto input_tensor = tensor.contiguous();
+  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
+
+  TORCH_CHECK(amax.scalar_type() == at::kFloat, "amax must be a float tensor");
+  TORCH_CHECK(amax.numel() == 1, "amax must have exactly one element");
+  TensorWrapper fake_te_output(
+      nullptr, te_input.shape(),
+      transformer_engine::DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
+      amax.data_ptr<float>());
+
+  nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
+}
+
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,

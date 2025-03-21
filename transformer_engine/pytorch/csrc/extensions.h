@@ -191,8 +191,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype);
 
-void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
-
 py::object quantize_to_fragment(const at::Tensor &tensor, py::handle quantizer,
                                 const py::object &output, const size_t start_offset_in_output,
                                 std::optional<at::Tensor> noop);
@@ -257,6 +255,8 @@ at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads
 /***************************************************************************************************
  * FP8 recipe
  **************************************************************************************************/
+
+void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,

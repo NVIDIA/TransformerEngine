@@ -16,12 +16,15 @@ from ..optimizers.multi_tensor_apply import multi_tensor_applier
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
-    r"""Replace the original raw data of a QuantizedTensor with the new raw data passed in.
+    r"""Change a quantized tensor's data buffer while preserving values
 
-    Replace the original raw data with the incoming new_raw_data. This is useful when we need
-    to place multiple different tensors in a continuous buffer, such as in data parallel
-    zero-1 scenarios. This function modifies only the address space of the underlying raw data
-    and should not alter any attributes or values of the input tensor.
+    This function modifies only the address space of the underlying
+    raw data and does not alter any other tensor attributes or values.
+
+    This may be used for custom buffer allocations, e.g. packing
+    multiple parameter tensors together into a single contiguous
+    buffer for ZeRO-2.
+
     """
     if isinstance(tensor, Float8Tensor):
         old_raw_data = tensor._data
@@ -38,6 +41,10 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
 def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, group):
     r"""Helper function to cast master weights to FP8 primary weights.
 
+    This is intended for use with ZeRO/FSDP. Each rank has a shard of
+    the master weights (possibly empty) and a full copy of the model
+    weights.
+
     Parameters
     ----------
     model_weights  : list of FP8 weights.
@@ -48,6 +55,7 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
                      should be updated.
     group          : The distributed group to do amax reduction. Typically it's the data parallel
                      group.
+
     """
 
     delayed_scaling_params = []
@@ -93,12 +101,12 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
             )
 
     if len(delayed_scaling_params) > 0:
-        cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, group)
+        _cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, group)
     if len(current_scaling_params) > 0:
-        cast_master_weights_to_fp8_current_scaling(current_scaling_params, group)
+        _cast_master_weights_to_fp8_current_scaling(current_scaling_params, group)
 
 
-def cast_master_weights_to_fp8_delayed_scaling(params, group):
+def _cast_master_weights_to_fp8_delayed_scaling(params, group):
     r"""Helper function to cast master weights to FP8 primary weights for delayed scaling.
 
     Parameters
@@ -178,7 +186,7 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
         )
 
 
-def cast_master_weights_to_fp8_current_scaling(params, group):
+def _cast_master_weights_to_fp8_current_scaling(params, group):
     r"""Helper function to cast master weights to FP8 primary weights for current scaling.
 
     Parameters
@@ -189,42 +197,42 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
              group.
     """
 
-    # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
-    dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=params[0][0].device)
-
-    # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
-    # NCCL kernels at once.
-    packed_amaxes = torch.zeros([len(params)], dtype=torch.float32, device=params[0][0].device)
-    packed_amax_views = [packed_amaxes[i : i + 1].view(1) for i in range(len(params))]
-
-    # Collect amaxes so we can copy the reduced amax from packed_amaxes to the quantizer.
-    # Collect scales and scale_invs to update them after amax reduction.
-    amaxes, scales, scale_invs = [], [], []
-
+    # Parameter attributes
+    device = params[0][0].device
     fp8_dtype = params[0][0]._get_quantizer().dtype
     force_pow_2_scales = params[0][0]._get_quantizer().force_pow_2_scales
     amax_epsilon = params[0][0]._get_quantizer().amax_epsilon
+
+    # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
+    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=device)
+
+    # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
+    # NCCL kernels at once.
+    packed_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
+    amaxes = [packed_amaxes[i : i+1] for i in range(len(params))]
+
+    # Collect scales and scale_invs to update them after amax reduction.
+    scales, scale_invs = [], []
 
     # ---------------------------------------------------------------------------------------------
     # Step 1: Iterate through all the none empty master weights and compute amax of them. Store the
     #         amaxes in a contiguous buffer. If the master weight is None, the corresponding amax
     #         will be set to 0.
     # ---------------------------------------------------------------------------------------------
-    for i, (model_weight, master_weight, _) in enumerate(params):
-        quantizer = model_weight._get_quantizer()
+    for (model_weight, master_weight, _), amax in zip(params, amaxes):
 
         # Make sure all the model weights have the same numerical options.
+        quantizer = model_weight._get_quantizer()
         assert quantizer.dtype == fp8_dtype
         assert quantizer.force_pow_2_scales == force_pow_2_scales
         assert quantizer.amax_epsilon == amax_epsilon
 
-        amaxes.append(quantizer.amax.view(1))
         scales.append(quantizer.scale.view(1))
         scale_invs.append(model_weight._scale_inv.view(1))
 
         # Compute amax of the master weight and store it in packed_amaxes.
         if master_weight is not None:
-            tex.compute_amax(master_weight, packed_amax_views[i])
+            tex.compute_amax(master_weight, amax)
 
     # ---------------------------------------------------------------------------------------------
     # Step 2: Perform all-reduce on packed_amaxes to get the global amax.
@@ -232,12 +240,7 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
     torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
 
     # ---------------------------------------------------------------------------------------------
-    # Step 3: Copy the global amaxes to all quantizers.
-    # ---------------------------------------------------------------------------------------------
-    multi_tensor_applier(multi_tensor_scale, dummy_overflow_buf, [packed_amax_views, amaxes], 1.0)
-
-    # ---------------------------------------------------------------------------------------------
-    # Step 4: Update scales and scale_invs.
+    # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
     if fp8_dtype == tex.DType.kFloat8E4M3:
         max_fp8 = 448.0
@@ -255,9 +258,9 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
     )
 
     # ---------------------------------------------------------------------------------------------
-    # Step 5: Use quantizers to cast master weights to FP8.
+    # Step 4: Cast master weights to FP8.
     # ---------------------------------------------------------------------------------------------
-    for model_weight, master_weight, start_offset in params:
+    for (model_weight, master_weight, start_offset), scale in zip(params, scales):
         # Reset transpose cache for all model weights.
         # We cannot create transpose cache here because users (like megatron) may want to overlap
         # the all-gather of model weights and forward process, so the model weight is not updated
@@ -269,5 +272,12 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
         if master_weight is None:
             continue
 
-        quantizer = model_weight._get_quantizer()
-        tex.quantize_to_fragment(master_weight, quantizer, model_weight, start_offset)
+        # Cast master weight to FP8
+        end_offset = start_offset + master_weight.numel()
+        model_weight_fragment = model_weight.reshape(-1)[start_offset:end_offset]
+        quantizer = Float8Quantizer(
+            scale=scale,
+            amax=torch.Tensor(),
+            fp8_dtype=model_weight._fp8_dtype,
+        )
+        quantizer.update_quantized(master_weight, model_weight_fragment)
