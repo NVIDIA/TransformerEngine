@@ -199,6 +199,16 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   return ret;
 }
 
+NVTETensor nvte_create_tensor_with_shape(NVTEScalingMode scaling_mode, NVTEShape initial_shape) {
+  transformer_engine::Tensor *ret = new transformer_engine::Tensor;
+  ret->scaling_mode = scaling_mode;
+  ret->data.shape.reserve(initial_shape.ndim);
+  for (size_t i = 0; i < initial_shape.ndim; ++i) {
+    ret->data.shape.push_back(initial_shape.data[i]);
+  }
+  return ret;
+}
+
 void nvte_destroy_tensor(NVTETensor tensor) {
   if (tensor == nullptr) return;
   auto *t = reinterpret_cast<transformer_engine::Tensor *>(tensor);
@@ -246,6 +256,28 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
       if (!t.has_data() && t.has_columnwise_data()) {
         ret.data = t.columnwise_data.shape.data();
         ret.ndim = t.columnwise_data.shape.size();
+      } else {
+        ret.data = t.data.shape.data();
+        ret.ndim = t.data.shape.size();
+      }
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      if (!t.has_data() && t.has_columnwise_data()) {
+        std::vector<size_t> shape;
+        ret.ndim = t.columnwise_data.shape.size();
+        shape.reserve(ret.ndim);
+        for (int i = 0; i + 1 < static_cast<int>(ret.ndim); ++i) {
+          shape.push_back(t.columnwise_data.shape[i + 1]);
+        }
+        if (ret.ndim > 0) {
+          shape.push_back(t.columnwise_data.shape[0]);
+        }
+        NVTE_CHECK(t.data.shape == shape,
+                   "Must return shape allocated on tensor. "
+                   "data shape expected to match derivation from columnwise.");
+        ret.data = t.data.shape.data();
       } else {
         ret.data = t.data.shape.data();
         ret.ndim = t.data.shape.size();
@@ -501,4 +533,34 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
   if (config != nullptr) {
     delete reinterpret_cast<transformer_engine::QuantizationConfig *>(config);
   }
+}
+
+int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_force_pow_2_scales_qopt()) {
+    t.force_pow_2_scales = zero_if_false != 0;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon) {
+  auto &t = *reinterpret_cast<transformer_engine::Tensor *>(tensor);
+  if (t.supports_amax_epsilon_qopt()) {
+    t.amax_epsilon = amax_epsilon;
+    return 0;
+  } else {
+    return 1;
+  }
+}
+
+int nvte_get_qopt_force_pow_2_scales(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.force_pow_2_scales ? 1 : 0;
+}
+
+float nvte_get_qopt_amax_epsilon(const NVTETensor tensor) {
+  const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
+  return t.amax_epsilon;
 }
