@@ -53,8 +53,8 @@ py::object quantize_to_fragment(const at::Tensor& input, py::handle quantizer,
   }
 
   if (detail::IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
-    char *dptr = reinterpret_cast<char *>(te_output.dptr());
-    char *fragment_dptr = dptr + start_offset_in_output * te_output.element_size();
+    char* dptr = reinterpret_cast<char*>(te_output.dptr());
+    char* fragment_dptr = dptr + start_offset_in_output * te_output.element_size();
     // Create a TensorWrapper for the fragment of the te_output.
     // There are three different attributes from te_output:
     //   1. dptr     : The fragment_dptr is offset by start_offset_in_output.
@@ -63,9 +63,9 @@ py::object quantize_to_fragment(const at::Tensor& input, py::handle quantizer,
     //   3. amax_dptr: Use nullptr instead of amax_dptr from te_output, to avoid atomic amax updates
     //                 in kernel.
     // Other attributes are the same as te_output.
-    TensorWrapper te_output_fragment(
-        fragment_dptr, te_input.shape(), te_output.dtype(), nullptr, te_output.scale(),
-        te_output.scale_inv(), te_output.scale_inv_shape(), te_output.scaling_mode());
+    TensorWrapper te_output_fragment(fragment_dptr, te_input.shape(), te_output.dtype(), nullptr,
+                                     te_output.scale(), te_output.scale_inv(),
+                                     te_output.scale_inv_shape(), te_output.scaling_mode());
 
     nvte_quantize_noop(te_input.data(), te_output_fragment.data(), te_noop.data(),
                        at::cuda::getCurrentCUDAStream());
