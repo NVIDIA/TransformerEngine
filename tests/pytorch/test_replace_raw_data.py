@@ -19,7 +19,7 @@ def test_replace_raw_data_for_float8tensor():
     torch.manual_seed(12345)
     torch.cuda.manual_seed(12345)
 
-    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=TE_DType.kFloat8E4M3, device='cuda')
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=TE_DType.kFloat8E4M3, device="cuda")
     fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
     random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
     fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
