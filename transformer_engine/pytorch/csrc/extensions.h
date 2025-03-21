@@ -191,10 +191,6 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype);
 
-py::object quantize_to_fragment(const at::Tensor &tensor, py::handle quantizer,
-                                const py::object &output, const size_t start_offset_in_output,
-                                std::optional<at::Tensor> noop);
-
 std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
 
 std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
