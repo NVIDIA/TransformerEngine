@@ -92,22 +92,6 @@ py::object dequantize(const py::handle& input, transformer_engine::DType otype) 
   return out;
 }
 
-void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
-  init_extension();
-
-  auto input_tensor = tensor.contiguous();
-  const TensorWrapper& te_input = makeTransformerEngineTensor(input_tensor);
-
-  TORCH_CHECK(amax.scalar_type() == at::kFloat, "amax must be a float tensor");
-  TORCH_CHECK(amax.numel() == 1, "amax can only has one element");
-  TensorWrapper fake_te_output(
-      nullptr, te_input.shape(),
-      transformer_engine::DType::kFloat8E4M3,  // It doesn't matter because we only compute amax.
-      amax.data_ptr<float>());
-
-  nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
-}
-
 template <void (*func)(const NVTETensor, const NVTETensor, NVTETensor, NVTETensor, NVTETensor,
                        cudaStream_t)>
 std::vector<py::object> dbias_dact(const at::Tensor& grad_output, const at::Tensor& act_input,

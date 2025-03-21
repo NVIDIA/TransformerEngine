@@ -172,8 +172,6 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
 def cast_master_weights_to_fp8_current_scaling(params, group):
     # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
     dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=params[0][0].device)
-    # Create a dummy amax buffer, it's needed by Float8Quantizer.
-    dummy_amax_buf = torch.empty(1, dtype=torch.float32, device=params[0][0].device)
 
     # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
     # NCCL kernels at once.
@@ -252,26 +250,5 @@ def cast_master_weights_to_fp8_current_scaling(params, group):
         if master_weight is None:
             continue
 
-        # If master weight is not None, start_offset must be a valid value.
-        assert start_offset is not None
-        assert start_offset >= 0
-        end_offset = start_offset + master_weight.numel()
-        assert end_offset <= model_weight.numel()
-
         quantizer = model_weight._get_quantizer()
-
-        # master_weight may be smaller than model_weight because it could be distributed across
-        # multiple ranks. So we need to create a dummy weight using the raw data from model_weight.
-        temp_quantizer = Float8Quantizer(
-            scale=quantizer.scale,
-            amax=dummy_amax_buf,
-            fp8_dtype=quantizer.dtype,
-            columnwise=False,
-        )
-        shard_model_weight_raw = model_weight._data.view(-1)[start_offset:end_offset]
-        shard_model_weight_fp8 = temp_quantizer.create_tensor_from_data(
-            data=shard_model_weight_raw,
-            fake_dtype=model_weight.dtype,
-            requires_grad=False,
-        )
-        temp_quantizer.update_quantized(master_weight.view(-1), shard_model_weight_fp8)
+        tex.quantize_to_fragment(master_weight, quantizer, model_weight, start_offset)
