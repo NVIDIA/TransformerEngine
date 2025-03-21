@@ -29,10 +29,10 @@ void compute_amax(const at::Tensor& tensor, at::Tensor& amax) {
   nvte_compute_amax(te_input.data(), fake_te_output.data(), at::cuda::getCurrentCUDAStream());
 }
 
-void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
+void fused_amax_and_scale_update_after_reduction(const at::Tensor& amax_reduction_buffer,
                                                  std::vector<at::Tensor> amax_histories,
                                                  std::vector<at::Tensor> scales,
-                                                 const std::string &amax_compute_algo,
+                                                 const std::string& amax_compute_algo,
                                                  transformer_engine::DType fp8_dtype,
                                                  float margin) {
   using namespace transformer_engine;

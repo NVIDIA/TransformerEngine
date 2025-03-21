@@ -209,7 +209,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group):
     # Create a contiguous buffer to store amaxes temporarily, so we can perform all all-reduce
     # NCCL kernels at once.
     packed_amaxes = torch.zeros(len(params), dtype=torch.float32, device=device)
-    amaxes = [packed_amaxes[i : i+1] for i in range(len(params))]
+    amaxes = [packed_amaxes[i : i + 1] for i in range(len(params))]
 
     # Collect scales and scale_invs to update them after amax reduction.
     scales, scale_invs = [], []
