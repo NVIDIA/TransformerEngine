@@ -1243,9 +1243,7 @@ def test_fp8_model_init_high_precision_init_val():
 
     assert isinstance(weight, QuantizedTensor), "Weight should be QuantizedTensor"
     assert hasattr(weight, "_high_precision_init_val"), "_high_precision_init_val not found"
-    assert hasattr(
-        weight, "get_high_precision_init_val"
-    ), "get_high_precision_init_val() not found"
+    assert hasattr(weight, "get_high_precision_init_val"), "get_high_precision_init_val() not found"
     assert hasattr(
         weight, "clear_high_precision_init_val"
     ), "clear_high_precision_init_val() not found"
@@ -1266,9 +1264,7 @@ def test_fp8_model_init_high_precision_init_val():
     )
 
     weight.clear_high_precision_init_val()
-    assert (
-        weight.get_high_precision_init_val() is None
-    ), "clear_high_precision_init_val() not work"
+    assert weight.get_high_precision_init_val() is None, "clear_high_precision_init_val() not work"
     assert not hasattr(
         weight, "._high_precision_init_val"
     ), "clear_high_precision_init_val() not work"
