@@ -96,22 +96,6 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfig config,
                                   cudaStream_t stream);
 
-/*! \brief Cast a high precision tensor to a fragment of an FP8 tensor.
- *
- *  This is only supported for FP8 tensors with per-tensor current scaling.
- *  The input tensor is typically the master weight when using zero algorithm.
- *
- *  \param[in]     input                    High precision tensor.
- *  \param[out]    output                   FP8 tensor with per-tensor current scaling.
- *  \param[in]     start_offset_in_output   Offset in the output tensor to start the cast.
- *  \param[in]     noop                     Noop tensor.
- *  \param[in]     config                   Quantization configuration.
- *  \param[in]     stream                   CUDA stream used for the operation.
- */
-void nvte_cs_cast_to_fragment(const NVTETensor input, NVTETensor output,
-                              const size_t start_offset_in_output, const NVTETensor noop,
-                              const NVTEQuantizationConfig config, cudaStream_t stream);
-
 #ifdef __cplusplus
 }  // extern "C"
 #endif
