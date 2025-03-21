@@ -688,9 +688,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 # partial result quantizer
                 for i in range(cp_size):
                     S_quantizer_per_step[i] = S_quantizer.copy()
-                    S_quantizer_per_step[i].amax = amax_per_step[0][i]
+                    S_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     O_CP_quantizer_per_step[i] = O_CP_quantizer.copy()
-                    O_CP_quantizer_per_step[i].amax = amax_per_step[1][i]
+                    O_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
@@ -1477,8 +1477,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if fp8 and use_fused_attention:
             amax_cp_fwd = amax_per_step.amax(dim=1)
-            S_quantizer.amax = amax_cp_fwd[0]
-            O_CP_quantizer.amax = amax_cp_fwd[1]
+            S_quantizer.amax.copy_(amax_cp_fwd[0])
+            O_CP_quantizer.amax.copy_(amax_cp_fwd[1])
 
         out_fp8 = None
         out_f16 = out.to(qkv_dtype)
@@ -1648,9 +1648,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
                 amax_per_step = torch.zeros((2, cp_size), dtype=torch.float32, device=q.device)
                 for i in range(cp_size):
                     dP_quantizer_per_step[i] = ctx.dP_quantizer.copy()
-                    dP_quantizer_per_step[i].amax = amax_per_step[0][i]
+                    dP_quantizer_per_step[i].amax = amax_per_step[0][i].reshape((1,))
                     dQKV_CP_quantizer_per_step[i] = ctx.dQKV_CP_quantizer.copy()
-                    dQKV_CP_quantizer_per_step[i].amax = amax_per_step[1][i]
+                    dQKV_CP_quantizer_per_step[i].amax = amax_per_step[1][i].reshape((1,))
             else:
                 assert False, "FP8 is only supported with Fused Attention!"
         else:
@@ -2388,8 +2388,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
 
         if ctx.fp8 and ctx.use_fused_attention:
             amax_cp_bwd = amax_per_step.amax(dim=1)
-            ctx.dP_quantizer.amax = amax_cp_bwd[0]
-            ctx.dQKV_CP_quantizer.amax = amax_cp_bwd[1]
+            ctx.dP_quantizer.amax.copy_(amax_cp_bwd[0])
+            ctx.dQKV_CP_quantizer.amax.copy_(amax_cp_bwd[1])
             if ctx.qkv_format in ["bshd", "sbhd"]:
                 # [cp, b, 2, sk//2, 2, np, hn] -> [cp, 2, b, 2, sk//2, np, hn] or
                 # [cp, 2, sk//2, b, 2, np, hn] -> [cp, 2, 2, sk//2, b, np, hn]
