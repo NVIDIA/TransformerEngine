@@ -56,3 +56,10 @@ def test_torch_dynamo(model_name: str):
     # Forward and backward pass
     out = model(*inputs)
     out.backward(torch.zeros_like(out))
+
+
+def test_lazy_compile():
+    """Smoke test to ensure lazy compilation is working."""
+    from transformer_engine.pytorch.jit import bgrad_dgelu_fused_
+
+    bgrad_dgelu_fused_(torch.randn(10, 10), torch.randn(10, 10))
