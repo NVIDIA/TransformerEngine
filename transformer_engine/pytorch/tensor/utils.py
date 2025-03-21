@@ -2,14 +2,16 @@
 #
 # See LICENSE for license information.
 
+"""Helper functions for using fp8 tensors as weights"""
+
 import torch
+
+import transformer_engine_torch as tex
+from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
 from .quantized_tensor import QuantizedTensor
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
-
-import transformer_engine_torch as tex
-from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 
 
@@ -28,10 +30,9 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
         tensor._data = new_raw_data
         del old_raw_data
     elif isinstance(tensor, MXFP8Tensor):
-        raise NotImplementedError(f"replace_raw_data for MXFP8Tensor is not supported yet")
+        raise NotImplementedError("replace_raw_data for MXFP8Tensor is not supported yet")
     else:
         raise ValueError(f"replace_raw_data for {type(tensor)} is not supported yet")
-    # TODO: Add NV sub-channel support here.
 
 
 def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, group):
@@ -84,22 +85,30 @@ def cast_master_weights_to_fp8(model_weights, master_weights, start_offsets, gro
             current_scaling_params.append((model_weight, master_weight, start_offset))
         elif isinstance(quantizer, MXFP8Quantizer):
             raise NotImplementedError(
-                f"cast_master_weights_to_fp8 for MXFP8BlockScaling is not supported yet"
+                "cast_master_weights_to_fp8 for MXFP8BlockScaling is not supported yet"
             )
         else:
             raise ValueError(
                 f"cast_master_weights_to_fp8 for {type(quantizer)} is not supported yet"
             )
-        # TODO: Add NV sub-channel support here.
 
     if len(delayed_scaling_params) > 0:
         cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, group)
     if len(current_scaling_params) > 0:
         cast_master_weights_to_fp8_current_scaling(current_scaling_params, group)
-    # TODO: Add NV sub-channel support here.
 
 
 def cast_master_weights_to_fp8_delayed_scaling(params, group):
+    r"""Helper function to cast master weights to FP8 primary weights for delayed scaling.
+
+    Parameters
+    ----------
+    params : List of tuple, each tuple contains a model weight, a master weight, and an offset
+             indicating the starting index of the master weight in the model weight.
+    group  : The distributed group to do amax reduction. Typically it's the data parallel
+             group.
+    """
+
     # Collect amaxes to do reduce-max among dp group.
     # Collect scales and scale_invs to update scale_invs of the fp8 weights.
     amaxes, scales, scale_invs = [], [], []
@@ -170,6 +179,16 @@ def cast_master_weights_to_fp8_delayed_scaling(params, group):
 
 
 def cast_master_weights_to_fp8_current_scaling(params, group):
+    r"""Helper function to cast master weights to FP8 primary weights for current scaling.
+
+    Parameters
+    ----------
+    params : List of tuple, each tuple contains a model weight, a master weight, and an offset
+             indicating the starting index of the master weight in the model weight.
+    group  : The distributed group to do amax reduction. Typically it's the data parallel
+             group.
+    """
+
     # Create a dummy overflow buffer, it's needed by multi_tensor_applier.
     dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=params[0][0].device)
 

@@ -937,8 +937,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 def get(self):
                     if hasattr(self, "_high_precision_init_val"):
                         return self._high_precision_init_val
-                    else:
-                        return None
+                    return None
 
                 def clear(self):
                     if hasattr(self, "_high_precision_init_val"):
