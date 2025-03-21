@@ -263,23 +263,20 @@ void launch_cs_cast_kernel(const InputType *input, OutputType *output, const flo
 
   switch (align) {
     case Alignment::SAME_ALIGNED:
-      cs_cast_kernel<nvec, true, float, InputType, OutputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
-              epsilon, N, num_aligned_elements);
+      cs_cast_kernel<nvec, true, float, InputType, OutputType><<<num_blocks, threads, 0, stream>>>(
+          input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
+          epsilon, N, num_aligned_elements);
       break;
     case Alignment::SAME_UNALIGNED:
-      cs_cast_kernel<nvec, false, float, InputType, OutputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
-              epsilon, N, num_aligned_elements);
+      cs_cast_kernel<nvec, false, float, InputType, OutputType><<<num_blocks, threads, 0, stream>>>(
+          input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
+          epsilon, N, num_aligned_elements);
       break;
     case Alignment::DIFFERENT: {
       // If the pointers are aligned differently we cannot vectorize
-      cs_cast_kernel<1, true, float, InputType, OutputType>
-          <<<num_blocks, threads, 0, stream>>>(
-              input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
-              epsilon, N, num_aligned_elements);
+      cs_cast_kernel<1, true, float, InputType, OutputType><<<num_blocks, threads, 0, stream>>>(
+          input, output, amax_ptr, scale_ptr, scale_inv_ptr, noop, max_fp8, force_pow_2_scales,
+          epsilon, N, num_aligned_elements);
       break;
     }
   }
@@ -359,7 +356,7 @@ void nvte_cs_cast_to_fragment(const NVTETensor input_, NVTETensor output_,
               reinterpret_cast<const float *>(output.amax.dptr),
               reinterpret_cast<float *>(output.scale.dptr),
               reinterpret_cast<float *>(output.scale_inv.dptr),
-              reinterpret_cast<const float *>(noop.data.dptr),
-              max_fp8, config.force_pow_2_scales, config.amax_epsilon, input.data.numel(),
+              reinterpret_cast<const float *>(noop.data.dptr), max_fp8, config.force_pow_2_scales,
+              config.amax_epsilon, input.data.numel(),
               stream);););  // NOLINT(*)
 }

@@ -193,8 +193,8 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype);
 
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
-py::object quantize_to_fragment(const at::Tensor& tensor, py::handle quantizer,
-                                const py::object& output, const size_t start_offset_in_output,
+py::object quantize_to_fragment(const at::Tensor &tensor, py::handle quantizer,
+                                const py::object &output, const size_t start_offset_in_output,
                                 std::optional<at::Tensor> noop);
 
 std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
