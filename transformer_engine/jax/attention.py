@@ -410,9 +410,7 @@ def _segment_ids_pos_to_seqlens_offsets_fast_causal_path(
     segment_ids_q, segment_ids_kv, segment_pos_q, segment_pos_kv, max_segments_per_seq
 ):
     q_len, q_offset = _get_seqlens_and_offsets(segment_ids_q, max_segments_per_seq)
-    kv_len, kv_offset = _get_seqlens_and_offsets(
-        segment_ids_kv, max_segments_per_seq
-    )
+    kv_len, kv_offset = _get_seqlens_and_offsets(segment_ids_kv, max_segments_per_seq)
     return _fast_causal_adjust_seqlen_and_offsets(
         segment_pos_q, q_len, q_offset, segment_pos_kv, kv_len, kv_offset
     )
@@ -541,7 +539,7 @@ class SequenceDescriptor:
         # No segment_ids/segment_pos
         if q_segment_ids.size + kv_segment_ids.size == 0:
             return self.seqlens, self.seq_offsets
-        
+
         if qkv_layout.is_thd():
             q_seqlens, kv_seqlens, q_offsets, kv_offsets = _segment_ids_pos_to_seqlens_offsets(
                 q_segment_ids,
