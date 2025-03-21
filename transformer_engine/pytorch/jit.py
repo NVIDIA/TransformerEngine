@@ -11,6 +11,7 @@ import torch
 
 # pylint: disable=unnecessary-lambda-assignment
 
+
 def lazy_compile(func):
     """Lazy compile a function with torch.compile
 
