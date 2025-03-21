@@ -8,7 +8,7 @@ import torch
 
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor import replace_raw_data
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from transformer_engine_torch import DType as TE_DType
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
@@ -16,14 +16,13 @@ fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 
 @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
 def test_replace_raw_data_for_float8tensor():
-    fp8_quantizer = Float8Quantizer(
-        scale=torch.empty(1, dtype=torch.float32, device="cuda"),
-        amax=torch.empty(1, dtype=torch.float32, device="cuda"),
-        fp8_dtype=TE_DType.kFloat8E4M3,
-        rowwise=True,
-        columnwise=True,
-    )
+    torch.manual_seed(12345)
+    torch.cuda.manual_seed(12345)
+
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=TE_DType.kFloat8E4M3, device='cuda')
     fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
+    random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
+    fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
 
     attrs_to_check = ["_quantizer", "_fp8_dtype", "_scale_inv", "_transpose", "_transpose_invalid"]
     attrs = {}
