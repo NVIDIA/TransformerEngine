@@ -12,8 +12,6 @@ from .utils import cast_master_weights_to_fp8, replace_raw_data
 __all__ = [
     "QuantizedTensor",
     "Quantizer",
-    "cast_master_weights_to_fp8",
-    "replace_raw_data",
 ]
 
 
