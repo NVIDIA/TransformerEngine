@@ -3222,14 +3222,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
 
-        ctx.qkv_dtype = qkv_dtype
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.S_quantizer = S_quantizer
-        ctx.dQKV_quantizer = dQKV_quantizer
-        ctx.dO_quantizer = dO_quantizer
-        ctx.dP_quantizer = dP_quantizer
-
         ctx.batch_size = batch_size
         ctx.cp_group = cp_group
         ctx.cp_stream = cp_stream
@@ -3248,6 +3240,22 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         ctx.use_flash_attn_3 = use_flash_attn_3
+
+        ctx.qkv_dtype = qkv_dtype
+        ctx.dQKV_quantizer = dQKV_quantizer
+        ctx.dO_quantizer = dO_quantizer
+        ctx.dP_quantizer = dP_quantizer
+        ctx.QKV_quantizer = QKV_quantizer
+        ctx.O_quantizer = O_quantizer
+        ctx.S_quantizer = S_quantizer
+        if ctx.fp8:
+            ctx.QKV_quantizer = QKV_quantizer.copy()
+            ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
+            ctx.O_quantizer = O_quantizer.copy()
+            ctx.O_quantizer.scale = O_quantizer.scale.clone()
+            ctx.S_quantizer = S_quantizer.copy()
+            ctx.S_quantizer.scale = S_quantizer.scale.clone()
+
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         return out_ret
 
@@ -4741,6 +4749,9 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dO_quantizer = dO_quantizer
         ctx.dP_quantizer = dP_quantizer
         ctx.S_quantizer = S_quantizer
+        if ctx.fp8:
+            ctx.S_quantizer = S_quantizer.copy()
+            ctx.S_quantizer.scale = S_quantizer.scale.clone()
 
         ctx.max_seqlen_q = max_seqlen_q
         ctx.max_seqlen_kv = max_seqlen_kv
