@@ -31,6 +31,7 @@ def _non_overlapping_grad(output: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("tensor_format", ["sbhd", "bshd"])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 @pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("interleaved", [True, False])
 def test_fused_rope(
     dtype: torch.dtype,
     seq_length: int,
@@ -41,6 +42,7 @@ def test_fused_rope(
     tensor_format: str,
     loss_func: Callable,
     cp_size: int,
+    interleaved: bool,
 ) -> None:
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -57,6 +59,7 @@ def test_fused_rope(
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(seq_length * cp_size)
+    assert emb.is_contiguous()
 
     for cp_rank in range(cp_size):
         # unfused
@@ -66,6 +69,7 @@ def test_fused_rope(
             t.float(),
             emb,
             tensor_format=tensor_format,
+            interleaved=interleaved,
             fused=False,
             cp_size=cp_size,
             cp_rank=cp_rank,
@@ -80,6 +84,7 @@ def test_fused_rope(
             t,
             emb,
             tensor_format=tensor_format,
+            interleaved=interleaved,
             fused=True,
             cp_size=cp_size,
             cp_rank=cp_rank,
@@ -100,6 +105,7 @@ def test_fused_rope(
 @pytest.mark.parametrize("transpose", [None, (1, 2)])
 @pytest.mark.parametrize("loss_func", [_overlapping_grad, _non_overlapping_grad])
 @pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("interleaved", [True, False])
 def test_fused_rope_thd(
     dtype: torch.dtype,
     hidden_size: int,
@@ -107,6 +113,7 @@ def test_fused_rope_thd(
     transpose: Union[Tuple, None],
     loss_func: Callable,
     cp_size: int,
+    interleaved: bool,
 ) -> None:
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -136,6 +143,7 @@ def test_fused_rope_thd(
 
     rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
     emb = rotary_pos_emb(cu_seqlens_padded[-1])
+    assert emb.is_contiguous()
 
     for cp_rank in range(cp_size):
         # unfused
@@ -145,6 +153,7 @@ def test_fused_rope_thd(
             t.float(),
             emb,
             tensor_format="thd",
+            interleaved=interleaved,
             fused=False,
             cu_seqlens=cu_seqlens_padded,
             cp_size=cp_size,
@@ -159,6 +168,7 @@ def test_fused_rope_thd(
         output_fused = apply_rotary_pos_emb(
             t,
             emb,
+            interleaved=interleaved,
             fused=True,
             tensor_format="thd",
             cu_seqlens=cu_seqlens_padded,

@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ROPE_H_
 #define TRANSFORMER_ENGINE_FUSED_ROPE_H_
 
-#include "transformer_engine.h"
 #include "fused_attn.h"
+#include "transformer_engine.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,8 +20,9 @@ extern "C" {
  *  \param[in]     freqs           The freqs tensor.
  *  \param[out]    output          Output tensor.
  *  \param[in]     qkv_format      QKV format.
- *  \param[in]     cp_size       Context parallel world size.
- *  \param[in]     cp_rank       Context parallel rank.
+ *  \param[in]     interleaved     Whether to use interleaved rotary position embedding.
+ *  \param[in]     cp_size         Context parallel world size.
+ *  \param[in]     cp_rank         Context parallel rank.
  *  \param[in]     s               Length of the s dimension of input.
  *  \param[in]     b               Length of the b dimension of input.
  *  \param[in]     h               Length of the h dimension of input.
@@ -34,10 +35,11 @@ extern "C" {
  *  \param[in]     stream          CUDA stream used for the operation.
  */
 void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs, NVTETensor output,
-                             const NVTE_QKV_Format qkv_format, const int cp_size, const int cp_rank,
-                             const int s, const int b, const int h, const int d, const int d2,
-                             const int stride_s, const int stride_b, const int stride_h,
-                             const int stride_d, cudaStream_t stream);
+                             const NVTE_QKV_Format qkv_format, const bool interleaved,
+                             const int cp_size, const int cp_rank, const int s, const int b,
+                             const int h, const int d, const int d2, const int stride_s,
+                             const int stride_b, const int stride_h, const int stride_d,
+                             cudaStream_t stream);
 
 /*! \brief Compute the backward of the fused rope.
  *
@@ -45,8 +47,9 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs, NVT
  *  \param[in]     freqs           The freqs tensor.
  *  \param[out]    input_grads     Input gradient tensor to calculate.
  *  \param[in]     qkv_format      QKV format.
- *  \param[in]     cp_size       Context parallel world size.
- *  \param[in]     cp_rank       Context parallel rank.
+ *  \param[in]     interleaved     Whether to use interleaved rotary position embedding.
+ *  \param[in]     cp_size         Context parallel world size.
+ *  \param[in]     cp_rank         Context parallel rank.
  *  \param[in]     s               Length of the s dimension of output_grads.
  *  \param[in]     b               Length of the b dimension of output_grads.
  *  \param[in]     h               Length of the h dimension of output_grads.
@@ -60,10 +63,10 @@ void nvte_fused_rope_forward(const NVTETensor input, const NVTETensor freqs, NVT
  */
 void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor freqs,
                               NVTETensor input_grads, const NVTE_QKV_Format qkv_format,
-                              const int cp_size, const int cp_rank, const int s, const int b,
-                              const int h, const int d, const int d2, const int stride_s,
-                              const int stride_b, const int stride_h, const int stride_d,
-                              cudaStream_t stream);
+                              const bool interleaved, const int cp_size, const int cp_rank,
+                              const int s, const int b, const int h, const int d, const int d2,
+                              const int stride_s, const int stride_b, const int stride_h,
+                              const int stride_d, cudaStream_t stream);
 
 /*! \brief Apply rotary positional embedding to the input tensor in thd format.
  *
@@ -71,6 +74,7 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor fr
  *  \param[in]     cu_seqlens    The cumulative sum of sequence lengths tensor.
  *  \param[in]     freqs         The freqs tensor.
  *  \param[out]    output        Output tensor.
+ *  \param[in]     interleaved   Whether to use interleaved rotary position embedding.
  *  \param[in]     cp_size       Context parallel world size.
  *  \param[in]     cp_rank       Context parallel rank.
  *  \param[in]     max_s         Max sequence length.
@@ -84,10 +88,10 @@ void nvte_fused_rope_backward(const NVTETensor output_grads, const NVTETensor fr
  *  \param[in]     stream        CUDA stream used for the operation.
  */
 void nvte_fused_rope_thd_forward(const NVTETensor input, const NVTETensor cu_seqlens,
-                                 const NVTETensor freqs, NVTETensor output, const int cp_size,
-                                 const int cp_rank, const int max_s, const int b, const int h,
-                                 const int d, const int d2, const int stride_t, const int stride_h,
-                                 const int stride_d, cudaStream_t stream);
+                                 const NVTETensor freqs, NVTETensor output, const bool interleaved,
+                                 const int cp_size, const int cp_rank, const int max_s, const int b,
+                                 const int h, const int d, const int d2, const int stride_t,
+                                 const int stride_h, const int stride_d, cudaStream_t stream);
 
 /*! \brief Compute the backward of the fused rope in thd format.
  *
@@ -95,6 +99,7 @@ void nvte_fused_rope_thd_forward(const NVTETensor input, const NVTETensor cu_seq
  *  \param[in]     cu_seqlens    The cumulative sum of sequence lengths tensor.
  *  \param[in]     freqs         The freqs tensor.
  *  \param[out]    input_grads   Input gradient to calculate.
+ *  \param[in]     interleaved   Whether to use interleaved rotary position embedding.
  *  \param[in]     cp_size       Context parallel world size.
  *  \param[in]     cp_rank       Context parallel rank.
  *  \param[in]     max_s         Max sequence length.
@@ -108,9 +113,10 @@ void nvte_fused_rope_thd_forward(const NVTETensor input, const NVTETensor cu_seq
  *  \param[in]     stream        CUDA stream used for the operation.
  */
 void nvte_fused_rope_thd_backward(const NVTETensor output_grads, const NVTETensor cu_seqlens,
-                                  const NVTETensor freqs, NVTETensor input_grads, const int cp_size,
-                                  const int cp_rank, const int max_s, const int b, const int h,
-                                  const int d, const int d2, const int stride_t, const int stride_h,
+                                  const NVTETensor freqs, NVTETensor input_grads,
+                                  const bool interleaved, const int cp_size, const int cp_rank,
+                                  const int max_s, const int b, const int h, const int d,
+                                  const int d2, const int stride_t, const int stride_h,
                                   const int stride_d, cudaStream_t stream);
 
 #ifdef __cplusplus

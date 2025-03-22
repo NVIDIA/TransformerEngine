@@ -7,7 +7,7 @@
 #include "extensions.h"
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const NVTE_QKV_Format qkv_format,
+                              const NVTE_QKV_Format qkv_format, const bool interleaved,
                               const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
                               const int cp_rank) {
   using namespace transformer_engine::pytorch;
@@ -44,8 +44,7 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     const int d2 = freqs.size(3);
 
     // output
-    auto act_options =
-        at::TensorOptions().dtype(input.scalar_type()).device(input.device());
+    auto act_options = at::TensorOptions().dtype(input.scalar_type()).device(input.device());
     auto output = at::empty(input.sizes(), act_options);
 
     auto input_cu = makeTransformerEngineTensor(input);
@@ -54,8 +53,8 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
     auto output_cu = makeTransformerEngineTensor(output);
 
     nvte_fused_rope_thd_forward(input_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                                output_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2, stride_t,
-                                stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                                output_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h, d, d2,
+                                stride_t, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
     return output;
   }
@@ -86,23 +85,22 @@ at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
               "greater than the freqs tensor");
 
   // output
-  auto act_options =
-      at::TensorOptions().dtype(input.scalar_type()).device(input.device());
+  auto act_options = at::TensorOptions().dtype(input.scalar_type()).device(input.device());
   auto output = at::empty(input.sizes(), act_options);
 
   auto input_cu = makeTransformerEngineTensor(input);
   auto freqs_cu = makeTransformerEngineTensor(freqs);
   auto output_cu = makeTransformerEngineTensor(output);
 
-  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), qkv_format, cp_size,
-                          cp_rank, s, b, h, d, d2, stride_s, stride_b, stride_h, stride_d,
-                          at::cuda::getCurrentCUDAStream());
+  nvte_fused_rope_forward(input_cu.data(), freqs_cu.data(), output_cu.data(), qkv_format,
+                          interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
+                          stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
   return output;
 }
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const NVTE_QKV_Format qkv_format,
+                               const NVTE_QKV_Format qkv_format, const bool interleaved,
                                const c10::optional<at::Tensor> cu_seqlens, const int cp_size,
                                const int cp_rank) {
   using namespace transformer_engine::pytorch;
@@ -147,8 +145,9 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
     auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
     nvte_fused_rope_thd_backward(output_grads_cu.data(), cu_seqlens_cu.data(), freqs_cu.data(),
-                                 input_grads_cu.data(), cp_size, cp_rank, max_s, b, h, d, d2,
-                                 stride_t, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                                 input_grads_cu.data(), interleaved, cp_size, cp_rank, max_s, b, h,
+                                 d, d2, stride_t, stride_h, stride_d,
+                                 at::cuda::getCurrentCUDAStream());
 
     return input_grads;
   }
@@ -191,8 +190,8 @@ at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor 
   auto input_grads_cu = makeTransformerEngineTensor(input_grads);
 
   nvte_fused_rope_backward(output_grads_cu.data(), freqs_cu.data(), input_grads_cu.data(),
-                           qkv_format, cp_size, cp_rank, s, b, h, d, d2, stride_s, stride_b,
-                           stride_h, stride_d, at::cuda::getCurrentCUDAStream());
+                           qkv_format, interleaved, cp_size, cp_rank, s, b, h, d, d2, stride_s,
+                           stride_b, stride_h, stride_d, at::cuda::getCurrentCUDAStream());
 
   return input_grads;
 }
