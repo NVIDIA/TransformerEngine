@@ -19,6 +19,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <string>
 
 #include "../util/string.h"
 
@@ -95,20 +96,31 @@
 
 #ifdef NVTE_WITH_CUBLASMP
 
-#define NVTE_CHECK_CUBLASMP(expr)             \
-  do {                                        \
-    const cublasMpStatus_t status = (expr);   \
-    if (status != CUBLASMP_STATUS_SUCCESS) {  \
-      NVTE_ERROR("cuBLASMp Error: ", status); \
-    }                                         \
+#define NVTE_CHECK_CUBLASMP(expr)                             \
+  do {                                                        \
+    const cublasMpStatus_t status = (expr);                   \
+    if (status != CUBLASMP_STATUS_SUCCESS) {                  \
+      NVTE_ERROR("cuBLASMp Error: ", std::to_string(status)); \
+    }                                                         \
   } while (false)
 
-#define NVTE_CHECK_CAL(expr)             \
-  do {                                   \
-    const calError_t status = (expr);    \
-    if (status != CAL_OK) {              \
-      NVTE_ERROR("CAL Error: ", status); \
-    }                                    \
+#define NVTE_CHECK_CAL(expr)                             \
+  do {                                                   \
+    const calError_t status = (expr);                    \
+    if (status != CAL_OK) {                              \
+      NVTE_ERROR("CAL Error: ", std::to_string(status)); \
+    }                                                    \
+  } while (false)
+
+#define NVTE_CHECK_MPI(expr)                         \
+  do {                                               \
+    int err = (expr);                                \
+    if (err != MPI_SUCCESS) {                        \
+      char err_str[MPI_MAX_ERROR_STRING + 1]{};      \
+      int _len{};                                    \
+      MPI_Error_string(err, err_str, &_len);         \
+      NVTE_ERROR("MPI error: ", err, ": ", err_str); \
+    }                                                \
   } while (false)
 
 #endif  // NVTE_WITH_CUBLASMP
