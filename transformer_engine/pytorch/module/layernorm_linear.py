@@ -55,9 +55,9 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
     general_gemm,
@@ -160,11 +160,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Configure quantizer for normalization output
         with_quantized_norm = fp8 and not return_layernorm_output
-        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
-        # so we need to set with_quantized_norm to False
-        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
-
         if with_quantized_norm:
             if with_input_all_gather:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
