@@ -60,7 +60,6 @@ from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -216,7 +215,6 @@ class _LayerNormMLP(torch.autograd.Function):
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
-        with_input_all_gather_nccl = sequence_parallel and not ub_overlap_ag
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
 
         # Configure quantizer for norm output
@@ -261,7 +259,9 @@ class _LayerNormMLP(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        ln_out_return = ln_out if return_layernorm_output else None
+        ln_out_return = None
+        if return_layernorm_output or return_layernorm_output_gathered:
+            ln_out_return = ln_out
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -525,7 +525,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.bias_gelu_fusion = bias_gelu_fusion
             ctx.return_layernorm_output = return_layernorm_output
             ctx.return_layernorm_output_gathered = (
-                return_layernorm_output_gathered and ln_out_gathered
+                return_layernorm_output_gathered and sequence_parallel
             )
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin

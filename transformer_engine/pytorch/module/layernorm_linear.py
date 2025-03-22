@@ -55,7 +55,6 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
@@ -195,7 +194,9 @@ class _LayerNormLinear(torch.autograd.Function):
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
-        ln_out_return = ln_out if return_layernorm_output else None
+        ln_out_return = None
+        if return_layernorm_output or return_layernorm_output_gathered:
+            ln_out_return = ln_out
         nvtx_range_pop(f"{nvtx_label}.norm")
 
         # Prepare GEMM input
