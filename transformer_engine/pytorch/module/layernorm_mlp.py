@@ -139,10 +139,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
         fc1_bias: torch.Tensor,
-        use_fc1_bias: bool,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
-        use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -367,7 +365,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # FC1 GEMM
 
-        # There are 2 fussions possible:
+        # There are 2 fusions possible:
         # - gemm_gelu_fusion - default for full precision, optional for fp8 - need to turn on gemm_gelu_fusion,
         # - bias_gelu_fusion - only for full precision.
         # If both gemm_gelu_fusion and bias_gelu_fusion are enabled, only bias_gelu_fusion will be performer
@@ -452,8 +450,7 @@ class _LayerNormMLP(torch.autograd.Function):
         )
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
-
-        if is_grad_enabled:
+        else:
             if cpu_offloading:
                 if fp8 and fc1_weight_final is not None:
                     set_offloading_param(fc1_weight_final, "weight_offloading", True)
@@ -536,9 +533,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_fc1_bias = use_fc1_bias
-            ctx.use_fc2_bias = use_fc2_bias
-            ctx.use_bias = ctx.use_fc1_bias
+            ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
@@ -773,14 +768,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     quantization_params=None,  # wgrad in high precision
                     layout="NT",
                     grad=True,
-                    bias=fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
+                    bias=fc2_bias if fc2_bias_grad is None else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
                 if fc2_bias_grad is None:
                     fc2_bias_grad = fc2_bias_grad_
-                del fc2_bias_grad_
             clear_tensor_data(act_out)
 
             # bias computation
@@ -1045,11 +1039,9 @@ class _LayerNormMLP(torch.autograd.Function):
             dgamma,
             dbeta,
             fc1_wgrad,
-            fc1_bias_grad if ctx.use_fc1_bias else None,
-            None,  # use_fc1_bias
+            fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
-            fc2_bias_grad if ctx.use_fc2_bias else None,
-            None,  # use_fc2_bias
+            fc2_bias_grad,
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1469,10 +1461,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.layer_norm_bias,
                 fc1_weight,
                 fc1_bias,
-                self.use_bias,
                 fc2_weight,
-                fc2_bias,
-                self.apply_bias and not self.gemm_bias_unfused_add,
+                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,

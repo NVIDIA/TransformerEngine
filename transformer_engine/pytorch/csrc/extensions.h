@@ -51,8 +51,9 @@ std::vector<py::object> fused_attn_fwd(
     const at::Tensor cu_seqlens_q, const at::Tensor cu_seqlens_kv, const py::handle Q,
     const py::handle K, const py::handle V, const at::ScalarType fake_dtype,
     const c10::optional<at::Tensor> cu_seqlens_q_padded,
-    const c10::optional<at::Tensor> cu_seqlens_kv_padded, py::handle s_quantizer,
-    py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
+    const c10::optional<at::Tensor> cu_seqlens_kv_padded,
+    const c10::optional<at::Tensor> page_table_k, const c10::optional<at::Tensor> page_table_v,
+    py::handle s_quantizer, py::handle o_quantizer, const c10::optional<at::Tensor> Bias,
     const c10::optional<at::Generator> rng_gen, size_t rng_elts_per_thread);
 
 std::vector<py::object> fused_attn_bwd(
@@ -68,6 +69,13 @@ std::vector<py::object> fused_attn_bwd(
 
 at::Tensor fa_prepare_fwd(at::Tensor qkvi);
 at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
+
+at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
+at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
+void copy_to_kv_cache(torch::Tensor new_k, torch::Tensor new_v, torch::Tensor k_cache,
+                      torch::Tensor v_cache, torch::Tensor page_table, torch::Tensor cu_new_lens,
+                      torch::Tensor cu_cached_lens, NVTE_QKV_Format kv_format, int b,
+                      int max_ctx_len, int max_seq_len, int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
  * GEMM

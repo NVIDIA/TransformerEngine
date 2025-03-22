@@ -79,7 +79,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
         bias: torch.Tensor,
-        use_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -383,6 +382,17 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.fsdp_scatter")
 
+            if cpu_offloading:
+                ctx.grad_added_to_main_grad = hasattr(weight, "grad_added_to_main_grad")
+
+                if ctx.grad_added_to_main_grad:
+                    # If you are passing torch.nn.Parameter through the Torch hooks, you will
+                    # get back torch.Tensor. Torch rips off the Parameter wrapper.
+                    # You need to preserve the weight object to have all the attributes user
+                    # sets for the weights. Because of this, it is not recommended to offload
+                    # weights if weights are externally touched outside this module
+                    ctx.weight_object = weight
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 weightmat,
@@ -411,7 +421,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_bias = use_bias
+            ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
@@ -526,8 +536,11 @@ class _LayerNormLinear(torch.autograd.Function):
 
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
-            if ctx.cpu_offloading and ctx.fuse_wgrad_accumulation:
-                weight.main_grad = main_grad
+            if ctx.cpu_offloading:
+                if ctx.grad_added_to_main_grad:
+                    origin_weight = ctx.weight_object
+                if ctx.requires_wgrad and ctx.fuse_wgrad_accumulation:
+                    origin_weight.main_grad = main_grad
 
             ctx.ub_obj_gradout = None
             ub_obj_dgrad = None
@@ -742,10 +755,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
                     clear_tensor_data(ln_out_total)
 
-            # Don't return grad bias if not needed
-            if not ctx.use_bias:
-                grad_bias = None
-
             # Synchronize tensor parallel communication
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
@@ -827,7 +836,6 @@ class _LayerNormLinear(torch.autograd.Function):
             dbeta,
             wgrad,
             grad_bias,
-            None,  # use_bias
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1330,8 +1338,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 weight_tensor,
-                bias_tensor,
-                self.apply_bias and not self.gemm_bias_unfused_add,
+                bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
