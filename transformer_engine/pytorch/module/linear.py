@@ -142,9 +142,8 @@ class _Linear(torch.autograd.Function):
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
                 if not isinstance(inputmat, QuantizedTensor):
-                    columnwise_usage = (
-                        backward_needs_input
-                        and isinstance(input_quantizer, MXFP8Quantizer)
+                    columnwise_usage = backward_needs_input and isinstance(
+                        input_quantizer, MXFP8Quantizer
                     )
                     input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
                     inputmat = input_quantizer(inputmat)

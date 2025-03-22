@@ -171,9 +171,7 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Construct norm output
         with_quantized_norm = (
-            fp8
-            and not return_layernorm_output
-            and not return_layernorm_output_gathered
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
         )
         ln_out = None
         if with_quantized_norm:
