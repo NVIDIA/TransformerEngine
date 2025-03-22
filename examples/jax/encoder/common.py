@@ -4,6 +4,7 @@
 """Shared functions for the encoder tests"""
 from functools import lru_cache
 
+import transformer_engine
 from transformer_engine_jax import get_device_compute_capability
 
 
