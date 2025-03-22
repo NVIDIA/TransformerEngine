@@ -1550,7 +1550,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ctx.O_quantizer.scale = O_quantizer.scale.clone()
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
 
         return out_ret
@@ -3262,7 +3261,6 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             ctx.O_quantizer.scale = O_quantizer.scale.clone()
             ctx.S_quantizer = S_quantizer.copy()
             ctx.S_quantizer.scale = S_quantizer.scale.clone()
-
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndQKVOA2A.forward")
         return out_ret
 
