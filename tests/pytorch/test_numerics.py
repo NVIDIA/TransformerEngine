@@ -24,6 +24,7 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     attention_mask_func,
     is_bf16_compatible,
+    get_cudnn_version,
 )
 from transformer_engine.pytorch import (
     DotProductAttention,
@@ -2143,7 +2144,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     inference_params = InferenceParams(
         max_batch_size=B_max,
-        max_seqlen_kv=S_max,
+        max_sequence_length=S_max,
         num_heads_kv=H,
         head_dim_k=head_size,
         dtype=dtype,
