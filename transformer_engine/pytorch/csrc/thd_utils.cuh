@@ -183,59 +183,199 @@ __global__ void thd_lse_kernel(lse_dtype *lse, float *half_lse, int *cu_seqlens,
 }
 
 /***************************************************************************************************
- * Support THD format for Context Parallel: Out correction in forward
+ * Support BSHD, SBHD, and THD formats for Context Parallel: Out correction in forward
  **************************************************************************************************/
 
-template <typename dtype, int only_second_half, int tile_size, bool lse_packed>
-__global__ void thd_out_correction_kernel(dtype *out, dtype *out_per_step, float *lse,
-                                          float *lse_per_step, int *cu_seqlens, int batch,
-                                          int num_heads, int dim_per_head, int lse_seqlen,
-                                          int lse_per_step_seqlen) {
-  extern __shared__ int cu_seqlens_s[];
-  for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
-    cu_seqlens_s[i] = cu_seqlens[i] / (only_second_half + 1);
+// format of out and lse, ignoring d as it’s always the last dimension.
+enum QKVFormat { SBH, BSH, BHS, HBS, TH, HT };
+
+template <int n>
+struct TensorList {
+  void *addresses_out[n];
+  void *addresses_lse[n];
+  int start_tensor_this_launch;
+};
+
+// describe tensor format for simplified computation.
+template <QKVFormat format>
+struct TensorFormat {
+  // store the bsht order for simplified computation, where bsht corresponds to 0, 1, 2, 3, and store_format[3] marks whether bs is fused into t
+  // For example, for the SBH format, the values of store_format are {1, 0, 2, 0}; for the TH format, the values of store_format are {3, 2, any-value, 1}
+  int8_t store_format[4];
+  int *cu_seqlens_s;
+  // size of tensor, b s h t
+  int size[4];
+  __forceinline__ __device__ TensorFormat(int size_kernel[4], int *cu_seqlens = nullptr) {
+    for (int i = 0; i < 4; i++) {
+      size[i] = size_kernel[i];
+    }
+    // Initialize store_format based on the format.
+    if constexpr (format == QKVFormat::TH) {
+      cu_seqlens_s = cu_seqlens;
+      store_format[0] = 3;
+      store_format[1] = 2;
+      store_format[3] = 1;
+    } else if constexpr (format == QKVFormat::HT) {
+      cu_seqlens_s = cu_seqlens;
+      store_format[0] = 2;
+      store_format[1] = 3;
+      store_format[3] = 1;
+    } else if constexpr (format == QKVFormat::SBH) {
+      store_format[0] = 1;
+      store_format[1] = 0;
+      store_format[2] = 2;
+      store_format[3] = 0;
+    } else if constexpr (format == QKVFormat::HBS) {
+      store_format[0] = 2;
+      store_format[1] = 0;
+      store_format[2] = 1;
+      store_format[3] = 0;
+    } else if constexpr (format == QKVFormat::BSH) {
+      store_format[0] = 0;
+      store_format[1] = 1;
+      store_format[2] = 2;
+      store_format[3] = 0;
+    } else if constexpr (format == QKVFormat::BHS) {
+      store_format[0] = 0;
+      store_format[1] = 2;
+      store_format[2] = 1;
+      store_format[3] = 0;
+    }
   }
-  __syncthreads();
+
+  // calculate address according to index
+  __forceinline__ __device__ int compute_address(int id[4]) {
+    int address;
+    if (store_format[3] == 1) {
+      address = id[store_format[0]] * size[store_format[1]] + id[store_format[1]];
+    } else {
+      address = id[store_format[0]] * size[store_format[1]] + id[store_format[1]];
+      address = address * size[store_format[2]] + id[store_format[2]];
+    }
+    return address;
+  }
+
+  // compute half right index
+  __forceinline__ __device__ void compute_half_right(int id[4]) {
+    if constexpr (format == QKVFormat::TH) {
+      id[1] -= (cu_seqlens_s[id[0] + 1] - cu_seqlens_s[id[0]]) / 2;
+      id[3] -= cu_seqlens_s[id[0] + 1] / 2;
+    } else if constexpr (format == QKVFormat::BSH || format == QKVFormat::SBH) {
+      id[1] -= size[1] / 2;
+    }
+  }
+};
+
+template <typename dtype, int tile_size, bool causal, QKVFormat out_format, QKVFormat lse_format,
+          int max_tensors>
+__global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> tensors, float *lse,
+                                            int *cu_seqlens, int batch, int num_heads,
+                                            int dim_per_head, int lse_seqlen, int num_total_tokens,
+                                            int cp_size, int rank, int start) {
+  extern __shared__ int cu_seqlens_s[];
+  int full_num;
+  int valid_total_tokens;  // Number of total tokens actually involved in the computation
+
+  if constexpr (out_format == QKVFormat::TH) {
+    for (int i = threadIdx.x; i <= batch; i += blockDim.x) {
+      cu_seqlens_s[i] = cu_seqlens[i];
+    }
+    __syncthreads();
+    valid_total_tokens = cu_seqlens_s[batch];
+  } else if constexpr (out_format == QKVFormat::SBH || out_format == QKVFormat::BSH) {
+    valid_total_tokens = lse_seqlen * batch;
+  }
+
+  if constexpr (causal) {
+    full_num = min(start + tensors.start_tensor_this_launch, max(rank + 1, start));
+  } else {
+    full_num = start + tensors.start_tensor_this_launch;
+  }
+
+  int size[4] = {batch, lse_seqlen, num_heads, lse_seqlen};
+  // Since the formats of out and lse are often different, create two TensorFormat objects to calculate the address
+  TensorFormat<out_format> out_full(size, cu_seqlens_s);
+  TensorFormat<lse_format> lse_full(size);
 
   int tile_id = (blockIdx.x * blockDim.x + threadIdx.x) / tile_size;
   int lane_id = threadIdx.x % tile_size;
   int num_tiles = (blockDim.x * gridDim.x) / tile_size;
-  int num_total_tokens = cu_seqlens_s[batch];
   int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
 
+  size_t idx_out_full, idx_lse_full, idx_out_half, idx_lse_half;
+
   for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
-    int seq_id = binary_search(token_id, cu_seqlens_s, batch + 1);
-    for (int head_id = blockIdx.y; head_id < num_heads; head_id += gridDim.y) {
-      size_t idx, idx_per_step;
+    int head_id = blockIdx.y;
+    int id[4];
+    if constexpr (out_format == QKVFormat::TH) {
+      id[0] = binary_search(token_id, cu_seqlens_s, batch + 1);
+      id[1] = token_id - cu_seqlens_s[id[0]];
+    } else if constexpr (out_format == QKVFormat::BSH) {
+      id[0] = token_id / lse_seqlen;
+      id[1] = token_id - id[0] * lse_seqlen;
+    } else if constexpr (out_format == QKVFormat::SBH) {
+      id[1] = token_id / batch;
+      id[0] = token_id - id[1] * batch;
+    }
+    id[2] = head_id;
+    id[3] = token_id;
 
-      if constexpr (lse_packed) {
-        idx = head_id * lse_seqlen + token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-        idx_per_step = head_id * lse_per_step_seqlen + token_id;
-      } else {
-        size_t row = static_cast<size_t>(seq_id) * num_heads + head_id;
-        int col = token_id - cu_seqlens_s[seq_id];
-        int seq_len = cu_seqlens_s[seq_id + 1] - cu_seqlens_s[seq_id];
-        idx = row * lse_seqlen + col + seq_len * only_second_half;
-        idx_per_step = row * lse_per_step_seqlen + col;
-      }
-      float lse_corrected_exp = exp(lse_per_step[idx_per_step] - lse[idx]);
+    // calculate the address using the index
+    idx_out_full = out_full.compute_address(id);
+    dtype *cur_out = out + idx_out_full * dim_per_head;
 
-      idx = token_id + cu_seqlens_s[seq_id + 1] * only_second_half;
-      idx = (idx * num_heads + head_id) * dim_per_head;
-      idx_per_step = (static_cast<size_t>(token_id) * num_heads + head_id) * dim_per_head;
-      dtype *cur_out = out + idx;
-      dtype *cur_out_per_step = out_per_step + idx_per_step;
-
+    if (token_id >= valid_total_tokens) {
+      // padding zeros
       for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
+        float4 data = {0.0f, 0.0f, 0.0f, 0.0f};
+        reinterpret_cast<float4 *>(cur_out)[j] = data;
+      }
+      continue;
+    }
+
+    idx_lse_full = lse_full.compute_address(id);
+    float lse_temp = lse[idx_lse_full];
+    int end = full_num;
+
+    // The number of times the current thread participates in the computation is determined by start and end
+    // If a causal mask is applied, the current thread will not participate in the full computation if id[0] < 0
+    if (start + tensors.start_tensor_this_launch > full_num) {
+      out_full.compute_half_right(id);
+      if (id[1] >= 0) {
+        int size_half[4] = {batch, lse_seqlen / 2, num_heads, lse_seqlen / 2};
+        TensorFormat<out_format> out_half(size_half);
+        TensorFormat<lse_format> lse_half(size_half);
+        idx_out_half = out_half.compute_address(id);
+        idx_lse_half = lse_half.compute_address(id);
+        end = start + tensors.start_tensor_this_launch;
+      }
+    }
+
+    for (int j = lane_id; j < num_loops_per_head; j += tile_size) {
+      float4 data = {0.0f, 0.0f, 0.0f, 0.0f};
+      dtype *p = reinterpret_cast<dtype *>(&data);
+
+      for (int i = start; i < end; i++) {
+        size_t idx_out;
+        size_t idx_lse;
+        if (causal && id[1] >= 0 && i > rank) {
+          idx_out = idx_out_half;
+          idx_lse = idx_lse_half;
+        } else {
+          idx_out = idx_out_full;
+          idx_lse = idx_lse_full;
+        }
+        dtype *cur_out_per_step =
+            reinterpret_cast<dtype *>(tensors.addresses_out[i]) + idx_out * dim_per_head;
         float4 data_per_step = reinterpret_cast<float4 *>(cur_out_per_step)[j];
-        float4 data = reinterpret_cast<float4 *>(cur_out)[j];
+        float lse_corrected_exp =
+            exp(reinterpret_cast<float *>(tensors.addresses_lse[i])[idx_lse] - lse_temp);
         dtype *p_per_step = reinterpret_cast<dtype *>(&data_per_step);
-        dtype *p = reinterpret_cast<dtype *>(&data);
         for (int k = 0; k < sizeof(float4) / sizeof(dtype); k++) {
           p[k] += (p_per_step[k] == 0 ? 0 : p_per_step[k] * lse_corrected_exp);
         }
-        reinterpret_cast<float4 *>(cur_out)[j] = data;
       }
+      reinterpret_cast<float4 *>(cur_out)[j] = data;
     }
   }
 }
