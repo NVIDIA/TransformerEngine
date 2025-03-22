@@ -1511,16 +1511,6 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
 
-        ctx.qkv_dtype = qkv_dtype
-        ctx.QKV_quantizer = QKV_quantizer
-        ctx.O_quantizer = O_quantizer
-        ctx.O_CP_quantizer = O_CP_quantizer
-        ctx.S_quantizer = S_quantizer
-        ctx.dQKV_quantizer = dQKV_quantizer
-        ctx.dQKV_CP_quantizer = dQKV_CP_quantizer
-        ctx.dO_quantizer = dO_quantizer
-        ctx.dP_quantizer = dP_quantizer
-
         ctx.cp_group_a2a = cp_group_a2a
         ctx.cp_size_a2a = cp_size_a2a
         ctx.rank_a2a = rank_a2a
@@ -1544,6 +1534,23 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         ctx.is_input_fp8 = is_input_fp8
         ctx.is_output_fp8 = is_output_fp8
         ctx.use_flash_attn_3 = use_flash_attn_3
+
+        ctx.qkv_dtype = qkv_dtype
+        ctx.dQKV_quantizer = dQKV_quantizer
+        ctx.dQKV_CP_quantizer = dQKV_CP_quantizer
+        ctx.dO_quantizer = dO_quantizer
+        ctx.dP_quantizer = dP_quantizer
+        ctx.QKV_quantizer = QKV_quantizer
+        ctx.O_quantizer = O_quantizer
+        ctx.S_quantizer = S_quantizer
+        if ctx.fp8:
+            ctx.QKV_quantizer = QKV_quantizer.copy()
+            ctx.QKV_quantizer.scale = QKV_quantizer.scale.clone()
+            ctx.O_quantizer = O_quantizer.copy()
+            ctx.O_quantizer.scale = O_quantizer.scale.clone()
+            ctx.S_quantizer = S_quantizer.copy()
+            ctx.S_quantizer.scale = S_quantizer.scale.clone()
+
         nvtx_range_pop("transformer_engine.AttnFuncWithCPAndKVP2P.forward")
 
         return out_ret
