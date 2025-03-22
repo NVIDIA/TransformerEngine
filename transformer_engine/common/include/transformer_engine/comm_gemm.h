@@ -16,7 +16,7 @@ extern "C" {
 typedef struct CommGemmCtx CommGemmCtx;
 
 CommGemmCtx* nvte_comm_gemm_ctx_create();
-void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx);
+void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) noexcept;
 
 void nvte_comm_gemm(CommGemmCtx* ctx);
 
