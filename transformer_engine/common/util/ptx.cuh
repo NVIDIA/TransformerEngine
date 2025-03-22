@@ -166,43 +166,36 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 
 // SIMD like "Fused" cast + multiplication (x2)
 template <typename T>
-__device__ __forceinline__ void 
-mul_cvt_2x(uint16_t& c, const float2& a, const float2& b);
+__device__ __forceinline__ void mul_cvt_2x(uint16_t &c, const float2 &a, const float2 &b);
 
 template <>
-__device__ __forceinline__ void 
-mul_cvt_2x<fp8e4m3>(uint16_t& c, const float2& a, const float2& b) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e4m3>(uint16_t &c, const float2 &a, const float2 &b) {
   asm volatile(
-    "{\n"
-        ".reg.b64 val_pair; \n\t"
-        ".reg.b32 val1; \n\t"
-        ".reg.b32 val2; \n\t"
-        "mul.f32x2 val_pair, %1, %2; \n\t"
-        "mov.b64 {val2,val1}, val_pair; \n\t"
-        "cvt.rn.satfinite.e4m3x2.f32 %0, val1, val2; \n\t"
-    "}"
-    : "=h"(c)
-    :  "l"(reinterpret_cast<const uint64_t&>(a)),
-      "l"(reinterpret_cast<const uint64_t&>(b))
-  );
+      "{\n"
+      ".reg.b64 val_pair; \n\t"
+      ".reg.b32 val1; \n\t"
+      ".reg.b32 val2; \n\t"
+      "mul.f32x2 val_pair, %1, %2; \n\t"
+      "mov.b64 {val2,val1}, val_pair; \n\t"
+      "cvt.rn.satfinite.e4m3x2.f32 %0, val1, val2; \n\t"
+      "}"
+      : "=h"(c)
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
 }
 
 template <>
-__device__ __forceinline__ void 
-mul_cvt_2x<fp8e5m2>(uint16_t& c, const float2& a, const float2& b) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e5m2>(uint16_t &c, const float2 &a, const float2 &b) {
   asm volatile(
-    "{\n"
-        ".reg.b64 val_pair; \n\t"
-        ".reg.b32 val1; \n\t"
-        ".reg.b32 val2; \n\t"
-        "mul.f32x2 val_pair, %1, %2; \n\t"
-        "mov.b64 {val2,val1}, val_pair; \n\t"
-        "cvt.rn.satfinite.e5m2x2.f32 %0, val1, val2; \n\t"
-    "}"
-    : "=h"(c)
-    :  "l"(reinterpret_cast<const uint64_t&>(a)),
-      "l"(reinterpret_cast<const uint64_t&>(b))
-  );
+      "{\n"
+      ".reg.b64 val_pair; \n\t"
+      ".reg.b32 val1; \n\t"
+      ".reg.b32 val2; \n\t"
+      "mul.f32x2 val_pair, %1, %2; \n\t"
+      "mov.b64 {val2,val1}, val_pair; \n\t"
+      "cvt.rn.satfinite.e5m2x2.f32 %0, val1, val2; \n\t"
+      "}"
+      : "=h"(c)
+      : "l"(reinterpret_cast<const uint64_t &>(a)), "l"(reinterpret_cast<const uint64_t &>(b)));
 }
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -339,5 +332,3 @@ __forceinline__ __device__ void copy_2d_to_sharedx3(
 }  // namespace transformer_engine
 
 #endif  // TRANSFORMER_ENGINE_PTX_CUH_
-
-
