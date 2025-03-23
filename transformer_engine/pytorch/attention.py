@@ -1369,12 +1369,8 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
         )
 
         kv = p2p_comm_buffers[-1]
-        if qkv_format == "bshd":
-            out = out.view(out.shape[0], -1, *out.shape[-2:])
-            ctx.batch_size = out.shape[0]
-        elif qkv_format == "sbhd":
-            out = out.view(-1, *out.shape[-3:])
-            ctx.batch_size = out.shape[1]
+        if isinstance(batch_dim, int):
+            ctx.batch_size = out.shape[batch_dim]
 
         if cp_size_a2a > 1:
             chunk_ids_for_a2a = get_seq_chunk_ids_for_reordering_after_attn(cp_size_a2a, out.device)

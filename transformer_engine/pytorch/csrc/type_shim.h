@@ -20,6 +20,41 @@
 //   //operator at::ScalarType(){ return payload.; };
 // };
 
+#define DISPATCH_BOOL(TYPE, LEVEL, ...)    \
+  switch (TYPE) {                          \
+    case true: {                           \
+      constexpr bool bool_##LEVEL = true;  \
+      __VA_ARGS__;                         \
+      break;                               \
+    }                                      \
+    case false: {                          \
+      constexpr bool bool_##LEVEL = false; \
+      __VA_ARGS__;                         \
+      break;                               \
+    }                                      \
+  }
+
+#define DISPATCH_SBHD_BSHD_AND_THD(TYPE, LEVEL, NAME, ...)                       \
+  switch (TYPE) {                                                                \
+    case NVTE_QKV_Format::NVTE_SBHD: {                                           \
+      constexpr NVTE_QKV_Format qkv_format_##LEVEL = NVTE_QKV_Format::NVTE_SBHD; \
+      __VA_ARGS__;                                                               \
+      break;                                                                     \
+    }                                                                            \
+    case NVTE_QKV_Format::NVTE_BSHD: {                                           \
+      constexpr NVTE_QKV_Format qkv_format_##LEVEL = NVTE_QKV_Format::NVTE_BSHD; \
+      __VA_ARGS__;                                                               \
+      break;                                                                     \
+    }                                                                            \
+    case NVTE_QKV_Format::NVTE_THD: {                                            \
+      constexpr NVTE_QKV_Format qkv_format_##LEVEL = NVTE_QKV_Format::NVTE_THD;  \
+      __VA_ARGS__;                                                               \
+      break;                                                                     \
+    }                                                                            \
+    default:                                                                     \
+      AT_ERROR(#NAME, " not implemented for NVTE_QKV_Format '", TYPE, "'");      \
+  }
+
 #define DISPATCH_FLOAT_AND_HALF(TYPE, LEVEL, NAME, ...)               \
   switch (TYPE) {                                                     \
     case at::ScalarType::Float: {                                     \

@@ -229,8 +229,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
-  m.def("fused_out_correction", &fused_out_correction,
-        "fused out correction after qkv calculation without lse_",
+  m.def("fused_out_correction", &fused_out_correction, "fused out correction after qkv calculation",
         py::call_guard<py::gil_scoped_release>());
 
   // multi-tensor functions
