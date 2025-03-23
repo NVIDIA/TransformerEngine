@@ -210,14 +210,14 @@ struct QKVTensorInfoBase {
 template <NVTE_QKV_Format out_format>
 struct QKVTensorInfo : QKVTensorInfoBase {
   __forceinline__ __device__ QKVTensorInfo(int BatchSize, int SeqLen, int NumHeads, int DimPerHead,
-                                           int *CuSeqlens = nullptr)
+                                           int *CuSeqlens)
       : QKVTensorInfoBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 };
 
 template <>
 struct QKVTensorInfo<NVTE_QKV_Format::NVTE_SBHD> : QKVTensorInfoBase {
   __forceinline__ __device__ QKVTensorInfo(int BatchSize, int SeqLen, int NumHeads, int DimPerHead,
-                                           int *CuSeqlens = nullptr)
+                                           int *CuSeqlens)
       : QKVTensorInfoBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 
   // Computes sequence id and local token id from token id.
@@ -256,7 +256,7 @@ struct QKVTensorInfo<NVTE_QKV_Format::NVTE_SBHD> : QKVTensorInfoBase {
 template <>
 struct QKVTensorInfo<NVTE_QKV_Format::NVTE_BSHD> : QKVTensorInfoBase {
   __forceinline__ __device__ QKVTensorInfo(int BatchSize, int SeqLen, int NumHeads, int DimPerHead,
-                                           int *CuSeqlens = nullptr)
+                                           int *CuSeqlens)
       : QKVTensorInfoBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 
   __forceinline__ __device__ void compute_indices_from_token_id(int token_id, int *seq_id,
@@ -290,7 +290,7 @@ struct QKVTensorInfo<NVTE_QKV_Format::NVTE_BSHD> : QKVTensorInfoBase {
 template <>
 struct QKVTensorInfo<NVTE_QKV_Format::NVTE_THD> : QKVTensorInfoBase {
   __forceinline__ __device__ QKVTensorInfo(int BatchSize, int SeqLen, int NumHeads, int DimPerHead,
-                                           int *CuSeqlens = nullptr)
+                                           int *CuSeqlens)
       : QKVTensorInfoBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 
   __forceinline__ __device__ void compute_indices_from_token_id(int token_id, int *seq_id,
@@ -426,9 +426,8 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
   int num_tiles = (blockDim.x * gridDim.x) / tile_size;
   int num_loops_per_head = dim_per_head * sizeof(dtype) / sizeof(float4);
 
-  size_t idx_out_full, idx_lse_full, idx_out_half, idx_lse_half;
-
   for (int token_id = tile_id; token_id < num_total_tokens; token_id += num_tiles) {
+    size_t idx_out_full, idx_lse_full, idx_out_half, idx_lse_half;
     int head_id = blockIdx.y;
     int seq_id, local_token_id;
 
