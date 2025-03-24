@@ -103,32 +103,17 @@ model_configs = {
 }
 
 fp8_recipes = [
-    None,  # Handles non-FP8 case
-    recipe.MXFP8BlockScaling(),
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3),
-    recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
+    None,  # Test non-FP8
+    recipe.MXFP8BlockScaling(),  # Test default
+    recipe.Float8CurrentScaling(),  # Test default
+    recipe.DelayedScaling(),  # Test default
+    recipe.DelayedScaling(  # Test most_recent algo
         amax_history_len=16,
         amax_compute_algo="most_recent",
     ),
-    recipe.DelayedScaling(
-        margin=0,
+    recipe.DelayedScaling(  # Test custom amax and scale compute algo
         fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
-        amax_compute_algo="max",
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         amax_compute_algo=custom_amax_compute,
-    ),
-    recipe.DelayedScaling(
-        margin=0,
-        fp8_format=recipe.Format.E4M3,
-        amax_history_len=16,
         scaling_factor_compute_algo=custom_amax_to_scale,
     ),
 ]
