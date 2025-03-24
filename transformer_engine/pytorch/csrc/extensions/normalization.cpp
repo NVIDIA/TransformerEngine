@@ -6,12 +6,13 @@
 
 #include "common/util/system.h"
 #include "extensions.h"
+#include "pybind.h"
 
 namespace transformer_engine::pytorch {
 std::pair<TensorWrapper, py::object> createOutputTensor(const NVTEShape &shape, DType dtype,
                                                         py::handle quantizer) {
   std::vector<size_t> shape_vec;
-  for (int i = 0; i < shape.ndim; i++) {
+  for (size_t i = 0; i < shape.ndim; i++) {
     size_t t = shape.data[i];
     shape_vec.push_back(t);
   }
@@ -74,6 +75,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                                       float eps, py::object out, py::handle quantizer,
                                       DType out_dtype, const int sm_margin,
                                       const bool zero_centered_gamma) {
+  using namespace transformer_engine::pytorch::detail;
   using namespace transformer_engine::pytorch;
   using namespace transformer_engine;
 
@@ -107,14 +109,17 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   }
 
   // Determine whether to avoid fused kernel
-  bool force_unfused_kernel = false;
-  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
-    if (!transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
-      // TE only supports MXFP8 norm with cuDNN backend
-      force_unfused_kernel = true;
-    } else if (N % 128 != 0 || H % 128 != 0) {
-      // cuDNN norm requires full tile for MXFP8
-      force_unfused_kernel = true;
+  bool force_unfused_kernel = true;
+  if (quantizer.is_none()) {
+    // No need for separate quantization step if output is unquantized
+    force_unfused_kernel = false;
+  } else if (IsFloat8Quantizers(quantizer.ptr())) {
+    // Always used fused kernel for FP8 delayed scaling
+    force_unfused_kernel = false;
+  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
+      // cuDNN MXFP8 kernel requires full tile
+      force_unfused_kernel = N % 128 != 0 || H % 128 != 0;
     }
   }
   TensorWrapper unquantized_out_cu;
@@ -145,6 +150,29 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
 
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
+    if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+      // my_quantizer here has to be a Float8CurrentScalingQuantizer
+      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+      nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
+      // check if we need to do amax reudction (depending on model parallel configs)
+      if (my_quantizer_cs->with_amax_reduction) {
+        c10::intrusive_ptr<dist_group_type> process_group_ptr =
+            my_quantizer_cs->amax_reduction_group;
+        // construct torch tesnor from NVTEBasicTensor without reallocating memory
+        at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
+        std::vector<at::Tensor> tensors = {amax_tensor_torch};
+        // allreduce amax tensor
+        c10d::AllreduceOptions allreduce_opts;
+        allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
+        process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
+      }
+      QuantizationConfigWrapper quant_config;
+      quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
+      quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
+      nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
+      // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+      out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
+    }
     nvte_quantize_noop(unquantized_out_cu.data(), out_cu.data(), nullptr,
                        at::cuda::getCurrentCUDAStream());
   }
@@ -196,6 +224,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     py::object out, py::handle quantizer,
                                     transformer_engine::DType out_dtype, const int sm_margin,
                                     const bool zero_centered_gamma) {
+  using namespace transformer_engine::pytorch::detail;
   using namespace transformer_engine::pytorch;
   using namespace transformer_engine;
 
@@ -223,14 +252,17 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   }
 
   // Determine whether to avoid fused kernel
-  bool force_unfused_kernel = false;
-  if (my_quantizer->get_scaling_mode() == NVTE_MXFP8_1D_SCALING) {
-    if (!transformer_engine::getenv<bool>("NVTE_CUDNN_MXFP8_NORM", false)) {
-      // TE only supports MXFP8 norm with cuDNN backend
-      force_unfused_kernel = true;
-    } else if (N % 128 != 0 || H % 128 != 0) {
-      // cuDNN norm requires full tile for MXFP8
-      force_unfused_kernel = true;
+  bool force_unfused_kernel = true;
+  if (quantizer.is_none()) {
+    // No need for separate quantization step if output is unquantized
+    force_unfused_kernel = false;
+  } else if (IsFloat8Quantizers(quantizer.ptr())) {
+    // Always used fused kernel for FP8 delayed scaling
+    force_unfused_kernel = false;
+  } else if (IsMXFP8Quantizers(quantizer.ptr())) {
+    if (transformer_engine::getenv<bool>("NVTE_NORM_FWD_USE_CUDNN")) {
+      // cuDNN MXFP8 kernel requires full tile
+      force_unfused_kernel = N % 128 != 0 || H % 128 != 0;
     }
   }
   TensorWrapper unquantized_out_cu;
@@ -261,6 +293,29 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
 
   // Quantize output if using unfused kernel
   if (force_unfused_kernel) {
+    if (IsFloat8CurrentScalingQuantizers(quantizer.ptr())) {
+      // my_quantizer here has to be a Float8CurrentScalingQuantizer
+      auto my_quantizer_cs = static_cast<Float8CurrentScalingQuantizer *>(my_quantizer.get());
+      nvte_compute_amax(unquantized_out_cu.data(), out_cu.data(), at::cuda::getCurrentCUDAStream());
+      // check if we need to do amax reudction (depending on model parallel configs)
+      if (my_quantizer_cs->with_amax_reduction) {
+        c10::intrusive_ptr<dist_group_type> process_group_ptr =
+            my_quantizer_cs->amax_reduction_group;
+        // construct torch tesnor from NVTEBasicTensor without reallocating memory
+        at::Tensor &amax_tensor_torch = my_quantizer_cs->amax;
+        std::vector<at::Tensor> tensors = {amax_tensor_torch};
+        // allreduce amax tensor
+        c10d::AllreduceOptions allreduce_opts;
+        allreduce_opts.reduceOp = c10d::ReduceOp::MAX;
+        process_group_ptr->allreduce(tensors, allreduce_opts)->wait();
+      }
+      QuantizationConfigWrapper quant_config;
+      quant_config.set_force_pow_2_scales(my_quantizer_cs->force_pow_2_scales);
+      quant_config.set_amax_epsilon(my_quantizer_cs->amax_epsilon);
+      nvte_compute_scale_from_amax(out_cu.data(), quant_config, at::cuda::getCurrentCUDAStream());
+      // set amax ptr to null in te_output TensorWrapper to avoid atomic amax updates in kernel
+      out_cu.set_amax(nullptr, DType::kFloat32, out_cu.defaultShape);
+    }
     nvte_quantize_noop(unquantized_out_cu.data(), out_cu.data(), nullptr,
                        at::cuda::getCurrentCUDAStream());
   }

@@ -178,6 +178,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dtype"), py::kw_only(), py::arg("out"), py::call_guard<py::gil_scoped_release>());
   m.def("get_fused_attn_backend", &get_fused_attn_backend, "Get Fused Attention backend",
         py::call_guard<py::gil_scoped_release>());
+  m.def("compute_amax", &compute_amax, "Compute amax", py::arg("input"), py::arg("amax"));
   m.def("fused_amax_and_scale_update_after_reduction", &fused_amax_and_scale_update_after_reduction,
         "Update amax history and FP8 scale/scale_inv after reduction",
         py::call_guard<py::gil_scoped_release>());
@@ -265,6 +266,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_sgd", &multi_tensor_sgd_cuda,
         "Fused SGD optimizer for list of contiguous tensors",
         py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_and_scale_inv", &multi_tensor_compute_scale_and_scale_inv_cuda,
+        "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
   // Data structures
   py::class_<transformer_engine::pytorch::FP8TensorMeta>(m, "FP8TensorMeta")

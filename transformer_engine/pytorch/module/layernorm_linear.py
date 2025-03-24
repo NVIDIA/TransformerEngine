@@ -55,9 +55,9 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
     general_gemm,
@@ -160,11 +160,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Configure quantizer for normalization output
         with_quantized_norm = fp8 and not return_layernorm_output
-        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
-        # so we need to set with_quantized_norm to False
-        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
-
         if with_quantized_norm:
             if with_input_all_gather:
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
@@ -261,28 +256,26 @@ class _LayerNormLinear(torch.autograd.Function):
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
 
         # Cast weight to expected dtype
-        weightmat = weight
-        quantized_weight = False
         if not fp8:
-            weightmat = cast_if_needed(weightmat, activation_dtype)
+            quantized_weight = False
+            weightmat = cast_if_needed(weight, activation_dtype)
         else:
-            if not isinstance(weight, QuantizedTensor):
-                quantized_weight = True
+            quantized_weight = not isinstance(weight, QuantizedTensor)
 
-                # Configure quantizer
-                if weight_quantizer is not None:
-                    weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            # Configure quantizer
+            if weight_quantizer is not None:
+                weight_quantizer.set_usage(rowwise=True, columnwise=True)
 
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                weightmat = module.get_weight_workspace(
-                    tensor=weight,
-                    quantizer=weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                )
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            weightmat = module.get_weight_workspace(
+                tensor=weight,
+                quantizer=weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+            )
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype
@@ -348,7 +341,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
-            # Input with column-wise usage is needed for dgrad GEMM.
+            # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
                 if isinstance(ln_out, QuantizedTensor):
                     # For sequence parallel in vanilla FP8, rowwise data is
@@ -356,6 +349,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
+
+            # Weight with column-wise usage is needed for dgrad GEMM.
+            if inp.requires_grad:
+                if isinstance(weightmat, QuantizedTensor):
+                    weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 if fp8 and weightmat is not None:
