@@ -139,10 +139,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
         fc1_bias: torch.Tensor,
-        use_fc1_bias: bool,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
-        use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -190,12 +188,12 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            if (
-                any([ub_overlap_ag, ub_overlap_rs])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+            if any([ub_overlap_ag, ub_overlap_rs]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
         activation_func = _act_func(
@@ -209,13 +207,11 @@ class _LayerNormMLP(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
-        # for standard fp8: layernorm output = FP8
+        # for fp8 DelayedScaling: layernorm output = FP8
         #                   only output of the linear is returned
         # for return_layernorm_output: layernorm output = High precision, then cast to FP8
         #                              high precision layernorm output and output of the linear are returned
         with_quantized_norm = fp8 and not return_layernorm_output
-        if isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output
@@ -237,9 +233,19 @@ class _LayerNormMLP(torch.autograd.Function):
                     columnwise=backwards_needs_fc1_input,
                 )
 
+        # Reduce duplicated transpose in `_fix_gathered_fp8_transpose`
+        if (
+            fp8
+            and FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
+            and ub_bulk_dgrad
+        ):
+            fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+
         ub_obj_lnout = None
         ln_out = None
-        if ub_overlap_ag:
+        # For DelayScaling, output of normalization will be in fp8.
+        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
+        if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
         elif not with_quantized_norm:
@@ -262,6 +268,14 @@ class _LayerNormMLP(torch.autograd.Function):
         )
 
         ln_out_return = ln_out if return_layernorm_output else None
+
+        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
+        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
+        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+            ub_obj_lnout = get_ub("fc1_fprop")
+            ln_out_local = ln_out
+            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
+            fc1_input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
@@ -301,35 +315,31 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_out_total = ln_out
 
         # Cast weights to expected dtype
-        fc1_weight_final = fc1_weight
-        fc2_weight_final = fc2_weight
         if not fp8:
-            fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
-            fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)
+            fc1_weight_final = cast_if_needed(fc1_weight, activation_dtype)
+            fc2_weight_final = cast_if_needed(fc2_weight, activation_dtype)
         else:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
-            if not isinstance(fc1_weight, QuantizedTensor):
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                fc1_weight_final = module.get_weight_workspace(
-                    tensor=fc1_weight,
-                    quantizer=fc1_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc1_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                )
-            if not isinstance(fc2_weight, QuantizedTensor):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                fc2_weight_final = module.get_weight_workspace(
-                    tensor=fc2_weight,
-                    quantizer=fc2_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc2_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                )
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            fc1_weight_final = module.get_weight_workspace(
+                tensor=fc1_weight,
+                quantizer=fc1_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc1_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+            )
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            fc2_weight_final = module.get_weight_workspace(
+                tensor=fc2_weight,
+                quantizer=fc2_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc2_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+            )
 
         # Cast biases to expected dtype
         bias_dtype = activation_dtype
@@ -349,7 +359,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # FC1 GEMM
 
-        # There are 2 fussions possible:
+        # There are 2 fusions possible:
         # - gemm_gelu_fusion - default for full precision, optional for fp8 - need to turn on gemm_gelu_fusion,
         # - bias_gelu_fusion - only for full precision.
         # If both gemm_gelu_fusion and bias_gelu_fusion are enabled, only bias_gelu_fusion will be performer
@@ -434,8 +444,7 @@ class _LayerNormMLP(torch.autograd.Function):
         )
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
-
-        if is_grad_enabled:
+        else:
             if cpu_offloading:
                 if fp8 and fc1_weight_final is not None:
                     set_offloading_param(fc1_weight_final, "weight_offloading", True)
@@ -518,9 +527,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_fc1_bias = use_fc1_bias
-            ctx.use_fc2_bias = use_fc2_bias
-            ctx.use_bias = ctx.use_fc1_bias
+            ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
@@ -589,9 +596,10 @@ class _LayerNormMLP(torch.autograd.Function):
                 )
                 and (ctx.fp8_recipe is not None)
             ):
-                if not ctx.fp8_recipe.delayed():
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
                     raise NotImplementedError(
-                        "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
                     )
 
             saved_tensors = ctx.saved_tensors
@@ -658,10 +666,11 @@ class _LayerNormMLP(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_fc2_output_quantizer is not None:
-                ctx.grad_fc2_output_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=True,
-                )
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=True)
 
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
@@ -753,14 +762,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     quantization_params=None,  # wgrad in high precision
                     layout="NT",
                     grad=True,
-                    bias=fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
+                    bias=fc2_bias if fc2_bias_grad is None else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
                 if fc2_bias_grad is None:
                     fc2_bias_grad = fc2_bias_grad_
-                del fc2_bias_grad_
             clear_tensor_data(act_out)
 
             # bias computation
@@ -797,14 +805,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     )  # activation in high precision
 
                 if ctx.fp8:
-                    # TODO zhongboz: per-tensor current scaling has no bgrad fusion for now
-                    if isinstance(ctx.grad_fc1_output_quantizer, Float8CurrentScalingQuantizer):
-                        fc1_bias_grad = dact.view(-1, dact.shape[-1]).sum(dim=0)
-                        dact = ctx.grad_fc1_output_quantizer(dact)
-                    else:
-                        fc1_bias_grad, dact = tex.bgrad_quantize(
-                            dact, ctx.grad_fc1_output_quantizer
-                        )
+                    fc1_bias_grad, dact = tex.bgrad_quantize(dact, ctx.grad_fc1_output_quantizer)
                 else:
                     fuse_gemm_and_bias_fc1_wgrad = (
                         True  # fc1_bias_grad is computed later, fused with wgrad gemm for the FC1
@@ -1032,11 +1033,9 @@ class _LayerNormMLP(torch.autograd.Function):
             dgamma,
             dbeta,
             fc1_wgrad,
-            fc1_bias_grad if ctx.use_fc1_bias else None,
-            None,  # use_fc1_bias
+            fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
-            fc2_bias_grad if ctx.use_fc2_bias else None,
-            None,  # use_fc2_bias
+            fc2_bias_grad,
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1456,10 +1455,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.layer_norm_bias,
                 fc1_weight,
                 fc1_bias,
-                self.use_bias,
                 fc2_weight,
-                fc2_bias,
-                self.apply_bias and not self.gemm_bias_unfused_add,
+                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,

@@ -83,9 +83,11 @@ size_t product(const NVTEShape &shape, size_t begin, size_t end) {
     }
     return ret;
 }
+
 size_t product(const NVTEShape &shape) {
   return product(shape, 0, shape.ndim);
 }
+
 size_t product(const std::vector<size_t> shape, size_t begin, size_t end) {
     size_t ret = 1;
     NVTE_CHECK(end <= shape.size());
@@ -193,6 +195,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
+  NVTEShape columnwise_shape{nullptr, 0};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
@@ -207,7 +210,11 @@ Tensor::Tensor(const std::string& name,
       columnwise_shape_vec.emplace_back(shape.data[i]);
     }
   }
-  const NVTEShape columnwise_shape{columnwise_shape_vec.data(), columnwise_shape_vec.size()};
+
+  if (columnwise) {
+    columnwise_shape.data = columnwise_shape_vec.data();
+    columnwise_shape.ndim = columnwise_shape_vec.size();
+  }
 
   tensor_ = TensorWrapper(scaling_mode);
 
@@ -645,10 +652,15 @@ void generate_data_uniformly(T* data, const size_t size, std::mt19937* gen) {
   #pragma omp parallel proc_bind(spread)
   {
     std::mt19937 gen_local = *gen;
-    gen_local.discard(omp_get_thread_num() * 599);
+    const int thread_ID = omp_get_thread_num();
+    const int threads_num = omp_get_max_threads();
+    const int chunk_size = (size + threads_num - 1) / threads_num;
+    const int idx_min = chunk_size * thread_ID;
+    const int idx_max = std::min(chunk_size * (thread_ID + 1), static_cast<int>(size));
+    gen_local.discard(idx_min);
     std::uniform_real_distribution<> dis(-2.0, 1.0);
-    #pragma omp for schedule(static)
-    for (size_t i = 0; i < size; ++i) {
+
+    for (int i = idx_min; i < idx_max; ++i) {
       data[i] = static_cast<T>(dis(gen_local));
     }
   }

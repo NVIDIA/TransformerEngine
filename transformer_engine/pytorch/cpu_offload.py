@@ -419,11 +419,25 @@ class AsyncDoubleBufferGroupOffloadHandler(SynchronizedGroupOffloadHandler):
                         tensor_list = [state]
 
                     for tensor_on_device in tensor_list:
+                        # `tensor_offloaded` is a hacky way of dealing with columnwise-only
+                        # quantized tensors for CPU offloading. The complication is due to
+                        # the `rowwise_data` being `None`. The offloading checker incorrectly
+                        # returns `False` and the entire `state` ([None, columnwise_tensor])
+                        # is added to the tensor tag state dict. A better design would change
+                        # how quantized tensors are kept track of in the offload handler.
+                        # Currently at every stage it is ensured that a quantized tensor is a
+                        # list whereas a non-quantized tensor is standalone object, which is
+                        # not good! TODO(@sanandaraj5597)
+                        tensor_offloaded = False
                         # if offload, return the reference to cpu copy
                         if self.tensor_need_offloading_checker(tensor_on_device):
+                            tensor_offloaded = True
                             state = SynchronizedGroupOffloadHandler.offload(tensor_on_device)
                         if is_quantized_tensor:
-                            self.tensor_tag_to_state[tensor_tag].append(state)
+                            if tensor_offloaded:
+                                self.tensor_tag_to_state[tensor_tag].append(state)
+                            else:
+                                self.tensor_tag_to_state[tensor_tag].append(tensor_on_device)
                         else:
                             self.tensor_tag_to_state[tensor_tag] = state
 
