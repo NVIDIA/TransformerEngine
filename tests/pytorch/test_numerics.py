@@ -24,7 +24,6 @@ from transformer_engine.pytorch.utils import (
     scaled_init_method_normal,
     attention_mask_func,
     is_bf16_compatible,
-    get_cudnn_version,
 )
 from transformer_engine.pytorch import (
     DotProductAttention,

@@ -100,7 +100,7 @@ target_include_directories(transformer_engine PUBLIC
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
                       CUDA::cudart
-		      CUDNN::cudnn_all)
+                      CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
