@@ -102,6 +102,7 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDA::cudart)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+target_include_directories(transformer_engine PRIVATE "${CUDNN_INCLUDE_DIR}")
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
