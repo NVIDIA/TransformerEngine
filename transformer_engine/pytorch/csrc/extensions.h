@@ -14,6 +14,12 @@
 /***************************************************************************************************
  * Permutation
  **************************************************************************************************/
+void dequantize_cast_transpose_1x128(
+    at::Tensor & input_data,
+    at::Tensor & input_scale,
+    at::Tensor & output_data,
+    at::Tensor & output_scale
+);
 
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     at::Tensor input, const transformer_engine::DType dtype, at::Tensor indices,
