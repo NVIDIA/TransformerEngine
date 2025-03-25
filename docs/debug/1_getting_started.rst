@@ -154,7 +154,7 @@ Let's look at the files with the logs. Two files will be created:
 
 Let's look inside them!
 
-In the main log file, you can find detailed information about the transformer's layer GEMMs behavior. You can see that ``fc1`` and ``fc2`` fprop GEMMs are run in high precision, as intended.
+In the main log file, you can find detailed information about the transformer layer's GEMMs behavior. You can see that ``fc1`` and ``fc2`` fprop GEMMs are run in high precision, as intended.
 
 .. code-block:: text
 
