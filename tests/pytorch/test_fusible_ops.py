@@ -1459,6 +1459,7 @@ class TestBasicOps:
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=quantized_compute),
             make_op(),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
