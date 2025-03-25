@@ -334,29 +334,27 @@ class _LayerNormMLP(torch.autograd.Function):
         if fp8 or debug:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
-            if not isinstance(fc1_weight, QuantizedTensor):
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                fc1_weight_final = module.get_weight_workspace(
-                    tensor=fc1_weight,
-                    quantizer=fc1_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc1_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    workspace_dtype=activation_dtype,
-                )
-            if not isinstance(fc2_weight, QuantizedTensor):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                fc2_weight_final = module.get_weight_workspace(
-                    tensor=fc2_weight,
-                    quantizer=fc2_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc2_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    workspace_dtype=activation_dtype,
-                )
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            fc1_weight_final = module.get_weight_workspace(
+                tensor=fc1_weight,
+                quantizer=fc1_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc1_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+                workspace_dtype=activation_dtype,
+            )
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            fc2_weight_final = module.get_weight_workspace(
+                tensor=fc2_weight,
+                quantizer=fc2_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc2_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+                workspace_dtype=activation_dtype,
+            )
         else:
             fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
             fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)

@@ -274,18 +274,18 @@ class _LayerNormLinear(torch.autograd.Function):
             if weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=True)
 
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
 
-                weightmat = module.get_weight_workspace(
-                    tensor=weight,
-                    quantizer=weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    workspace_dtype=activation_dtype,
-                )
+            weightmat = module.get_weight_workspace(
+                tensor=weight,
+                quantizer=weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+                workspace_dtype=activation_dtype,
+            )
 
         # Cast bias to expected dtype
         bias_dtype = activation_dtype

@@ -184,27 +184,26 @@ class _Linear(torch.autograd.Function):
         weightmat = weight
 
         if fp8 or debug:
-            if not isinstance(weight, QuantizedTensor):
-                # Configure quantizer
-                if weight_quantizer is not None:
-                    columnwise_usage = is_grad_enabled and inp.requires_grad
-                    if not columnwise_usage:
-                        columnwise_usage = (
-                            is_fp8_activation_recompute_enabled()
-                            and not in_fp8_activation_recompute_phase()
-                        )
-                    weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                weightmat = module.get_weight_workspace(
-                    tensor=weight,
-                    quantizer=weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                    workspace_dtype=activation_dtype,
-                )
+            # Configure quantizer
+            if weight_quantizer is not None:
+                columnwise_usage = is_grad_enabled and inp.requires_grad
+                if not columnwise_usage:
+                    columnwise_usage = (
+                        is_fp8_activation_recompute_enabled()
+                        and not in_fp8_activation_recompute_phase()
+                    )
+                weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            weightmat = module.get_weight_workspace(
+                tensor=weight,
+                quantizer=weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+                workspace_dtype=activation_dtype,
+            )
         else:
             weightmat = cast_if_needed(weightmat, activation_dtype)
 
