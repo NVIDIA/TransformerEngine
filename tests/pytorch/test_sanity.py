@@ -545,6 +545,8 @@ def test_sanity_grouped_linear(
             pytest.skip(reason_for_no_fp8)
         if fp8_recipe.mxfp8():
             pytest.skip("Grouped linear does not support MXFP8")
+        if fp8_recipe.float8_current_scaling():
+            pytest.skip("Grouped linear does not support MXFP8")
         if not config.is_fp8_supported():
             pytest.skip("Model config does not support FP8")
 
