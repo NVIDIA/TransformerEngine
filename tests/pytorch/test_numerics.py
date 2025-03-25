@@ -107,7 +107,10 @@ if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     # no feature is active.
     import nvdlfw_inspect.api as debug_api
 
-    debug_api.initialize(os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"], feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"])
+    debug_api.initialize(
+        os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"],
+        feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"],
+    )
 
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
