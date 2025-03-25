@@ -17,8 +17,6 @@ RET=0
 FAILED_CASES=""
 
 : ${TE_PATH:=/opt/transformerengine}
-: ${DUMMY_CONFIG_FILE:=$TE_PATH/tests/pytorch/debug/test_configs/dummy_feature.yaml}
-: ${FEATURE_DIRS:=$TE_PATH/transformer_engine/debug/features}
 
 
 pip3 install pytest==8.2.1 || error_exit "Failed to install pytest"
@@ -33,9 +31,16 @@ python3 -m pytest -v -s $TE_PATH/tests/pytorch/distributed/test_cast_master_weig
 
 
 # debug tests
-pytest -v -s $TE_PATH/tests/pytorch/debug/test_distributed.py --feature_dirs=$FEATURE_DIRS || test_fail "debug test_distributed.py"
+
+
+# Config with the dummy feature which prevents nvinspect from being disabled.
+# Nvinspect will be disabled if no feature is active.
+: ${NVTE_TEST_NVINSPECT_DUMMY_CONFIG_FILE:=$TE_PATH/tests/pytorch/debug/test_configs/dummy_feature.yaml}
+: ${NVTE_TEST_NVINSPECT_FEATURE_DIRS:=$TE_PATH/transformer_engine/debug/features}
+
+pytest -v -s $TE_PATH/tests/pytorch/debug/test_distributed.py --feature_dirs=$NVTE_TEST_NVINSPECT_FEATURE_DIRS || test_fail "debug test_distributed.py"
 # standard numerics tests with initialized debug
-DEBUG=True CONFIG_FILE=$DUMMY_CONFIG_FILE FEATURE_DIRS=$FEATURE_DIRS pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py || test_fail "debug test_numerics.py"
+NVTE_TEST_NVINSPECT_ENABLED=True NVTE_TEST_NVINSPECT_CONFIG_FILE=$NVTE_TEST_NVINSPECT_DUMMY_CONFIG_FILE NVTE_TEST_NVINSPECT_FEATURE_DIRS=$NVTE_TEST_NVINSPECT_FEATURE_DIRS pytest -v -s $TE_PATH/tests/pytorch/distributed/test_numerics.py || test_fail "debug test_numerics.py"
 
 if [ "$RET" -ne 0 ]; then
     echo "Error in the following test cases:$FAILED_CASES"

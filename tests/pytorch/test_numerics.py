@@ -100,14 +100,14 @@ all_normalizations = ["LayerNorm", "RMSNorm"]
 
 mask_types = ["causal", "no_mask"]
 
-if os.environ.get("DEBUG", False):
+if os.environ.get("NVTE_TEST_NVINSPECT_ENABLED", False):
     # The numerics of all the layers should work the same,
     # when debug=True. I fed them with dummy feature
     # to prevent switching off debug, which can happen if
     # no feature is active.
     import nvdlfw_inspect.api as debug_api
 
-    debug_api.initialize(os.environ["CONFIG_FILE"], feature_dirs=os.environ["FEATURE_DIRS"])
+    debug_api.initialize(os.environ["NVTE_TEST_NVINSPECT_CONFIG_FILE"], feature_dirs=os.environ["NVTE_TEST_NVINSPECT_FEATURE_DIRS"])
 
 fp8_recipes = [
     recipe.MXFP8BlockScaling(),
