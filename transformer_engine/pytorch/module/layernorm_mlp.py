@@ -1575,6 +1575,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         This simplified implementation is designed specifically for inference scenarios.
         """
         from ..export import onnx_layernorm, onnx_gemm
+
         assert_warmed_up(self)
         (
             fc1_input_quantizer,

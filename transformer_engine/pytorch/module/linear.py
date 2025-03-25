@@ -1206,6 +1206,7 @@ class Linear(TransformerEngineBaseModule):
         This simplified implementation is designed specifically for inference scenarios.
         """
         from ..export import onnx_gemm
+
         assert_warmed_up(self)
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         (

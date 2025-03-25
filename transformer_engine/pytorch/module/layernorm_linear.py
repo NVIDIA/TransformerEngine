@@ -1431,6 +1431,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         This simplified implementation is designed specifically for inference scenarios.
         """
         from ..export import onnx_layernorm, onnx_gemm
+
         assert_warmed_up(self)
         (
             input_quantizer,
