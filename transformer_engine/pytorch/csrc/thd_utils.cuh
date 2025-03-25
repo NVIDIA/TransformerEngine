@@ -223,9 +223,7 @@ struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_SBHD> : QKVIndexCalculatorBase {
                                                 int DimPerHead, int *CuSeqlens)
       : QKVIndexCalculatorBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 
-  __forceinline__ __device__ int compute_seq_id(int token_id) {
-    return token_id % batch_size;
-  }
+  __forceinline__ __device__ int compute_seq_id(int token_id) { return token_id % batch_size; }
 
   __forceinline__ __device__ int compute_local_token_id(int token_id, int seq_id) {
     return token_id / batch_size;
@@ -254,9 +252,7 @@ struct QKVIndexCalculator<NVTE_QKV_Format::NVTE_BSHD> : QKVIndexCalculatorBase {
                                                 int DimPerHead, int *CuSeqlens)
       : QKVIndexCalculatorBase(BatchSize, SeqLen, NumHeads, DimPerHead, CuSeqlens) {}
 
-  __forceinline__ __device__ int compute_seq_id(int token_id) {
-    return token_id / seq_len;
-  }
+  __forceinline__ __device__ int compute_seq_id(int token_id) { return token_id / seq_len; }
 
   __forceinline__ __device__ int compute_local_token_id(int token_id, int seq_id) {
     return token_id % seq_len;
@@ -411,9 +407,12 @@ __global__ void fused_out_correction_kernel(dtype *out, TensorList<max_tensors> 
     int head_id = blockIdx.y;
 
     size_t idx_out_full = out_calculator.compute_full_tensor_offset(token_id, head_id);
-    size_t idx_out_half = out_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
-    size_t idx_lse_full = lse_calculator.compute_full_tensor_offset(seq_id, local_token_id, head_id);
-    size_t idx_lse_half = lse_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+    size_t idx_out_half =
+        out_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
+    size_t idx_lse_full =
+        lse_calculator.compute_full_tensor_offset(seq_id, local_token_id, head_id);
+    size_t idx_lse_half =
+        lse_calculator.compute_half_tensor_offset(seq_id, local_token_id, head_id);
 
     dtype *cur_out = out + idx_out_full;
     if (token_id >= num_total_valid_tokens) {
