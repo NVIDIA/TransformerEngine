@@ -286,6 +286,12 @@ def run_dpa_with_cp(
         else:
             out_.backward(dout_)
 
+    if fp8_mha:
+        assert isinstance(out, Float8Tensor)
+        assert isinstance(out_, Float8Tensor)
+        out = out.dequantize()
+        out_ = out_.dequantize()
+
     for x in [out_, q_.grad, k_.grad, v_.grad]:
         assert torch.all(~torch.isnan(x))
         assert torch.all(~torch.isinf(x))
