@@ -74,7 +74,8 @@ from transformer_engine.pytorch.tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
-from transformer_engine.pytorch.export import is_in_onnx_export_mode, onnx_attention_mask_func
+from transformer_engine.pytorch import export
+from transformer_engine.pytorch.export import is_in_onnx_export_mode
 
 # Import attention utils
 import transformer_engine.pytorch.dot_product_attention.utils as dpa_utils
@@ -3782,7 +3783,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
 
         def mask_func(x, y):
             return (
-                onnx_attention_mask_func(x, y)
+                export.onnx_attention_mask_func(x, y)
                 if is_in_onnx_export_mode()
                 else attention_mask_func(x, y)
             )
