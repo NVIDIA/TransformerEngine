@@ -3894,18 +3894,13 @@ class UnfusedDotProductAttention(torch.nn.Module):
         key_layer = key_layer.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # preallocting result tensor: [b * np, sq, sk]
-        # WAR to set dtype to FP32 as ONNX lacks BF16 support for ConstantOfShape operator
-        is_bf16 = query_layer.dtype == torch.bfloat16
         matmul_result = torch.empty(
             output_size[0] * output_size[1],
             output_size[2],
             output_size[3],
-            dtype=torch.float32 if is_in_onnx_export_mode() and is_bf16 else query_layer.dtype,
+            dtype=query_layer.dtype,
             device=torch.cuda.current_device(),
         )
-
-        if is_in_onnx_export_mode() and is_bf16:
-            matmul_result = matmul_result.bfloat16()
 
         scale = self.softmax_scale
         if apply_qk_layer_scaling:
@@ -3954,6 +3949,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
             matmul_result = (matmul_result.view(*output_size) + core_attention_bias).to(
                 dtype=query_layer.dtype
             )
+
         # attention scores and attention mask [b, np, sq, sk]
         softmax_scale = self.layer_number if apply_qk_layer_scaling else None
 
@@ -6988,10 +6984,8 @@ class MultiheadAttention(torch.nn.Module):
             # not qkv_weight_interleaved:
             #  [sq, b, (np/ng + 2), ng, hn]
             #  --> [sq, b, np/ng, np, hn], [sq, b, 1, ng, hn], [sq, b, 1, ng, hn]
-            fn = _SplitAlongDim.apply
-            n = []
-            query_layer, key_layer, value_layer = fn(
-                *n, mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
+            query_layer, key_layer, value_layer = _SplitAlongDim.apply(
+                mixed_x_layer, split_dim, (num_queries_per_key_value, 1, 1)
             )
 
             if self.qkv_format == "thd":

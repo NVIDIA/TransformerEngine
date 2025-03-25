@@ -725,8 +725,6 @@ def test_export_layernorm_mlp(
         )
 
 
-@skip_FP8
-@skip_MXFP8
 @pytest.mark.parametrize(
     "precision,      use_mask, attn_mask_type",
     [
