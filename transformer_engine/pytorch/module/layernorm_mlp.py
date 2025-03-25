@@ -206,11 +206,10 @@ class _LayerNormMLP(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
-        # for fp8 DelayedScaling: layernorm output = FP8
-        #                   only output of the linear is returned
-        # for return_layernorm_output: layernorm output = High precision, then cast to FP8
-        #                              high precision layernorm output and output of the linear are returned
-        with_quantized_norm = fp8 and not return_layernorm_output
+        # Avoid quantized norm kernel if norm output will be returned
+        with_quantized_norm = (
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
+        )
 
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
@@ -230,31 +229,15 @@ class _LayerNormMLP(torch.autograd.Function):
                 columnwise_usage = False
             fc1_input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
-        # Construct norm output
-        ln_out = None
-        if with_quantized_norm:
-            ln_out = fc1_input_quantizer.make_empty(
-                inputmat.shape,
-                dtype=inputmat.dtype,
-                device="cuda",
-            )
-        else:
-            ln_out = torch.empty_like(
-                inputmat,
-                dtype=inputmat.dtype,
-                memory_format=torch.contiguous_format,
-                device="cuda",
-            )
-
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            ln_out,
+            None,  # ln_out
             ln_weight,
             ln_bias,
             eps,
             fc1_input_quantizer if with_quantized_norm else None,
-            inp.dtype,
+            inputmat.dtype,
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,

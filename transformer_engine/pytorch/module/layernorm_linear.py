@@ -136,6 +136,11 @@ class _LayerNormLinear(torch.autograd.Function):
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
         nvtx_range_pop(f"{nvtx_label}.norm_input_cast")
 
+        # Avoid quantized norm kernel if norm output will be returned
+        with_quantized_norm = (
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
+        )
+
         tp_world_size = get_distributed_world_size(tp_group)
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
@@ -168,28 +173,16 @@ class _LayerNormLinear(torch.autograd.Function):
                 columnwise_usage = False
             input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
-        # Construct norm output
-        with_quantized_norm = (
-            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
-        )
-        ln_out = None
-        if with_quantized_norm:
-            ln_out = input_quantizer.make_empty(inputmat.shape, dtype=inputmat.dtype, device="cuda")
-        else:
-            ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
-            )
-
         # Apply normalization
         nvtx_range_push(f"{nvtx_label}.norm")
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            ln_out,
+            None,  # ln_out
             ln_weight,
             ln_bias,
             eps,
             input_quantizer if with_quantized_norm else None,
-            inp.dtype,
+            inputmat.dtype,
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
