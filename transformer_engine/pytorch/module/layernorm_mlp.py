@@ -243,9 +243,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         ub_obj_lnout = None
         ln_out = None
-        # For DelayScaling, output of normalization will be in fp8.
-        # For Float8CurrentScaling, we want the output of normalization in high precision, then quantize to fp8.
-        if ub_overlap_ag and not isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
+        if ub_overlap_ag:
             ub_obj_lnout = get_ub("fc1_fprop")
             ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
         elif not with_quantized_norm:
