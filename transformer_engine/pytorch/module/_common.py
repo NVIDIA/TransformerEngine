@@ -4,7 +4,6 @@
 
 """Internal function used by multiple modules."""
 
-import os
 from typing import Any, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass
 from functools import reduce
@@ -16,10 +15,7 @@ from .. import cpp_extensions as tex
 from ..constants import TE_DType
 from ..utils import get_default_init_method
 from ..tensor.float8_tensor import Float8Tensor
-from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..export import is_in_onnx_export_mode
-
-_use_cudnn_mxfp8_norm = bool(int(os.getenv("NVTE_CUDNN_MXFP8_NORM", "0")))
 
 
 def _get_normalization_func(normalization: str, forward: bool):
@@ -87,24 +83,14 @@ def apply_normalization(
 
     inputs = (inputmat, ln_weight) if ln_bias is None else (inputmat, ln_weight, ln_bias)
 
-    split_mxfp8_cast = False
-    if not _use_cudnn_mxfp8_norm and isinstance(output_quantizer, MXFP8Quantizer):
-        split_mxfp8_cast = True
-
-    output = normalization_func(
+    return normalization_func(
         *inputs,
         eps,
-        None if split_mxfp8_cast else ln_out,
-        None if split_mxfp8_cast else output_quantizer,
+        ln_out,
+        output_quantizer,
         TE_DType[output_dtype] if output_dtype in TE_DType else output_dtype,
         fwd_ln_sm_margin,
         zero_centered_gamma,
-    )
-
-    return (
-        (output_quantizer.quantize(output[0], out=ln_out), *output[1:])
-        if split_mxfp8_cast
-        else output
     )
 
 
