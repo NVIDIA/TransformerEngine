@@ -2143,7 +2143,7 @@ def test_kv_cache_accuracy(dtype, bs, model_key, use_RoPE, input_format, module,
 
     inference_params = InferenceParams(
         max_batch_size=B_max,
-        max_seqlen_kv=S_max,
+        max_sequence_length=S_max,
         num_heads_kv=H,
         head_dim_k=head_size,
         dtype=dtype,
