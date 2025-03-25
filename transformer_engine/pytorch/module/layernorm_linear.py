@@ -59,7 +59,7 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_layernorm, onnx_gemm
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 from ..cpp_extensions import (
     general_gemm,
@@ -1439,6 +1439,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
+        from ..export import onnx_layernorm, onnx_gemm
         assert_warmed_up(self)
         (
             input_quantizer,

@@ -70,7 +70,7 @@ from ..tensor.quantized_tensor import (
 from ..cpp_extensions import (
     general_gemm,
 )
-from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_layernorm, onnx_gemm
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 __all__ = ["LayerNormMLP"]
 
@@ -1582,6 +1582,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
+        from ..export import onnx_layernorm, onnx_gemm
         assert_warmed_up(self)
         (
             fc1_input_quantizer,

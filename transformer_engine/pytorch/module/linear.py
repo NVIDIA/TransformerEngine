@@ -59,7 +59,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from ..export import is_in_onnx_export_mode, assert_warmed_up, onnx_gemm
+from ..export import is_in_onnx_export_mode, assert_warmed_up
 
 __all__ = ["Linear"]
 
@@ -1202,6 +1202,7 @@ class Linear(TransformerEngineBaseModule):
         while only using operations that have defined ONNX symbolic translations.
         This simplified implementation is designed specifically for inference scenarios.
         """
+        from ..export import onnx_gemm
         assert_warmed_up(self)
         weight_tensor, bias_tensor = self._get_weight_and_bias_tensors()
         (
