@@ -58,9 +58,9 @@ from ..tensor.quantized_tensor import (
 )
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.utils import any_feature_enabled
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from ..cpp_extensions import (
     general_gemm,
@@ -82,7 +82,6 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_bias: Union[torch.Tensor, None],
         weight: torch.Tensor,
         bias: torch.Tensor,
-        use_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -166,10 +165,6 @@ class _LayerNormLinear(torch.autograd.Function):
 
         # Configure quantizer for normalization output
         with_quantized_norm = fp8 and not return_layernorm_output and not debug
-        # for Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer
-        # so we need to set with_quantized_norm to False
-        if isinstance(input_quantizer, Float8CurrentScalingQuantizer):
-            with_quantized_norm = False
 
         if with_quantized_norm:
             if with_input_all_gather:
@@ -273,12 +268,11 @@ class _LayerNormLinear(torch.autograd.Function):
         if not fp8 and not debug:
             weightmat = cast_if_needed(weightmat, activation_dtype)
         else:
-            if not isinstance(weight, QuantizedTensor):
-                quantized_weight = True
+            quantized_weight = not isinstance(weight, QuantizedTensor)
 
-                # Configure quantizer
-                if weight_quantizer is not None:
-                    weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            # Configure quantizer
+            if weight_quantizer is not None:
+                weight_quantizer.set_usage(rowwise=True, columnwise=True)
 
                 # FP8 cast to workspace buffer
                 update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -357,7 +351,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight.requires_grad and parallel_mode == "column" and sequence_parallel
             )
 
-            # Input with column-wise usage is needed for dgrad GEMM.
+            # Input with column-wise usage is needed for wgrad GEMM.
             if backward_needs_input:
                 if isinstance(ln_out, QuantizedTensor):
                     # For sequence parallel in vanilla FP8, rowwise data is
@@ -365,6 +359,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     # can be allgathered.
                     if isinstance(ln_out, MXFP8TensorBase) or not ctx.ln_out_needs_gather:
                         ln_out.update_usage(rowwise_usage=False)
+
+            # Weight with column-wise usage is needed for dgrad GEMM.
+            if inp.requires_grad:
+                if isinstance(weightmat, QuantizedTensor):
+                    weightmat.update_usage(columnwise_usage=True)
 
             if cpu_offloading:
                 if fp8 and weightmat is not None:
@@ -431,7 +430,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_bias = use_bias
+            ctx.use_bias = bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
@@ -766,10 +765,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
                     clear_tensor_data(ln_out_total)
 
-            # Don't return grad bias if not needed
-            if not ctx.use_bias:
-                grad_bias = None
-
             # Synchronize tensor parallel communication
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
@@ -851,7 +846,6 @@ class _LayerNormLinear(torch.autograd.Function):
             dbeta,
             wgrad,
             grad_bias,
-            None,  # use_bias
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1379,8 +1373,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.layer_norm_weight,
                 self.layer_norm_bias,
                 weight_tensor,
-                bias_tensor,
-                self.apply_bias and not self.gemm_bias_unfused_add,
+                bias_tensor if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,

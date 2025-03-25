@@ -9,6 +9,7 @@ import torch
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
 from .quantized_tensor import QuantizedTensor, Quantizer
+from .utils import cast_master_weights_to_fp8, replace_raw_data
 
 __all__ = [
     "QuantizedTensor",
