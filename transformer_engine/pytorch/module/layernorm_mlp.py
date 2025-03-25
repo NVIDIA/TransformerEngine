@@ -261,21 +261,13 @@ class _LayerNormMLP(torch.autograd.Function):
             ln_bias,
             eps,
             fc1_input_quantizer if with_quantized_norm else None,
-            inp.dtype,
+            inputmat.dtype,
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
 
         ln_out_return = ln_out if return_layernorm_output else None
-
-        # For Float8CurrentScalingQuantizer, layernorm/rmsnorm has not been fused with quantizer.
-        # So the output of normalization is in high precision, and we need to quantize it to FP8 and put in the buffer.
-        if ub_overlap_ag and isinstance(fc1_input_quantizer, Float8CurrentScalingQuantizer):
-            ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out_local = ln_out
-            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-            fc1_input_quantizer.quantize(ln_out_local, out=ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication

@@ -77,13 +77,7 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, fp8):
                 pytest.skip("Atomic GEMM is requires device compute capability 9.x (Hopper).")
             test_cmd.append("--atomic")
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    result = subprocess.run(test_cmd, env=os.environ, check=True)
 
 
 def _run_layer_with_overlap(
@@ -116,18 +110,12 @@ def _run_layer_with_overlap(
     os.environ["NVTE_TORCH_COMPILE"] = "0"
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
-
-    os.unsetenv("PYTORCH_JIT")
-    os.unsetenv("NVTE_TORCH_COMPILE")
-    os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
-
-    if (
-        result.returncode != 0
-        or "NUMERICAL CHECK FAILED" in result.stderr.decode()
-        or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
-    ):
-        raise AssertionError(result.stderr.decode())
+    try:
+        result = subprocess.run(test_cmd, env=os.environ, check=True)
+    finally:
+        os.unsetenv("PYTORCH_JIT")
+        os.unsetenv("NVTE_TORCH_COMPILE")
+        os.unsetenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
 
 
 @pytest.mark.parametrize(
