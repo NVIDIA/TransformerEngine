@@ -34,7 +34,7 @@ Transformer Engine can be directly installed from `our PyPI <https://pypi.org/pr
 
 .. code-block:: bash
 
-    pip install transformer_engine[pytorch]
+    pip3 install transformer_engine[pytorch]
 
 To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]). Transformer Engine ships wheels for the core library. Source distributions are shipped for the JAX and PyTorch extensions.
 
@@ -54,7 +54,7 @@ Execute the following command to install the latest stable version of Transforme
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+  pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`).
 
@@ -71,7 +71,7 @@ Execute the following command to install the latest development build of Transfo
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@main
+  pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@main
 
 This will automatically detect if any supported deep learning frameworks are installed and build Transformer Engine support for them. To explicitly specify frameworks, set the environment variable `NVTE_FRAMEWORK` to a comma-separated list (e.g. `NVTE_FRAMEWORK=jax,pytorch`). To only build the framework-agnostic C++ API, set `NVTE_FRAMEWORK=none`.
 
@@ -79,7 +79,7 @@ In order to install a specific PR, execute (after changing NNN to the PR number)
 
 .. code-block:: bash
 
-  pip install git+https://github.com/NVIDIA/TransformerEngine.git@refs/pull/NNN/merge
+  pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@refs/pull/NNN/merge
 
 
 Installation (from source)
@@ -94,7 +94,7 @@ Execute the following commands to install Transformer Engine from source:
 
   cd TransformerEngine
   export NVTE_FRAMEWORK=pytorch   # Optionally set framework
-  pip install .                   # Build and install
+  pip3 install .                   # Build and install
 
 If the Git repository has already been cloned, make sure to also clone the submodules:
 
@@ -106,10 +106,10 @@ Extra dependencies for testing can be installed by setting the "test" option:
 
 .. code-block:: bash
 
-  pip install .[test]
+  pip3 install .[test]
 
 To build the C++ extensions with debug symbols, e.g. with the `-g` flag:
 
 .. code-block:: bash
 
-  pip install . --global-option=--debug
+  pip3 install . --global-option=--debug

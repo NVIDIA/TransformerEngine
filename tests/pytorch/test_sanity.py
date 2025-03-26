@@ -25,6 +25,7 @@ from transformer_engine.pytorch.utils import (
 from transformer_engine.pytorch import (
     LayerNormLinear,
     Linear,
+    GroupedLinear,
     LayerNormMLP,
     TransformerLayer,
     RMSNorm,
@@ -35,7 +36,12 @@ from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions import general_gemm
 from transformer_engine.pytorch.module.base import get_workspace
-from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import (
+    Float8Quantizer,
+    Float8CurrentScalingQuantizer,
+)
+from transformer_engine.pytorch.tensor.utils import replace_raw_data
 from test_numerics import reset_rng_states, dtype_tols
 
 # Only run FP8 tests on supported devices.
@@ -527,6 +533,55 @@ def test_sanity_linear_with_zero_tokens(dtype, bs, model, fp8_recipe, fp8_model_
     ).cuda()
     with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
         out = te_linear(inp_hidden_states)
+    loss = out.sum()
+    loss.backward()
+    assert out.shape == (num_tokens, ffn_hidden_size)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes_with_zero)
+@pytest.mark.parametrize("model", ["small", "weird"])
+@pytest.mark.parametrize("fp8_recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("use_bias", all_boolean)
+@pytest.mark.parametrize("empty_split", ["first", "last", "middle"])
+@pytest.mark.parametrize("num_gemms", [4])
+def test_sanity_grouped_linear(
+    dtype, bs, model, fp8_recipe, fp8_model_params, use_bias, num_gemms, empty_split
+):
+    config = model_configs[model]
+    ffn_hidden_size = 4 * config.hidden_size
+    # Small batch size used to catch bug from https://github.com/NVIDIA/TransformerEngine/pull/1527.
+    bs = bs * 16
+    num_tokens = bs * config.seq_len * (num_gemms - 1)
+
+    if fp8_recipe is not None:
+        if not fp8_available:
+            pytest.skip(reason_for_no_fp8)
+        if fp8_recipe.mxfp8():
+            pytest.skip("Grouped linear does not support MXFP8")
+        if not config.is_fp8_supported():
+            pytest.skip("Model config does not support FP8")
+
+    use_fp8 = fp8_recipe is not None
+    with fp8_model_init(enabled=use_fp8 and fp8_model_params, recipe=fp8_recipe):
+        te_grouped_linear = GroupedLinear(
+            num_gemms, config.hidden_size, ffn_hidden_size, bias=use_bias, params_dtype=dtype
+        ).cuda()
+
+    inp_hidden_states = torch.randn(
+        num_tokens, config.hidden_size, dtype=dtype, requires_grad=True
+    ).cuda()
+    m_splits = [bs * config.seq_len] * num_gemms
+    if empty_split == "first":
+        m_splits[0] = 0
+    elif empty_split == "last":
+        m_splits[-1] = 0
+    elif empty_split == "middle":
+        m_splits[num_gemms // 2] = 0
+
+    with fp8_autocast(enabled=use_fp8, fp8_recipe=fp8_recipe):
+        out = te_grouped_linear(inp_hidden_states, m_splits)
     loss = out.sum()
     loss.backward()
     assert out.shape == (num_tokens, ffn_hidden_size)
@@ -1146,3 +1201,70 @@ def _run_attention_extra_state(dtype, config, checkpoint=False, mimic_v1_6=False
             outputs.append(p.grad)
 
     return outputs
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_replace_raw_data_for_float8tensor():
+    """Test the functionality of replace_raw_data"""
+    torch.manual_seed(12345)
+    torch.cuda.manual_seed(12345)
+
+    fp8_quantizer = Float8CurrentScalingQuantizer(fp8_dtype=tex.DType.kFloat8E4M3, device="cuda")
+    fp8_tensor = fp8_quantizer.make_empty([128, 128], dtype=torch.bfloat16, device="cuda")
+    random_bf16_data = torch.randn(fp8_tensor.shape, dtype=torch.bfloat16, device="cuda")
+    fp8_quantizer.update_quantized(random_bf16_data, fp8_tensor)
+
+    attrs_to_check = ["_quantizer", "_fp8_dtype", "_scale_inv", "_transpose", "_transpose_invalid"]
+    attrs = {}
+    for attr in attrs_to_check:
+        attrs[attr] = getattr(fp8_tensor, attr)
+
+    old_data = fp8_tensor._data
+    new_data = torch.empty_like(old_data)
+    replace_raw_data(fp8_tensor, new_data)
+
+    # Make sure the new_data is properly assigned.
+    assert fp8_tensor._data.data_ptr() != old_data.data_ptr()
+    assert fp8_tensor._data.data_ptr() == new_data.data_ptr()
+    # Make sure the values are not changed.
+    torch.testing.assert_close(old_data, fp8_tensor._data, atol=0, rtol=0)
+    # Make sure other attributes are not changed (totally identical)
+    for attr in attrs_to_check:
+        assert id(getattr(fp8_tensor, attr)) == id(attrs[attr])
+
+
+@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+def test_fp8_model_init_high_precision_init_val():
+    """Test fp8_model_init with preserve_high_precision_init_val=True"""
+    with fp8_model_init(preserve_high_precision_init_val=True):
+        model = Linear(768, 768)
+
+    weight = model.weight
+
+    assert isinstance(weight, QuantizedTensor), "Weight should be QuantizedTensor"
+    assert hasattr(weight, "_high_precision_init_val"), "_high_precision_init_val not found"
+    assert hasattr(weight, "get_high_precision_init_val"), "get_high_precision_init_val() not found"
+    assert hasattr(
+        weight, "clear_high_precision_init_val"
+    ), "clear_high_precision_init_val() not found"
+
+    high_precision = weight.get_high_precision_init_val()
+    assert high_precision.device.type == "cpu", "high_precision_init_val is not on the CPU"
+
+    new_weight = weight._get_quantizer().make_empty(
+        shape=weight.shape, dtype=weight.dtype, device=weight.device
+    )
+    weight._get_quantizer().update_quantized(high_precision.to(weight.device), new_weight)
+
+    torch.testing.assert_close(
+        new_weight.dequantize(dtype=weight.dtype),
+        weight.dequantize(dtype=weight.dtype),
+        rtol=0,
+        atol=0,
+    )
+
+    weight.clear_high_precision_init_val()
+    assert weight.get_high_precision_init_val() is None, "clear_high_precision_init_val() not work"
+    assert not hasattr(
+        weight, "._high_precision_init_val"
+    ), "clear_high_precision_init_val() not work"

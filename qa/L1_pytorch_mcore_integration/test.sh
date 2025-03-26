@@ -40,7 +40,7 @@ CUDA_DEVICE_MAX_CONNECTIONS=1
 NVTE_BIAS_GELU_NVFUSION=0
 NVTE_BIAS_DROPOUT_FUSION=0
 
-python
+python3
 -m torch.distributed.launch
 --use_env
 --nnodes=1

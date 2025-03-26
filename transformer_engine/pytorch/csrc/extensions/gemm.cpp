@@ -36,6 +36,10 @@ namespace transformer_engine::pytorch {
 
 namespace detail {
 
+bool is_low_precision(const DType type) {
+  return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2;
+}
+
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
                                        const NVTEShape& B_shape, const bool transb) {
   // Flatten outer dims to get 2D matrices
@@ -96,6 +100,9 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   TensorWrapper A_tensor = makeTransformerEngineTensor(A, none);
   TensorWrapper B_tensor = makeTransformerEngineTensor(B, none);
 
+  const bool low_precision =
+      detail::is_low_precision(A_tensor.dtype()) || detail::is_low_precision(B_tensor.dtype());
+
   // Check tensor dimensions
   const auto& A_shape = A_tensor.shape();
   const auto& B_shape = B_tensor.shape();
@@ -137,7 +144,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 
   // Activation input tensor
   MaybeTensor pre_gelu_out = std::nullopt;
-  DType gelu_type = bias_type;
+  DType gelu_type = low_precision ? bias_type : D_tensor.dtype();
   if (gelu) {
     if (!grad) {
       auto dtype = GetATenDType(gelu_type);
@@ -329,9 +336,13 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     at::Tensor out_tensor;
     auto size_t_shape =
         pytorch::detail::getGemmOutputShape(te_A.shape(), transa, te_B.shape(), transb);
+    bool D_numel_is_zero = false;
     std::vector<int64_t> D_shape;
     for (size_t t : size_t_shape) {
       D_shape.push_back(t);
+      if (t == 0) {
+        D_numel_is_zero = true;
+      }
     }
     auto dtype = GetATenDType(D_type);
     auto opts = torch::TensorOptions().dtype(dtype).device(torch::kCUDA);
@@ -339,7 +350,12 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
       if (output_data_ptr == nullptr) {
         out_tensor = at::empty(D_shape, opts);
       } else {
-        out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        // We need to check !D_numel_is_zero because if the final input portion has zero elements,
+        // output_data_ptr would point beyond the allocated memory of D. This would cause
+        // at::from_blob to fail as it would reference memory not allocated by CUDA.
+        if (!D_numel_is_zero) {
+          out_tensor = at::from_blob(output_data_ptr, D_shape, opts);
+        }
       }
       char* char_ptr = reinterpret_cast<char*>(output_data_ptr);
       char_ptr += D_shape[0] * D_shape[1] * (*D)[0].element_size();

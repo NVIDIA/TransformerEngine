@@ -86,6 +86,7 @@ list(APPEND transformer_engine_SOURCES
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
      fused_rope/fused_rope.cu
+     recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
@@ -100,7 +101,8 @@ target_include_directories(transformer_engine PUBLIC
 # Configure dependencies
 target_link_libraries(transformer_engine PUBLIC
                       CUDA::cublas
-                      CUDA::cudart)
+                      CUDA::cudart
+                      CUDNN::cudnn_all)
 target_include_directories(transformer_engine PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")

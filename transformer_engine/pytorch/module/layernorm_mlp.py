@@ -15,6 +15,7 @@ from torch.nn import init
 
 import transformer_engine_torch as tex
 
+from transformer_engine.common.recipe import Recipe
 from .base import (
     get_workspace,
     _ub_communicators,
@@ -59,7 +60,6 @@ from ..tensor.float8_tensor import Float8Tensor
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-
 from ..tensor.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
@@ -73,17 +73,53 @@ from ..cpp_extensions import (
 __all__ = ["LayerNormMLP"]
 
 
-def _act_func(activation: str):
-    funcs = {
-        "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
-        "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
+    if recipe is None:
+        # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+        return {
+            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
+            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "geglu": (tex.geglu, tex.dgeglu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
+            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+        }
+    if recipe.delayed() or recipe.mxfp8():
+        # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+        # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+        return {
+            "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
+            "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
+            "geglu": (tex.geglu, tex.dgeglu, None),
+            "reglu": (tex.reglu, tex.dreglu, None),
+            "swiglu": (tex.swiglu, tex.dswiglu, None),
+            "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+            "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
+            "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+        }
+    # no activation fusion written yet
+    # Per-tensor current scaling: []
+    return {
+        "gelu": (tex.gelu, tex.dgelu, None),
+        "relu": (tex.relu, tex.drelu, None),
         "geglu": (tex.geglu, tex.dgeglu, None),
         "reglu": (tex.reglu, tex.dreglu, None),
         "swiglu": (tex.swiglu, tex.dswiglu, None),
-        "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
+        "qgelu": (tex.qgelu, tex.dqgelu, None),
         "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
-        "srelu": (tex.srelu, tex.dsrelu, tex.dbias_dsrelu),
+        "srelu": (tex.srelu, tex.dsrelu, None),
     }
+
+
+def _act_func(activation: str, recipe: Optional[Recipe] = None):
+    # based on each quantization mode, we have different kernel fusion supported:
+    # bf16 (recipe is None): [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+    # Delayed scaling, fusion supported list: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+    # MXFP8: [tex.dbias_dgelu, tex.dbias_drelu, tex.dbias_dqgelu, tex.dbias_dsrelu]
+    # Per-tensor current scaling: []
+    funcs = _get_act_func_supported_list(recipe)
     if activation not in funcs:
         raise NotImplementedError("Activation type " + activation + " is not supported!")
     return funcs[activation]
@@ -102,10 +138,8 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_bias: torch.Tensor,
         fc1_weight: torch.Tensor,
         fc1_bias: torch.Tensor,
-        use_fc1_bias: bool,
         fc2_weight: torch.Tensor,
         fc2_bias: torch.Tensor,
-        use_fc2_bias: bool,
         eps: float,
         is_first_microbatch: Union[bool, None],
         fp8: bool,
@@ -153,15 +187,17 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            if (
-                any([ub_overlap_ag, ub_overlap_rs])
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+            if any([ub_overlap_ag, ub_overlap_rs]) and not (
+                FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
             ):
                 raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
+                    "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                    " current scaling"
                 )
 
-        activation_func = _act_func(activation)[0]
+        activation_func = _act_func(
+            activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
+        )[0]
         device = inp.device
 
         # Cast for native AMP
@@ -170,126 +206,108 @@ class _LayerNormMLP(torch.autograd.Function):
         if ln_bias is not None:
             ln_bias = cast_if_needed(ln_bias, activation_dtype)
 
-        # for standard fp8: layernorm output = FP8
-        #                   only output of the linear is returned
-        # for return_layernorm_output: layernorm output = High precision, then cast to FP8
-        #                              high precision layernorm output and output of the linear are returned
-        with_quantized_norm = fp8 and not return_layernorm_output
+        # Avoid quantized norm kernel if norm output will be returned
+        with_quantized_norm = (
+            fp8 and not return_layernorm_output and not return_layernorm_output_gathered
+        )
 
         tp_world_size = get_distributed_world_size(tp_group)
-        ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output
+        ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
-        with_input_all_gather_nccl = sequence_parallel and not ub_overlap_ag
         backwards_needs_fc1_input = is_grad_enabled and fc1_weight.requires_grad
 
-        # Configure quantizer for normalization output
-        if fp8 and fc1_input_quantizer is None:
-            raise ValueError("Missing quantizer for input tensor")
-        if with_quantized_norm:
-            if with_input_all_gather_nccl:
-                fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
-                if isinstance(fc1_input_quantizer, MXFP8Quantizer):
-                    with_quantized_norm = False
-            else:
-                fc1_input_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=backwards_needs_fc1_input,
-                )
-
-        ub_obj_lnout = None
-        ln_out = None
-        if ub_overlap_ag:
-            ub_obj_lnout = get_ub("fc1_fprop")
-            ln_out = ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True)
-        elif not with_quantized_norm:
-            ln_out = torch.empty_like(
-                inputmat, dtype=inputmat.dtype, memory_format=torch.contiguous_format, device="cuda"
-            )
+        # Configure quantizer for norm output
+        if fp8:
+            if fc1_input_quantizer is None:
+                raise ValueError("Missing quantizer for FC1 input tensor")
+            columnwise_usage = backwards_needs_fc1_input
+            if (
+                columnwise_usage
+                and sequence_parallel
+                and not isinstance(fc1_input_quantizer, MXFP8Quantizer)
+            ):
+                columnwise_usage = False
+            fc1_input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
 
         # Apply normalization
         ln_out, mu, rsigma = apply_normalization(
             inputmat,
-            ln_out,
+            None,  # ln_out
             ln_weight,
             ln_bias,
             eps,
             fc1_input_quantizer if with_quantized_norm else None,
-            inp.dtype,
+            inputmat.dtype,
             normalization,
             fwd_ln_sm_margin,
             zero_centered_gamma,
         )
+        ln_out_return = None
+        if return_layernorm_output or return_layernorm_output_gathered:
+            ln_out_return = ln_out
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication
-        ln_out_gathered = False
-        with_quantized_all_gather = fp8
-        if with_input_all_gather_nccl:
-            if return_layernorm_output and return_layernorm_output_gathered:
-                with_quantized_all_gather = False
-            if fp8:
-                fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
-            ln_out_total, _ = gather_along_first_dim(
-                ln_out,
-                tp_group,
-                quantizer=(fc1_input_quantizer if with_quantized_all_gather else None),
-            )
-            ln_out_gathered = True
-        else:
-            with_quantized_all_gather = False
-            if ub_overlap_ag:
-                ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer, False)
+        ln_out_total = None
+        ub_obj_lnout = None
+        if sequence_parallel:
+            if return_layernorm_output_gathered:
+                # Perform all-gather in high precision if gathered
+                # norm output will be returned
+                ln_out_total, _ = gather_along_first_dim(ln_out, tp_group)
+                ln_out_return = ln_out_total
+                if fp8:
+                    ln_out = fc1_input_quantizer(ln_out)
+                    fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    ln_out_total = fc1_input_quantizer(ln_out_total)
             else:
-                ln_out_total = ln_out
-
-        # If residual connection is after LN, we need `ln_out`
-        # tensor in higher precision, this comes at the cost
-        # of an extra fp8 cast.
-        ln_out_return = None
-        if return_layernorm_output:
-            ln_out_return = ln_out_total if return_layernorm_output_gathered else ln_out
-            if fp8 and not with_quantized_all_gather:
-                ln_out_total = fc1_input_quantizer(ln_out_total)
-                if ln_out_gathered:
-                    rank = torch.distributed.get_rank(tp_group)
-                    slice_start = rank * ln_out.size(0)
-                    slice_end = (rank + 1) * ln_out.size(0)
-                    ln_out = ln_out_total[
-                        slice_start:slice_end, ...
-                    ]  # TODO(pgadzinski) - check this  # pylint: disable=fixme
+                if fp8:
+                    if not with_quantized_norm:
+                        ln_out = fc1_input_quantizer(ln_out)
+                    fc1_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                if ub_overlap_ag:
+                    # Copy into Userbuffers buffer
+                    ub_obj_lnout = get_ub("fc1_fprop")
+                    ub_obj_lnout.get_buffer(fc1_input_quantizer, local_chunk=True).copy_(ln_out)
+                    ln_out_total = ub_obj_lnout.get_buffer(fc1_input_quantizer)
                 else:
-                    ln_out = ln_out_total
+                    # All-gather with NCCL
+                    ln_out_total, _ = gather_along_first_dim(
+                        ln_out,
+                        tp_group,
+                        quantizer=(fc1_input_quantizer if fp8 else None),
+                    )
+        else:
+            if fp8 and not with_quantized_norm:
+                ln_out = fc1_input_quantizer(ln_out)
+            ln_out_total = ln_out
 
         # Cast weights to expected dtype
-        fc1_weight_final = fc1_weight
-        fc2_weight_final = fc2_weight
         if not fp8:
-            fc1_weight_final = cast_if_needed(fc1_weight_final, activation_dtype)
-            fc2_weight_final = cast_if_needed(fc2_weight_final, activation_dtype)
+            fc1_weight_final = cast_if_needed(fc1_weight, activation_dtype)
+            fc2_weight_final = cast_if_needed(fc2_weight, activation_dtype)
         else:
             # If weights are not quantized, we call get_weight_workspace,
             # which handles weight caching etc.
-            if not isinstance(fc1_weight, QuantizedTensor):
-                # FP8 cast to workspace buffer
-                update_workspace = is_first_microbatch is None or is_first_microbatch
-                fc1_weight_final = module.get_weight_workspace(
-                    tensor=fc1_weight,
-                    quantizer=fc1_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc1_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                )
-            if not isinstance(fc2_weight, QuantizedTensor):
-                fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
-                fc2_weight_final = module.get_weight_workspace(
-                    tensor=fc2_weight,
-                    quantizer=fc2_weight_quantizer,
-                    cache_name=(None if is_first_microbatch is None else "fc2_weight"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    fsdp_group=fsdp_group,
-                )
+            # FP8 cast to workspace buffer
+            update_workspace = is_first_microbatch is None or is_first_microbatch
+            fc1_weight_final = module.get_weight_workspace(
+                tensor=fc1_weight,
+                quantizer=fc1_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc1_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+            )
+            fc2_weight_quantizer.set_usage(rowwise=True, columnwise=True)
+            fc2_weight_final = module.get_weight_workspace(
+                tensor=fc2_weight,
+                quantizer=fc2_weight_quantizer,
+                cache_name=(None if is_first_microbatch is None else "fc2_weight"),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                fsdp_group=fsdp_group,
+            )
 
         # Cast biases to expected dtype
         bias_dtype = activation_dtype
@@ -309,7 +327,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
         # FC1 GEMM
 
-        # There are 2 fussions possible:
+        # There are 2 fusions possible:
         # - gemm_gelu_fusion - default for full precision, optional for fp8 - need to turn on gemm_gelu_fusion,
         # - bias_gelu_fusion - only for full precision.
         # If both gemm_gelu_fusion and bias_gelu_fusion are enabled, only bias_gelu_fusion will be performer
@@ -392,10 +410,17 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_type=tex.CommOverlapType.RS if ub_overlap_rs else None,
             extra_output=rs_out,
         )
+
+        # Weight with column-wise usage is needed for dgrad GEMM.
+        if is_grad_enabled and inp.requires_grad:
+            if isinstance(fc1_weight_final, QuantizedTensor):
+                fc1_weight_final.update_usage(columnwise_usage=True)
+            if isinstance(fc2_weight_final, QuantizedTensor):
+                fc2_weight_final.update_usage(columnwise_usage=True)
+
         if not is_grad_enabled:
             clear_tensor_data(act_out, fc1_out_without_bias, fc1_out)
-
-        if is_grad_enabled:
+        else:
             if cpu_offloading:
                 if fp8 and fc1_weight_final is not None:
                     set_offloading_param(fc1_weight_final, "weight_offloading", True)
@@ -440,7 +465,7 @@ class _LayerNormMLP(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
                 ln_weight,
-                ln_out.clone() if ub_overlap_ag else ln_out,  # avoid saving a UB buffer
+                ln_out,
                 fc1_weight_final,
                 fc1_bias,
                 fc1_out,
@@ -459,6 +484,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
 
+            ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
             ctx.grad_fc1_output_quantizer = grad_fc1_output_quantizer
             ctx.grad_fc2_output_quantizer = grad_fc2_output_quantizer
             ctx.grad_input_quantizer = grad_input_quantizer
@@ -477,9 +503,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             ctx.cpu_offloading = cpu_offloading
             ctx.is_first_microbatch = is_first_microbatch
-            ctx.use_fc1_bias = use_fc1_bias
-            ctx.use_fc2_bias = use_fc2_bias
-            ctx.use_bias = ctx.use_fc1_bias
+            ctx.use_bias = fc2_bias is not None
             ctx.sequence_parallel = sequence_parallel
             ctx.tensor_parallel = tensor_parallel
             ctx.inp_shape = inp_shape
@@ -488,7 +512,7 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.bias_gelu_fusion = bias_gelu_fusion
             ctx.return_layernorm_output = return_layernorm_output
             ctx.return_layernorm_output_gathered = (
-                return_layernorm_output_gathered and ln_out_gathered
+                return_layernorm_output_gathered and sequence_parallel
             )
             ctx.set_parallel_mode = set_parallel_mode
             ctx.bwd_ln_sm_margin = bwd_ln_sm_margin
@@ -546,11 +570,13 @@ class _LayerNormMLP(torch.autograd.Function):
                         ctx.ub_bulk_wgrad,
                     ]
                 )
-                and not FP8GlobalStateManager.get_fp8_recipe().delayed()
+                and (ctx.fp8_recipe is not None)
             ):
-                raise NotImplementedError(
-                    "Comm+GEMM overlap is only supported with FP8 delayed scaling"
-                )
+                if not ctx.fp8_recipe.float8_per_tensor_scaling():
+                    raise NotImplementedError(
+                        "Comm+GEMM overlap is only supported with FP8 delayed scaling or per-tensor"
+                        " current scaling"
+                    )
 
             saved_tensors = ctx.saved_tensors
             (  # pylint: disable=unbalanced-tuple-unpacking
@@ -616,10 +642,11 @@ class _LayerNormMLP(torch.autograd.Function):
             # Prepare grad output tensor
             # Note: Cast to expected dtype and perform tensor-parallel communication
             if ctx.grad_fc2_output_quantizer is not None:
-                ctx.grad_fc2_output_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=True,
-                )
+                # Reduce duplicated transpose, which is performed in grad_output.update_usage
+                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                else:
+                    ctx.grad_fc2_output_quantizer.set_usage(rowwise=True, columnwise=True)
 
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
@@ -645,7 +672,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.fc1_input_quantizer
-                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    quantizer.set_usage(rowwise=False, columnwise=True)
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,
@@ -711,14 +738,13 @@ class _LayerNormMLP(torch.autograd.Function):
                     quantization_params=None,  # wgrad in high precision
                     layout="NT",
                     grad=True,
-                    bias=fc2_bias if fc2_bias is not None and fc2_bias_grad is None else None,
+                    bias=fc2_bias if fc2_bias_grad is None else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     use_split_accumulator=_2X_ACC_WGRAD,
                     out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
                 if fc2_bias_grad is None:
                     fc2_bias_grad = fc2_bias_grad_
-                del fc2_bias_grad_
             clear_tensor_data(act_out)
 
             # bias computation
@@ -733,16 +759,23 @@ class _LayerNormMLP(torch.autograd.Function):
                 fc1_bias_grad, dact = bgrad_dgelu_fused(fc2_dgrad, fc1_out_without_bias, fc1_bias)
                 if ctx.grad_fc1_output_quantizer is not None:
                     dact = ctx.grad_fc1_output_quantizer(dact)
-            elif _act_func(ctx.activation)[2] is not None and ctx.fp8:
+            elif (
+                _act_func(ctx.activation, ctx.fp8_recipe if ctx.fp8 else None)[2] is not None
+                and ctx.fp8
+            ):
                 # Fusion: gemm, bias + gelu + quantize
-                dbias_dact_quantize_func = _act_func(ctx.activation)[2]
+                dbias_dact_quantize_func = _act_func(
+                    ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                )[2]
                 fc1_bias_grad, dact = dbias_dact_quantize_func(
                     fc2_dgrad, fc1_out.to(ctx.activation_dtype), ctx.grad_fc1_output_quantizer
                 )  # quantize bgrad gelu fused
             else:
                 # Fusion: gemm + gelu,
                 if not fc2_dgrad_gemm_gelu_fusion:
-                    activation_func_bwd = _act_func(ctx.activation)[1]
+                    activation_func_bwd = _act_func(
+                        ctx.activation, ctx.fp8_recipe if ctx.fp8 else None
+                    )[1]
                     dact = activation_func_bwd(
                         fc2_dgrad, fc1_out.to(ctx.activation_dtype), None
                     )  # activation in high precision
@@ -976,11 +1009,9 @@ class _LayerNormMLP(torch.autograd.Function):
             dgamma,
             dbeta,
             fc1_wgrad,
-            fc1_bias_grad if ctx.use_fc1_bias else None,
-            None,  # use_fc1_bias
+            fc1_bias_grad if fc1_bias is not None else None,
             fc2_wgrad,  # pylint: disable=possibly-used-before-assignment
-            fc2_bias_grad if ctx.use_fc2_bias else None,
-            None,  # use_fc2_bias
+            fc2_bias_grad,
             None,  # eps
             None,  # is_first_microbatch
             None,  # fp8
@@ -1286,6 +1317,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.bwd_ln_sm_margin = int(os.getenv("NVTE_BWD_LAYERNORM_SM_MARGIN", "0"))
         self.inf_ln_sm_margin = int(os.getenv("NVTE_INF_LAYERNORM_SM_MARGIN", "0"))
 
+    def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
+        """Init scales and amaxes for fwd | bwd."""
+        super().set_meta_tensor(fwd, recipe)
+
+        # customize quantizers based on each recipe & layer configs
+        if FP8GlobalStateManager.get_fp8_recipe().float8_current_scaling():
+            self._customize_quantizers_float8_current_scaling(fwd, recipe)
+        # elif for other recipes (mxfp8, etc.)
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1391,10 +1431,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.layer_norm_bias,
                 fc1_weight,
                 fc1_bias,
-                self.use_bias,
                 fc2_weight,
-                fc2_bias,
-                self.apply_bias and not self.gemm_bias_unfused_add,
+                fc2_bias if self.apply_bias and not self.gemm_bias_unfused_add else None,
                 self.eps,
                 is_first_microbatch,
                 self.fp8,
@@ -1494,3 +1532,76 @@ class LayerNormMLP(TransformerEngineBaseModule):
             grad_fc2_output_quantizer,
             grad_input_quantizer,
         )
+
+    def _customize_quantizers_float8_current_scaling(self, fwd: bool, recipe: Recipe) -> None:
+        """Customize quantizers based on current scaling recipe + layernorm_mlp."""
+        assert (
+            recipe.float8_current_scaling()
+        ), "current scaling recipe quantizer customization here"
+        if fwd:
+            # fc1_input_quantizer: set configs about amax epsilon and power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_INPUT
+            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+            # fc2_input_quantizer
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_INPUT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_INPUT
+            ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
+            # fc1_weight_quantizer: also set numerical configs about weight
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM1_WEIGHT
+            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+            # fc2_weight_quantizer
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_WEIGHT
+            ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
+            self.quantizers["scaling_fwd"][
+                tex.FP8FwdTensors.GEMM2_WEIGHT
+            ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
+            # parallel related
+            if self.sequence_parallel and self.set_parallel_mode:
+                # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].with_amax_reduction = True
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_fwd"][
+                    tex.FP8FwdTensors.GEMM1_INPUT
+                ].amax_reduction_size = self.tp_size
+        else:
+            # grad_fc2_output_quantizer: set configs about amax epsilon and power_2_scale for grad_fc2_output_quantizer
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_OUTPUT1
+            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            # grad_fc1_output_quantizer: also set numerical configs for grad_fc1_output_quantizer
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_INPUT1
+            ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
+            self.quantizers["scaling_bwd"][
+                tex.FP8BwdTensors.GRAD_INPUT1
+            ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
+            if self.sequence_parallel and self.set_parallel_mode:
+                # grad_fc2_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].with_amax_reduction = True
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_group = self.tp_group
+                self.quantizers["scaling_bwd"][
+                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                ].amax_reduction_size = self.tp_size

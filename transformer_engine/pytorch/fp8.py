@@ -13,7 +13,13 @@ from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
 import transformer_engine_torch as tex
-from transformer_engine.common.recipe import Recipe, DelayedScaling, Format, MXFP8BlockScaling
+from transformer_engine.common.recipe import (
+    Recipe,
+    DelayedScaling,
+    Format,
+    MXFP8BlockScaling,
+    Float8CurrentScaling,
+)
 
 from .constants import dist_group_type
 from .utils import get_device_compute_capability
@@ -87,6 +93,7 @@ class FP8GlobalStateManager:
     FP8_RECIPE = None
     FP8_DISTRIBUTED_GROUP = None
     FP8_PARAMETERS = False
+    HIGH_PRECISION_INIT_VAL = False
     IS_FIRST_FP8_MODULE = False
     FP8_GRAPH_CAPTURING = False
     FP8_AUTOCAST_DEPTH = 0
@@ -111,6 +118,7 @@ class FP8GlobalStateManager:
         cls.FP8_RECIPE = None
         cls.FP8_DISTRIBUTED_GROUP = None
         cls.FP8_PARAMETERS = False
+        cls.HIGH_PRECISION_INIT_VAL = False
         cls.IS_FIRST_FP8_MODULE = False
         cls.FP8_GRAPH_CAPTURING = False
         cls.FP8_AUTOCAST_DEPTH = 0
@@ -198,6 +206,8 @@ class FP8GlobalStateManager:
         fp8_meta: Dict[str, Any],
     ) -> None:
         """
+        Delayed scaling only.
+
         The amax reduction process happens completely outside the FP8 modules.
         To participate in the reduction, the only role played by a module is
         to call this function in order to append it's FP8 tensor into a global
@@ -211,7 +221,8 @@ class FP8GlobalStateManager:
         wrapper. For non CG case, it's called from within the module.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other recipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Every module must call this function exactly once since
@@ -257,6 +268,11 @@ class FP8GlobalStateManager:
     def with_fp8_parameters(cls) -> bool:
         """Should the parameters be stored as FP8"""
         return cls.FP8_PARAMETERS
+
+    @classmethod
+    def with_high_precision_init_val(cls) -> bool:
+        """Should the high precision initial values be stored with FP8 parameters"""
+        return cls.HIGH_PRECISION_INIT_VAL
 
     @classmethod
     def fp8_graph_capturing(cls) -> bool:
@@ -326,7 +342,8 @@ class FP8GlobalStateManager:
         cls,
         forward: bool = True,
     ) -> None:
-        """Concatenate, reduce, and split amaxes in the global buffer."""
+        """Delayed scaling only. Concatenate, reduce, and split amaxes in the global buffer."""
+        # global_amax_buffer should only be non-empty for fp8 delayed scaling
         for buffer_key, amax_buffer in cls.global_amax_buffer.items():
             # Check for forward or backward reduction.
             fwd_update, autocast_key = cls.split_key_in_buffer(buffer_key)
@@ -426,6 +443,8 @@ class FP8GlobalStateManager:
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
         if enabled and cls.FP8_AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
+            # delayed scaling only function, for other recipes (current scaling with any granularity),
+            # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
 
     @classmethod
@@ -434,7 +453,8 @@ class FP8GlobalStateManager:
         to ensure both forward steps are numerically same.
         """
 
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other recipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         buffer_position_key = "global_fp8_buffer_pos_fwd_recompute"
@@ -459,8 +479,8 @@ class FP8GlobalStateManager:
         """Switch to the copied scaling factors and amaxes from phase
         1 forward for indentical numerical outputs.
         """
-
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other recipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         # Store updated amaxes and scales from phase 1 post forward.
@@ -478,8 +498,8 @@ class FP8GlobalStateManager:
     @staticmethod
     def restore_fp8_meta_tensors(fp8_meta: Dict[str, Any]) -> None:
         """Restore latest scaling factors and amaxes after recompute forward run."""
-
-        if fp8_meta["recipe"].mxfp8():
+        # delayed scaling only function, noop for any other recipe
+        if not fp8_meta["recipe"].delayed():
             return
 
         fp8_meta["scaling_fwd"].amax_history.copy_(fp8_meta["updated_amax_history_fwd"])
@@ -487,7 +507,11 @@ class FP8GlobalStateManager:
 
 
 @contextmanager
-def fp8_model_init(enabled: bool = True, recipe: Optional[Recipe] = None) -> None:
+def fp8_model_init(
+    enabled: bool = True,
+    recipe: Optional[Recipe] = None,
+    preserve_high_precision_init_val: bool = False,
+) -> None:
     """
     Context manager for FP8 initialization of parameters.
 
@@ -497,6 +521,12 @@ def fp8_model_init(enabled: bool = True, recipe: Optional[Recipe] = None) -> Non
 
         with fp8_model_init(enabled=True):
             model = transformer_engine.pytorch.Linear(768, 768)
+
+        # Preserving high precision initial value to initialize master weight
+        with fp8_model_init(enabled=True, preserve_high_precision_init_val=True):
+            model = transformer_engine.pytorch.Linear(768, 768)
+        master_weight = model.weight.get_high_precision_init_val()
+        model.weight.clear_high_precision_init_val()
 
     Parameters
     ----------
@@ -513,18 +543,29 @@ def fp8_model_init(enabled: bool = True, recipe: Optional[Recipe] = None) -> Non
              * LoRA-like fine-tuning, where the main parameters of the model do not change.
     recipe: transformer_engine.common.recipe.Recipe, default = `None`
             Recipe used to create the parameters. If left to None, it uses the default FP8 recipe.
+    preserve_high_precision_init_val: bool, default = `False`
+             when enabled, store the high precision tensor used to initialize FP8 parameters
+             in CPU memory, and add two function attributes named `get_high_precision_init_val()`
+             and `clear_high_precision_init_val()` to FP8 parameters to get/clear this high
+             precision tensor. The purpose is that users can use this high-precision copy
+             to initialize master weights, avoiding the loss of precision that can occur when
+             using FP8 parameters directly. Note that after the master weights are initialized,
+             users should call `clear_high_precision_init_val()` to release this CPU memory.
 
              This functionality is *EXPERIMENTAL*.
     """
     _fp8_parameters = FP8GlobalStateManager.FP8_PARAMETERS
     _fp8_recipe = FP8GlobalStateManager.FP8_RECIPE
+    _high_precision_init_val = FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL
     FP8GlobalStateManager.FP8_PARAMETERS = enabled
     FP8GlobalStateManager.FP8_RECIPE = get_default_fp8_recipe() if recipe is None else recipe
+    FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL = preserve_high_precision_init_val
     try:
         yield
     finally:
         FP8GlobalStateManager.FP8_PARAMETERS = _fp8_parameters
         FP8GlobalStateManager.FP8_RECIPE = _fp8_recipe
+        FP8GlobalStateManager.HIGH_PRECISION_INIT_VAL = _high_precision_init_val
 
 
 @contextmanager
@@ -743,6 +784,8 @@ class RecipeState(abc.ABC):
             cls = DelayedScalingRecipeState
         elif recipe.mxfp8():
             cls = MXFP8BlockScalingRecipeState
+        elif recipe.float8_current_scaling():
+            cls = Float8CurrentScalingRecipeState
         else:
             raise ValueError("{recipe.__class__.__name__} is not supported")
         return cls(
@@ -809,6 +852,45 @@ class DelayedScalingRecipeState(RecipeState):
 
         return [
             Float8Quantizer(self.scale[i], self.amax_history[0][i].reshape((1,)), self.dtype)
+            for i in range(self.num_quantizers)
+        ]
+
+
+class Float8CurrentScalingRecipeState(RecipeState):
+    """Configuration for Per-tensor current scaling quantization.
+
+    Per-tensor current quantization does not require state.
+
+    """
+
+    recipe: Float8CurrentScaling
+    mode: str
+    dtype: tex.DType
+    device: torch.device
+
+    def __init__(
+        self,
+        recipe: Float8CurrentScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        self.dtype = get_fp8_te_dtype(recipe, mode == "forward")
+
+        # Allocate buffers
+        if device is None:
+            device = torch.device("cuda")
+        self.device = device
+
+    def make_quantizers(self) -> list:
+        from .tensor.float8_tensor import Float8CurrentScalingQuantizer
+
+        return [
+            Float8CurrentScalingQuantizer(self.dtype, device=self.device)
             for i in range(self.num_quantizers)
         ]
 

@@ -24,6 +24,16 @@ TE_DType = {
     torch.bfloat16: tex.DType.kBFloat16,
 }
 
+TE_DType_To_Torch = {
+    tex.DType.kByte: torch.uint8,
+    tex.DType.kFloat8E4M3: torch.float8_e4m3fn,
+    tex.DType.kFloat8E5M2: torch.float8_e5m2,
+    tex.DType.kInt32: torch.int32,
+    tex.DType.kFloat32: torch.float32,
+    tex.DType.kFloat16: torch.half,
+    tex.DType.kBFloat16: torch.bfloat16,
+}
+
 AttnMaskTypes = (
     "no_mask",
     "padding",
@@ -54,6 +64,16 @@ QKVLayouts = (
     "thd_t2hd",
     "thd_th2d",
     "thd_thd_thd",
+    "sbhd_bshd_bshd",
+    "bshd_sbhd_sbhd",
+    "thd_bshd_bshd",
+    "thd_sbhd_sbhd",
+    "paged_kv_bshd_bshd_bshd",
+    "paged_kv_bshd_sbhd_sbhd",
+    "paged_kv_sbhd_bshd_bshd",
+    "paged_kv_sbhd_sbhd_sbhd",
+    "paged_kv_thd_bshd_bshd",
+    "paged_kv_thd_sbhd_sbhd",
 )
 
 LayerTypes = ("encoder", "decoder")

@@ -66,6 +66,16 @@ class MXFP8Quantizer(Quantizer):
 
         return dst
 
+    def is_quantizable(self, inp: torch.Tensor) -> bool:
+        """Returns whether or not given inp can be quantized"""
+        if inp.ndim < 2:
+            return False
+        if inp.shape[-1] % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        if math.prod(inp.shape[:-1]) % MXFP8_BLOCK_SCALING_SIZE != 0:
+            return False
+        return True
+
     def make_empty(
         self,
         shape: Iterable[int],
@@ -207,36 +217,50 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         # TODO(ksivamani): Fix the detach bug
         return MXFP8Tensor.make_like(self)
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+    def update_usage(
+        self,
+        rowwise_usage: Optional[bool] = None,
+        columnwise_usage: Optional[bool] = None,
+    ):
         """
         For MXFP8, columnwise scaled output is only produced by x2
         scaling kernels, so this function only disables usages.
         """
-        assert rowwise_usage or columnwise_usage, "Could not disable all usages of the tensor."
 
-        if columnwise_usage and rowwise_usage:
-            assert (
-                self._rowwise_data is not None
-                and self._rowwise_scale_inv is not None
-                and self._columnwise_data is not None
-                and self._columnwise_scale_inv is not None
-            ), "Cannot update to rowwise and columnwise usage."
-            return
+        # Default usage is based on available data
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
 
+        # Update row-scaled data
         if rowwise_usage:
-            assert (
-                self._rowwise_data is not None and self._rowwise_scale_inv is not None
-            ), "Cannot update to rowwise usage."
+            if self._rowwise_data is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled FP8 data"
+                )
+            if self._rowwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested row-wise usage, but MXFP8Tensor is missing row-scaled scale-inverses"
+                )
+        else:
+            self._rowwise_data = None
+            self._rowwise_scale_inv = None
+
+        # Update column-scaled data
+        if columnwise_usage:
+            if self._columnwise_data is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, but MXFP8Tensor is missing column-scaled FP8 data"
+                )
+            if self._columnwise_scale_inv is None:
+                raise RuntimeError(
+                    "Requested column-wise usage, "
+                    "but MXFP8Tensor is missing column-scaled scale-inverses"
+                )
+        else:
             self._columnwise_data = None
             self._columnwise_scale_inv = None
-            return
-
-        assert (
-            self._columnwise_data is not None and self._columnwise_scale_inv is not None
-        ), "Cannot update to columnwise usage."
-        self._rowwise_data = None
-        self._rowwise_scale_inv = None
-        return
 
     def clone(self) -> MXFP8Tensor:
         # pylint: disable=missing-function-docstring
@@ -284,15 +308,6 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         self._rowwise_data = torch.Tensor() if self._rowwise_data is not None else None
         self._columnwise_data = torch.Tensor() if self._columnwise_data is not None else None
-
-    def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP8TensorBase]:
-        """Prepare the tensor base for saving for backward
-
-        After calling this, the tensor instance does not hold any
-        data.
-
-        """
-        return [self], None
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

@@ -14,13 +14,15 @@ import transformer_engine.pytorch as te
 import torch
 from torch import nn
 import torch.distributed as dist
-
+import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
+    Float8CurrentScaling,
     Format,
     Recipe,
 )
+from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
 from run_layer_with_overlap import _compare_tensors
 
 SEQ_LEN, BATCH_SIZE = 16, 16
@@ -45,6 +47,8 @@ def quantization_recipe() -> Recipe:
         )
     if QUANTIZATION == "mxfp8":
         return MXFP8BlockScaling()
+    if QUANTIZATION == "fp8_cs":
+        return Float8CurrentScaling()
     return te.fp8.get_default_fp8_recipe()
 
 
@@ -88,6 +92,7 @@ def main(argv=None, namespace=None):
         HIDDEN_SIZE = 128
 
     test_dict = [
+        test_quantizer,
         test_linear,
         test_layernorm,
         test_layernorm_linear,
@@ -152,7 +157,12 @@ def dist_print(msg, src=None, end="\n", error=False):
 
 
 def _get_tolerances(dtype):
-    if QUANTIZATION is not None:
+    # loose tolerances for fp8_cs because of sequence parallel & amax reduction
+    # so that each rank has a different scale_inv for computing Y when we have
+    # row parallel & sequence parallel, because we do the all_gather in backward pass
+    if QUANTIZATION == "fp8_cs":
+        return {"rtol": 0.4, "atol": 0.25}
+    elif QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
 
     if dtype == torch.float16:
@@ -293,6 +303,98 @@ def _alloc_main_grad(model_single_node, model_distributed):
             param.main_grad = torch.zeros_like(param, dtype=torch.float32)
 
 
+###############################################
+#                   Quantizer                 #
+###############################################
+def _construct_quantizer(quantizer_class, fp8_dtype, device, tp_group, tp_size):
+    """
+    quantizer is the reference quantizer on a single GPU.
+    quantizer_dist is the distributed quantizer to be tested on multiple GPUs.
+    """
+    if quantizer_class == Float8CurrentScalingQuantizer:
+        quantizer_dist = quantizer_class(
+            fp8_dtype=fp8_dtype,
+            device=device,
+            with_amax_reduction=True,
+            amax_reduction_group=tp_group,
+            amax_reduction_size=tp_size,
+        )
+        quantizer = quantizer_class(
+            fp8_dtype=fp8_dtype,
+            device=device,
+            with_amax_reduction=False,
+        )
+        return quantizer, quantizer_dist
+    else:
+        raise ValueError(f"Unsupported quantizer class: {quantizer_class}")
+
+
+def _shard_tensor(x, world_size, axis):
+    split_size = x.size()[axis] // world_size
+    split_tensor = torch.split(x, split_size, axis)
+    out = []
+    for tensor in split_tensor:
+        out.append(tensor.detach().clone().requires_grad_(x.requires_grad).cuda())
+    return out
+
+
+@run_distributed_test()
+def _test_quantizer(input_dtype, fp8_dtype):
+    """Test the quantizer under distributed settings.
+
+    Args:
+        input_dtype (torch.dtype): The data type of the input.
+        fp8_dtype (tex.DType): The data type of the fp8.
+    """
+
+    M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE
+
+    # high precision input
+    x_hp_cpu = torch.randn((M, N), device="cpu").to(input_dtype)
+    # set one element of the input to a very large value, which doesn't live in rank 0 after the split
+    # to test the amax reduction on purpose
+    x_hp_cpu[M - 1, N - 1] = 1e4
+    # rank 0 takes the full copy and quantize with GPU 0 for verification
+    if WORLD_RANK == 0:
+        x_hp_rank0 = x_hp_cpu.clone().detach().requires_grad_(True).to("cuda")
+    x_hp_local_rank = _shard_tensor(x_hp_cpu, WORLD_SIZE, 0)[WORLD_RANK]
+
+    # Create quantizers
+    quantizer, quantizer_dist = _construct_quantizer(
+        Float8CurrentScalingQuantizer, fp8_dtype, x_hp_local_rank.device, NCCL_WORLD, WORLD_SIZE
+    )
+
+    # quantize the input
+    if WORLD_RANK == 0:
+        x_fp8_single = quantizer(x_hp_rank0)
+
+    # multi-GPU quantizer
+    x_fp8_dist = quantizer_dist(x_hp_local_rank)
+
+    # check scale_inv with zero tolerance
+    if WORLD_RANK == 0:
+        torch.testing.assert_close(
+            x_fp8_single._scale_inv, x_fp8_dist._scale_inv, rtol=0.0, atol=0.0
+        )
+
+
+def test_quantizer():
+    """
+    Run quantizer tests with various configurations.
+    Currently only check fp8_cs because it needs to do amax reduction in the quantizer.
+    """
+    # skip this test for other quantization schemes
+    if QUANTIZATION != "fp8_cs":
+        return
+
+    input_dtypes = [torch.float32, torch.bfloat16]
+    fp8_dtypes = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+
+    for input_dtype in input_dtypes:
+        for fp8_dtype in fp8_dtypes:
+            _test_quantizer(input_dtype, fp8_dtype)
+
+
 ############################################
 #                   Linear                 #
 ############################################
@@ -339,6 +441,11 @@ def _test_linear(parallel_mode=None, sequence_parallel=False, **kwargs):
                 torch.empty((WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
             )
             input_distributed = torch.randn((BATCH_SIZE, HIDDEN_SIZE)).cuda().to(params_dtype)
+            # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+            if QUANTIZATION == "fp8_cs":
+                input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+                if WORLD_RANK == WORLD_SIZE - 1:
+                    input_distributed[BATCH_SIZE - 1, HIDDEN_SIZE - 1] = 11
             input_single_node = _gather(input_distributed, dim=0).detach()
         else:
             input_distributed = input_single_node.clone()
@@ -501,6 +608,12 @@ def _test_layernorm_linear(parallel_mode=None, sequence_parallel=False, **kwargs
         # Duplicate input for sequence parallelism
         input_single_node = torch.empty((WORLD_SIZE * SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
         input_distributed = torch.randn((SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
+        # make the last element of the input a large value to test the amax reduction on purpose
+        # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+        if QUANTIZATION == "fp8_cs":
+            input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+            if WORLD_RANK == WORLD_SIZE - 1:
+                input_distributed[SEQ_LEN - 1, HIDDEN_SIZE - 1] = 11
         input_single_node = _gather(input_distributed).detach()
     else:
         input_distributed = input_single_node.clone()
@@ -599,6 +712,12 @@ def _test_layernorm_mlp(set_parallel_mode=None, sequence_parallel=False, **kwarg
         # Duplicate input for sequence parallelism
         input_single_node = torch.empty((WORLD_SIZE * SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
         input_distributed = torch.randn((SEQ_LEN, HIDDEN_SIZE)).cuda().to(params_dtype)
+        # make the last element of the input a large value to test the amax reduction on purpose
+        # when quantization is fp8_cs, we need to trigger corner cases to see if amax reduction is working
+        if QUANTIZATION == "fp8_cs":
+            input_distributed = torch.clamp(input_distributed, min=-10, max=10)
+            if WORLD_RANK == WORLD_SIZE - 1:
+                input_distributed[SEQ_LEN - 1, HIDDEN_SIZE - 1] = 11
         input_single_node = _gather(input_distributed).detach()
     else:
         input_distributed = input_single_node.clone()
@@ -651,6 +770,7 @@ def test_layernorm_mlp():
         {"return_bias": True},
         {"return_layernorm_output": True},
     ]
+
     for kwargs in kwargs_list:
         for set_parallel_mode in [True]:
             for sequence_parallel in [False, True]:
@@ -745,6 +865,7 @@ def test_transformer_layer():
         {"fuse_qkv_params": True},
         {"activation": "relu"},
     ]
+
     for kwargs in kwargs_list:
         for sequence_parallel in [False, True]:
             _test_transformer_layer_parallel(sequence_parallel, **kwargs)
