@@ -52,15 +52,15 @@ calError_t request_test(void* request) {
 
 calError_t request_free(void* request) { return CAL_OK; }
 
-CommGemmCtx* nvte_comm_gemm_ctx_create() {
+CommGemmCtx* nvte_comm_gemm_ctx_create(int nranks, int rank, int local_device) {
   cal_comm_create_params_t params{
     .allgather = allgather,
     .req_test = request_test,
     .req_free = request_free,
+    .nranks = nranks,
+    .rank = rank,
+    .local_device = local_device,
   };
-  NVTE_CHECK_MPI(MPI_Comm_rank(MPI_COMM_WORLD, &params.rank));
-  NVTE_CHECK_MPI(MPI_Comm_size(MPI_COMM_WORLD, &params.nranks));
-  params.local_device = params.rank;
   cal_comm_t cal_comm_raw{};
   NVTE_CHECK_CAL(cal_comm_create(params, &cal_comm_raw));
   CalComm cal_comm(cal_comm_raw, cal_comm_destroy);
@@ -92,6 +92,8 @@ CommGemmCtx* nvte_comm_gemm_ctx_create() {
 
 void nvte_comm_gemm_ctx_destroy(CommGemmCtx* ctx) noexcept { delete ctx; }
 
-void nvte_comm_gemm(CommGemmCtx* ctx) {
+void nvte_comm_gemm(CommGemmCtx* ctx, const NVTETensor a, const NVTETensor b, NVTETensor d,
+                    const NVTETensor bias, NVTETensor pre_gelu_out, bool transa, bool transb,
+                    bool grad, bool accumulate, int comm_sm_count) {
   // TODO:
 }
