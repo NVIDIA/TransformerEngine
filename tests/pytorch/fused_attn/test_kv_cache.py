@@ -229,7 +229,7 @@ def get_model(
         attn_mask_type = "causal"
         qkv_format = "bshd"
     if mode == "inference":
-        attn_mask_type = "padding_causal" if backend != "FusedAttention" else "padding"
+        attn_mask_type = "padding_causal"
 
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
@@ -392,9 +392,9 @@ def get_tols(module, backend, dtype):
 @pytest.mark.parametrize("module", ["TransformerLayer", "DotProductAttention"])
 @pytest.mark.parametrize("is_cuda_graph", [False, True])
 @pytest.mark.parametrize("is_fp8", [False, True])
-def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
+def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_graph, is_fp8):
     reset_rng_states()
-    logger = logging.getLogger("test_paged_attn")
+    logger = logging.getLogger("test_kv_cache")
     fp8_recipe = recipe.DelayedScaling(
         margin=0,
         fp8_format=recipe.Format.HYBRID,
@@ -407,7 +407,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     fp8_meta["recipe"] = fp8_recipe
 
     config = model_configs_infer[model]
-    num_layers = 2 if module == "TransformerLayer" and backend != "FusedAttention" else 1
+    num_layers = 2 if module == "TransformerLayer" else 1
     # flash-attn v2 requires page_size >= 256
     if backend == "FlashAttention" and not fa_utils.v3_is_installed:
         config_max_seqlen_q = config.max_seqlen_q
@@ -437,7 +437,7 @@ def test_paged_attn(dtype, model, qkv_format, is_paged, backend, module, is_cuda
     # initialize inference_params
     inference_params = InferenceParams(
         max_batch_size=max_batch_size,
-        max_seqlen_kv=config.max_seqlen_kv,
+        max_sequence_length=config.max_seqlen_kv,
         num_heads_kv=config.num_gqa_groups,
         head_dim_k=config.head_dim_qk,
         head_dim_v=config.head_dim_v,

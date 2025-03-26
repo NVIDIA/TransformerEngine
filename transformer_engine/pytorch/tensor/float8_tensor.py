@@ -185,9 +185,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
     """
 
-    """Scaling factor to multiply when quantizing to FP8"""
+    """Workspace buffer for FP8 scaling factor"""
     scale: torch.Tensor
-    """Max-abs value from last FP8 cast"""
+    """Workspace buffer for max-abs value"""
     amax: torch.Tensor
     """FP8 datatype"""
     dtype: TE_DType
