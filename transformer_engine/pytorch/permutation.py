@@ -10,8 +10,9 @@ import torch
 import transformer_engine_torch as tex
 import transformer_engine.pytorch.triton.permutation as triton_permutation
 from transformer_engine.pytorch.constants import TE_DType
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
-
+from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
 __all__ = [
     "moe_permute",
@@ -281,29 +282,60 @@ class _moe_permute_mask_map(torch.autograd.Function):
         ), "num_out_tokens must be provided to the fused permute function."
 
         row_id_map = triton_permutation.make_row_id_map(routing_map, num_tokens, num_experts)
-
-        fp8 = isinstance(inp, Float8Tensor)
+        
+        fp8 = isinstance(inp, QuantizedTensor)
+        delay_scaling = isinstance(inp, Float8Tensor)
+        sub_channel_recpie = isinstance(inp, Float8BlockwiseQTensor)
         if fp8:
             fp8_dtype = inp._fp8_dtype
-            fp8_scale_inv = inp._scale_inv
             fake_dtype = inp.dtype
-            inp = inp._data
-        output, permuted_probs = triton_permutation.permute_with_mask_map(
+            # sub-channel current scaling
+            if sub_channel_recpie:
+                fp8_scale = inp._rowwise_scale_inv.T.contiguous()
+                scale_hidden_dim = fp8_scale.shape[1]
+                assert num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"
+                inp = inp._rowwise_data
+            # delay scaling 
+            elif delay_scaling:
+                fp8_scale_inv = inp._scale_inv
+                inp = inp._data
+        else :  
+            fp8_scale = None
+            fp8_dtype = None
+            scale_hidden_dim = None
+
+        output, permuted_scale, permuted_probs = triton_permutation.permute_with_mask_map(
             inp,
             row_id_map,
             probs,
+            fp8_scale,
             num_tokens,
             num_experts,
             num_out_tokens,
             hidden_size,
+            scale_hidden_dim,
         )
-        if fp8:
+
+        if delay_scaling:
             output = Float8Tensor(
                 data=output,
                 fp8_dtype=fp8_dtype,
                 fp8_scale_inv=fp8_scale_inv,
                 shape=output.shape,
                 dtype=fake_dtype,
+            )
+        elif sub_channel_recpie:
+            output = Float8BlockwiseQTensor(
+                shape = output.shape,
+                dtype = fake_dtype,
+                rowwise_data = output,
+                rowwise_scale_inv = permuted_scale.T.contiguous(),
+                columnwise_data = None,
+                columnwise_scale_inv = None,
+                fp8_dtype = fp8_dtype,
+                quantizer = None,
+                is_2D_scaled = False,
+                requires_grad = output.requires_grad,
             )
 
         ctx.save_for_backward(row_id_map)
@@ -442,47 +474,77 @@ class _moe_unpermute_mask_map(torch.autograd.Function):
             else:
                 (row_id_map,) = ctx.saved_tensors
 
-            fp8 = isinstance(unpermuted_act_grad, Float8Tensor)
+            fp8 = isinstance(unpermuted_act_grad, QuantizedTensor)
+            delay_scaling = isinstance(unpermuted_act_grad, Float8Tensor)
+            sub_channel_recpie = isinstance(unpermuted_act_grad, Float8BlockwiseQTensor)
+
             if fp8:
                 fp8_dtype = unpermuted_act_grad._fp8_dtype
-                fp8_scale_inv = unpermuted_act_grad._scale_inv
                 fake_dtype = unpermuted_act_grad.dtype
-                unpermuted_act_grad = unpermuted_act_grad._data
+                # delay scaling
+                if delay_scaling:
+                    fp8_scale_inv = unpermuted_act_grad._scale_inv
+                    unpermuted_act_grad = unpermuted_act_grad._data
+                # sub-channel current scaling
+                elif sub_channel_recpie:
+                    fp8_scale = unpermuted_act_grad._rowwise_scale_inv.T.contiguous()
+                    unpermuted_act_grad = unpermuted_act_grad._rowwise_data
+                    scale_hidden_dim = fp8_scale.shape[1]
+                    assert ctx.num_tokens == fp8_scale.shape[0], "scale and input shape mismatch"   
             else:
+                scale_hidden_dim = None
                 fp8_dtype = None
+                fp8_scale = None
 
             if ctx.with_probs:
-                act_grad, probs_grad = (
+                act_grad, permuted_scale, probs_grad = (
                     triton_permutation.unpermute_with_mask_map_bwd_with_merging_probs(
                         unpermuted_act_grad,
                         row_id_map,
                         fwd_input,
                         merging_probs,
+                        fp8_scale,
                         ctx.num_tokens,
                         ctx.num_experts,
                         ctx.num_permuted_tokens,
                         ctx.hidden_size,
+                        scale_hidden_dim,
                         fp8_dtype,
                     )
                 )
             else:
-                act_grad, _ = triton_permutation.permute_with_mask_map(
+                act_grad, permuted_scale, _ = triton_permutation.permute_with_mask_map(
                     unpermuted_act_grad,
                     row_id_map,
                     None,
+                    fp8_scale,
                     ctx.num_tokens,
                     ctx.num_experts,
                     ctx.num_permuted_tokens,
                     ctx.hidden_size,
+                    scale_hidden_dim,
                 )
 
-            if fp8:
+            if delay_scaling:
                 act_grad = Float8Tensor(
                     data=act_grad,
                     fp8_dtype=fp8_dtype,
                     fp8_scale_inv=fp8_scale_inv,
                     shape=act_grad.shape,
                     dtype=fake_dtype,
+                )
+            elif sub_channel_recpie:
+                act_grad = Float8BlockwiseQTensor(
+                    shape = act_grad.shape,
+                    dtype = fake_dtype,
+                    rowwise_data = act_grad,
+                    rowwise_scale_inv = permuted_scale.T.contiguous(),
+                    columnwise_data = None,
+                    columnwise_scale_inv = None,
+                    fp8_dtype = fp8_dtype,
+                    quantizer = None,
+                    is_2D_scaled = False,
+                    requires_grad = act_grad.requires_grad,
                 )
 
         if not ctx.needs_input_grad[2]:
