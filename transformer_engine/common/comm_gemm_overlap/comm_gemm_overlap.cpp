@@ -205,16 +205,14 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
                  (param_type == NVTETensorParam::kNVTERowwiseScaleInv ||
                   param_type == NVTETensorParam::kNVTEColumnwiseScaleInv)) {
         // Calculate offset and size for MXFP8 scale-invs
-        size_t chunk_scale_height = height;
-        size_t chunk_scale_width = width;
+        size_t chunk_scale_height = chunk_height;
+        size_t chunk_scale_width = chunk_width;
         if (param_type == NVTETensorParam::kNVTERowwiseScaleInv) {
           chunk_scale_width /= 32;
         } else {
           chunk_scale_height /= 32;
         }
-        auto chunk_scale_start = chunk_offset / 32;
-        auto chunk_scale_end = chunk_scale_start + chunk_scale_height * chunk_scale_width;
-        param_dptr += chunk_scale_start * typeToSize(param_dtype);
+        param_dptr += (chunk_offset / 32) * typeToSize(param_dtype);
         param_shape = {chunk_scale_height, chunk_scale_width};
       }
 

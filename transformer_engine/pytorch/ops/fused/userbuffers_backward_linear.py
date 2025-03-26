@@ -13,7 +13,7 @@ import torch
 
 from transformer_engine_torch import CommOverlapType
 from ...cpp_extensions import general_gemm
-from ...distributed import get_distributed_world_size
+from ...distributed import gather_along_first_dim, get_distributed_world_size
 from ...float8_tensor import Float8Tensor
 from ...fp8 import FP8GlobalStateManager, get_fp8_te_dtype
 from ...module.base import (
@@ -234,9 +234,9 @@ class UserbuffersBackwardLinear(FusedOperation):
 
         # Get Userbuffers communicators
         # Note: Communication patterns are (1) overlap dy all-gather
-        # with dgrad and/or wgrad GEMMs, (2) overlap x all-gather with
-        # dgrad GEMM and dx reduce-scatter with wgrad GEMM, (3)
-        # overlap dx reduce-scatter with dgrad GEMM
+        # with dgrad GEMM, (2) overlap x all-gather with dgrad GEMM
+        # and dx reduce-scatter with wgrad GEMM, (3) overlap dx
+        # reduce-scatter with dgrad GEMM
         ub_comm_dgrad = None
         ub_comm_wgrad = None
         ub_type_dgrad = None
@@ -245,17 +245,11 @@ class UserbuffersBackwardLinear(FusedOperation):
         with_dgrad_all_gather_dy = False
         with_dgrad_reduce_scatter_dx = False
         with_dgrad_all_gather_x = False
-        with_wgrad_all_gather_dy = False
         with_wgrad_reduce_scatter_dx = False
-        with_wgrad_all_gather_x = False
         if tensor_parallel_mode == "row":
             ub_comm_dgrad = get_ub(ub_comm_name + "_dgrad")
             ub_type_dgrad = CommOverlapType.AG
             with_dgrad_all_gather_dy = True
-            if weight_requires_grad and isinstance(grad_output_quantizer, MXFP8Quantizer):
-                ub_comm_wgrad = get_ub(ub_comm_name + "_dgrad")
-                ub_type_wgrad = CommOverlapType.AG
-                with_wgrad_all_gather_dy = True
         elif tensor_parallel_mode == "column":
             if input_requires_grad and weight_requires_grad:
                 with_bulk_overlap = True
@@ -312,6 +306,27 @@ class UserbuffersBackwardLinear(FusedOperation):
                 dy_local = dy_local.dequantize(dtype=dtype)
             elif dy_local.dtype != dtype:
                 dy_local = dy_local.to(dtype=dtype)
+
+        # NCCL communication for MXFP8 grad output tensor
+        # Note: UB does not support overlapping grad output all-gather
+        # with wgrad GEMM. Also, MXFP8 does not allow reusing the grad
+        # output that was gathered for the dgrad GEMM. We work around
+        # this by all-gathering the grad output with NCCL and
+        # overlapping with the dgrad GEMM.
+        dy_wgrad = None
+        dy_wgrad_async = None
+        if (
+            tensor_parallel_mode == "row"
+            and weight_requires_grad
+            and isinstance(grad_output_quantizer, MXFP8Quantizer)
+        ):
+            grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+            dy_wgrad, dy_wgrad_async = gather_along_first_dim(
+                dy_local,
+                tensor_parallel_group,
+                async_op=True,
+                quantizer=grad_output_quantizer,
+            )
 
         # Cast weight tensor dtype if needed
         if weight is None:
@@ -420,32 +435,29 @@ class UserbuffersBackwardLinear(FusedOperation):
         if weight_requires_grad:
 
             # Initialize grad output
-            if with_wgrad_all_gather_dy:
-                if grad_output_quantizer is not None:
-                    grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
-                dy, _ = fill_userbuffers_buffer_for_all_gather(
-                    ub_comm_wgrad,
-                    dy_local,
-                    grad_output_quantizer,
-                    tensor_parallel_group,
-                )
-            elif dy is None:
+            if dy_wgrad is not None:
+                if dy_wgrad_async is not None:
+                    dy_wgrad_async.wait()
+                    dy_wgrad_async = None
+                dy = dy_wgrad
+            elif tensor_parallel_mode == "column":
                 dy = dy_local
+            if dy is None:
+                raise RuntimeError(
+                    "wgrad GEMM requires grad output tensor, which has not been initialized"
+                )
             if isinstance(dy, QuantizedTensor):
                 dy.update_usage(rowwise_usage=False, columnwise_usage=True)
 
-            # Initialize input tensor if needed
-            if with_wgrad_all_gather_x:
-                if input_quantizer is not None:
-                    input_quantizer.set_usage(rowwise=False, columnwise=True)
-                x, _ = fill_userbuffers_buffer_for_all_gather(
-                    ub_comm_dgrad,
-                    x_local,
-                    input_quantizer,
-                    tensor_parallel_group,
-                )
-            if not (with_dgrad_all_gather_x or with_wgrad_all_gather_x):
+            # Initialize input tensor
+            if tensor_parallel_mode == "row":
                 x = x_local
+            if x is None:
+                raise RuntimeError(
+                    "wgrad GEMM requires input tensor, which has not been initialized"
+                )
+            if isinstance(x, QuantizedTensor):
+                x.update_usage(rowwise_usage=False, columnwise_usage=True)
 
             # Perform wgrad GEMM
             dw, *_ = general_gemm(
@@ -473,6 +485,10 @@ class UserbuffersBackwardLinear(FusedOperation):
             db_async.wait()
         if bias_requires_grad:
             extra_outputs["grad_bias"] = db
+
+        # Clean up
+        if dy_wgrad_async is not None:
+            dy_wgrad_async.wait()
 
         return dx_local, dw, extra_outputs
 
