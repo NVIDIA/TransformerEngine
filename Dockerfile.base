@@ -1,0 +1,48 @@
+ARG FROM_IMAGE_NAME=gitlab-master.nvidia.com:5005/dl/dgx/pytorch:master-py3-devel
+ARG FRAMEWORK=pytorch
+
+FROM scratch as transformerengine
+COPY 3rdparty/ 3rdparty/
+COPY docs/ docs/
+COPY examples/ examples/
+COPY qa/ qa/
+COPY tests/ tests/
+COPY transformer_engine/ transformer_engine/
+COPY build_tools/ build_tools/
+COPY CONTRIBUTING.rst LICENSE README.rst setup.py pylintrc CPPLINT.cfg .
+
+FROM ${FROM_IMAGE_NAME}
+ARG FRAMEWORK
+
+WORKDIR /opt/transformerengine/
+COPY --from=transformerengine . .
+
+# Disable Pip constraint file
+### TODO (tmoon): Update constraint file with TE dependency versions
+ENV PIP_CONSTRAINT=
+
+# Install dependencies for building
+# Note: pybind11 is not a strict dependency since it may be installed
+# outside of Python, e.g. installed via apt.
+RUN pip install ninja pybind11
+
+# Install google logging lib for paddle ci as a hotfix.
+# TODO (ksivamai): fix in TE build
+RUN apt-get update && apt-get install -y libgoogle-glog-dev
+
+# Install Transformer Engine
+RUN <<"EOF" bash -e
+  [[ "${FRAMEWORK}" =~ pytorch|all ]] \
+  && export NVTE_WITH_USERBUFFERS=1 \
+  && export MPI_HOME=/usr/local/mpi \
+  && export MAX_JOBS=4 \
+  || [[ ! "${FRAMEWORK}" =~ pytorch|all ]]
+
+  NVTE_FRAMEWORK=${FRAMEWORK} \
+  NVTE_BUILD_THREADS_PER_JOB=4 \
+  pip install --verbose --verbose --no-build-isolation .[test]
+
+  rm -rf transformer_engine.egg-info dist build
+EOF
+
+WORKDIR /workspace/
