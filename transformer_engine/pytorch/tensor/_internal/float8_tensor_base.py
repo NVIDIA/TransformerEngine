@@ -134,3 +134,10 @@ class Float8TensorBase:
             f"data={self.dequantize()}"
             ")"
         )
+
+    def _create_transpose(self):
+        data = self._data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
+        self._transpose_invalid = False
