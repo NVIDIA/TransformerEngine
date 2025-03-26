@@ -735,7 +735,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     grad_output,
                     get_workspace(),
                     out_dtype=(
-                        fc2_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        fc2_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     quantization_params=None,  # wgrad in high precision
                     layout="NT",
@@ -897,7 +899,9 @@ class _LayerNormMLP(torch.autograd.Function):
                     dact,
                     get_workspace(),
                     out_dtype=(
-                        fc1_weight.main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype
+                        fc1_weight.main_grad.dtype
+                        if ctx.fuse_wgrad_accumulation
+                        else ctx.activation_dtype
                     ),
                     layout="NT",
                     grad=fuse_gemm_and_bias_fc1_wgrad,
