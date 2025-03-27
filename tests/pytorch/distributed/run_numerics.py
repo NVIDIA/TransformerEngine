@@ -317,7 +317,6 @@ def _construct_quantizer(quantizer_class, fp8_dtype, device, tp_group, tp_size):
             device=device,
             with_amax_reduction=True,
             amax_reduction_group=tp_group,
-            amax_reduction_size=tp_size,
         )
         quantizer = quantizer_class(
             fp8_dtype=fp8_dtype,

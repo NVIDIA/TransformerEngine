@@ -11,7 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..utils import devices_match, non_tn_fp8_gemm_supported
+from ..utils import canonicalize_process_group, devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..constants import dist_group_type
@@ -194,7 +194,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
-    amax_reduction_size: Optional[int]
     """Options about how to quantize the tensor"""
     force_pow_2_scales: bool
     amax_epsilon: float
@@ -208,9 +207,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
         columnwise: bool = True,
         with_amax_reduction: bool = False,
         amax_reduction_group: Optional[dist_group_type] = None,
-        amax_reduction_size: Optional[int] = 1,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
+        amax_reduction_size: Any = None,  # deprecated
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = torch.ones(1, dtype=torch.float32, device=device)
@@ -218,9 +217,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
-        self.amax_reduction_size = amax_reduction_size
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
+
+        # Deprecated option
+        if amax_reduction_size is not None:
+            warnings.warn("amax_reduction_size kwarg is deprecated", DeprecationWarning, stacklevel=2)
 
     def update_quantized(
         self,
@@ -326,6 +328,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
             data_transpose=None,
             quantizer=self,
         )
+
+    def _canonicalized_amax_reduction_group(self) -> dist_group_type:
+        """Get process group for amax reduction"""
+        return canonicalize_process_group(self.amax_reduction_group)
 
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
