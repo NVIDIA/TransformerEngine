@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Optional, Tuple, Iterable
+from typing import Any, Optional, Tuple, Iterable
 import warnings
 
 import torch
