@@ -867,9 +867,8 @@ def _all_gather_fp8(
     world_size = get_distributed_world_size(process_group)
 
     # Check that quantizer is valid
-    if (
-        quantizer is not None
-        and not isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+    if quantizer is not None and not isinstance(
+        quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
     ):
         raise ValueError(f"Got non-FP8 quantizer ({quantizer.__class__.__name__})")
 
@@ -927,9 +926,7 @@ def _all_gather_fp8(
 
     # Make sure FP8 transpose is populated if needed
     needs_transpose = (
-        quantizer is not None
-        and quantizer.columnwise_usage
-        and not non_tn_fp8_gemm_supported()
+        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
     )
     if needs_transpose:
         if handle is not None:

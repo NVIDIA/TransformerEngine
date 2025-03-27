@@ -478,12 +478,9 @@ class _Linear(torch.autograd.Function):
             if ctx.grad_output_quantizer is not None:
                 rowwise_usage = True
                 columnwise_usage = True
-                if (
-                    ctx.ub_overlap_ag
-                    and isinstance(
-                        ctx.grad_output_quantizer,
-                        (Float8Quantizer, Float8CurrentScalingQuantizer),
-                    )
+                if ctx.ub_overlap_ag and isinstance(
+                    ctx.grad_output_quantizer,
+                    (Float8Quantizer, Float8CurrentScalingQuantizer),
                 ):
                     # If data is in FP8 and communication is handled
                     # with Userbuffers, we compute FP8 transposes
@@ -624,9 +621,7 @@ class _Linear(torch.autograd.Function):
                 if ctx.fp8:
                     recipe = ctx.fp8_recipe
                     if hasattr(recipe, "fp8_gemm_wgrad"):
-                        use_split_accumulator = (
-                            recipe.fp8_gemm_wgrad.use_split_accumulator
-                        )
+                        use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
 
                 # Output buffer for overlapping grad input
                 # reduce-scatter with wgrad GEMM

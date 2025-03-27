@@ -649,12 +649,9 @@ class _LayerNormMLP(torch.autograd.Function):
             if ctx.grad_fc2_output_quantizer is not None:
                 rowwise_usage = True
                 columnwise_usage = True
-                if (
-                    ctx.ub_overlap_ag
-                    and isinstance(
-                        ctx.grad_fc2_output_quantizer,
-                        (Float8Quantizer, Float8CurrentScalingQuantizer),
-                    )
+                if ctx.ub_overlap_ag and isinstance(
+                    ctx.grad_fc2_output_quantizer,
+                    (Float8Quantizer, Float8CurrentScalingQuantizer),
                 ):
                     # If data is in FP8 and communication is handled
                     # with Userbuffers, we compute FP8 transposes
