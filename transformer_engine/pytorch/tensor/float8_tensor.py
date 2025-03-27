@@ -222,7 +222,9 @@ class Float8CurrentScalingQuantizer(Quantizer):
 
         # Deprecated option
         if amax_reduction_size is not None:
-            warnings.warn("amax_reduction_size kwarg is deprecated", DeprecationWarning, stacklevel=2)
+            warnings.warn(
+                "amax_reduction_size kwarg is deprecated", DeprecationWarning, stacklevel=2
+            )
 
     def update_quantized(
         self,

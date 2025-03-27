@@ -387,6 +387,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
     # Pop NVTX range
     torch.cuda.nvtx.range_pop()
 
+
 def canonicalize_process_group(
     group: Optional[torch.distributed.ProcessGroup],
 ) -> torch.distributed.ProcessGroup:
