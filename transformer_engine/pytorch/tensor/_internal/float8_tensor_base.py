@@ -136,6 +136,7 @@ class Float8TensorBase:
         )
 
     def _create_transpose(self):
+        """Update FP8 transpose cache"""
         data = self._data
         if not data.is_contiguous():
             data = data.contiguous()
