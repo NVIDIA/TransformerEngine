@@ -101,17 +101,21 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     bool grad, std::vector<at::Tensor> workspace, size_t workspaceSize, bool accumulate,
     bool use_split_accumulator, int math_sm_count);
 
+namespace transformer_engine::pytorch {
+
 /***************************************************************************************************
  * Transpose
  **************************************************************************************************/
 
-std::vector<py::object> fused_multi_quantize(std::vector<py::handle> input_list,
-                                             std::optional<std::vector<py::handle>> output_list,
+std::vector<py::object> fused_multi_quantize(std::vector<at::Tensor> input_list,
+                                             std::optional<std::vector<py::object>> output_list,
                                              std::vector<py::handle> quantizer_list,
                                              transformer_engine::DType otype);
 
 at::Tensor fp8_transpose(at::Tensor input, transformer_engine::DType otype,
                          std::optional<at::Tensor> output = std::nullopt);
+
+}  // namespace transformer_engine::pytorch
 
 namespace transformer_engine::pytorch {
 
