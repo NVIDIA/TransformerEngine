@@ -197,8 +197,9 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
                                          max_fp8 = Quantized_Limits<DType>::max_norm;);
 
   // Update scale
-  compute_scale_from_amax_kernel<<<1, 1>>>(reinterpret_cast<const float *>(output.amax.dptr),
-                                           reinterpret_cast<float *>(output.scale.dptr), max_fp8,
-                                           config.force_pow_2_scales, config.amax_epsilon);
+  compute_scale_from_amax_kernel<<<1, 1, 0, stream>>>(
+      reinterpret_cast<const float *>(output.amax.dptr),
+      reinterpret_cast<float *>(output.scale.dptr), max_fp8, config.force_pow_2_scales,
+      config.amax_epsilon);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
