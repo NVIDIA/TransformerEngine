@@ -6,8 +6,9 @@
 import os
 from functools import wraps
 from typing import Callable, Optional, Tuple
-
 import torch
+
+from .export import is_in_onnx_export_mode
 
 # pylint: disable=unnecessary-lambda-assignment
 
@@ -43,7 +44,17 @@ if torch.__version__ >= "2.2" and bool(int(os.getenv("NVTE_TORCH_COMPILE", "1"))
 
 # Decorator to disable Torch Dynamo
 # See: https://github.com/NVIDIA/TransformerEngine/issues/308
-no_torch_dynamo = lambda recursive=True: lambda f: torch._dynamo.disable(f, recursive=recursive)
+no_torch_dynamo = lambda recursive=True: lambda func: func
+if torch.__version__ >= "2":
+    import torch._dynamo
+
+    if torch.__version__ >= "2.1":
+        no_torch_dynamo = lambda recursive=True: lambda f: (
+            f if is_in_onnx_export_mode() else torch._dynamo.disable(f, recursive=recursive)
+        )
+    else:
+        # no "recursive" option in pyTorch 2.0 - it acts as if recursive was True
+        no_torch_dynamo = lambda recursive=True: torch._dynamo.disable
 
 
 def set_jit_fusion_options() -> None:
