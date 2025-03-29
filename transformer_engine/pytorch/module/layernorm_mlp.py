@@ -428,7 +428,6 @@ class _LayerNormMLP(torch.autograd.Function):
             dim_size[0] = dim_size[0] // tp_world_size
             dim_size[1] = fc2_weight.size(0)
             rs_out = torch.empty(dim_size, dtype=activation_dtype, device=device)
-            fc2_out = ub_obj_fc2out.get_buffer(output_quantizer)
         else:
             dim_size = list(act_out.size())
             dim_size[1] = fc2_weight.size(0)
