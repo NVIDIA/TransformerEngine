@@ -496,11 +496,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight,
                 ln_out.clone() if ub_overlap_ag else ln_out,  # avoid saving a UB buffer
                 fc1_weight_final,
+                fc1_weight,
                 fc1_bias,
                 fc1_out,
                 fc1_out_without_bias,
                 act_out,
                 fc2_weight_final,
+                fc2_weight,
                 fc2_bias,
                 mu,
                 rsigma,
@@ -613,11 +615,13 @@ class _LayerNormMLP(torch.autograd.Function):
                 ln_weight,
                 ln_out,
                 fc1_weight,
+                origin_fc1_weight,
                 fc1_bias,
                 fc1_out,
                 fc1_out_without_bias,
                 act_out,
                 fc2_weight,
+                origin_fc2_weight,
                 fc2_bias,
                 mu,
                 rsigma,
@@ -636,7 +640,7 @@ class _LayerNormMLP(torch.autograd.Function):
             )
             fc2_weight_main_grad = (
                 ctx.fc2_main_grad
-                if fc2_weight is not None
+                if origin_fc2_weight is not None
                 and ctx.fuse_wgrad_accumulation
                 and ctx.fc2_weight_requires_grad
                 else None
@@ -645,8 +649,8 @@ class _LayerNormMLP(torch.autograd.Function):
             # For CPU offloading, we offloaded weight and weight.main_grad to different tensors,
             # we need to connect them into one.
             if ctx.fuse_wgrad_accumulation:
-                fc1_weight.main_grad = fc1_weight_main_grad
-                fc2_weight.main_grad = fc2_weight_main_grad
+                origin_fc1_weight.main_grad = fc1_weight_main_grad
+                origin_fc2_weight.main_grad = fc2_weight_main_grad
 
             # TODO: Fix this  # pylint: disable=fixme
             # Gather saved autograd context tensors when running with FSDP
@@ -770,7 +774,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     bias=fc2_bias if fc2_bias_grad is None else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     use_split_accumulator=_2X_ACC_WGRAD,
-                    out=fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    out=origin_fc2_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                 )
                 if fc2_bias_grad is None:
                     fc2_bias_grad = fc2_bias_grad_
@@ -928,7 +932,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     grad=fuse_gemm_and_bias_fc1_wgrad,
                     bias=fc1_bias if fuse_gemm_and_bias_fc1_wgrad else None,
                     accumulate=accumulate_wgrad_into_param_main_grad,
-                    out=fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
+                    out=origin_fc1_weight.main_grad if ctx.fuse_wgrad_accumulation else None,
                     ub=ub_obj_fc1_wgrad,
                     ub_type=tex.CommOverlapType.RS if ctx.ub_bulk_wgrad else None,
                     extra_output=fc1_dgrad_rs_out,
@@ -989,16 +993,21 @@ class _LayerNormMLP(torch.autograd.Function):
         if ctx.fc1_weight_requires_grad:
             # Handle custom DDP from mcore.
             if ctx.fuse_wgrad_accumulation and hasattr(fc1_weight, "grad_added_to_main_grad"):
-                fc1_weight.grad_added_to_main_grad = True
-                if getattr(fc1_weight, "zero_out_wgrad", False):
+                origin_fc1_weight.grad_added_to_main_grad = True
+                if getattr(origin_fc1_weight, "zero_out_wgrad", False):
                     fc1_wgrad = torch.zeros(
-                        fc1_weight.main_grad.shape,
-                        dtype=fc1_weight.dtype,
+                        origin_fc1_weight.main_grad.shape,
+                        dtype=origin_fc1_weight.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
-                    fc1_wgrad = None
+                    fc1_wgrad = torch.empty(
+                        origin_fc1_weight.main_grad.shape,
+                        dtype=origin_fc1_weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 fc1_wgrad = None
         else:
@@ -1006,17 +1015,22 @@ class _LayerNormMLP(torch.autograd.Function):
 
         if ctx.fc2_weight_requires_grad:
             # Handle custom DDP from mcore.
-            if ctx.fuse_wgrad_accumulation and hasattr(fc2_weight, "grad_added_to_main_grad"):
-                fc2_weight.grad_added_to_main_grad = True
-                if getattr(fc2_weight, "zero_out_wgrad", False):
+            if ctx.fuse_wgrad_accumulation and hasattr(origin_fc2_weight, "grad_added_to_main_grad"):
+                origin_fc2_weight.grad_added_to_main_grad = True
+                if getattr(origin_fc2_weight, "zero_out_wgrad", False):
                     fc2_wgrad = torch.zeros(
-                        fc2_weight.main_grad.shape,
-                        dtype=fc2_weight.dtype,
+                        origin_fc2_weight.main_grad.shape,
+                        dtype=origin_fc2_weight.dtype,
                         device=torch.cuda.current_device(),
                         requires_grad=False,
                     )
                 else:
-                    fc2_wgrad = None
+                    fc2_wgrad = torch.empty(
+                        origin_fc2_weight.main_grad.shape,
+                        dtype=origin_fc2_weight.dtype,
+                        device=torch.cuda.current_device(),
+                        requires_grad=False,
+                    )
             elif ctx.fuse_wgrad_accumulation:
                 fc2_wgrad = None
         else:
