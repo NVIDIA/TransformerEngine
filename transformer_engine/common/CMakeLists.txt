@@ -189,6 +189,7 @@ if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   set_source_files_properties(activation/gelu.cu
                               activation/relu.cu
                               activation/swiglu.cu
+                              util/cast.cu
                               PROPERTIES
                               COMPILE_OPTIONS "--use_fast_math")
 endif()
