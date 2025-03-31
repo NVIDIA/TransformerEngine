@@ -153,7 +153,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   if constexpr (IS_DBIAS) {
 #pragma unroll
     for (int j = 0; j < SCALE_DIM_X; ++j) {
-      thread_dbias_rowwise[SCALE_DIM_X] = 0.0f;
+      thread_dbias_rowwise[j] = 0.0f;
     }
   }
 
