@@ -935,6 +935,17 @@ struct Quantized_Limits {
 };
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
+#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
+      (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
+    uint16_t out;
+    asm volatile(
+        "{\n"
+        "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
+        "}"
+        : "=h"(out)
+        : "f"(val));
+    return *reinterpret_cast<e8m0_t *>(&out);
+#else
   // TODO: nan/inf needs to be set for any value
   // of nan/inf in input not just amax.
   if (isnan(val)) {
@@ -943,17 +954,6 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
   if (isinf(val)) {
     return 0xFE;
   }
-#if ((__CUDA_ARCH_HAS_FEATURE__(SM100_ALL)) || (__CUDA_ARCH_HAS_FEATURE__(SM101_ALL)) || \
-     (__CUDA_ARCH_HAS_FEATURE__(SM120_ALL)))
-  uint16_t out;
-  asm volatile(
-      "{\n"
-      "cvt.rp.satfinite.ue8m0x2.f32  %0, 0.0, %1;\n"
-      "}"
-      : "=h"(out)
-      : "f"(val));
-  return *reinterpret_cast<e8m0_t *>(&out);
-#else
   if (val == 0.0f) {
     return 0x00;
   }
