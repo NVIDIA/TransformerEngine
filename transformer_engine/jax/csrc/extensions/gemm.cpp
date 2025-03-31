@@ -3,7 +3,7 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-
+#include <memory>
 #include "transformer_engine/gemm.h"
 
 #include "common/util/cuda_runtime.h"
@@ -35,10 +35,10 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
              "sizeof(lhs_sinv_dtype) != sizeof(rhs_sinv_dtype)");
 
   size_t dim_list_bytes = sizeof(int32_t) * 3 * num_gemms;
-  int32_t *dim_list_host = (int32_t *)malloc(dim_list_bytes);
-  // Note: This may break cudaGraph. We can test it via running the unit test with
-  //       XLA_FLAGS=--xla_gpu_graph_min_graph_size=1
-  cudaMemcpyAsync(dim_list_host, dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost, stream);
+  std::unique_ptr<int32_t[]> dim_list_host = std::make_unique<int32_t[]>(3 * num_gemms);
+
+  cudaMemcpyAsync(dim_list_host.get(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost, stream);
+  // Note: This may break cudaGraph.
   cudaStreamSynchronize(stream);
 
   // Notes on matrix layouts and transpose:
@@ -159,8 +159,6 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
                                 pre_gelu_list.data(), num_gemms, trans_lhs, trans_rhs, grad,
                                 workspace_list.data(), accumulate, use_split_accumulator,
                                 num_math_sm, stream);
-
-  free(dim_list_host);
 
   return ffi_with_cuda_error_check();
 }
