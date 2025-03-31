@@ -618,7 +618,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                                produced)
         """
         assert not isinstance(
-            inp, Float8Tensor
+            inp, QuantizedTensor
         ), "GroupedLinear doesn't support input tensor in FP8."
         assert len(m_splits) == self.num_gemms, "Number of splits should match number of GEMMs."
 
