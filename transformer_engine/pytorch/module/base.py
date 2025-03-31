@@ -36,7 +36,6 @@ from ..constants import dist_group_type
 from ..tensor import QuantizedTensor, Quantizer
 from ..tensor._internal.float8_tensor_base import Float8TensorBase
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-from ..utils import canonicalize_process_group
 
 __all__ = ["initialize_ub", "destroy_ub"]
 
@@ -689,7 +688,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         tp_group : ProcessGroup, default = `None`
                   tensor parallel process group.
         """
-        self.tp_group = canonicalize_process_group(tp_group)
+        self.tp_group = tp_group
         self.tp_group_initialized = True
 
     def _get_fp8_params(self) -> Union[List[torch.Tensor], None]:

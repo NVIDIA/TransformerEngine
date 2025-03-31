@@ -4,7 +4,7 @@
 
 """Tensor class with FP8 data"""
 from __future__ import annotations
-from typing import Any, Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable
 import warnings
 
 import torch
@@ -209,7 +209,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
         amax_reduction_group: Optional[dist_group_type] = None,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
-        amax_reduction_size: Any = None,  # deprecated
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.scale = torch.ones(1, dtype=torch.float32, device=device)
@@ -219,12 +218,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.amax_reduction_group = amax_reduction_group
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
-
-        # Deprecated option
-        if amax_reduction_size is not None:
-            warnings.warn(
-                "amax_reduction_size kwarg is deprecated", DeprecationWarning, stacklevel=2
-            )
 
     def update_quantized(
         self,
