@@ -16,8 +16,8 @@ do
 done
 wait
 
-# for i in $(seq 0 $(($NUM_GPUS-1)))
-# do
-#   pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py::TestEncoder::test_te_mxfp8 --num-process=$NUM_GPUS --process-id=$i &
-# done
-# wait
+for i in $(seq 0 $(($NUM_GPUS-1)))
+do
+  pytest -c $TE_PATH/tests/jax/pytest.ini -v $TE_PATH/examples/jax/encoder/test_multiprocessing_encoder.py::TestEncoder::test_te_mxfp8 --num-process=$NUM_GPUS --process-id=$i &
+done
+wait

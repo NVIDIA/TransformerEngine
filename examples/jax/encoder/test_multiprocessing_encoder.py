@@ -364,17 +364,12 @@ def train_and_evaluate(args):
         num_gpu_dp = 1
         num_gpu_tp = 1
 
-    assert args.batch_size % num_gpu_dp == 0, f"Batch size needs to be multiple of {num_gpu_dp}"
-    assert (
-        args.test_batch_size % num_gpu_dp == 0
-    ), f"Test batch size needs to be multiple of {num_gpu_dp}"
-
     if args.fp8_recipe == "MXFP8BlockScaling":
         assert (
-            args.batch_size / num_gpu_dp % 32 == 0
+            args.batch_size % 32 == 0
         ), "Batch size needs to be multiple of 32 for MXFP8"
         assert (
-            args.test_batch_size / num_gpu_dp % 32 == 0
+            args.test_batch_size % 32 == 0
         ), "Test batch size needs to be multiple of 32 for MXFP8"
 
     if args.use_fp8:
@@ -502,16 +497,16 @@ def encoder_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=128,
         metavar="N",
-        help="input batch size for training (default: 64)",
+        help="input batch size for training (default: 128)",
     )
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=64,
+        default=128,
         metavar="N",
-        help="input batch size for testing (default: 64)",
+        help="input batch size for testing (default: 128)",
     )
     parser.add_argument(
         "--max-seq-len",
@@ -587,7 +582,8 @@ class TestEncoder(unittest.TestCase):
         num_gpu = self.num_process
         tp_size = 2 if num_gpu > 1 and num_gpu % 2 == 0 else 1
         dp_size = num_gpu // tp_size
-        batch_size = 128 // dp_size
+        assert args.batch_size % dp_size == 0, f"Batch size needs to be multiple of {dp_size}"
+        batch_size = args.batch_size // dp_size
 
         args.use_fp8 = use_fp8
         args.batch_size = batch_size
