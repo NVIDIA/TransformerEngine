@@ -908,7 +908,7 @@ using e8m0_t = uint8_t;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
-enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENTIONAL = 2 };
+enum ScalingType { ROWWISE = 0, COLWISE = 1, BIDIMENSIONAL = 2 };
 
 template <typename T>
 struct Numeric_Traits;
