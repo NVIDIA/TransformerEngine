@@ -8,8 +8,8 @@ Rotary Position Embedding implementation of different types along with helper fu
 from typing import Optional, Tuple, Union
 import torch
 
-from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 import transformer_engine_torch as tex
+from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb"]
@@ -174,11 +174,12 @@ def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
     if not interleaved:
         x1, x2 = torch.chunk(x, 2, dim=-1)
         return torch.cat((-x2, x1), dim=-1)
-    else:
-        x1 = x[:, :, :, ::2]
-        x2 = x[:, :, :, 1::2]
-        x_new = torch.stack((-x2, x1), dim=-1)
-        return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
+
+    # interleaved
+    x1 = x[:, :, :, ::2]
+    x2 = x[:, :, :, 1::2]
+    x_new = torch.stack((-x2, x1), dim=-1)
+    return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
 def _apply_rotary_pos_emb_base(
@@ -249,8 +250,9 @@ def _get_freqs_on_this_cp_rank(
                 freqs[full_seqlen - (cp_rank + 1) * cp_seg : full_seqlen - cp_rank * cp_seg],
             ]
         )
-    else:
-        return freqs[:seqlen]
+
+    # cp_size == 1
+    return freqs[:seqlen]
 
 
 def apply_rotary_pos_emb(
