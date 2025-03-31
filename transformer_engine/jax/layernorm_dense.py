@@ -1,10 +1,10 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Fused Layer normalization and linear transformation operations for Transformer Engine in JAX.
+"""Fused Layer normalization and dense layer transformation operations for Transformer Engine in JAX.
 
 This module provides optimized implementations of layer normalization followed by
-linear transformation (GEMM) operations, which are commonly used in transformer
+dense layer transformation (GEMM) operations, which are commonly used in transformer
 architectures. It supports various normalization types, quantization, and
 distributed training through sharding constraints.
 """
@@ -24,7 +24,7 @@ from .quantize import (
 )
 
 
-def layernorm_linear(
+def layernorm_dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -39,7 +39,7 @@ def layernorm_linear(
     dot_input_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ) -> jnp.ndarray:
-    """Apply layer normalization followed by linear transformation.
+    """Apply layer normalization followed by dense layer transformation.
 
     This function implements the following sequence of operations:
         1. Layer normalization: (x - mean) / sqrt(var + epsilon) * gamma + beta
@@ -50,7 +50,7 @@ def layernorm_linear(
         kernel: Weight matrix with shape [hidden_in, hidden_out]
         gamma: Scale parameter for normalization with shape [hidden_in]
         beta: Bias parameter for normalization with shape [hidden_in]
-        bias: Optional bias term for linear transformation with shape [hidden_out]
+        bias: Optional bias term for dense layer transformation with shape [hidden_out]
         norm_type: Type of normalization ("layernorm" or "rmsnorm")
         zero_centered_gamma: Whether to use zero-centered gamma for normalization
         epsilon: Small constant for numerical stability in normalization
@@ -67,7 +67,7 @@ def layernorm_linear(
         - The function supports automatic differentiation through JAX's custom VJP
         - Quantization is applied to both the normalized input and kernel
     """
-    output = _layernorm_linear(
+    output = _layernorm_dense(
         x,
         kernel,
         gamma,
@@ -93,7 +93,7 @@ def layernorm_linear(
         9,
     ),
 )
-def _layernorm_linear(
+def _layernorm_dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -106,10 +106,10 @@ def _layernorm_linear(
     dot_input_axes: Tuple[str, ...],
     quantizer_set,
 ):
-    """Internal implementation of layernorm_linear with custom VJP.
+    """Internal implementation of layernorm_dense with custom VJP.
 
-    This function implements the forward pass of layernorm_linear with support for
-    automatic differentiation. It handles the normalization and linear transformation
+    This function implements the forward pass of layernorm_dense with support for
+    automatic differentiation. It handles the normalization and dense layer transformation
     operations, including quantization and sharding constraints.
 
     Args:
@@ -128,7 +128,7 @@ def _layernorm_linear(
     Returns:
         Output tensor from the combined operations
     """
-    output, _ = _layernorm_linear_fwd_rule(
+    output, _ = _layernorm_dense_fwd_rule(
         x,
         kernel,
         gamma,
@@ -144,7 +144,7 @@ def _layernorm_linear(
     return output
 
 
-def _layernorm_linear_fwd_rule(
+def _layernorm_dense_fwd_rule(
     x,
     kernel,
     gamma,
@@ -157,7 +157,7 @@ def _layernorm_linear_fwd_rule(
     dot_input_axes,
     quantizer_set,
 ):
-    """Forward pass rule for layernorm_linear.
+    """Forward pass rule for layernorm_dense.
 
     Implements the forward pass computation including:
     1. Layer normalization with quantization
@@ -222,7 +222,7 @@ def _layernorm_linear_fwd_rule(
     return output, ctx
 
 
-def _layernorm_linear_bwd_rule(
+def _layernorm_dense_bwd_rule(
     norm_type,
     zero_centered_gamma,
     epsilon,
@@ -231,7 +231,7 @@ def _layernorm_linear_bwd_rule(
     ctx,
     grad,
 ):
-    """Backward pass rule for layernorm_linear.
+    """Backward pass rule for layernorm_dense.
 
     Implements the backward pass computation including:
     1. Gradient computation for matrix multiplication
@@ -306,4 +306,4 @@ def _layernorm_linear_bwd_rule(
     return dx, wgrad, dgamma, dbeta, dbias, quantizer_set
 
 
-_layernorm_linear.defvjp(_layernorm_linear_fwd_rule, _layernorm_linear_bwd_rule)
+_layernorm_dense.defvjp(_layernorm_dense_fwd_rule, _layernorm_dense_bwd_rule)

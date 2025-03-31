@@ -1,9 +1,9 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Linear transformation operations for Transformer Engine in JAX.
+"""Dense layer transformation operations for Transformer Engine in JAX.
 
-This module provides optimized linear transformation operations for transformer
+This module provides optimized dense layer transformation operations for transformer
 architectures, including support for quantization and automatic differentiation.
 It implements matrix multiplication with optional bias addition and supports
 customizable contracting dimensions for flexible tensor operations.
@@ -18,14 +18,14 @@ from . import cpp_extensions as tex
 from .quantize import QuantizerSet, noop_quantizer_set
 
 
-def linear(
+def dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
     bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
-    """Perform linear transformation with optional quantization.
+    """Perform dense layer transformation with optional quantization.
 
     This function implements matrix multiplication with optional bias addition,
     supporting quantization and custom contracting dimensions. It's optimized
@@ -33,7 +33,7 @@ def linear(
 
     Args:
         x: Input tensor
-        kernel: Weight matrix for the linear transformation
+        kernel: Weight matrix for the dense layer transformation
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
@@ -48,15 +48,15 @@ def linear(
             bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
             output += jnp.reshape(bias, bias_new_shape)
     else:
-        output = _linear(x, kernel, bias, contracting_dims, quantizer_set)
+        output = _dense(x, kernel, bias, contracting_dims, quantizer_set)
     return output
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(3,))
-def _linear(x, kernel, bias, contracting_dims, quantizer_set):
-    """Internal implementation of linear transformation with custom VJP.
+def _dense(x, kernel, bias, contracting_dims, quantizer_set):
+    """Internal implementation of dense layer transformation with custom VJP.
 
-    This function implements the core linear transformation logic with support
+    This function implements the core dense layer transformation logic with support
     for custom vector-Jacobian product (VJP) for automatic differentiation.
 
     Args:
@@ -69,12 +69,12 @@ def _linear(x, kernel, bias, contracting_dims, quantizer_set):
     Returns:
         Transformed output tensor
     """
-    output, _ = _linear_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set)
+    output, _ = _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set)
     return output
 
 
-def _linear_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
-    """Forward pass rule for linear transformation.
+def _dense_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
+    """Forward pass rule for dense layer transformation.
 
     Args:
         x: Input tensor
@@ -113,8 +113,8 @@ def _linear_fwd_rule(x, kernel, bias, contracting_dims, quantizer_set):
     return output, ctx
 
 
-def _linear_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argument
-    """Backward pass rule for linear transformation.
+def _dense_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-argument
+    """Backward pass rule for dense layer transformation.
 
     Args:
         contracting_dims: Contracting dimensions specification
@@ -165,31 +165,31 @@ def _linear_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-arg
     return dgrad, wgrad, dbias, quantizer_set
 
 
-_linear.defvjp(_linear_fwd_rule, _linear_bwd_rule)
+_dense.defvjp(_dense_fwd_rule, _dense_bwd_rule)
 
 
-def grouped_linear(
+def grouped_dense(
     x_list,
     kernel_list,
     bias_list,
     contracting_dims_list,
     quantizer_set_list=None,
 ):
-    output_list = _grouped_linear(
+    output_list = _grouped_dense(
         x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
     )
     return output_list
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(3,))
-def _grouped_linear(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
-    output_list, _ = _grouped_linear_fwd_rule(
+def _grouped_dense(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
+    output_list, _ = _grouped_dense_fwd_rule(
         x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
     )
     return output_list
 
 
-def _grouped_linear_fwd_rule(
+def _grouped_dense_fwd_rule(
     x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
 ):
     use_bias = bias_list is not None
@@ -233,7 +233,7 @@ def _grouped_linear_fwd_rule(
     return output_list, ctx
 
 
-def _grouped_linear_bwd_rule(contracting_dims_list, ctx, grad_list):
+def _grouped_dense_bwd_rule(contracting_dims_list, ctx, grad_list):
     (
         colwise_x_list,
         rowwise_kernel_list,
@@ -295,4 +295,4 @@ def _grouped_linear_bwd_rule(contracting_dims_list, ctx, grad_list):
     return dgrad_list, wgrad_list, dbias_list, quantizer_set_list
 
 
-_grouped_linear.defvjp(_grouped_linear_fwd_rule, _grouped_linear_bwd_rule)
+_grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)

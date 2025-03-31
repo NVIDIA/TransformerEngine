@@ -6,8 +6,8 @@
 This module provides optimized implementations of MLP blocks commonly used in transformer
 architectures. Each MLP block consists of:
 1. Layer normalization
-2. First linear transformation (GEMM1) with bias and activation
-3. Second linear transformation (GEMM2) with bias
+2. First dense layer transformation (GEMM1) with bias and activation
+3. Second dense layer transformation (GEMM2) with bias
 
 The implementation supports various normalization types, activation functions,
 quantization, and distributed training through sharding constraints.
@@ -46,9 +46,9 @@ def layernorm_mlp(
 
     This function implements the following sequence of operations:
         1. Layer normalization: (x - mean) / sqrt(var + epsilon) * gamma + beta
-        2. First linear transformation: y1 = x * kernel1 + bias1
+        2. First dense layer transformation: y1 = x * kernel1 + bias1
         3. Activation function: y2 = activation(y1)
-        4. Second linear transformation: y3 = y2 * kernel2 + bias2
+        4. Second dense layer transformation: y3 = y2 * kernel2 + bias2
 
     Args:
         x: Input tensor with shape [batch..., hidden_in]
@@ -68,8 +68,8 @@ def layernorm_mlp(
         dot_2_input_axes: Logical axes for sharding the second matrix multiplication
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
-        activation_type: Activation function(s) to apply after the first linear transformation
-        quantizer_sets: Tuple of two quantizer sets for the two linear transformations
+        activation_type: Activation function(s) to apply after the first dense layer transformation
+        quantizer_sets: Tuple of two quantizer sets for the two dense layer transformations
 
     Returns:
         Output tensor with shape [batch..., hidden_in]
@@ -78,7 +78,7 @@ def layernorm_mlp(
         - For RMSNorm (norm_type="rmsnorm"), beta must be None and zero_centered_gamma
           must be False
         - The function supports automatic differentiation through JAX's custom VJP
-        - Quantization is applied to both linear transformations
+        - Quantization is applied to both dense layer transformations
         - Checkpointing is applied to both feed-forward networks for memory efficiency
     """
     assert len(kernels) == 2
@@ -140,7 +140,7 @@ def _layernorm_mlp(
     """Internal implementation of layernorm_mlp with custom VJP.
 
     This function implements the forward pass of layernorm_mlp with support for
-    automatic differentiation. It handles the normalization, linear transformations,
+    automatic differentiation. It handles the normalization, dense layer transformations,
     activation, and quantization operations.
 
     Args:

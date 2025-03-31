@@ -33,8 +33,8 @@ from transformer_engine.jax.quantize import (
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
-from transformer_engine.jax.linear import linear, grouped_linear
-from transformer_engine.jax.layernorm_linear import layernorm_linear
+from transformer_engine.jax.dense import dense, grouped_dense
+from transformer_engine.jax.layernorm_dense import layernorm_dense
 from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
 GEMM_CASES = [
@@ -150,12 +150,12 @@ class TestFP8Dot:
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
 
     @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
-    def test_linear_grad_bf16(self, m, n, k):
+    def test_dense_grad_bf16(self, m, n, k):
         layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
 
         def primitive_func(x, w, contracting_dims):
-            primitive_out = linear(x, w, contracting_dims=contracting_dims)
+            primitive_out = dense(x, w, contracting_dims=contracting_dims)
             return jnp.mean(primitive_out)
 
         def ref_func(x, w, layout):
@@ -178,7 +178,7 @@ class TestFP8Dot:
     @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    def test_linear_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
+    def test_dense_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
         layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
 
@@ -186,7 +186,7 @@ class TestFP8Dot:
         bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
 
         def primitive_func(x, w, bias, contracting_dims, quantizer_set):
-            primitive_out = linear(
+            primitive_out = dense(
                 x, w, bias, contracting_dims=contracting_dims, quantizer_set=quantizer_set
             )
             return jnp.mean(primitive_out)
@@ -235,15 +235,15 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
     return ln_out
 
 
-class TestFusedLinear:
+class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("m,n,k", [(512, 128, 128)])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
-    def test_layernorm_linear_grad(self, m, n, k, q_dtype, scaling_mode, norm_type):
+    def test_layernorm_dense_grad(self, m, n, k, q_dtype, scaling_mode, norm_type):
         """
-        Test layernorm_linear VJP Rule
+        Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
         if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
@@ -275,8 +275,8 @@ class TestFusedLinear:
             beta = None
 
         def prim_func(x, w, gamma, beta):
-            # bias = None as quantize_dbias is already tested in test_linear_grad_fp8
-            prim_out = layernorm_linear(
+            # bias = None as quantize_dbias is already tested in test_dense_grad_fp8
+            prim_out = layernorm_dense(
                 x,
                 w,
                 gamma,
@@ -1125,7 +1125,7 @@ class TestGroupedGemm:
             out_list = []
             for i in range(len(x_list)):
                 out_list.append(
-                    linear(
+                    dense(
                         x_list[i],
                         kernel_list[i],
                         bias_list[i],
@@ -1138,7 +1138,7 @@ class TestGroupedGemm:
             return jnp.sum(jnp.asarray(out_sum_list))
 
         def primitive_func(x_list, kernel_list, bias_list, contracting_dims_list):
-            out_list = grouped_linear(x_list, kernel_list, bias_list, contracting_dims_list)
+            out_list = grouped_dense(x_list, kernel_list, bias_list, contracting_dims_list)
             out_sum_list = [jnp.sum(out) for out in out_list]
             return jnp.sum(jnp.asarray(out_sum_list))
 
@@ -1196,7 +1196,7 @@ class TestGroupedGemm:
             out_list = []
             for i in range(len(x_list)):
                 out_list.append(
-                    linear(
+                    dense(
                         x_list[i],
                         kernel_list[i],
                         bias_list[i],
@@ -1212,7 +1212,7 @@ class TestGroupedGemm:
         def primitive_func(
             x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
         ):
-            out_list = grouped_linear(
+            out_list = grouped_dense(
                 x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
             )
             out_sum_list = [jnp.sum(out) for out in out_list]

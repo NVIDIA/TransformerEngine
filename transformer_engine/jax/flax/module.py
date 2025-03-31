@@ -17,11 +17,11 @@ from jax import nn as jax_nn
 from jax import random as jax_random
 from jax.ad_checkpoint import checkpoint_name
 
-from ..linear import linear
+from ..dense import dense
 
 from ..layernorm import canonicalize_norm_type
 from ..layernorm import layernorm
-from ..layernorm_linear import layernorm_linear
+from ..layernorm_dense import layernorm_dense
 from ..layernorm_mlp import layernorm_mlp
 from ..activation import activation
 from ..softmax import softmax, SoftmaxType
@@ -375,7 +375,7 @@ class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-method
 
 class DenseGeneral(TransformerEngineBase):
     r"""
-    Applies a linear transformation to the incoming data :math:`y = xA^T + b`.
+    Applies a dense layer transformation to the incoming data :math:`y = xA^T + b`.
 
     Parameters
     ----------
@@ -397,7 +397,7 @@ class DenseGeneral(TransformerEngineBase):
         The name of axes used to shard bias with a corresponding mesh,
         only used when :attr:`use_bias=True`.
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
@@ -440,7 +440,7 @@ class DenseGeneral(TransformerEngineBase):
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
         """
-        Apply the linear transformation to the input.
+        Apply the dense layer transformation to the input.
 
         Parameters
         ----------
@@ -481,7 +481,7 @@ class DenseGeneral(TransformerEngineBase):
 
         quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
-        y = linear(
+        y = dense(
             inputs, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set
         )
 
@@ -533,14 +533,14 @@ class DenseGeneral(TransformerEngineBase):
 
 class LayerNormDenseGeneral(TransformerEngineBase):
     r"""
-    Applies layer normalization followed by linear transformation to the incoming data.
+    Applies layer normalization followed by dense layer transformation to the incoming data.
 
     Parameters
     ----------
     features : Union[Iterable[int], int]
         The hidden size of each output sample.
     enable_layernorm: bool, default = True
-        Indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before dense layer transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
@@ -589,7 +589,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`
@@ -663,7 +663,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
     @nn.compact
     def __call__(self, inputs: Array) -> Array:
         """
-        Apply layer normalization to the input followed by a linear transformation.
+        Apply layer normalization to the input followed by a dense layer transformation.
 
         Parameters
         ----------
@@ -746,7 +746,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         contract_ind = tuple(range(0, len(axis)))
 
         if fuse_layernorm:
-            z = layernorm_linear(
+            z = layernorm_dense(
                 y,
                 kernel,
                 scale,
@@ -760,7 +760,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = linear(
+            z = dense(
                 y, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set
             )
 
@@ -823,14 +823,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
 class LayerNormMLP(TransformerEngineBase):
     r"""
     Applies layer normalization on the input followed by the MLP module,
-    consisting of 2 successive linear transformations, separated by given activations.
+    consisting of 2 successive dense layer transformations, separated by given activations.
 
     Parameters
     ----------
     intermediate_dim: int, default = 2048
         Intermediate size to which input samples are projected.
     enable_layernorm: bool, default = True
-        Indicate whether to enable layer normalization before linear transformation.
+        Indicate whether to enable layer normalization before dense layer transformation.
     layernorm_type : {'layernorm', 'rmsnorm'}, default = 'layernorm'
         Indicate the type of layer normalization.
     epsilon : float, default = 1e-6
@@ -862,14 +862,14 @@ class LayerNormMLP(TransformerEngineBase):
         Only used when :attr:`enable_layernorm=True` and :attr:`layernorm_type='layernorm'`.
     kernel_init : Initializer, default =
         flax.linen.initializers.variance_scaling(1.0, 'fan_in', 'truncated_normal')
-        Used for initializing the weights of both linear transformations.
+        Used for initializing the weights of both dense layer transformations.
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     kernel_axes_1 : Tuple[str, ...], default = ('embed', 'act', 'mlp')
         The name of axes used to shard the weights with a corresponding mesh for
-        the weight of the first linear transformations.
+        the weight of the first dense layer transformation.
     kernel_axes_2 : Tuple[str, ...], default = ('mlp', 'embed')
         The name of axes used to shard the weights with a corresponding mesh for
-        the weight of the second linear transformations.
+        the weight of the second dense layer transformation.
     use_bias: bool, default = False
         Indicate whether to enable bias shifting.
         If set to False, the layer will not learn an additive bias.
@@ -878,17 +878,17 @@ class LayerNormMLP(TransformerEngineBase):
         It should be a callable object with three arguments (jax.random.PRNGKey, shape, dtype).
     bias_axes_1: Tuple[str, ...], default = ('mlp',)
         The name of axes used to shard bias with a corresponding mesh  for
-        the weight of the first linear transformations.
+        the weight of the first dense layer transformation.
         Only used when :attr:`use_bias=True`.
     bias_axes_2: Tuple[str, ...], default = ('embed',)
         The name of axes used to shard bias with a corresponding mesh  for
-        the weight of the second linear transformations.
+        the weight of the second dense layer transformation.
         Only used when :attr:`use_bias=True`.
     return_layernorm_output: bool, default = True
         Indicate whether to return the output of layer normalization.
         If set False, return None as the second tensor in outputs.
     activations: Sequence[Union[str, Callable]], default = ('relu',)
-        The sequence of activation functions to apply after the first linear transformation.
+        The sequence of activation functions to apply after the first dense layer transformation.
         Each activation has its own transformation layer.
     intermediate_dropout_rng_name: str, default = 'dropout'
         The key in given RNGs via flax.linen.Module.apply that for generating Dropout masks.
@@ -897,7 +897,7 @@ class LayerNormMLP(TransformerEngineBase):
     intermediate_hidden_dropout_dims: Sequence[int], default = ()
         Dimensions that will share the same dropout mask for hidden
     enable_low_rank_adaptation: bool, default = False
-        Indicate whether to enable low rank adaptation for each linear layer.
+        Indicate whether to enable low rank adaptation for each dense layer.
     low_rank_adaptation_dim: int, default = 32
         The dimension for low rank adaptation, only used when
         :attr:`enable_low_rank_adaptation=True`.
@@ -1162,7 +1162,7 @@ class LayerNormMLP(TransformerEngineBase):
         else:  # not use_fused_ln_geglu_mlp
             # DenseGeneral 1
             if fuse_layernorm:
-                x = layernorm_linear(
+                x = layernorm_dense(
                     y,
                     kernel_1,
                     scale,
@@ -1176,7 +1176,7 @@ class LayerNormMLP(TransformerEngineBase):
                 )
             else:
                 y = with_sharding_constraint_by_logical_axes(y, self.dot_1_input_axes)
-                x = linear(
+                x = dense(
                     y,
                     kernel_1,
                     contracting_dims=(axis, contract_ind),
@@ -1260,7 +1260,7 @@ class LayerNormMLP(TransformerEngineBase):
             z = z.astype(input_dtype)
 
             # DenseGeneral 2
-            out = linear(
+            out = dense(
                 z, kernel_2, contracting_dims=(axis, contract_ind), quantizer_set=ffn2_quantizer_set
             )
 
