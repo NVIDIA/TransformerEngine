@@ -54,6 +54,7 @@ model_configs = {"small": ModelConfig(2, 32, 64, 2, 32)}
 fp8_recipes = [
     recipe.DelayedScaling(),
     recipe.MXFP8BlockScaling(),
+    recipe.Float8CurrentScaling(),
 ]
 
 # Supported data types
