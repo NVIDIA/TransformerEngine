@@ -110,6 +110,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);
 
+// Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
+
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 

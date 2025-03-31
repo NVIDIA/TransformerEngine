@@ -33,7 +33,7 @@ from transformer_engine.jax.quantize import (
 )
 from transformer_engine.jax.quantize import helper
 from transformer_engine.jax.activation import activation
-from transformer_engine.jax.linear import linear
+from transformer_engine.jax.linear import linear, grouped_linear
 from transformer_engine.jax.layernorm_linear import layernorm_linear
 from transformer_engine.jax.quantize import ScaledTensor1x, ScaledTensor2x
 
@@ -996,3 +996,245 @@ class TestFusedQuantize:
             is_dbias=is_dbias,
             q_axis=q_axis,
         )
+
+
+# This function is modified from transformer_engine/jax/cpp_extensions/gemm.py::_jax_gemm()
+def _quantize_gemm_pair(lhs, rhs, contracting_dims, lhs_quantizer, rhs_quantizer):
+    ((lhs_contract_dim,), (rhs_contract_dim,)) = contracting_dims
+    lhs_is_rowwise = lhs_contract_dim == lhs.ndim - 1
+    rhs_is_rowwise = rhs_contract_dim == rhs.ndim - 1
+    lhs_q = lhs_quantizer.quantize(
+        lhs,
+        is_rowwise=lhs_is_rowwise,
+        is_colwise=not lhs_is_rowwise,
+    )
+    rhs_q = rhs_quantizer.quantize(
+        rhs,
+        is_rowwise=rhs_is_rowwise,
+        is_colwise=not rhs_is_rowwise,
+    )
+    return lhs_q, rhs_q
+
+
+# E5M2 * E5M2 is not supported
+fwd_bwd_dtypes = [
+    [jnp.float8_e4m3fn, jnp.float8_e4m3fn],
+    [jnp.float8_e4m3fn, jnp.float8_e5m2],
+    [jnp.float8_e5m2, jnp.float8_e4m3fn],
+]
+
+
+@pytest_parametrize_wrapper(
+    "shape_list", [[(512, 128, 256), (256, 128, 256), (256, 128, 128), (512, 256, 128)]]
+)
+class TestGroupedGemm:
+    def _ref_grouped_gemm_with_jnp_dot(self, lhs_list, rhs_list, contracting_dims_list):
+        ref_out_list = []
+        for lhs, rhs, contracting_dims in zip(lhs_list, rhs_list, contracting_dims_list):
+            dim_nums = (contracting_dims, ((), ()))
+            ref_out_list.append(jax.lax.dot_general(lhs, rhs, dim_nums))
+        return ref_out_list
+
+    def _generate_grouped_gemm_input(self, dtype, shape_list, layout_list):
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, len(shape_list) * 2)
+
+        lhs_list, rhs_list, contracting_dims_list = [], [], []
+        for i, ((m, n, k), layout) in enumerate(zip(shape_list, layout_list)):
+            lhs = jax.random.uniform(
+                subkeys[2 * i],
+                (m if layout[0] == "N" else k, k if layout[0] == "N" else m),
+                dtype=dtype,
+            )
+            rhs = jax.random.uniform(
+                subkeys[2 * i + 1],
+                (k if layout[1] == "N" else n, n if layout[1] == "N" else k),
+                dtype=dtype,
+            )
+            lhs_contracting_dim = (1,) if layout[0] == "N" else (0,)
+            rhs_contracting_dim = (0,) if layout[1] == "N" else (1,)
+            contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+
+            lhs_list.append(lhs)
+            rhs_list.append(rhs)
+            contracting_dims_list.append(contracting_dims)
+
+        return lhs_list, rhs_list, contracting_dims_list
+
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
+    @pytest_parametrize_wrapper("layout_list", [["NN", "TN", "NT", "TT"]])
+    def test_grouped_gemm_fp16(self, dtype, shape_list, layout_list):
+        lhs_list, rhs_list, contracting_dims_list = self._generate_grouped_gemm_input(
+            dtype, shape_list, layout_list
+        )
+        ref_out = self._ref_grouped_gemm_with_jnp_dot(lhs_list, rhs_list, contracting_dims_list)
+        primitive_out = tex.grouped_gemm(lhs_list, rhs_list, contracting_dims_list)
+        for i in range(len(shape_list)):
+            assert_allclose(primitive_out[i], ref_out[i], dtype=dtype)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("layout_list", [["NN", "TN", "NT", "TT"]])
+    def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list, layout_list):
+        fwd_dtype, bwd_dtype = fwd_bwd_dtype
+        quantizer_set = QuantizerFactory.create_set(
+            scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=False
+        )
+
+        out_dtype = jnp.bfloat16
+        lhs_list, rhs_list, contracting_dims_list = self._generate_grouped_gemm_input(
+            out_dtype, shape_list, layout_list
+        )
+        q_lhs_list = []
+        q_rhs_list = []
+        for lhs, rhs, contracting_dims in zip(lhs_list, rhs_list, contracting_dims_list):
+            # quantizer_set.x and quantizer_set.kernel have the same q_dtype, we want to
+            # test the case where lhs and rhs have different q_dtypes
+            q_lhs, q_rhs = _quantize_gemm_pair(
+                lhs, rhs, contracting_dims, quantizer_set.x, quantizer_set.dgrad
+            )
+            q_lhs_list.append(q_lhs)
+            q_rhs_list.append(q_rhs)
+
+        ref_out = self._ref_grouped_gemm_with_jnp_dot(lhs_list, rhs_list, contracting_dims_list)
+        primitive_out = tex.grouped_gemm(q_lhs_list, q_rhs_list, contracting_dims_list)
+
+        allclose_dtype = jnp.float8_e4m3fn
+        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
+            allclose_dtype = jnp.float8_e5m2
+        for i in range(len(shape_list)):
+            assert_allclose(primitive_out[i], ref_out[i], dtype=allclose_dtype)
+
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
+    def test_grouped_dense_grad_fp16(self, dtype, shape_list):
+        group_size = len(shape_list)
+        layout_list = ["NN" for _ in range(group_size)]
+
+        x_list, kernel_list, contracting_dims_list = self._generate_grouped_gemm_input(
+            dtype, shape_list, layout_list
+        )
+        bias_list = []
+        key = jax.random.PRNGKey(1)
+        for shape in shape_list:
+            n = shape[1]
+            bias = jax.random.uniform(key, n, dtype=dtype)
+            bias_list.append(bias)
+
+        def ref_func(x_list, kernel_list, bias_list, contracting_dims_list):
+            out_list = []
+            for i in range(len(x_list)):
+                out_list.append(
+                    linear(
+                        x_list[i],
+                        kernel_list[i],
+                        bias_list[i],
+                        contracting_dims=contracting_dims_list[i],
+                    )
+                )
+            # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
+            # and prevent them from being clamp to zero
+            out_sum_list = [jnp.sum(out) for out in out_list]
+            return jnp.sum(jnp.asarray(out_sum_list))
+
+        def primitive_func(x_list, kernel_list, bias_list, contracting_dims_list):
+            out_list = grouped_linear(x_list, kernel_list, bias_list, contracting_dims_list)
+            out_sum_list = [jnp.sum(out) for out in out_list]
+            return jnp.sum(jnp.asarray(out_sum_list))
+
+        value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
+        value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
+
+        ref_out_mean, (ref_dgrad_list, ref_wgrad_list, ref_dbias_list) = value_n_grad_ref_func(
+            x_list, kernel_list, bias_list, contracting_dims_list
+        )
+        primitive_out_mean, (primitive_dgrad_list, primitive_wgrad_list, primitive_dbias_list) = (
+            value_n_grad_primitive_func(x_list, kernel_list, bias_list, contracting_dims_list)
+        )
+
+        assert_allclose(primitive_out_mean, ref_out_mean, dtype=dtype)
+        for i in range(group_size):
+            assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=dtype)
+            assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=dtype)
+            assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=dtype)
+
+    @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list):
+        group_size = len(shape_list)
+        layout_list = ["NN" for _ in range(group_size)]
+        fwd_dtype, bwd_dtype = fwd_bwd_dtype
+        if fwd_dtype == jnp.float8_e5m2:
+            pytest.skip("We never use E5M2 for fwd_dtype in training")
+
+        # Question: should we use different quantizers for different groups?
+        ref_quantizer_set_list = []
+        quantizer_set_list = []
+        for _ in range(group_size):
+            ref_quantizer_set = QuantizerFactory.create_set(
+                scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=True
+            )
+            ref_quantizer_set_list.append(ref_quantizer_set)
+            quantizer_set = QuantizerFactory.create_set(
+                scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=True
+            )
+            quantizer_set_list.append(quantizer_set)
+
+        out_dtype = jnp.bfloat16
+        x_list, kernel_list, contracting_dims_list = self._generate_grouped_gemm_input(
+            out_dtype, shape_list, layout_list
+        )
+        bias_list = []
+        key = jax.random.PRNGKey(1)
+        for shape in shape_list:
+            n = shape[1]
+            bias = jax.random.uniform(key, n, dtype=out_dtype)
+            bias_list.append(bias)
+
+        def ref_func(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
+            out_list = []
+            for i in range(len(x_list)):
+                out_list.append(
+                    linear(
+                        x_list[i],
+                        kernel_list[i],
+                        bias_list[i],
+                        contracting_dims=contracting_dims_list[i],
+                        quantizer_set=quantizer_set_list[i],
+                    )
+                )
+            # Note: we use jnp.sum instead of jnp.mean to make the gradient larger
+            # and prevent them from being clamp to zero
+            out_sum_list = [jnp.sum(out) for out in out_list]
+            return jnp.sum(jnp.asarray(out_sum_list))
+
+        def primitive_func(
+            x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+        ):
+            out_list = grouped_linear(
+                x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+            )
+            out_sum_list = [jnp.sum(out) for out in out_list]
+            return jnp.sum(jnp.asarray(out_sum_list))
+
+        value_n_grad_ref_func = value_and_grad(ref_func, (0, 1, 2))
+        value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
+
+        ref_out_mean, (ref_dgrad_list, ref_wgrad_list, ref_dbias_list) = value_n_grad_ref_func(
+            x_list, kernel_list, bias_list, contracting_dims_list, ref_quantizer_set_list
+        )
+        primitive_out_mean, (primitive_dgrad_list, primitive_wgrad_list, primitive_dbias_list) = (
+            value_n_grad_primitive_func(
+                x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+            )
+        )
+
+        allclose_dtype = jnp.float8_e4m3fn
+        if fwd_dtype == jnp.float8_e5m2 or bwd_dtype == jnp.float8_e5m2:
+            allclose_dtype = jnp.float8_e5m2
+        assert_allclose(primitive_out_mean, ref_out_mean, dtype=allclose_dtype)
+        for i in range(group_size):
+            assert_allclose(primitive_dgrad_list[i], ref_dgrad_list[i], dtype=allclose_dtype)
+            assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=allclose_dtype)
+            assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=allclose_dtype)

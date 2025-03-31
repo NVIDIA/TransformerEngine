@@ -166,3 +166,133 @@ def _linear_bwd_rule(contracting_dims, ctx, grad):  # pylint: disable=unused-arg
 
 
 _linear.defvjp(_linear_fwd_rule, _linear_bwd_rule)
+
+
+def grouped_linear(
+    x_list,
+    kernel_list,
+    bias_list,
+    contracting_dims_list,
+    quantizer_set_list=None,
+):
+    output_list = _grouped_linear(
+        x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+    )
+    return output_list
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _grouped_linear(x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list):
+    output_list, _ = _grouped_linear_fwd_rule(
+        x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+    )
+    return output_list
+
+
+def _grouped_linear_fwd_rule(
+    x_list, kernel_list, bias_list, contracting_dims_list, quantizer_set_list
+):
+    use_bias = bias_list is not None
+    output_list = []
+    x_rowwise_list = []
+    x_colwise_list = []
+    kernel_colwise_list = []
+    kernel_rowwise_list = []
+    x_shape_list = []
+    kernel_shape_list = []
+    if quantizer_set_list is None:
+        x_rowwise_list = x_list
+        x_colwise_list = x_list
+        kernel_colwise_list = kernel_list
+        kernel_rowwise_list = kernel_list
+        x_shape_list = [x.shape for x in x_list]
+        kernel_shape_list = [kernel.shape for kernel in kernel_list]
+    else:
+        for i in range(len(x_list)):
+            q_x = tex.quantize(x_list[i], quantizer_set_list[i].x)
+            q_kernel = tex.quantize(kernel_list[i], quantizer_set_list[i].kernel)
+            x_rowwise_list.append(q_x.get_rowwise_tensor())
+            x_colwise_list.append(q_x.get_colwise_tensor())
+            kernel_colwise_list.append(q_kernel.get_colwise_tensor())
+            kernel_rowwise_list.append(q_kernel.get_rowwise_tensor())
+            x_shape_list.append(x_rowwise_list[-1].data.shape)
+            kernel_shape_list.append(kernel_rowwise_list[-1].data.shape)
+
+    output_list = tex.grouped_gemm(
+        x_rowwise_list, kernel_colwise_list, contracting_dims_list, bias_list
+    )
+
+    ctx = (
+        x_colwise_list,
+        kernel_rowwise_list,
+        x_shape_list,
+        kernel_shape_list,
+        use_bias,
+        quantizer_set_list,
+    )
+    return output_list, ctx
+
+
+def _grouped_linear_bwd_rule(contracting_dims_list, ctx, grad_list):
+    (
+        colwise_x_list,
+        rowwise_kernel_list,
+        x_shape_list,
+        kernel_shape_list,
+        use_bias,
+        quantizer_set_list,
+    ) = ctx
+
+    group_size = len(grad_list)
+    dbias_list = []
+    grad_rowwise_list = []
+    grad_colwise_list = []
+    dgrad_contracting_dims_list = []
+    wgrad_contracting_dims_list = []
+    for i in range(group_size):
+        grad = grad_list[i]
+        x_shape = x_shape_list[i]
+        kernel_shape = kernel_shape_list[i]
+        fwd_contracting_dims = contracting_dims_list[i]
+
+        if quantizer_set_list is None:
+            casted_grad = grad
+            dbias = tex.quantization._jax_dbias(grad)
+            grad_rowwise_list.append(grad)
+            grad_colwise_list.append(grad)
+        else:
+            quantizer_set = quantizer_set_list[i]
+            casted_grad, dbias = tex.quantize_dbias(
+                grad, is_dbias=use_bias, quantizer=quantizer_set.dgrad
+            )
+            grad_rowwise_list.append(casted_grad.get_rowwise_tensor())
+            grad_colwise_list.append(casted_grad.get_colwise_tensor())
+        dbias_list.append(dbias)
+
+        # GEMM NT
+        fwd_x_contracting_dims, fwd_k_contracting_dims = fwd_contracting_dims
+        g_contracting_dim = tuple(
+            range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
+        )
+        k_contracting_dim = tuple(
+            dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
+        )
+        dgrad_contracting_dims = (g_contracting_dim, k_contracting_dim)
+        dgrad_contracting_dims_list.append(dgrad_contracting_dims)
+
+        # GEMM TN
+        g_contracting_dim = x_contracting_dim = tuple(
+            range(0, len(x_shape) - len(fwd_x_contracting_dims))
+        )
+        wgrad_contracting_dims = (x_contracting_dim, g_contracting_dim)
+        wgrad_contracting_dims_list.append(wgrad_contracting_dims)
+
+    dgrad_list = tex.grouped_gemm(
+        grad_rowwise_list, rowwise_kernel_list, dgrad_contracting_dims_list
+    )
+    wgrad_list = tex.grouped_gemm(colwise_x_list, grad_colwise_list, wgrad_contracting_dims_list)
+
+    return dgrad_list, wgrad_list, dbias_list, quantizer_set_list
+
+
+_grouped_linear.defvjp(_grouped_linear_fwd_rule, _grouped_linear_bwd_rule)

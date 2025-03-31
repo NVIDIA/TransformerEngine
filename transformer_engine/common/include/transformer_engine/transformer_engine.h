@@ -80,7 +80,8 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  NVTE_INVALID_SCALING
+  NVTE_INVALID_SCALING = 2,
+  NVTE_NO_SCALING = 3
 };
 
 /*! \brief TE Tensor type
