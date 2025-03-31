@@ -8,12 +8,8 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType_To_Torch
 
 
-# compute amax and scale
-def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
-    x_fp32 = x.to(torch.float32)
-    amax = torch.amax(torch.abs(x_fp32)).view(1)
-    assert amax.dtype == torch.float, "amax must be a float tensor."
-    fp8_max = torch.finfo(quant_dtype).max
+# Compute scale and scale_inv from amax
+def _ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales):
     # Clamping amax to avoid division by small numbers
     amax = torch.max(amax, torch.tensor(eps))
 
@@ -51,6 +47,20 @@ def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
     scale = torch.where(amax == 0, 1.0, scale)
     # Compute scale_inv
     scale_inv = torch.reciprocal(scale)
+
+    return scale, scale_inv
+
+
+# compute amax and scale
+def _ref_compute_amax_scale(x, quant_dtype, eps, pow_2_scales):
+    x_fp32 = x.to(torch.float32)
+    amax = torch.amax(torch.abs(x_fp32)).view(1)
+    assert amax.dtype == torch.float, "amax must be a float tensor."
+    fp8_max = torch.finfo(quant_dtype).max
+
+    scale, scale_inv = _ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales)
+    # Clamping amax to avoid division by small numbers
+    amax = torch.max(amax, torch.tensor(eps))
 
     return scale, scale_inv, amax
 
@@ -103,3 +113,7 @@ def ref_per_tensor_cs_cast(
         qx_t = _multi_dim_transpose(qx)
         sx_t = sx
     return qx, sx, qx_t, sx_t
+
+
+def ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales):
+    return _ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales)
