@@ -638,9 +638,8 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout.is_separate()
 
-            assert (
-                sequence_descriptor is None
-                or isinstance(sequence_descriptor, (jnp.ndarray, np.ndarray))
+            assert sequence_descriptor is None or isinstance(
+                sequence_descriptor, (jnp.ndarray, np.ndarray)
             )
 
             x = _UnfusedDotProductAttention(

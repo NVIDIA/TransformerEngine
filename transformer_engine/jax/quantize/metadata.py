@@ -37,6 +37,7 @@ class QuantizeMetaSet:
         kernel: Quantization metadata for kernel tensors
         grad: Quantization metadata for gradient tensors
     """
+
     x: QuantizeMeta
     kernel: QuantizeMeta
     grad: QuantizeMeta

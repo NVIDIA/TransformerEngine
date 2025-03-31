@@ -18,10 +18,10 @@ import jax.numpy as jnp
 from . import cpp_extensions as tex
 
 from .quantize import (
-        QuantizerSet,
-        noop_quantizer_set,
-        with_sharding_constraint_by_logical_axes,
-        )
+    QuantizerSet,
+    noop_quantizer_set,
+    with_sharding_constraint_by_logical_axes,
+)
 
 
 def layernorm_linear(
