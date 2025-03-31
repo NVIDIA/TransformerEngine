@@ -61,14 +61,26 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group) {
 #endif
 }
 
-void nvshmem_wait_on_stream(torch::Tensor signal, int wait_kind) {
+void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind) {
 #ifdef NVTE_ENABLE_NVSHMEM
   uint64_t *sig_addr = reinterpret_cast<uint64_t *>(signal.data_ptr());
   cudaStream_t cur_stream = (cudaStream_t)at::cuda::getCurrentCUDAStream();
 
-  transformer_engine::nvshmem_wait_on_stream(sig_addr, wait_kind, cur_stream);
+  WaitKind wait_kind_enum = WaitKind::STREAM_WAIT;
+
+  if (wait_kind == "kernel") {
+    wait_kind_enum = WaitKind::KERNEL_WAIT;
+  } else if (wait_kind == "nvshmem") {
+    wait_kind_enum = WaitKind::NVSHMEM_WAIT;
+  } else if (wait_kind == "stream") {
+    wait_kind_enum = WaitKind::STREAM_WAIT;
+  } else {
+    NVTE_ERROR("Invalid wait kind: ", wait_kind);
+  }
+  nvshmem_wait_on_stream(sig_addr, wait_kind_enum, cur_stream);
+
 #else
-  NVTE_ERROR("Internal TE error: nvshmem_wait_on_stream cannot be initialized with valid PyTorch ",
+  NVTE_ERROR("Internal TE error: nvshmem_wait_on_current_stream cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
@@ -87,7 +99,7 @@ torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::Scal
 #endif
 }
 
-void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal) {
+void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal) {
 #ifdef NVTE_ENABLE_NVSHMEM
   void *src_ptr = reinterpret_cast<void *>(src.data_ptr());
   void *dst_ptr = reinterpret_cast<void *>(dst.data_ptr());
@@ -99,7 +111,7 @@ void nvshmem_send_on_stream(torch::Tensor src, torch::Tensor dst, int peer, torc
   nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET,
                                    peer, (cudaStream_t)cur_stream);
 #else
-  NVTE_ERROR("Internal TE error: nvshmem_send_on_stream cannot be initialized with valid PyTorch ",
+  NVTE_ERROR("Internal TE error: nvshmem_send_on_current_stream cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
@@ -108,15 +120,6 @@ void nvshmem_finalize() {
   nvshmem_finalize();
 #else
   NVTE_ERROR("Internal TE error: nvshmem_finalize cannot be initialized with valid PyTorch ",
-             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
-#endif
-}
-
-void nvshmem_quiet() {
-#ifdef NVTE_ENABLE_NVSHMEM
-  nvshmem_quiet();
-#else
-  NVTE_ERROR("Internal TE error: nvshmem_quiet cannot be initialized with valid PyTorch ",
              "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }

@@ -1,5 +1,5 @@
 ##########################################################################
-# Copyright (c) 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 ##########################################################################
@@ -25,6 +25,3 @@ set_target_properties(nvshmemapi PROPERTIES
                       CUDA_STANDARD 17
                       POSITION_INDEPENDENT_CODE ON
                       CUDA_SEPARABLE_COMPILATION ON)
-
-# This means nvshmemapi.so will be installed in TransformerEngine/, alongside libtransformer_engine.so and transformer_engine_common.cpython-310-x86_64-linux-gnu.so
-# install(TARGETS nvshmemapi DESTINATION ./)
