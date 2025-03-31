@@ -3,8 +3,9 @@
  *
  * See LICENSE for license information.
  ************************************************************************/
-#include <memory>
 #include "transformer_engine/gemm.h"
+
+#include <memory>
 
 #include "common/util/cuda_runtime.h"
 #include "common/util/system.h"
@@ -37,7 +38,8 @@ Error_Type GroupedGemmImpl(uint8_t *lhs_ptr, const DType &lhs_dtype, uint8_t *lh
   size_t dim_list_bytes = sizeof(int32_t) * 3 * num_gemms;
   std::unique_ptr<int32_t[]> dim_list_host = std::make_unique<int32_t[]>(3 * num_gemms);
 
-  cudaMemcpyAsync(dim_list_host.get(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost, stream);
+  cudaMemcpyAsync(dim_list_host.get(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+                  stream);
   // Note: This may break cudaGraph.
   cudaStreamSynchronize(stream);
 

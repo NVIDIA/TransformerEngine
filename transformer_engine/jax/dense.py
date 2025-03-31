@@ -212,7 +212,7 @@ def _grouped_dense_fwd_rule(
         x_shape_list = [x.shape for x in x_list]
         kernel_shape_list = [kernel.shape for kernel in kernel_list]
     else:
-        for i in range(len(x_list)):    # pylint: disable=consider-using-enumerate
+        for i in range(len(x_list)):  # pylint: disable=consider-using-enumerate
             q_x = tex.quantize(x_list[i], quantizer_set_list[i].x)
             q_kernel = tex.quantize(kernel_list[i], quantizer_set_list[i].kernel)
             x_rowwise_list.append(q_x.get_rowwise_tensor())
