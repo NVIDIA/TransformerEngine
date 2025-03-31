@@ -11,14 +11,17 @@ from packaging.version import Version as PkgVersion
 
 import numpy as np
 
-import jax.numpy as jnp
+import jax
 from jax import dtypes
+import jax.numpy as jnp
 from jax.interpreters.mlir import dtype_to_ir_type
 
-from transformer_engine_jax import DType as TEDType
 import transformer_engine_jax
 
 from ..sharding import get_padded_spec as te_get_padded_spec
+from ..quantize import ScalingMode, ScaledTensorFactory, QuantizeAxis
+
+TEDType = transformer_engine_jax.DType
 
 
 def te_dtype_to_jax_dtype(te_dtype):
@@ -104,7 +107,7 @@ def normalize_axis_boundary(axis, ndim):
     return axis if axis >= 0 else ndim + axis
 
 
-def multidim_transpose(shape, static_axis_boundary, transpose_axis_boundary):
+def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis_boundary=-1):
     """
     te_cast_transpose_p multi-dims transpose
 
@@ -158,17 +161,6 @@ def jax_version_meet_requirement(version: str):
     return jax_version >= jax_version_required
 
 
-def is_ffi_enabled():
-    """
-    Helper function checking if XLA Custom Call with FFI is enabled
-    """
-    is_supported = jax_version_meet_requirement("0.4.35")
-    # New APIs with FFI are enabled by default
-    is_enabled = int(os.getenv("NVTE_JAX_WITH_FFI", "1"))
-    assert is_enabled in (0, 1), "Invalid NVTE_JAX_WITH_FFI value"
-    return is_supported and is_enabled
-
-
 def get_xla_flag(flag: str, default=None, cast=str):
     """
     Returns the value of a flag/option in XLA_FLAGS environment variable if present or returns the default value.
@@ -189,3 +181,86 @@ def get_xla_flag(flag: str, default=None, cast=str):
             if name == flag:
                 return True
     return default
+
+
+def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quantizer=None):
+    """
+    Fused dbias is not supported for arch < 100 for 1x quantization, so we need to apply a workaround to
+    calculate dbias separately. This function checks if the workaround should be applied.
+    """
+    arch_l_100 = False
+    for local_gpu_id in range(len(jax.local_devices())):
+        if transformer_engine_jax.get_device_compute_capability(local_gpu_id) < 100:
+            arch_l_100 = True
+            break
+    return (
+        quantizer is not None
+        and quantizer.q_axis == QuantizeAxis.ROWWISE
+        and arch_l_100
+        and is_dbias
+    )
+
+
+def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
+    """
+    Applies a workaround for delayed scaling 2x and can be used when the TE common kernels do not yet support 2x delayed scaling.
+    It will call the given function 'f' with the given arguments and quantizer as 1x and calculate the colwise output by transposing result.
+
+    If 'f' returns a tuple, the first output must be the only ScaledTensor output.
+
+    @param f: function to call
+    @param args: positional arguments to pass to 'f'
+    @param quantizer: quantizer to use
+    @param kwargs: keyword arguments to pass to 'f'
+    @return: the output of 'f' with the colwise output calculated
+    """
+    should_apply_war = (
+        quantizer is not None
+        and quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+        and quantizer.is_2x2x()
+    )
+    if not should_apply_war:
+        return None
+
+    # 2x is not supported by TE kernels for delayed scaling
+    # so revert to 1x and transpose in JAX
+    quantizer.q_axis = QuantizeAxis.ROWWISE
+    rowwise = f(*args, **kwargs, quantizer=quantizer)
+    other_outputs = None
+    if isinstance(rowwise, tuple):
+        other_outputs = rowwise[1:]
+        rowwise = rowwise[0]
+    quantizer.q_axis = QuantizeAxis.ROWWISE_COLWISE
+    colwise_data = jnp.transpose(rowwise.data, (-1, *range(rowwise.data.ndim - 1)))
+    output_2x = ScaledTensorFactory.create(
+        data=rowwise.data,
+        scale_inv=rowwise.scale_inv,
+        colwise_data=colwise_data,
+        colwise_scale_inv=rowwise.scale_inv,
+        scaling_mode=quantizer.scaling_mode,
+        dq_dtype=rowwise.dq_dtype,
+        q_axis=QuantizeAxis.ROWWISE_COLWISE,
+        layout=quantizer.get_layout(),
+    )
+    if other_outputs is not None:
+        return (output_2x,) + other_outputs
+    return output_2x
+
+
+class NamedSharding(jax.sharding.NamedSharding):
+    """
+    Wrapper around jax.sharding.NamedSharding that adds a string description field as metadata for easier debugging.
+    """
+
+    def __init__(self, *args, desc: str = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.desc = desc
+
+    def __repr__(self):
+        return f"NamedSharding({self.mesh}, {self.spec}, desc={self.desc})"
+
+    def duplicate_with_new_description(self, desc: str):
+        """
+        Create a new NamedSharding with the same mesh and spec but with a new description.
+        """
+        return NamedSharding(self.mesh, self.spec, desc=desc)
