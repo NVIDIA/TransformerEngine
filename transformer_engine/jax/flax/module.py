@@ -760,9 +760,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = dense(
-                y, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set
-            )
+            z = dense(y, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set)
 
         if self.enable_low_rank_adaptation:
             lora_a_kernel_shape = (
