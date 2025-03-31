@@ -365,9 +365,7 @@ def train_and_evaluate(args):
         num_gpu_tp = 1
 
     if args.fp8_recipe == "MXFP8BlockScaling":
-        assert (
-            args.batch_size % 32 == 0
-        ), "Batch size needs to be multiple of 32 for MXFP8"
+        assert args.batch_size % 32 == 0, "Batch size needs to be multiple of 32 for MXFP8"
         assert (
             args.test_batch_size % 32 == 0
         ), "Test batch size needs to be multiple of 32 for MXFP8"
