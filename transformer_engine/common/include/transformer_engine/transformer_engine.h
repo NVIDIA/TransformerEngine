@@ -80,7 +80,8 @@ enum NVTEScalingMode {
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
   NVTE_MXFP8_1D_SCALING = 1,
-  NVTE_INVALID_SCALING
+  NVTE_INVALID_SCALING = 2,
+  NVTE_NO_SCALING = 3
 };
 
 /*! \brief TE Tensor type
@@ -345,6 +346,13 @@ enum class DType {
   kFloat8E8M0 = 8,
   kNumTypes
 };
+
+/*! \brief Check if TE datatype is FP8
+ *
+ * Return true if TE datatype is FP8
+ *  \param[in] DType      TE Datatype of interest
+ */
+bool is_fp8_dtype(const DType t);
 
 /*! \struct TensorWrapper
  *  \brief C++ wrapper for the NVTETensor class.
