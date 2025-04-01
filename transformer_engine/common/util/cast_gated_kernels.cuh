@@ -27,14 +27,8 @@
 
 namespace transformer_engine {
 
-template <typename T1, typename T2>
-__device__ __host__ __forceinline__ uint64_t DIVUP_TO_MULTIPLE(T1 N, T2 M) {
-  return DIVUP(static_cast<uint64_t>(N), static_cast<uint64_t>(M)) * M;
-}
-
 namespace gated_kernels {
 
-constexpr size_t ALIGNMENT_SIZE = 128;
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 512;
@@ -76,18 +70,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   float amax = 0;
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
-  extern __shared__ char dshmem_unaligned[];
-  const uint64_t dshmem_unaligned_as_uint = reinterpret_cast<uint64_t>(dshmem_unaligned);
-  const uint64_t dshmem_aligned_as_uint =
-      DIVUP(dshmem_unaligned_as_uint, static_cast<uint64_t>(ALIGNMENT_SIZE)) * ALIGNMENT_SIZE;
-  char *dshmem = reinterpret_cast<char *>(dshmem_aligned_as_uint);
+  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
-  constexpr size_t buff_size_aligned_in =
-      DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
-  constexpr size_t buff_size_aligned_out =
-      DIVUP(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
+  constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
 
@@ -96,8 +84,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t in_mem = in_act_mem + in_gate_mem;
 
   constexpr size_t out_act_mem = buff_size_aligned_out;
-
-  // const size_t in_transaction_size = grad_mem + in_mem;
   constexpr size_t in_transaction_size = buff_elems * sizeof(IType);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
@@ -309,18 +295,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const bool col_out_of_bounds = (chunk_offset_X + thread_offset_X >= cols);
 
-  extern __shared__ char dshmem_unaligned[];
-  const uint64_t dshmem_unaligned_as_uint = reinterpret_cast<uint64_t>(dshmem_unaligned);
-  const uint64_t dshmem_aligned_as_uint =
-      DIVUP(dshmem_unaligned_as_uint, static_cast<uint64_t>(ALIGNMENT_SIZE)) * ALIGNMENT_SIZE;
-  char *dshmem = reinterpret_cast<char *>(dshmem_aligned_as_uint);
+  extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
   const size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   const size_t buff_elems_total = BUFFERS_NUM * buff_elems;
-  const size_t buff_size_aligned_in =
-      DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
-  const size_t buff_size_aligned_out =
-      DIVUP(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
+  const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
 
@@ -332,7 +312,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const size_t out_gate_mem = buff_size_aligned_out;
   const size_t out_mem = out_act_mem + out_gate_mem;
 
-  // const size_t in_transaction_size = grad_mem + in_mem;
   const size_t in_transaction_size = (IS_DGATED ? 3 : 2) * buff_elems * sizeof(IType);
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
@@ -770,18 +749,15 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                                typeToNumBits(output->dtype()));
 
           const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
-          const size_t buff_size_aligned_out =
-              DIVUP(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
+          const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
           const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
           const size_t in_act_mem = buff_size_aligned_in;
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
-          // const size_t mbar_mem = ITERATIONS * sizeof(uint64_t);
-          const size_t shmem_size = ALIGNMENT_SIZE + grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem);  // + mbar_mem;
+          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
+                                    (out_act_mem + out_gate_mem);
 
           cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
@@ -880,10 +856,8 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                   }
 
                   const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-                  const size_t buff_size_aligned_in =
-                      DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
-                  const size_t buff_size_aligned_out =
-                      DIVUP(buff_elems_total * sizeof(OType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
+                  const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+                  const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
                   const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
                   const size_t in_act_mem = buff_size_aligned_in;
@@ -895,10 +869,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                   size_t out_mem = out_act_mem + out_gate_mem;
                   if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
 
-                  // const size_t mbar_mem = ITERATIONS * sizeof(uint64_t);
-                  // const size_t shmem_size = ALIGNMENT_SIZE + in_mem + out_mem + mbar_mem;
-
-                  const size_t shmem_size = ALIGNMENT_SIZE + in_mem + out_mem;
+                  const size_t shmem_size = in_mem + out_mem;
 
                   cudaFuncSetAttribute(
                       cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
@@ -1064,21 +1035,21 @@ void quantize_gated_helper(const NVTETensor grad, const NVTETensor gated_input, 
   const Tensor gated_input_tensor = *convertNVTETensorCheck(gated_input);
   Tensor *output_tensor = convertNVTETensorCheck(output);
 
-  if (is_supported_by_CC_100()) {
-    quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
-                                                      output_tensor, stream);
-  } else {
-    if (is_delayed_tensor_scaling(output_tensor->scaling_mode)) {
-      if constexpr (IS_DGATED) {
-        cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, stream);
-      } else {
-        cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, stream);
-      }
-    } else {
-      // MX scaling
-      NVTE_ERROR("Not supported by the Arch < 10.0");
-    }
-  }
+  // if (is_supported_by_CC_100()) {
+  //   quantize_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor,
+  //                                                     output_tensor, stream);
+  // } else {
+  //   if (is_delayed_tensor_scaling(output_tensor->scaling_mode)) {
+  //     if constexpr (IS_DGATED) {
+  //       cast_dgated<ParamOP, ActOP, DActOP>(grad_tensor, gated_input_tensor, output_tensor, stream);
+  //     } else {
+  //       cast_gated<ParamOP, ActOP>(gated_input_tensor, output_tensor, stream);
+  //     }
+  //   } else {
+  //     // MX scaling
+  //     NVTE_ERROR("Not supported by the Arch < 10.0");
+  //   }
+  // }
 }
 }  // namespace detail
 
