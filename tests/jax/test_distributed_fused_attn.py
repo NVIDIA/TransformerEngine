@@ -6,7 +6,6 @@ import os
 import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import random
 from distributed_test_base import (
     generate_configs,
@@ -104,7 +103,7 @@ class TestDistributedSelfAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
@@ -176,7 +175,7 @@ class TestDistributedCrossAttn:
             hidden,
             None,  # no window
         ):
-            pytest.skip(f"No FusedAttn backend found")
+            pytest.skip("No FusedAttn backend found")
 
         col_ref = self.generate_collectives_count_ref()
         runner = FusedAttnRunner(
@@ -256,7 +255,6 @@ class TestDistributedContextParallelSelfAttn:
         dropout_prob = 0.0
         is_training = True
         dp_size, cp_size, tp_size = mesh_shape
-        qkv_format = qkv_layout.get_qkv_format()
 
         batch, seqlen, num_head, hidden = data_shape
 
@@ -382,7 +380,7 @@ class TestDistributedContextParallelSelfAttn:
         if qkv_layout.is_thd() and not load_balanced:
             pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
-        return self.impl_test_context_parallel_attn(
+        self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -396,6 +394,7 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.RING,
         )
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+        return
 
 
 class TestReorderCausalLoadBalancing:
