@@ -27,12 +27,18 @@ from transformer_engine.jax.sharding import global_shard_guard, MeshResource
 from .scaling_modes import ScalingMode
 from .. import cpp_extensions as tex
 
-__all__ = ["QuantizeConfig", "fp8_autocast", "is_fp8_available", "update_collections", "get_delayed_scaling"]
+__all__ = [
+        "QuantizeConfig",
+        "fp8_autocast",
+        "is_fp8_available",
+        "update_collections",
+        "get_delayed_scaling",
+        "NVTE_FP8_COLLECTION_NAME",
+        ]
 
 _is_fp8_available = None
 _reason_for_no_fp8 = ""
 Collection = Union[Dict, FrozenDict]
-
 
 def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     """Check if delayed scaling FP8 is supported on the given GPU architecture.
@@ -439,3 +445,6 @@ def update_collections(new: Collection, original: Collection) -> Collection:
     if not isinstance(original, FrozenDict):
         new_coll = new_coll.unfreeze()
     return new_coll
+
+
+NVTE_FP8_COLLECTION_NAME = QuantizeConfig.COLLECTION_NAME
