@@ -57,7 +57,7 @@ def test_fused_rope(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb = rotary_pos_emb(seq_length * cp_size)
     assert emb.is_contiguous()
 
@@ -141,7 +141,7 @@ def test_fused_rope_thd(
         t = t.transpose(*transpose).contiguous().transpose(*transpose)
     t.requires_grad = True
 
-    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent)
+    rotary_pos_emb = RotaryPositionEmbedding(hidden_size, rotary_percent, interleaved=interleaved)
     emb = rotary_pos_emb(cu_seqlens_padded[-1])
     assert emb.is_contiguous()
 
