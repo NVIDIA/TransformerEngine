@@ -283,7 +283,7 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             recipe_state = fp8_meta[fp8_meta_key]
 
             # Reallocate amax history if needed
-            if recipe.mxfp8():
+            if not recipe.delayed():
                 continue
 
             current_length = recipe_state.amax_history.size(0)

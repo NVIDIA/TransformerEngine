@@ -1240,9 +1240,6 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].amax_reduction_size = self.tp_size
         else:
             # set grad_output_quantizer with amax epsilon and power_2_scale
             self.quantizers["scaling_bwd"][
@@ -1260,6 +1257,3 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].amax_reduction_size = self.tp_size
