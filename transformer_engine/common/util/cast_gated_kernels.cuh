@@ -74,8 +74,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
-  constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
 
@@ -299,8 +301,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   const size_t buff_elems_total = BUFFERS_NUM * buff_elems;
-  const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+  const size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  const size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
 
@@ -749,15 +753,17 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                                typeToNumBits(output->dtype()));
 
           const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-          const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
           const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
           const size_t in_act_mem = buff_size_aligned_in;
           const size_t in_gate_mem = buff_size_aligned_in;
           const size_t out_act_mem = buff_size_aligned_out;
           const size_t out_gate_mem = buff_size_aligned_out;
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem);
+          const size_t shmem_size =
+              grad_mem + (in_act_mem + in_gate_mem) + (out_act_mem + out_gate_mem);
 
           cudaFuncSetAttribute(
               cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
@@ -856,8 +862,10 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                   }
 
                   const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
-                  const size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-                  const size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+                  const size_t buff_size_aligned_in =
+                      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+                  const size_t buff_size_aligned_out =
+                      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
                   const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
                   const size_t in_act_mem = buff_size_aligned_in;

@@ -113,15 +113,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
-  const int thread_group = tid_Y_rowwise % (THREADS_PER_WARP / THREADS_X);  // helps to resolve bank conflicts in shmem
-  const int lane = tid_X_rowwise; // helps to resolve bank conflicts in shmem
+  const int thread_group =
+      tid_Y_rowwise % (THREADS_PER_WARP / THREADS_X);  // helps to resolve bank conflicts in shmem
+  const int lane = tid_X_rowwise;                      // helps to resolve bank conflicts in shmem
 
   extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
-  constexpr size_t buff_size_aligned_in = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-  constexpr size_t buff_size_aligned_out = DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
 
   constexpr size_t elt_input_mem = buff_size_aligned_in;
   constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
@@ -291,9 +294,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       thread_amax = 0.0f;
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
-      
+
       // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
-      Vec<IType, PACK_SIZE> in_IType[WAVES]; 
+      Vec<IType, PACK_SIZE> in_IType[WAVES];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
@@ -472,16 +475,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       thread_partial_dbias = partial_dbias_colwise;
     } else {
       __shared__ float partial_dbias_rowwise[WARPS][BUFF_DIM_X];
-      #pragma unroll
+#pragma unroll
       for (int w = 0; w < WARPS; ++w) {
         partial_dbias_rowwise[w][threadIdx.x] = 0.0f;
       }
       __syncthreads();
-      #pragma unroll
+#pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         const int swizzled_group_idx = ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
           const int j = w * PACK_SIZE + e;
           const int swizzled_lane_idx = (e + lane) % PACK_SIZE;
@@ -490,7 +493,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
       }
       __syncthreads();
-      #pragma unroll
+#pragma unroll
       for (int w = 0; w < WARPS; ++w) {
         thread_partial_dbias += partial_dbias_rowwise[w][threadIdx.x];
       }
@@ -567,9 +570,12 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
-  __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT)
+      IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT)
+      IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT)
+      OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / FP8_BUFFERS_NUM;
 
