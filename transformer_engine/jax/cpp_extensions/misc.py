@@ -240,7 +240,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=rowwise.dq_dtype,
         q_layout=QuantizeLayout.ROWWISE_COLWISE,
-        layout=quantizer.get_data_layout(),
+        data_layout=quantizer.get_data_layout(),
     )
     if other_outputs is not None:
         return (output_2x,) + other_outputs

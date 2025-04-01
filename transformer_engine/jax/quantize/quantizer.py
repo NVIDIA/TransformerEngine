@@ -89,10 +89,10 @@ class Quantizer(ABC):
 
     @abstractmethod
     def get_data_layout(self) -> str:
-        """Get the data layout.
+        """Get the data data_layout.
 
         Returns:
-            Data layout in string format
+            Data data_layout in string format
         """
 
     @abstractmethod
@@ -185,21 +185,21 @@ class DelayedScaleQuantizer(Quantizer):
         return (children, aux_data)
 
     def get_data_layout(self) -> str:
-        """Get the data layout string.
+        """Get the data data_layout string.
 
         Returns:
-            Data layout in string format
+            Data data_layout in string format
 
         Raises:
             ValueError: If quantization axis is invalid
         """
-        layout = "NT"
+        data_layout = "NT"
         if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
-            return layout
+            return data_layout
         if self.q_layout == QuantizeLayout.ROWWISE:
-            return layout[0]
+            return data_layout[0]
         if self.q_layout == QuantizeLayout.COLWISE:
-            return layout[1]
+            return data_layout[1]
         raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
     def _quantize_func(self, x: jnp.ndarray, is_colwise=False, dq_dtype=None) -> ScaledTensor1x:
@@ -267,7 +267,7 @@ class DelayedScaleQuantizer(Quantizer):
                 scaling_mode=self.scaling_mode,
                 dq_dtype=dq_dtype,
                 is_colwise=True,
-                layout="T",
+                data_layout="T",
             )
         if is_colwise and is_rowwise:
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
@@ -360,10 +360,10 @@ class BlockScaleQuantizer(Quantizer):
     q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     def get_data_layout(self) -> str:
-        """Get the data layout string.
+        """Get the data data_layout string.
 
         Returns:
-            Data layout in string format
+            Data data_layout in string format
         """
         if self.is_2x2x():
             return "NN"

@@ -82,7 +82,7 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
 
 def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
     if isinstance(a, ScaledTensor1x):
-        if a.layout == "T":
+        if a.data_layout == "T":
             b_transpose = jnp.transpose(b, (-1, *range(b.ndim - 1)))
             assert_allclose(a.dequantize(), b_transpose, dtype=a.data.dtype)
         else:
@@ -650,39 +650,39 @@ class TestFusedQuantize:
 
 
 class TestDense:
-    def _ref_gemm_with_jnp_dot(self, a, b, layout):
-        if layout[0] == "T":
+    def _ref_gemm_with_jnp_dot(self, a, b, data_layout):
+        if data_layout[0] == "T":
             a = jnp.swapaxes(a, -1, -2)
-        if layout[1] == "T":
+        if data_layout[1] == "T":
             b = jnp.swapaxes(b, -1, -2)
         return jnp.dot(a, b)
 
-    def _generate_gemm_input(self, m, n, k, layout):
+    def _generate_gemm_input(self, m, n, k, data_layout):
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(
             subkeys[0],
-            (m if layout[0] == "N" else k, k if layout[0] == "N" else m),
+            (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
             dtype=jnp.bfloat16,
         ) / jnp.sqrt(k)
         w = jax.random.uniform(
             subkeys[1],
-            (k if layout[1] == "N" else n, n if layout[1] == "N" else k),
+            (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
             dtype=jnp.bfloat16,
         ) / jnp.sqrt(n)
-        lhs_contracting_dim = (1,) if layout[0] == "N" else (0,)
-        rhs_contracting_dim = (0,) if layout[1] == "N" else (1,)
+        lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+        rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
         contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
         return (x, w, contracting_dims)
 
     @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
-    @pytest_parametrize_wrapper("layout", ["TN", "NT", "NN", "TT"])
-    def test_gemm_bf16(self, m, n, k, layout):
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
+    def test_gemm_bf16(self, m, n, k, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         primitive_out = tex.gemm(x, w, contracting_dims)
-        ref_out = self._ref_gemm_with_jnp_dot(x, w, layout)
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
@@ -690,30 +690,30 @@ class TestDense:
     @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    @pytest_parametrize_wrapper("layout", ["TN", "NT", "NN", "TT"])
-    def test_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, layout):
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+    @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
+    def test_gemm_fp8(self, m, n, k, q_dtype, scaling_mode, data_layout):
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=False
         )
         primitive_out = tex.gemm(
             x, w, contracting_dims=contracting_dims, quantizer_set=quantizer_set
         )
-        ref_out = self._ref_gemm_with_jnp_dot(x, w, layout)
+        ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
 
     @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
     def test_dense_grad_bf16(self, m, n, k):
-        layout = "NN"
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+        data_layout = "NN"
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         def primitive_func(x, w, contracting_dims):
             primitive_out = dense(x, w, contracting_dims=contracting_dims)
             return jnp.mean(primitive_out)
 
-        def ref_func(x, w, layout):
-            return jnp.mean(self._ref_gemm_with_jnp_dot(x, w, layout))
+        def ref_func(x, w, data_layout):
+            return jnp.mean(self._ref_gemm_with_jnp_dot(x, w, data_layout))
 
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1))
 
@@ -722,7 +722,7 @@ class TestDense:
         primitive_out, (primitive_x_grad, primitive_w_grad) = value_n_grad_primitive_func(
             x, w, contracting_dims
         )
-        ref_out, (ref_x_grad, ref_w_grad) = value_n_grad_ref_func(x, w, layout)
+        ref_out, (ref_x_grad, ref_w_grad) = value_n_grad_ref_func(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=jnp.bfloat16)
@@ -733,8 +733,8 @@ class TestDense:
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_dense_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
-        layout = "NN"
-        x, w, contracting_dims = self._generate_gemm_input(m, n, k, layout)
+        data_layout = "NN"
+        x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
 
         key = jax.random.PRNGKey(1)
         bias = jax.random.uniform(key, n, dtype=jnp.bfloat16)
@@ -745,9 +745,9 @@ class TestDense:
             )
             return jnp.mean(primitive_out)
 
-        def ref_func(x, w, bias, layout):
+        def ref_func(x, w, bias, data_layout):
             return jnp.mean(
-                self._ref_gemm_with_jnp_dot(x, w, layout) + jnp.expand_dims(bias, axis=0)
+                self._ref_gemm_with_jnp_dot(x, w, data_layout) + jnp.expand_dims(bias, axis=0)
             )
 
         value_n_grad_primitive_func = value_and_grad(primitive_func, (0, 1, 2))
@@ -763,7 +763,7 @@ class TestDense:
                 value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
             )
 
-        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(x, w, bias, layout)
+        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(x, w, bias, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=q_dtype)
@@ -1039,19 +1039,19 @@ class TestGroupedDense:
         subkeys = jax.random.split(key, len(shape_list) * 2)
 
         lhs_list, rhs_list, contracting_dims_list = [], [], []
-        for i, ((m, n, k), layout) in enumerate(zip(shape_list, layout_list)):
+        for i, ((m, n, k), data_layout) in enumerate(zip(shape_list, layout_list)):
             lhs = jax.random.uniform(
                 subkeys[2 * i],
-                (m if layout[0] == "N" else k, k if layout[0] == "N" else m),
+                (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m),
                 dtype=dtype,
             )
             rhs = jax.random.uniform(
                 subkeys[2 * i + 1],
-                (k if layout[1] == "N" else n, n if layout[1] == "N" else k),
+                (k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k),
                 dtype=dtype,
             )
-            lhs_contracting_dim = (1,) if layout[0] == "N" else (0,)
-            rhs_contracting_dim = (0,) if layout[1] == "N" else (1,)
+            lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+            rhs_contracting_dim = (0,) if data_layout[1] == "N" else (1,)
             contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
 
             lhs_list.append(lhs)
