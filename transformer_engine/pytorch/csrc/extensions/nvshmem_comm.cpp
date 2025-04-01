@@ -80,8 +80,9 @@ void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wai
   nvshmem_wait_on_stream(sig_addr, wait_kind_enum, cur_stream);
 
 #else
-  NVTE_ERROR("Internal TE error: nvshmem_wait_on_current_stream cannot be initialized with valid PyTorch ",
-             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+  NVTE_ERROR(
+      "Internal TE error: nvshmem_wait_on_current_stream cannot be initialized with valid PyTorch ",
+      "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
 
@@ -99,7 +100,8 @@ torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::Scal
 #endif
 }
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal) {
+void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
+                                    torch::Tensor signal) {
 #ifdef NVTE_ENABLE_NVSHMEM
   void *src_ptr = reinterpret_cast<void *>(src.data_ptr());
   void *dst_ptr = reinterpret_cast<void *>(dst.data_ptr());
@@ -111,8 +113,9 @@ void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int pe
   nvshmemx_putmem_signal_on_stream(dst_ptr, src_ptr, nelement, sig_addr, sigval, NVSHMEM_SIGNAL_SET,
                                    peer, (cudaStream_t)cur_stream);
 #else
-  NVTE_ERROR("Internal TE error: nvshmem_send_on_current_stream cannot be initialized with valid PyTorch ",
-             "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
+  NVTE_ERROR(
+      "Internal TE error: nvshmem_send_on_current_stream cannot be initialized with valid PyTorch ",
+      "distributed process groups when TE is compiled with NVTE_ENABLE_NVSHMEM=1!");
 #endif
 }
 void nvshmem_finalize() {

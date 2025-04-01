@@ -382,7 +382,8 @@ void init_nvshmem_backend(c10d::ProcessGroup *process_group);
 
 torch::Tensor create_nvshmem_tensor(const std::vector<int64_t> &shape, c10::ScalarType dtype);
 
-void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer, torch::Tensor signal);
+void nvshmem_send_on_current_stream(torch::Tensor src, torch::Tensor dst, int peer,
+                                    torch::Tensor signal);
 
 void nvshmem_wait_on_current_stream(torch::Tensor signal, const std::string &wait_kind);
 

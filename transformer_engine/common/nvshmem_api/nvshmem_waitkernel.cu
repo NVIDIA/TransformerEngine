@@ -29,7 +29,8 @@ void nvshmem_wait_on_stream(uint64_t* sig_addr, WaitKind wait_kind, cudaStream_t
   uint64_t signal_reset = 0;
   cudaStream_t cur_stream = stream;
 
-  NVTE_CHECK(wait_kind >= WaitKind::KERNEL_WAIT && wait_kind <= WaitKind::STREAM_WAIT, "Invalid wait kind: ", static_cast<int>(wait_kind));
+  NVTE_CHECK(wait_kind >= WaitKind::KERNEL_WAIT && wait_kind <= WaitKind::STREAM_WAIT,
+             "Invalid wait kind: ", static_cast<int>(wait_kind));
 
   switch (wait_kind) {
     case WaitKind::KERNEL_WAIT:
@@ -38,14 +39,13 @@ void nvshmem_wait_on_stream(uint64_t* sig_addr, WaitKind wait_kind, cudaStream_t
     case WaitKind::NVSHMEM_WAIT:
       nvshmemx_uint64_wait_until_on_stream(sig_addr, NVSHMEM_CMP_EQ, wait_value, cur_stream);
       cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)signal_reset,
-                          CU_STREAM_WRITE_VALUE_DEFAULT);
+                           CU_STREAM_WRITE_VALUE_DEFAULT);
       break;
     case WaitKind::STREAM_WAIT:
       cuStreamWaitValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)wait_value,
-                         CU_STREAM_WAIT_VALUE_GEQ);
+                          CU_STREAM_WAIT_VALUE_GEQ);
       cuStreamWriteValue64((CUstream)cur_stream, (CUdeviceptr)sig_addr, (cuuint64_t)signal_reset,
-                          CU_STREAM_WRITE_VALUE_DEFAULT);
+                           CU_STREAM_WRITE_VALUE_DEFAULT);
       break;
   }
 }
-

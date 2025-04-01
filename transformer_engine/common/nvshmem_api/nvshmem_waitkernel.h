@@ -18,9 +18,9 @@ extern "C" {
  *  \brief Types of wait operations that can be performed.
  */
 enum class WaitKind {
-    KERNEL_WAIT = 0,    /*!< Wait using a CUDA kernel */
-    NVSHMEM_WAIT = 1,   /*!< Wait using NVSHMEM wait operation */
-    STREAM_WAIT = 2     /*!< Wait using CUDA stream synchronization */
+  KERNEL_WAIT = 0,  /*!< Wait using a CUDA kernel */
+  NVSHMEM_WAIT = 1, /*!< Wait using NVSHMEM wait operation */
+  STREAM_WAIT = 2   /*!< Wait using CUDA stream synchronization */
 };
 
 /*! \brief Wait on a signal until a certain condition is met.
