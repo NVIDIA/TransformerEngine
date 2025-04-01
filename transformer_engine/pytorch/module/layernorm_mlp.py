@@ -738,7 +738,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     grad_output,
                     get_workspace(),
                     out_dtype=(
-                        fc2_weight.main_grad.dtype
+                        origin_fc2_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
@@ -902,7 +902,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     dact,
                     get_workspace(),
                     out_dtype=(
-                        fc1_weight.main_grad.dtype
+                        origin_fc1_weight.main_grad.dtype
                         if ctx.fuse_wgrad_accumulation
                         else ctx.activation_dtype
                     ),
