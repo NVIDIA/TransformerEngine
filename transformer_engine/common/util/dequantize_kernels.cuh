@@ -56,7 +56,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const size_t scales_stride) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
-  constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM_X;  //    4 = 128 / 32
@@ -66,7 +65,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
-  constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
 
   const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
