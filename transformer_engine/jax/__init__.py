@@ -83,7 +83,8 @@ _load_library()
 from . import flax
 from . import quantize
 
-from .quantize import fp8_autocast
+from .quantize import fp8_autocast, update_collections, get_delayed_scaling
+from .quantize import NVTE_FP8_COLLECTION_NAME
 
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
@@ -101,11 +102,14 @@ ShardingResource = deprecate_wrapper(
 )
 
 __all__ = [
+    "NVTE_FP8_COLLECTION_NAME",
     "fp8_autocast",
+    "update_collections",
+    "get_delayed_scaling",
     "MeshResource",
     "MajorShardingType",
     "ShardingResource",
     "ShardingType",
     "flax",
-    "praxis",
+    "quantize",
 ]
