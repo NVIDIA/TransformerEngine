@@ -121,7 +121,9 @@ class ScaledTensor1x(ScaledTensor):
         """
         if self.q_axis < 0:
             self.q_axis = len(self.data.shape) + self.q_axis
-        assert 0 <= self.q_axis < len(self.data.shape), f"q_axis {self.q_axis} is out of bounds for shape {self.data.shape}"
+        assert (
+            0 <= self.q_axis < len(self.data.shape)
+        ), f"q_axis {self.q_axis} is out of bounds for shape {self.data.shape}"
 
         expected_scale_shape = self.scaling_mode.get_scale_shape(
             self.data.shape, self.is_colwise, is_padded=True, q_axis=self.q_axis
@@ -150,7 +152,13 @@ class ScaledTensor1x(ScaledTensor):
             A tuple containing (children, aux_data) for tree operations
         """
         children = (self.data, self.scale_inv)
-        aux_data = (self.scaling_mode, self.dq_dtype, self._dq_func, self.is_colwise, self.data_layout)
+        aux_data = (
+            self.scaling_mode,
+            self.dq_dtype,
+            self._dq_func,
+            self.is_colwise,
+            self.data_layout,
+        )
         return (children, aux_data)
 
     def dequantize(self):
@@ -250,7 +258,13 @@ class ScaledTensorFactory:
 
     @staticmethod
     def create_1x(
-        data, scale_inv, scaling_mode, dq_dtype=jnp.bfloat16, is_colwise=False, data_layout="N", q_axis=-1
+        data,
+        scale_inv,
+        scaling_mode,
+        dq_dtype=jnp.bfloat16,
+        is_colwise=False,
+        data_layout="N",
+        q_axis=-1,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -267,7 +281,9 @@ class ScaledTensorFactory:
             A ScaledTensor1x instance
         """
         dq_func = Dequantizer.funcs.get(scaling_mode)
-        return ScaledTensor1x(data, scale_inv, scaling_mode, dq_dtype, dq_func, is_colwise, data_layout, q_axis)
+        return ScaledTensor1x(
+            data, scale_inv, scaling_mode, dq_dtype, dq_func, is_colwise, data_layout, q_axis
+        )
 
     @staticmethod
     def create_2x(
@@ -359,7 +375,13 @@ class ScaledTensorFactory:
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
         return ScaledTensorFactory.create_1x(
-            data, scale_inv, scaling_mode, dq_dtype, is_colwise=is_colwise, data_layout=data_layout[0], q_axis=q_axis
+            data,
+            scale_inv,
+            scaling_mode,
+            dq_dtype,
+            is_colwise=is_colwise,
+            data_layout=data_layout[0],
+            q_axis=q_axis,
         )
 
 

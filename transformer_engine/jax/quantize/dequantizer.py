@@ -64,7 +64,7 @@ class Dequantizer:
         scale = jax.lax.slice(scale, [0] * len(scale_shape), scale_shape)  # slice out the padding
 
         data = data.reshape(
-            *data_shape[:q_axis - 1],
+            *data_shape[: q_axis - 1],
             scale_shape[q_axis - 1],
             int(data_shape[q_axis - 1] / scale_shape[q_axis - 1]),
             *data_shape[q_axis:-1],

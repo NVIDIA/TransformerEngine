@@ -145,7 +145,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .export_values();
 
   pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
-                                                         pybind11::module_local())
+                                                           pybind11::module_local())
       .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)

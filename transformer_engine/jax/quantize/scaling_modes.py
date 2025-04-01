@@ -40,7 +40,10 @@ class ScalingModeMetadataImpl(ABC):
 
     @abstractmethod
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True,
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
         q_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors.
@@ -70,7 +73,10 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return jnp.float32
 
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True,
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
         q_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors in delayed scaling.
@@ -117,8 +123,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return jnp.float8_e8m0fnu
 
     def _apply_scale_shape_correction(self, data_shape, n_scale_blocks):
-        """ Remove excess padding from the scale shape and return the shape with respect to the original data shape.
-        """
+        """Remove excess padding from the scale shape and return the shape with respect to the original data shape."""
         scale_shape = ()
         for d in data_shape[:-1]:
             scale_shape += (d,)
@@ -130,7 +135,10 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         return scale_shape
 
     def get_scale_shape(
-        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True,
+        self,
+        data_shape: Tuple[int, ...],
+        is_colwise: bool = False,
+        is_padded: bool = True,
         q_axis: int = -1,
     ) -> Tuple[int, ...]:
         """Get the shape for scale tensors in block scaling.
@@ -155,17 +163,21 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         if q_axis < 0:
             q_axis = len(data_shape) + q_axis
-        assert 0 <= q_axis < len(data_shape), f"q_axis {q_axis} is out of bounds for shape {data_shape}"
+        assert (
+            0 <= q_axis < len(data_shape)
+        ), f"q_axis {q_axis} is out of bounds for shape {data_shape}"
 
         flattened_first_dim = reduce(operator.mul, data_shape[:q_axis], 1)
         flattened_last_dim = reduce(operator.mul, data_shape[q_axis:], 1)
 
-        assert (
-            flattened_first_dim % block_x == 0
-        ), f"Flattened first dim - mutiplication of axes={tuple(range(0, q_axis))} of shape {data_shape} - should be divisible by block_x {block_x}"
-        assert (
-            flattened_last_dim % block_y == 0
-        ), f"Flattened last dim - mutiplication of axes={tuple(range(q_axis, len(data_shape)))} of shape {data_shape} - should be divisible by block_y {block_y}"
+        assert flattened_first_dim % block_x == 0, (
+            f"Flattened first dim - mutiplication of axes={tuple(range(0, q_axis))} of shape"
+            f" {data_shape} - should be divisible by block_x {block_x}"
+        )
+        assert flattened_last_dim % block_y == 0, (
+            f"Flattened last dim - mutiplication of axes={tuple(range(q_axis, len(data_shape)))} of"
+            f" shape {data_shape} - should be divisible by block_y {block_y}"
+        )
 
         n_block_x = int(flattened_first_dim / block_x)
         n_block_y = int(flattened_last_dim / block_y)
@@ -236,7 +248,9 @@ class ScalingMode(Enum):
         rowwise_scale_shape = self.get_scale_shape(
             data_shape, is_colwise=False, is_padded=is_padded, q_axis=q_axis
         )
-        colwise_scale_shape = self.get_scale_shape(data_shape, is_colwise=True, is_padded=is_padded, q_axis=q_axis)
+        colwise_scale_shape = self.get_scale_shape(
+            data_shape, is_colwise=True, is_padded=is_padded, q_axis=q_axis
+        )
         return (rowwise_scale_shape, colwise_scale_shape)
 
     def get_scale_shape(self, data_shape, is_colwise, is_padded=True, q_axis=-1) -> Tuple[int]:

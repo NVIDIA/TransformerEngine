@@ -182,7 +182,9 @@ class TestActivation:
     @pytest_parametrize_wrapper("shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_act_forward_with_delayed_scaling_fp8(
         self, random_inputs, activation_type, output_type, q_layout
     ):
@@ -206,7 +208,9 @@ class TestActivation:
     @pytest_parametrize_wrapper("shape", [(128, 128)])
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_act_forward_with_block_scaling_fp8(
         self, random_inputs, activation_type, output_type, q_layout
     ):
@@ -324,7 +328,9 @@ class TestNorm:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_norm_grad_with_delayed_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
     ):
@@ -335,7 +341,9 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING, q_dtype=out_dtype, q_layout=q_layout
+            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            q_dtype=out_dtype,
+            q_layout=q_layout,
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -391,7 +399,9 @@ class TestNorm:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     # No Norm FWD E5M2 in TE backend
     @pytest_parametrize_wrapper("out_dtype", [jnp.float8_e4m3fn])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_norm_forward_with_delayed_scaling_fp8(
         self, n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, out_dtype, q_layout
     ):
@@ -508,7 +518,9 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("input_shape", QUANTIZE_TEST_SHAPES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_quantize_dbias(self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout):
         transpose_axis = -1
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
@@ -605,7 +617,9 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_quantize_dact_dbias_delayed_scaling(
         self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
     ):
@@ -626,7 +640,9 @@ class TestFusedQuantize:
     )
     @pytest_parametrize_wrapper("out_dtype", QUANTIZE_OUTPUT_DTYPES)
     @pytest_parametrize_wrapper("is_dbias", [True, False])
-    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE])
+    @pytest_parametrize_wrapper(
+        "q_layout", [QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
+    )
     def test_quantize_dact_dbias_mxfp8_scaling(
         self, in_dtype, input_shape, out_dtype, activation_type, is_dbias, q_layout
     ):
@@ -763,7 +779,9 @@ class TestDense:
                 value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
             )
 
-        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(x, w, bias, data_layout)
+        ref_out, (ref_x_grad, ref_w_grad, ref_bias_grad) = value_n_grad_ref_func(
+            x, w, bias, data_layout
+        )
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
         assert_allclose(primitive_x_grad, ref_x_grad, dtype=q_dtype)

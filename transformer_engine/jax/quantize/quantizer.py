@@ -52,7 +52,6 @@ class Quantizer(ABC):
     scaling_mode: ScalingMode
     q_layout: QuantizeLayout
 
-
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
 
@@ -125,7 +124,9 @@ class Quantizer(ABC):
         """
         if (is_rowwise and is_colwise) or self.is_2x2x():
             rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
-            colwise_tensor = self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype, q_axis=q_axis)
+            colwise_tensor = self._quantize_func(
+                x, is_colwise=True, dq_dtype=dq_dtype, q_axis=q_axis
+            )
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
         if is_colwise:
@@ -205,7 +206,9 @@ class DelayedScaleQuantizer(Quantizer):
             return data_layout[1]
         raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
-    def _quantize_func(self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, q_axis=-1) -> ScaledTensor1x:
+    def _quantize_func(
+        self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, q_axis=-1
+    ) -> ScaledTensor1x:
         """Quantize function helper for delayed scaling FP8.
 
         Args:
@@ -238,7 +241,9 @@ class DelayedScaleQuantizer(Quantizer):
             q_axis=q_axis,
         )
 
-    def quantize(self, x, is_rowwise: bool = None, is_colwise: bool = None, dq_dtype=None, q_axis=-1):
+    def quantize(
+        self, x, is_rowwise: bool = None, is_colwise: bool = None, dq_dtype=None, q_axis=-1
+    ):
         """Quantize a tensor using the internal _quantize_func().
 
         Args:
@@ -394,13 +399,15 @@ class BlockScaleQuantizer(Quantizer):
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         x_shape = x.shape
-        scale_shape = self.scaling_mode.get_scale_shape(x_shape, is_colwise, is_padded=False, q_axis=q_axis)
+        scale_shape = self.scaling_mode.get_scale_shape(
+            x_shape, is_colwise, is_padded=False, q_axis=q_axis
+        )
         scale_dtype = self.scaling_mode.get_scale_dtype()
         x = x.reshape(
-            *x_shape[:q_axis - 1],
+            *x_shape[: q_axis - 1],
             scale_shape[q_axis - 1],
             int(x_shape[q_axis - 1] / scale_shape[q_axis - 1]),
-            *x_shape[q_axis: -1],
+            *x_shape[q_axis:-1],
             scale_shape[-1],
             int(x_shape[-1] / scale_shape[-1]),
         )
@@ -592,7 +599,9 @@ class QuantizerFactory:
             args_x = args_kernel = args_grad = {}
 
         q_x = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_x, **args_x)
-        q_kernel = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_kernel, **args_kernel)
+        q_kernel = QuantizerFactory.create(
+            1, scaling_mode, fwd_dtype, q_layout_kernel, **args_kernel
+        )
         q_dgrad = QuantizerFactory.create(1, scaling_mode, bwd_dtype, q_layout_dgrad, **args_grad)
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
