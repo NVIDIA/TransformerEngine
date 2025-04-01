@@ -256,9 +256,15 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
 
 Float8BlockQuantizer::Float8BlockQuantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
-  this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
-  this->amax_epsilon = quantizer.attr("amax_epsilon").cast<float>();
   this->block_scaling_dim = quantizer.attr("block_scaling_dim").cast<int>();
+  NVTE_CHECK(quantizer.attr("force_pow_2_scales").cast<bool>(),
+             "Pending additional parameters to the nvte_quantize API, "
+             "float8 block quantization requires pow2 scales");
+  NVTE_CHECK(quantizer.attr("amax_epsilon").cast<float>() == 0.0,
+             "Pending additional parameters to the nvte_quantize API, "
+             "float8 block quantization requires amax_epsilon==0");
+  NVTE_CHECK(this->block_scaling_dim == 1 || this->block_scaling_dim == 2,
+             "Unsupported block scaling dim.");
 }
 
 void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const {
@@ -274,10 +280,6 @@ void Float8BlockQuantizer::set_quantization_params(TensorWrapper* tensor) const 
                            rowwise_data.shape);
   tensor->set_columnwise_data(columnwise_data.data_ptr, static_cast<DType>(columnwise_data.dtype),
                               columnwise_data.shape);
-
-  // Set options on TensorWrapper from quantization.
-  tensor->set_qopt_force_pow_2_scales(force_pow_2_scales);
-  tensor->set_qopt_amax_epsilon(amax_epsilon);
 }
 
 std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(

@@ -429,8 +429,6 @@ std::vector<ActivationType> Activation_types = {
 
 std::vector<float> amax_epsilons = {
     0.0f,
-    // Set large epsilon to get observable behavior.
-    0.1f,
 };
 
 }  // namespace
@@ -601,7 +599,7 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(false, true)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true)),
     [](const testing::TestParamInfo<FusedCastFloat8BlockwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));
@@ -625,7 +623,7 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
                        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
                        ::testing::ValuesIn(input_scenarios), ::testing::Values(true, false),
-                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(false, true)),
+                       ::testing::ValuesIn(amax_epsilons), ::testing::Values(true)),
     [](const testing::TestParamInfo<FusedCastFloat8VectorwiseTestSuite::ParamType>& info) {
       std::string name =
           to_string(std::get<0>(info.param)) + "X" + to_string(std::get<1>(info.param));

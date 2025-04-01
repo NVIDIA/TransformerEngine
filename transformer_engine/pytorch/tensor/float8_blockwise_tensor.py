@@ -40,7 +40,7 @@ class Float8BlockQuantizer(Quantizer):
         rowwise: bool,
         columnwise: bool,
         amax_epsilon: float = 0.0,
-        force_pow_2_scales: bool = False,
+        force_pow_2_scales: bool = True,
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)

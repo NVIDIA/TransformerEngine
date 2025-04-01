@@ -88,11 +88,11 @@ def initialize_for_many_scales(
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("eps", [0, 1e-12], ids=["eps_0", "eps_1e-12"])
+@pytest.mark.parametrize("eps", [0], ids=["eps_0"])
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "quantize_only"]
 )
-@pytest.mark.parametrize("pow_2_scales", [True, False], ids=["pow2scales", "f32scales"])
+@pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
 @pytest.mark.parametrize("tile_size", [(1, 128), (128, 128)], ids=["1DTile", "2DTile"])
 def test_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
@@ -203,8 +203,8 @@ def test_quantization_block_tiling_versus_reference(
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
 @pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("eps", [0, math.pow(2, -125)], ids=["eps_0", "eps_small"])
-@pytest.mark.parametrize("pow_2_scales", [True, False], ids=["pow2scales", "f32scales"])
+@pytest.mark.parametrize("eps", [0], ids=["eps_0"])
+@pytest.mark.parametrize("pow_2_scales", [True], ids=["pow2scales"])
 @pytest.mark.parametrize("tile_size", [(128, 128)])
 @pytest.mark.parametrize("extrema_high", [False, True], ids=["zeros", "maxes"])
 def test_quantization_block_tiling_extrema_versus_reference(

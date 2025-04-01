@@ -254,52 +254,6 @@ void nvte_zero_tensor(const NVTETensor tensor, cudaStream_t stream);
 void nvte_set_tensor_param(NVTETensor *tensor, NVTETensorParam param_name,
                            const NVTEBasicTensor *param);
 
-/*! \brief Set a quantization option for whether to force power of 2 scales.
- *
- *  \param[in/out] tensor Tensor.
- *  \param[in] zero_if_false Whether to force power of 2 scales.
- *
- *  \return zero if the tensor supports this option and it was set. non-zero if
- *   call had no effect.
- */
-int nvte_set_qopt_force_pow_2_scales(NVTETensor tensor, int zero_if_false);
-
-/*! \brief Set a quantization option for epsilon to set floor of amax.
- *
- *  \param[in/out] tensor Tensor.
- *  \param[in] amax_epsilon Epsilon to use for amax calculation.
- *
- *  \return zero if the tensor supports this option and it was set. non-zero if
- *   call had no effect.
- */
-int nvte_set_qopt_amax_epsilon(NVTETensor tensor, float amax_epsilon);
-
-/*! \brief Get a quantization option for whether to force power of 2 scales.
- *
- *  \param[in] tensor Tensor.
- *
- *  \return zero if the tensor will not force power of 2 scales or if the
- *   setting is irrelevant. non-zero if the flag is configured.
- */
-int nvte_get_qopt_force_pow_2_scales(NVTETensor tensor);
-
-/*! \brief Get a quantization option for amax epsilon.
- *
- *  \param[in] tensor Tensor.
- *
- *  \return amax_epsilon value or zero if not applicable.
- */
-float nvte_get_qopt_amax_epsilon(const NVTETensor tensor);
-
-/*! \brief Get the number of dimensions in the quantization blocks.
- *
- *  \param[in] tensor Tensor.
- *
- *  \return zero if the quantization does not support the block_scaling_dim
- *   option or the block_scaling_dim configured.
- */
-int nvte_get_qopt_block_scaling_dim(const NVTETensor tensor);
-
 /*! \brief Get a value of the parameter of the tensor.
  *
  *  \param[in] tensor Tensor.
@@ -729,18 +683,6 @@ class TensorWrapper {
 
   void zero_(cudaStream_t stream) { nvte_zero_tensor(tensor_, stream); }
 
-  int set_qopt_force_pow_2_scales(bool flag) {
-    return nvte_set_qopt_force_pow_2_scales(tensor_, flag ? 1 : 0);
-  }
-
-  int set_qopt_amax_epsilon(float eps) { return nvte_set_qopt_amax_epsilon(tensor_, eps); }
-
-  bool get_qopt_force_pow_2_scales() const {
-    return nvte_get_qopt_force_pow_2_scales(tensor_) != 0;
-  }
-
-  float get_qopt_amax_epsilon() const { return nvte_get_qopt_amax_epsilon(tensor_); }
-
   static constexpr size_t defaultData = 1;
   static constexpr NVTEShape defaultShape = {&defaultData, 1};
 
@@ -787,18 +729,6 @@ class QuantizationConfigWrapper {
    *  \return NVTEQuantizationConfig held by this QuantizationConfigWrapper.
    */
   operator NVTEQuantizationConfig() const noexcept { return config_; }
-
-  /*! \brief Set whether to force power of 2 scales */
-  void set_force_pow_2_scales(bool force_pow_2_scales) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
-                                           &force_pow_2_scales, sizeof(bool));
-  }
-
-  /*! \brief Set small value to add to amax */
-  void set_amax_epsilon(float amax_epsilon) {
-    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
-                                           &amax_epsilon, sizeof(float));
-  }
 
  private:
   /*! \brief Wrapped NVTEQuantizationConfig. */
