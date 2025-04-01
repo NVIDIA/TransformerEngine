@@ -57,17 +57,22 @@ class Dequantizer:
         data = scaled_tensor.data.astype(jnp.float32)
         data_shape = data.shape
         scale = scaled_tensor.scale_inv.view(jnp.uint8).astype(jnp.float32)
+        q_axis = scaled_tensor.q_axis
         scale_shape = scaled_tensor.scaling_mode.get_scale_shape(
-            scaled_tensor.data.shape, scaled_tensor.is_colwise, is_padded=False
+            data_shape, scaled_tensor.is_colwise, is_padded=False, q_axis=q_axis
         )
         scale = jax.lax.slice(scale, [0] * len(scale_shape), scale_shape)  # slice out the padding
+
         data = data.reshape(
-            *data_shape[:-2],
-            scale_shape[-2],
-            int(data_shape[-2] / scale_shape[-2]),
+            *data_shape[:q_axis - 1],
+            scale_shape[q_axis - 1],
+            int(data_shape[q_axis - 1] / scale_shape[q_axis - 1]),
+            *data_shape[q_axis:-1],
             scale_shape[-1],
             int(data_shape[-1] / scale_shape[-1]),
         )
+
+        # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         scale = jnp.expand_dims(scale, axis=(-1, -3))
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         return jnp.asarray(data * jnp.power(2, scale - 127), scaled_tensor.dq_dtype).reshape(

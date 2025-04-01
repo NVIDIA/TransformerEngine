@@ -101,6 +101,7 @@ class ScaledTensor1x(ScaledTensor):
         _dq_func: The dequantization function
         is_colwise: Whether the tensor uses column-wise quantization
         data_layout: The data_layout specification for the tensor
+        q_axis: The quantization axis for the tensor
     """
 
     data: jnp.ndarray
@@ -110,6 +111,7 @@ class ScaledTensor1x(ScaledTensor):
     _dq_func: Callable
     is_colwise: bool
     data_layout: str
+    q_axis: int = -1
 
     def __post_init__(self):
         """Validates and adjusts the scale_inv shape after initialization.
@@ -117,11 +119,15 @@ class ScaledTensor1x(ScaledTensor):
         Ensures the scale_inv shape matches the expected shape based on the scaling mode
         and quantization direction. Pads the scale_inv if necessary.
         """
+        if self.q_axis < 0:
+            self.q_axis = len(self.data.shape) + self.q_axis
+        assert 0 <= self.q_axis < len(self.data.shape), f"q_axis {self.q_axis} is out of bounds for shape {self.data.shape}"
+
         expected_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=True
+            self.data.shape, self.is_colwise, is_padded=True, q_axis=self.q_axis
         )
         expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=False
+            self.data.shape, self.is_colwise, is_padded=False, q_axis=self.q_axis
         )
         if self.scale_inv.shape != expected_scale_shape:
             assert self.scale_inv.shape == expected_unpadded_scale_shape, (
@@ -244,7 +250,7 @@ class ScaledTensorFactory:
 
     @staticmethod
     def create_1x(
-        data, scale_inv, scaling_mode, dq_dtype=jnp.bfloat16, is_colwise=False, data_layout="N"
+        data, scale_inv, scaling_mode, dq_dtype=jnp.bfloat16, is_colwise=False, data_layout="N", q_axis=-1
     ):
         """Creates a single-scale quantized tensor.
 
@@ -255,12 +261,13 @@ class ScaledTensorFactory:
             dq_dtype: The data type for dequantized values (default: bfloat16)
             is_colwise: Whether to use column-wise quantization (default: False)
             data_layout: The data_layout specification (default: "N")
+            q_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor1x instance
         """
         dq_func = Dequantizer.funcs.get(scaling_mode)
-        return ScaledTensor1x(data, scale_inv, scaling_mode, dq_dtype, dq_func, is_colwise, data_layout)
+        return ScaledTensor1x(data, scale_inv, scaling_mode, dq_dtype, dq_func, is_colwise, data_layout, q_axis)
 
     @staticmethod
     def create_2x(
@@ -271,6 +278,7 @@ class ScaledTensorFactory:
         scaling_mode,
         dq_dtype=jnp.bfloat16,
         data_layout="NN",
+        q_axis=-1,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -282,6 +290,7 @@ class ScaledTensorFactory:
             scaling_mode: The scaling mode for quantization
             dq_dtype: The data type for dequantized values (default: bfloat16)
             data_layout: The data_layout specification (default: "NN")
+            q_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor2x instance
@@ -295,6 +304,7 @@ class ScaledTensorFactory:
             dq_func,
             is_colwise=False,
             data_layout=data_layout[0],
+            q_axis=q_axis,
         )
         colwise_tensor = ScaledTensor1x(
             colwise_data,
@@ -304,6 +314,7 @@ class ScaledTensorFactory:
             dq_func,
             is_colwise=True,
             data_layout=data_layout[1],
+            q_axis=q_axis,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -317,6 +328,7 @@ class ScaledTensorFactory:
         dq_dtype: jnp.dtype = jnp.bfloat16,
         data_layout: str = "NN",
         q_layout: QuantizeLayout = QuantizeLayout.ROWWISE,
+        q_axis: int = -1,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -342,11 +354,12 @@ class ScaledTensorFactory:
                 scaling_mode,
                 dq_dtype,
                 data_layout=data_layout,
+                q_axis=q_axis,
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
         return ScaledTensorFactory.create_1x(
-            data, scale_inv, scaling_mode, dq_dtype, is_colwise=is_colwise, data_layout=data_layout[0]
+            data, scale_inv, scaling_mode, dq_dtype, is_colwise=is_colwise, data_layout=data_layout[0], q_axis=q_axis
         )
 
 
@@ -369,6 +382,7 @@ def with_sharding_constraint_by_logical_axes(x, logical_axis_names: Tuple[str, .
             _dq_func=x._dq_func,
             is_colwise=x.is_colwise,
             data_layout=x.data_layout,
+            q_axis=x.q_axis,
         )
     if isinstance(x, ScaledTensor2x):
         return ScaledTensor2x(
