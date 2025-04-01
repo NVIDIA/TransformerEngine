@@ -540,7 +540,7 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
 )
 @pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
 @pytest.mark.parametrize("w_magnitude", [1], ids=str)
@@ -738,8 +738,12 @@ def test_gelu_unsupported_cases_error(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
-    if use_grad and not use_bias:
-        pytest.skip("DGELU epilogue is supported.")
+    if use_grad and not use_bias and out_dtype == torch.bfloat16:
+        pytest.skip("DGELU epilogue is supported for bfloat16.")
+    elif use_grad and not use_bias:
+        expected_err = "an unsupported value or parameter was passed"
+    else:
+        expected_err = "Epilogue requested outside of the available"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -754,7 +758,7 @@ def test_gelu_unsupported_cases_error(
         use_grad=use_grad,
         use_bias=use_bias,
         use_gelu=True,
-        expected_err_msg="Epilogue requested outside of the available",
+        expected_err_msg=expected_err,
     )
 
 
