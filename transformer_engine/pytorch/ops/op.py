@@ -623,10 +623,14 @@ class BasicOperation(FusibleOperation, metaclass=abc.ABCMeta):
             if state[mode]["recipe"].delayed():
                 if mode == "forward":
                     copy_tensor(state[mode]["scale_fwd"], fp8_meta["scaling_fwd"].scale)
-                    copy_tensor(state[mode]["amax_history_fwd"], fp8_meta["scaling_fwd"].amax_history)
+                    copy_tensor(
+                        state[mode]["amax_history_fwd"], fp8_meta["scaling_fwd"].amax_history
+                    )
                 if mode == "backward":
                     copy_tensor(state[mode]["scale_bwd"], fp8_meta["scaling_bwd"].scale)
-                    copy_tensor(state[mode]["amax_history_bwd"], fp8_meta["scaling_bwd"].amax_history)
+                    copy_tensor(
+                        state[mode]["amax_history_bwd"], fp8_meta["scaling_bwd"].amax_history
+                    )
 
         # Finish CPU-GPU memory transfers
         torch.cuda.synchronize()

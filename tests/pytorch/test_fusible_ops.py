@@ -1942,7 +1942,7 @@ class TestCheckpointing:
         # Save checkpoint
         byte_stream = io.BytesIO()
         torch.save(
-            { "model": model_save.state_dict(), "optim": optim_save.state_dict() },
+            {"model": model_save.state_dict(), "optim": optim_save.state_dict()},
             byte_stream,
         )
         checkpoint_bytes = byte_stream.getvalue()
@@ -1956,8 +1956,7 @@ class TestCheckpointing:
         with torch.no_grad():
             xs_load = [x.clone().requires_grad_() for x in xs_save]
         dys = [
-            torch.randn(out_shape, dtype=dtype, device=device)
-            for _ in range(post_checkpoint_steps)
+            torch.randn(out_shape, dtype=dtype, device=device) for _ in range(post_checkpoint_steps)
         ]
 
         # Training steps with original model
@@ -1991,7 +1990,7 @@ class TestCheckpointing:
             ys_load.append(y)
 
         # Check that original and loaded model match exactly
-        tols = { "rtol": 0, "atol": 0 }
+        tols = {"rtol": 0, "atol": 0}
         for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
             torch.testing.assert_close(param_load, param_save, **tols)
             torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
