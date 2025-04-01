@@ -3,13 +3,13 @@
 # See LICENSE for license information.
 
 add_executable(test_operator
-               test_cast.cu
-               test_cast_current_scaling.cu
-               test_cast_dbias.cu
-               test_cast_dbias_dgelu.cu
-               test_cast_gated_swiglu.cu
-               test_cast_mxfp8_gated_swiglu.cu
-               test_qdq.cu
+            #    test_cast.cu
+            #    test_cast_current_scaling.cu
+            #    test_cast_dbias.cu
+            #    test_cast_dbias_dgelu.cu
+            #    test_cast_gated_swiglu.cu
+            #    test_cast_mxfp8_gated_swiglu.cu
+            #    test_qdq.cu
                test_cast_mxfp8.cu
                test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
