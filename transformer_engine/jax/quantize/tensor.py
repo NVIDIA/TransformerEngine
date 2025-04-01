@@ -316,7 +316,7 @@ class ScaledTensorFactory:
         scaling_mode: ScalingMode,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         layout: str = "NN",
-        q_axis: QuantizeLayout = QuantizeLayout.ROWWISE,
+        q_layout: QuantizeLayout = QuantizeLayout.ROWWISE,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -328,12 +328,12 @@ class ScaledTensorFactory:
             scaling_mode: The scaling mode for quantization
             dq_dtype: The data type for dequantized values (default: bfloat16)
             layout: The layout specification (default: "NN")
-            q_axis: The quantization axis (default: ROWWISE)
+            q_layout: The quantization axis (default: ROWWISE)
 
         Returns:
-            Either a ScaledTensor1x or ScaledTensor2x instance depending on q_axis
+            Either a ScaledTensor1x or ScaledTensor2x instance depending on q_layout
         """
-        if q_axis == QuantizeLayout.ROWWISE_COLWISE:
+        if q_layout == QuantizeLayout.ROWWISE_COLWISE:
             return ScaledTensorFactory.create_2x(
                 data,
                 scale_inv,
@@ -344,7 +344,7 @@ class ScaledTensorFactory:
                 layout=layout,
             )
 
-        is_colwise = q_axis == QuantizeLayout.COLWISE
+        is_colwise = q_layout == QuantizeLayout.COLWISE
         return ScaledTensorFactory.create_1x(
             data, scale_inv, scaling_mode, dq_dtype, is_colwise=is_colwise, layout=layout[0]
         )

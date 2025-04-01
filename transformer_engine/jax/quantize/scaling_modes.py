@@ -135,27 +135,27 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             block_x, block_y = self._block_dims
             alignment_x, alignment_y = block_alignment
 
-        seq_axis = len(data_shape) - 2
+        seq_layout = len(data_shape) - 2
 
         assert (
-            data_shape[seq_axis] % block_x == 0
-        ), f"Input data of shape {data_shape} should be padded by {block_x} in axes={seq_axis}"
+            data_shape[seq_layout] % block_x == 0
+        ), f"Input data of shape {data_shape} should be padded by {block_x} in axes={seq_layout}"
         assert (
             data_shape[-1] % block_y == 0
         ), f"Input data of shape {data_shape} should be padded by {block_y} in axis -1"
 
-        # NOTE: this overpads if dim > 2 and dims before seq_axis are greater than 1
-        n_block_seq = data_shape[seq_axis] // block_x
+        # NOTE: this overpads if dim > 2 and dims before seq_layout are greater than 1
+        n_block_seq = data_shape[seq_layout] // block_x
         n_block_y = data_shape[-1] // block_y
 
-        n_flat_first_dim = reduce(operator.mul, data_shape[:seq_axis], 1) * n_block_seq
+        n_flat_first_dim = reduce(operator.mul, data_shape[:seq_layout], 1) * n_block_seq
 
         # Padding
         n_flat_first_dim = ((n_flat_first_dim + alignment_x - 1) // alignment_x) * alignment_x
         n_block_y = ((n_block_y + alignment_y - 1) // alignment_y) * alignment_y
 
         out_shape = ()
-        for i in range(seq_axis):
+        for i in range(seq_layout):
             d = data_shape[i]
             out_shape += (d,)
             assert n_flat_first_dim % d == 0

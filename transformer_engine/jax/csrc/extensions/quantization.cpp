@@ -133,7 +133,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Ret<Buffer_Type>()      // dbias
                                   .Ret<Buffer_Type>()      // wkspace
                                   .Attr<int64_t>("scaling_mode")
-                                  .Attr<int64_t>("q_axis")
+                                  .Attr<int64_t>("q_layout")
                                   .Attr<bool>("is_dbias"),
                               FFI_CudaGraph_Traits);
 

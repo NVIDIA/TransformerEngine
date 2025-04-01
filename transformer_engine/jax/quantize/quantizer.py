@@ -45,12 +45,12 @@ class Quantizer(ABC):
     Attributes:
         q_dtype: The data type for quantized values
         scaling_mode: The scaling mode to use for quantization
-        q_axis: The quantization axis (row-wise, column-wise, or both)
+        q_layout: The quantization axis (row-wise, column-wise, or both)
     """
 
     q_dtype: jnp.dtype
     scaling_mode: ScalingMode
-    q_axis: QuantizeLayout
+    q_layout: QuantizeLayout
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -59,7 +59,7 @@ class Quantizer(ABC):
             Tuple of (children, aux_data) for tree operations
         """
         children = ()
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_axis)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
         return (children, aux_data)
 
     @classmethod
@@ -85,7 +85,7 @@ class Quantizer(ABC):
         Returns:
             True if using both row-wise and column-wise quantization
         """
-        return self.q_axis == QuantizeLayout.ROWWISE_COLWISE
+        return self.q_layout == QuantizeLayout.ROWWISE_COLWISE
 
     @abstractmethod
     def get_data_layout(self) -> str:
@@ -161,13 +161,13 @@ class DelayedScaleQuantizer(Quantizer):
 
     Attributes:
         scaling_mode: Set to NVTE_DELAYED_TENSOR_SCALING
-        q_axis: Quantization axis (default: ROWWISE_COLWISE)
+        q_layout: Quantization axis (default: ROWWISE_COLWISE)
         scale: Current scaling factor
         amax_history: History of maximum absolute values
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
-    q_axis: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+    q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
     amax_history: jnp.ndarray = field(
@@ -181,7 +181,7 @@ class DelayedScaleQuantizer(Quantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.scale, self.amax_history)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_axis)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
         return (children, aux_data)
 
     def get_data_layout(self) -> str:
@@ -194,13 +194,13 @@ class DelayedScaleQuantizer(Quantizer):
             ValueError: If quantization axis is invalid
         """
         layout = "NT"
-        if self.q_axis == QuantizeLayout.ROWWISE_COLWISE:
+        if self.q_layout == QuantizeLayout.ROWWISE_COLWISE:
             return layout
-        if self.q_axis == QuantizeLayout.ROWWISE:
+        if self.q_layout == QuantizeLayout.ROWWISE:
             return layout[0]
-        if self.q_axis == QuantizeLayout.COLWISE:
+        if self.q_layout == QuantizeLayout.COLWISE:
             return layout[1]
-        raise ValueError(f"Invalid q_axis: {self.q_axis}")
+        raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
     def _quantize_func(self, x: jnp.ndarray, is_colwise=False, dq_dtype=None) -> ScaledTensor1x:
         """Quantize function helper for delayed scaling FP8.
@@ -250,12 +250,12 @@ class DelayedScaleQuantizer(Quantizer):
         is_rowwise = (
             is_rowwise
             if is_rowwise is not None
-            else (self.q_axis == QuantizeLayout.ROWWISE or self.is_2x2x())
+            else (self.q_layout == QuantizeLayout.ROWWISE or self.is_2x2x())
         )
         is_colwise = (
             is_colwise
             if is_colwise is not None
-            else (self.q_axis == QuantizeLayout.COLWISE or self.is_2x2x())
+            else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
         )
 
         rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype)
@@ -353,11 +353,11 @@ class BlockScaleQuantizer(Quantizer):
 
     Attributes:
         scaling_mode: Set to NVTE_MXFP8_1D_SCALING
-        q_axis: Quantization axis (default: ROWWISE_COLWISE)
+        q_layout: Quantization axis (default: ROWWISE_COLWISE)
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
-    q_axis: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
+    q_layout: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     def get_data_layout(self) -> str:
         """Get the data layout string.
@@ -509,7 +509,7 @@ class QuantizerFactory:
         n_quantizers: int = 1,
         scaling_mode: ScalingMode = None,
         q_dtype: jnp.dtype = None,
-        q_axis: QuantizeLayout = None,
+        q_layout: QuantizeLayout = None,
         **kwargs,
     ) -> Quantizer:
         """Create one or more quantizers with specified parameters.
@@ -518,7 +518,7 @@ class QuantizerFactory:
             n_quantizers: Number of quantizers to create
             scaling_mode: Scaling mode to use
             q_dtype: Quantization data type
-            q_axis: Quantization axis
+            q_layout: Quantization axis
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:
@@ -534,7 +534,7 @@ class QuantizerFactory:
                 quantizer_type = QuantizerFactory.quantizer_type_map.get(scaling_mode)
                 quantizers.append(
                     quantizer_type(
-                        q_dtype=q_dtype, scaling_mode=scaling_mode, q_axis=q_axis, **kwargs
+                        q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout, **kwargs
                     )
                 )
         return quantizers[0] if len(quantizers) == 1 else tuple(quantizers)
@@ -554,11 +554,11 @@ class QuantizerFactory:
             A QuantizerSet instance
         """
         if is_2x2x:
-            q_axis_x = q_axis_kernel = q_axis_dgrad = QuantizeLayout.ROWWISE_COLWISE
+            q_layout_x = q_layout_kernel = q_layout_dgrad = QuantizeLayout.ROWWISE_COLWISE
         else:
-            q_axis_x = QuantizeLayout.ROWWISE
-            q_axis_kernel = QuantizeLayout.COLWISE
-            q_axis_dgrad = None
+            q_layout_x = QuantizeLayout.ROWWISE
+            q_layout_kernel = QuantizeLayout.COLWISE
+            q_layout_dgrad = None
 
         if "quantize_meta_set" in kwargs:
             quantize_meta_set = kwargs.get("quantize_meta_set")
@@ -577,9 +577,9 @@ class QuantizerFactory:
         else:
             args_x = args_kernel = args_grad = {}
 
-        q_x = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_axis_x, **args_x)
-        q_kernel = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_axis_kernel, **args_kernel)
-        q_dgrad = QuantizerFactory.create(1, scaling_mode, bwd_dtype, q_axis_dgrad, **args_grad)
+        q_x = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_x, **args_x)
+        q_kernel = QuantizerFactory.create(1, scaling_mode, fwd_dtype, q_layout_kernel, **args_kernel)
+        q_dgrad = QuantizerFactory.create(1, scaling_mode, bwd_dtype, q_layout_dgrad, **args_grad)
         return QuantizerSet(x=q_x, kernel=q_kernel, dgrad=q_dgrad)
 
     @staticmethod

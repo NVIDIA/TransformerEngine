@@ -816,7 +816,7 @@ def layernorm_fwd(
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
@@ -900,7 +900,7 @@ def layernorm_fwd(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
+        q_layout=quantizer.q_layout,
         layout=quantizer.get_data_layout(),
     )
 
@@ -997,7 +997,7 @@ def rmsnorm_fwd(
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
@@ -1082,7 +1082,7 @@ def rmsnorm_fwd(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
+        q_layout=quantizer.q_layout,
         layout=quantizer.get_data_layout(),
     )
 

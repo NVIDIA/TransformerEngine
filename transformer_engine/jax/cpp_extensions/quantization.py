@@ -50,7 +50,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         6,
         7,
         8,
-    )  # out_dtype, scaling_mode, q_axis, scale_dtype, scale_shapes, is_dbias, is_outer
+    )  # out_dtype, scaling_mode, q_layout, scale_dtype, scale_shapes, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -61,7 +61,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         *,
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -77,7 +77,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         rowwise_out_aval = jax.core.ShapedArray(shape=(1,), dtype=out_dtype)
 
-        if q_axis in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             rowwise_out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
 
         updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
@@ -93,7 +93,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         dbias_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
-        if q_axis in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             t_shape = multidim_transpose(x_aval.shape)
             if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
                 # Don't transpose output for MXFP8
@@ -151,7 +151,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         *,
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -169,7 +169,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             x,
             scale,
             scaling_mode=scaling_mode,
-            q_axis=q_axis,
+            q_layout=q_layout,
             is_dbias=is_dbias,
         )
 
@@ -179,7 +179,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         scale,
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -203,7 +203,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             scale,
             out_dtype=out_dtype,
             scaling_mode=scaling_mode,
-            q_axis=q_axis,
+            q_layout=q_layout,
             scale_dtype=scale_dtype,
             scale_shapes=scale_shapes,
             is_dbias=is_dbias,
@@ -213,11 +213,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            if q_axis in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
                 scale_inv = jax.lax.slice(
                     scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
                 )
-            if q_axis in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
                 colwise_scale_inv = jax.lax.slice(
                     colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
                 )
@@ -237,7 +237,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         *,
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -260,7 +260,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 scale,
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
-                q_axis=q_axis,
+                q_layout=q_layout,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
@@ -272,7 +272,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
     def infer_sharding_from_operands(
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -288,7 +288,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             PartitionSpec(*x_spec[:-1], x_spec[-1]),
             desc="DBiasQuantizePrimitive.out_sharding",
         )
-        if q_axis in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(x_spec)
             else:
@@ -333,7 +333,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
     def partition(
         out_dtype,
         scaling_mode,
-        q_axis,
+        q_layout,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -349,7 +349,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             PartitionSpec(*x_spec[:-1], x_spec[-1]),
             desc="DBiasQuantizePrimitive.out_sharding",
         )
-        if q_axis in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(x_spec)
             else:
@@ -404,7 +404,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 scale,
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
-                q_axis=q_axis,
+                q_layout=q_layout,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
@@ -498,7 +498,7 @@ def _quantize_impl(
         return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype), None
 
     # TE/common doesn't support colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         if is_dbias:
             return _jax_quantize_dbias(
                 x,
@@ -539,7 +539,7 @@ def _quantize_impl(
         scale,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_axis=quantizer.q_axis.value,
+        q_layout=quantizer.q_layout.value,
         scale_dtype=quantizer.get_scale_dtype(),
         scale_shapes=quantizer.get_scale_shapes(x.shape),
         is_dbias=is_dbias,
@@ -558,7 +558,7 @@ def _quantize_impl(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=dq_dtype if dq_dtype is not None else x.dtype,
-        q_axis=quantizer.q_axis,
+        q_layout=quantizer.q_layout,
         layout=quantizer.get_data_layout(),
     )
     return out, dbias
