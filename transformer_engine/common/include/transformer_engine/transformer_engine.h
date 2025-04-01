@@ -730,6 +730,18 @@ class QuantizationConfigWrapper {
    */
   operator NVTEQuantizationConfig() const noexcept { return config_; }
 
+  /*! \brief Set whether to force power of 2 scales */
+  void set_force_pow_2_scales(bool force_pow_2_scales) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigForcePow2Scales,
+                                           &force_pow_2_scales, sizeof(bool));
+  }
+
+  /*! \brief Set small value to add to amax */
+  void set_amax_epsilon(float amax_epsilon) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigAmaxEpsilon,
+                                           &amax_epsilon, sizeof(float));
+  }
+
  private:
   /*! \brief Wrapped NVTEQuantizationConfig. */
   NVTEQuantizationConfig config_ = nullptr;

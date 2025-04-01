@@ -477,9 +477,11 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 dst.requires_grad_(requires_grad=src.requires_grad)
 
         # Just copy FP8 data if other tensor is Float8BlockwiseQTensor
-        compatible_layout = (isinstance(tensor, Float8BlockwiseQTensor)
+        compatible_layout = (
+            isinstance(tensor, Float8BlockwiseQTensor)
             and self.size() == tensor.size()
-            and self.stride() == tensor.stride())
+            and self.stride() == tensor.stride()
+        )
         if (
             compatible_layout
             and self.storage_offset() == tensor.storage_offset()
