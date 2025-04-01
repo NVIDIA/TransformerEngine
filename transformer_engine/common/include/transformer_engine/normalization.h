@@ -149,6 +149,8 @@ void nvte_rmsnorm_bwd(const NVTETensor dz, const NVTETensor x, const NVTETensor 
 void nvte_enable_cudnn_norm_fwd(bool enable);
 void nvte_enable_cudnn_norm_bwd(bool enable);
 
+enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
