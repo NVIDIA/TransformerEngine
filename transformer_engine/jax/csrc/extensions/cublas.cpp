@@ -4,16 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "transformer_engine/gemm.h"
-
 #include "extensions.h"
+#include "transformer_engine/gemm.h"
 #include "xla/ffi/api/c_api.h"
 
 namespace transformer_engine {
 namespace jax {
 
 Error_Type CublasHandleInitFFI(Variadic_Buffer_Type args, Variadic_Result_Type rets,
-      Dictionary attrs) {
+                               Dictionary attrs) {
   nvte_cublas_handle_init();
   return ffi_with_cuda_error_check();
 }

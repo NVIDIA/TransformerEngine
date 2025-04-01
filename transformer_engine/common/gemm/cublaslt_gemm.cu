@@ -584,4 +584,4 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 
 void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
 
-} //  namespace transformer_engine
+}  //  namespace transformer_engine

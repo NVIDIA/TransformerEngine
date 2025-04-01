@@ -128,5 +128,4 @@ void nvte_cublas_handle_init();
 
 }  // namespace transformer_engine
 
-
 #endif  // TRANSFORMER_ENGINE_GEMM_H_
