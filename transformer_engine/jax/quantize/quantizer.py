@@ -88,7 +88,7 @@ class Quantizer(ABC):
         return self.q_axis == QuantizeLayout.ROWWISE_COLWISE
 
     @abstractmethod
-    def get_layout(self) -> str:
+    def get_data_layout(self) -> str:
         """Get the data layout.
 
         Returns:
@@ -184,7 +184,7 @@ class DelayedScaleQuantizer(Quantizer):
         aux_data = (self.q_dtype, self.scaling_mode, self.q_axis)
         return (children, aux_data)
 
-    def get_layout(self) -> str:
+    def get_data_layout(self) -> str:
         """Get the data layout string.
 
         Returns:
@@ -359,7 +359,7 @@ class BlockScaleQuantizer(Quantizer):
     scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
     q_axis: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
-    def get_layout(self) -> str:
+    def get_data_layout(self) -> str:
         """Get the data layout string.
 
         Returns:

@@ -901,7 +901,7 @@ def layernorm_fwd(
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
         q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        layout=quantizer.get_data_layout(),
     )
 
     return scaled_tensor, mu, rsigma
@@ -1083,7 +1083,7 @@ def rmsnorm_fwd(
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
         q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        layout=quantizer.get_data_layout(),
     )
 
     return scaled_tensor, rsigma

@@ -559,7 +559,7 @@ def _quantize_impl(
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=dq_dtype if dq_dtype is not None else x.dtype,
         q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        layout=quantizer.get_data_layout(),
     )
     return out, dbias
 

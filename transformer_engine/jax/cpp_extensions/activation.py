@@ -952,7 +952,7 @@ def act_lu(
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
         q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        layout=quantizer.get_data_layout(),
     )
 
 
@@ -1091,7 +1091,7 @@ def quantize_dact_dbias(
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
         q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        layout=quantizer.get_data_layout(),
     )
 
     return out, dbias
