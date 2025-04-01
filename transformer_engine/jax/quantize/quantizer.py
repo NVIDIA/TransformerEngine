@@ -14,7 +14,7 @@ from typing import Union, Optional
 import jax
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
-from transformer_engine_jax import QuantizeAxis
+from transformer_engine_jax import QuantizeLayout
 
 from .scaling_modes import ScalingMode
 from .tensor import ScaledTensor1x, ScaledTensor2x, ScaledTensorFactory
@@ -24,7 +24,7 @@ from .helper import (
 )
 
 __all__ = [
-    "QuantizeAxis",
+    "QuantizeLayout",
     "Quantizer",
     "QuantizerSet",
     "DelayedScaleQuantizer",
@@ -50,7 +50,7 @@ class Quantizer(ABC):
 
     q_dtype: jnp.dtype
     scaling_mode: ScalingMode
-    q_axis: QuantizeAxis
+    q_axis: QuantizeLayout
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -85,7 +85,7 @@ class Quantizer(ABC):
         Returns:
             True if using both row-wise and column-wise quantization
         """
-        return self.q_axis == QuantizeAxis.ROWWISE_COLWISE
+        return self.q_axis == QuantizeLayout.ROWWISE_COLWISE
 
     @abstractmethod
     def get_layout(self) -> str:
@@ -167,7 +167,7 @@ class DelayedScaleQuantizer(Quantizer):
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
-    q_axis: QuantizeAxis = QuantizeAxis.ROWWISE_COLWISE
+    q_axis: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
     amax_history: jnp.ndarray = field(
@@ -194,11 +194,11 @@ class DelayedScaleQuantizer(Quantizer):
             ValueError: If quantization axis is invalid
         """
         layout = "NT"
-        if self.q_axis == QuantizeAxis.ROWWISE_COLWISE:
+        if self.q_axis == QuantizeLayout.ROWWISE_COLWISE:
             return layout
-        if self.q_axis == QuantizeAxis.ROWWISE:
+        if self.q_axis == QuantizeLayout.ROWWISE:
             return layout[0]
-        if self.q_axis == QuantizeAxis.COLWISE:
+        if self.q_axis == QuantizeLayout.COLWISE:
             return layout[1]
         raise ValueError(f"Invalid q_axis: {self.q_axis}")
 
@@ -250,12 +250,12 @@ class DelayedScaleQuantizer(Quantizer):
         is_rowwise = (
             is_rowwise
             if is_rowwise is not None
-            else (self.q_axis == QuantizeAxis.ROWWISE or self.is_2x2x())
+            else (self.q_axis == QuantizeLayout.ROWWISE or self.is_2x2x())
         )
         is_colwise = (
             is_colwise
             if is_colwise is not None
-            else (self.q_axis == QuantizeAxis.COLWISE or self.is_2x2x())
+            else (self.q_axis == QuantizeLayout.COLWISE or self.is_2x2x())
         )
 
         rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype)
@@ -357,7 +357,7 @@ class BlockScaleQuantizer(Quantizer):
     """
 
     scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
-    q_axis: QuantizeAxis = QuantizeAxis.ROWWISE_COLWISE
+    q_axis: QuantizeLayout = QuantizeLayout.ROWWISE_COLWISE
 
     def get_layout(self) -> str:
         """Get the data layout string.
@@ -509,7 +509,7 @@ class QuantizerFactory:
         n_quantizers: int = 1,
         scaling_mode: ScalingMode = None,
         q_dtype: jnp.dtype = None,
-        q_axis: QuantizeAxis = None,
+        q_axis: QuantizeLayout = None,
         **kwargs,
     ) -> Quantizer:
         """Create one or more quantizers with specified parameters.
@@ -554,10 +554,10 @@ class QuantizerFactory:
             A QuantizerSet instance
         """
         if is_2x2x:
-            q_axis_x = q_axis_kernel = q_axis_dgrad = QuantizeAxis.ROWWISE_COLWISE
+            q_axis_x = q_axis_kernel = q_axis_dgrad = QuantizeLayout.ROWWISE_COLWISE
         else:
-            q_axis_x = QuantizeAxis.ROWWISE
-            q_axis_kernel = QuantizeAxis.COLWISE
+            q_axis_x = QuantizeLayout.ROWWISE
+            q_axis_kernel = QuantizeLayout.COLWISE
             q_axis_dgrad = None
 
         if "quantize_meta_set" in kwargs:

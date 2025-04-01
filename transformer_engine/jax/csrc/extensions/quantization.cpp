@@ -55,7 +55,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto *input = input_buf.untyped_data();
 
   auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
-  auto const quantize_axis = static_cast<QuantizeAxis>(quantize_axis_enum);
+  auto const quantize_axis = static_cast<QuantizeLayout>(quantize_axis_enum);
 
   auto *output = output_buf->untyped_data();
   auto *output_trans = output_trans_buf->untyped_data();
@@ -75,7 +75,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto input_tensor = TensorWrapper(input, input_shape, in_dtype);
   auto output_tensor = TensorWrapper(scaling_mode);
 
-  if (quantize_axis == QuantizeAxis::ROWWISE || quantize_axis == QuantizeAxis::ROWWISE_COLWISE) {
+  if (quantize_axis == QuantizeLayout::ROWWISE || quantize_axis == QuantizeLayout::ROWWISE_COLWISE) {
     output_tensor.set_rowwise_data(output, out_dtype, output_shape);
     output_tensor.set_rowwise_scale_inv(
         scale_inv_buf->untyped_data(),
@@ -95,7 +95,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     output_tensor.set_amax(amax_out, DType::kFloat32, std::vector<size_t>{1});
   }
 
-  if (quantize_axis == QuantizeAxis::COLWISE || quantize_axis == QuantizeAxis::ROWWISE_COLWISE) {
+  if (quantize_axis == QuantizeLayout::COLWISE || quantize_axis == QuantizeLayout::ROWWISE_COLWISE) {
     output_tensor.set_columnwise_data(output_trans, out_dtype, output_trans_shape);
     // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
     auto &colwise_scale_inv_buf =

@@ -31,7 +31,7 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_a
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
-    QuantizeAxis,
+    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
 )
@@ -878,7 +878,7 @@ def act_lu(
         return _jax_act_lu(x, activation_type, quantizer)
 
     # TE/common does not support colwise-only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
         return _jax_act_lu(x, activation_type, quantizer)
 
     # TE/common does not support 2x quantization for DelayedScaling yet
@@ -934,7 +934,7 @@ def act_lu(
     rowwise_casted_output = rowwise_casted_output.reshape(output_shape)
     if len(rowwise_scale_inv.shape) > 1:
         rowwise_scale_inv = jnp.squeeze(rowwise_scale_inv, axis=-2)  # Remove act axis
-    if quantizer.q_axis in (QuantizeAxis.COLWISE, QuantizeAxis.ROWWISE_COLWISE):
+    if quantizer.q_axis in (QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE):
         colwise_output_shape = output_shape
         if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
             colwise_output_shape = multidim_transpose(output_shape)
@@ -983,7 +983,7 @@ def quantize_dact_dbias(
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support colwise-only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet

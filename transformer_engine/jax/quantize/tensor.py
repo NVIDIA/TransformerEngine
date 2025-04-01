@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 import jax.numpy as jnp
 from jax.tree_util import register_pytree_node_class
 
-from transformer_engine_jax import QuantizeAxis
+from transformer_engine_jax import QuantizeLayout
 
 from .scaling_modes import ScalingMode
 from .dequantizer import Dequantizer
@@ -316,7 +316,7 @@ class ScaledTensorFactory:
         scaling_mode: ScalingMode,
         dq_dtype: jnp.dtype = jnp.bfloat16,
         layout: str = "NN",
-        q_axis: QuantizeAxis = QuantizeAxis.ROWWISE,
+        q_axis: QuantizeLayout = QuantizeLayout.ROWWISE,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -333,7 +333,7 @@ class ScaledTensorFactory:
         Returns:
             Either a ScaledTensor1x or ScaledTensor2x instance depending on q_axis
         """
-        if q_axis == QuantizeAxis.ROWWISE_COLWISE:
+        if q_axis == QuantizeLayout.ROWWISE_COLWISE:
             return ScaledTensorFactory.create_2x(
                 data,
                 scale_inv,
@@ -344,7 +344,7 @@ class ScaledTensorFactory:
                 layout=layout,
             )
 
-        is_colwise = q_axis == QuantizeAxis.COLWISE
+        is_colwise = q_axis == QuantizeLayout.COLWISE
         return ScaledTensorFactory.create_1x(
             data, scale_inv, scaling_mode, dq_dtype, is_colwise=is_colwise, layout=layout[0]
         )

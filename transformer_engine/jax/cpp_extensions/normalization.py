@@ -30,7 +30,7 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_a
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
-    QuantizeAxis,
+    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
 )
@@ -816,7 +816,7 @@ def layernorm_fwd(
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
@@ -997,7 +997,7 @@ def rmsnorm_fwd(
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_axis == QuantizeLayout.COLWISE:
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
