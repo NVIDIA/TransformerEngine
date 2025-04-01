@@ -145,12 +145,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   float partial_dbias_colwise = 0.0f;
   float thread_dbias_rowwise[SCALE_DIM_X];
-  // if constexpr (IS_DBIAS) {
-  //   #pragma unroll
-  //   for (int j = 0; j < SCALE_DIM_X; ++j) {
-  //     thread_dbias_rowwise[j] = 0.0f;
-  //   }
-  // }
+  if constexpr (IS_DBIAS) {
+    #pragma unroll
+    for (int j = 0; j < SCALE_DIM_X; ++j) {
+      thread_dbias_rowwise[j] = 0.0f;
+    }
+  }
 
   float block_amax = 0.0f;
 
@@ -382,6 +382,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
             if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
               thread_dbias_rowwise[j] += elt;
+              if (threadIdx.x == 1 && stage == 0) {
+                printf("Adding elt=%f to thread_dbias_rowwise at index j=%d (wave=%d  e=%d)\n", elt, j, w, e);
+              }
             }
             if constexpr (COMPUTE_ACTIVATIONS) {
               const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
@@ -503,6 +506,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int dbias_offset_X = blockIdx.x * CHUNK_DIM_X + threadIdx.x;
     const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
     const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
+    printf("tid=%d  dbias=%f\n", threadIdx.x, thread_partial_dbias);
     if (!col_out_of_bounds_dbias) {
       dbias_workspace[dbias_idx] = thread_partial_dbias;
     }
