@@ -57,6 +57,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
@@ -145,9 +146,13 @@ class _Linear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
-                assert not isinstance(
-                    inputmat, QuantizedTensor
-                ), "All gather of fp8 input is not supported"
+                if not isinstance(inputmat, QuantizedTensor):
+                    columnwise_usage = backward_needs_input and isinstance(
+                        input_quantizer, MXFP8Quantizer
+                    )
+                    input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                    inputmat = input_quantizer(inputmat)
+                    own_quantized_input = True
                 input_quantizer.set_usage(rowwise=True, columnwise=False)
                 inputmat_total, _ = gather_along_first_dim(
                     inputmat,
@@ -276,7 +281,7 @@ class _Linear(torch.autograd.Function):
                     # to gather the input. For MXFP8, columnwise only data
                     # can be allgathered.
                     if isinstance(inputmat, MXFP8TensorBase) or not ctx.backward_input_needs_gather:
-                        inputmat.update_usage(rowwise_usage=False)
+                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM.
@@ -503,7 +508,7 @@ class _Linear(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.input_quantizer
-                    quantizer.set_usage(rowwise=True, columnwise=True)
+                    quantizer.set_usage(rowwise=False, columnwise=True)
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
                 inputmat_total, inputmat_total_work = gather_along_first_dim(
                     inputmat,
@@ -1267,9 +1272,6 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_fwd"][
                     tex.FP8FwdTensors.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
-                ].amax_reduction_size = self.tp_size
         else:
             # set grad_output_quantizer with amax epsilon and power_2_scale
             self.quantizers["scaling_bwd"][
@@ -1287,6 +1289,3 @@ class Linear(TransformerEngineBaseModule):
                 self.quantizers["scaling_bwd"][
                     tex.FP8BwdTensors.GRAD_OUTPUT1
                 ].amax_reduction_group = self.tp_group
-                self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
-                ].amax_reduction_size = self.tp_size

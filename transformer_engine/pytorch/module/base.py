@@ -1031,6 +1031,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if cache_name is not None:
             out = self._fp8_workspaces.get(cache_name, None)
+            if quantizer is not None and isinstance(out, MXFP8TensorBase):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    out = None
+                    del self._fp8_workspaces[cache_name]
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    out = None
+                    del self._fp8_workspaces[cache_name]
 
             is_debug = isinstance(quantizer, DebugQuantizer)
             is_out_debug_tensor = out is not None and isinstance(out, DebugQuantizedTensor)
