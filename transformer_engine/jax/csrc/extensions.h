@@ -116,6 +116,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 
+// CuBLAS helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
+
 }  // namespace jax
 }  // namespace transformer_engine
 
