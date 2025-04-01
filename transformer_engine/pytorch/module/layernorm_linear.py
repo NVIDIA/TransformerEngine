@@ -56,6 +56,7 @@ from ..tensor.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
+from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
@@ -565,12 +566,27 @@ class _LayerNormLinear(torch.autograd.Function):
                     ub_obj_wgrad.set_buffer_params(ctx.grad_input_quantizer)
                     dgrad_bulk = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer)
 
+            # Configure quantizer for grad output tensor
+            # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
+            # requires column-wise usage
             if ctx.grad_output_quantizer is not None:
-                # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+                rowwise_usage = True
+                columnwise_usage = True
+                if ctx.ub_overlap_ag and isinstance(
+                    ctx.grad_output_quantizer,
+                    (Float8Quantizer, Float8CurrentScalingQuantizer),
+                ):
+                    # If data is in FP8 and communication is handled
+                    # with Userbuffers, we compute FP8 transposes
+                    # manually
+                    columnwise_usage = False
+                ctx.grad_output_quantizer.set_usage(
+                    rowwise=rowwise_usage,
+                    columnwise=columnwise_usage,
+                )
+
+            # Prepare grad output tensor
+            # Note: Cast to expected dtype and perform tensor-parallel communication
             nvtx_range_push(f"{nvtx_label}.grad_output_preprocess")
             (
                 grad_output,
@@ -583,15 +599,19 @@ class _LayerNormLinear(torch.autograd.Function):
             )
             nvtx_range_pop(f"{nvtx_label}.grad_output_preprocess")
 
-            # Prepare GEMM input
-            # Note: Perform tensor-parallel communication if needed
+            # Launch tensor-parallel communication for LayerNorm out tensor
             ln_out_total = None
             ln_out_total_work = None
             if ctx.ln_out_needs_gather and not ctx.ub_bulk_dgrad:
                 quantizer = None
                 if ctx.fp8:
                     quantizer = ctx.input_quantizer
-                    quantizer.set_usage(rowwise=False, columnwise=True)
+                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                        # If data is in FP8, we compute FP8 transposes manually
+                        quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        # wgrad GEMM requires input with column-wise usage
+                        quantizer.set_usage(rowwise=False, columnwise=True)
                 nvtx_range_push(f"{nvtx_label}.column_parallel_comm_input")
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
@@ -660,6 +680,8 @@ class _LayerNormLinear(torch.autograd.Function):
             # Compute grad weight tensor
             wgrad = None
             if ctx.requires_wgrad:
+
+                # Synchronize tensor-parallel communication for input tensor
                 if ctx.ub_bulk_dgrad:
                     ln_out_total = ub_obj_dgrad.get_buffer(ctx.input_quantizer)
                     if ctx.fp8:
@@ -673,18 +695,25 @@ class _LayerNormLinear(torch.autograd.Function):
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.
                             ln_out_total._create_transpose()
+                if ln_out_total_work is not None:
+                    ln_out_total_work.wait()
+                    ln_out_total_work = None
 
-                else:
-                    if ln_out_total_work is not None:
-                        # Synchronize tensor-parallel communication
-                        ln_out_total_work.wait()
-                        ln_out_total_work = None
-
+                # Make sure GEMM inputs have required data
+                if isinstance(ln_out_total, QuantizedTensor):
+                    ln_out_total.update_usage(columnwise_usage=True)
                 if isinstance(grad_output, QuantizedTensor):
-                    # This is a no-op if platform supports non-TN FP8 GEMM or the transpose
-                    # already exists.
-                    grad_output.update_usage(rowwise_usage=True, columnwise_usage=True)
+                    grad_output.update_usage(columnwise_usage=True)
 
+                # Figure out whether to use split accumulator
+                use_split_accumulator = _2X_ACC_WGRAD
+                if ctx.fp8:
+                    recipe = ctx.fp8_recipe
+                    if hasattr(recipe, "fp8_gemm_wgrad"):
+                        use_split_accumulator = recipe.fp8_gemm_wgrad.use_split_accumulator
+
+                # Output buffer for overlapping grad input
+                # reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad and ub_obj_wgrad.is_fp8_ubuf():
                     rs_out = torch.empty(
                         dgrad_shape, dtype=ctx.activation_dtype, device=inputmat.device
@@ -693,14 +722,6 @@ class _LayerNormLinear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if ctx.fp8:
-                    recipe = ctx.fp8_recipe
-                    if hasattr(recipe, "fp8_gemm_wgrad"):
-                        wgrad_gemm_use_split_accumulator = (
-                            recipe.fp8_gemm_wgrad.use_split_accumulator
-                        )
-
                 wgrad, grad_bias_, *_, rs_out = general_gemm(
                     ln_out_total,
                     grad_output,
@@ -712,7 +733,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     ),
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
                     out=main_grad if ctx.fuse_wgrad_accumulation else None,
-                    use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                    use_split_accumulator=use_split_accumulator,
                     accumulate=accumulate_wgrad_into_param_main_grad,
                     ub=ub_obj_wgrad,
                     ub_type=ub_type_wgrad,
@@ -736,7 +757,7 @@ class _LayerNormLinear(torch.autograd.Function):
                     # TODO (pgadzinski) - deallocate transpose only  # pylint: disable=fixme
                     clear_tensor_data(ln_out_total)
 
-            # Synchronize tensor parallel communication
+            # Make sure all tensor-parallel communication is finished
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
