@@ -34,5 +34,11 @@ inline size_t product(const std::vector<size_t> &shape) {
   return ret;
 }
 
+enum class QuantizeAxis {
+  ROWWISE,
+  COLWISE,
+  ROWWISE_COLWISE,
+};
+
 }  // namespace jax
 }  // namespace transformer_engine

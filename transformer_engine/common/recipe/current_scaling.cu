@@ -13,6 +13,7 @@
 #include "../common.h"
 #include "../util/logging.h"
 #include "../util/vectorized_pointwise.h"
+#include "recipe_common.cuh"
 
 namespace transformer_engine {
 namespace {
@@ -135,7 +136,7 @@ void nvte_compute_amax(const NVTETensor input_, const NVTETensor output_, cudaSt
              "Output tensor for amax computation has invalid amax tensor  "
              "(expected FP32, got dtype=",
              to_string(output.amax.dtype), ")");
-  CheckOutputTensor(output, "output_compute_amax");
+  CheckOutputTensor(output, "output_compute_amax", true);
 
   // Compute amax
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -151,41 +152,7 @@ namespace {
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
                                                const float epsilon) {
-  float amax = *amax_ptr;
-  if (amax < epsilon) {
-    amax = epsilon;
-  }
-
-  float scale = 1.f;
-
-  if (isinf(amax) || amax == 0.f) {
-    *scale_ptr = scale;
-    return;
-  }
-
-  scale = max_fp8 / amax;
-
-  // The amax is too small that the scale becoming infinite in FP32. In other word,
-  // the scale is not representable in FP32.
-  if (isinf(scale)) {
-    // use fp32 max to represent the scale
-    scale = std::numeric_limits<float>::max();
-  }
-
-  if (isnan(scale)) {
-    scale = 1.f;
-  }
-
-  if (force_pow_2_scales) {
-    uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&scale);
-    scale_bits &= 0xFF800000;
-    // If the exponent was zero, we have a logic error.
-    __builtin_assume(scale_bits != 0);
-    __builtin_assume(scale_bits != 0x80000000);
-    scale = *reinterpret_cast<float *>(&scale_bits);
-  }
-
-  *scale_ptr = scale;
+  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon);
 }
 
 }  // namespace
@@ -230,8 +197,9 @@ void nvte_compute_scale_from_amax(NVTETensor output_, const NVTEQuantizationConf
                                          max_fp8 = Quantized_Limits<DType>::max_norm;);
 
   // Update scale
-  compute_scale_from_amax_kernel<<<1, 1>>>(reinterpret_cast<const float *>(output.amax.dptr),
-                                           reinterpret_cast<float *>(output.scale.dptr), max_fp8,
-                                           config.force_pow_2_scales, config.amax_epsilon);
+  compute_scale_from_amax_kernel<<<1, 1, 0, stream>>>(
+      reinterpret_cast<const float *>(output.amax.dptr),
+      reinterpret_cast<float *>(output.scale.dptr), max_fp8, config.force_pow_2_scales,
+      config.amax_epsilon);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
