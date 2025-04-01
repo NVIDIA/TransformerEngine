@@ -146,7 +146,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   float partial_dbias_colwise = 0.0f;
   float thread_dbias_rowwise[SCALE_DIM_X];
   if constexpr (IS_DBIAS) {
-    #pragma unroll
+#pragma unroll
     for (int j = 0; j < SCALE_DIM_X; ++j) {
       thread_dbias_rowwise[j] = 0.0f;
     }
@@ -383,7 +383,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
               thread_dbias_rowwise[j] += elt;
               if (threadIdx.x == 1 && stage == 0) {
-                printf("Adding elt=%f to thread_dbias_rowwise at index j=%d (wave=%d  e=%d)\n", elt, j, w, e);
+                printf("Adding elt=%f to thread_dbias_rowwise at index j=%d (wave=%d  e=%d)\n", elt,
+                       j, w, e);
               }
             }
             if constexpr (COMPUTE_ACTIVATIONS) {
