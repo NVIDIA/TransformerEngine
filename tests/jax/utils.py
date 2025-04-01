@@ -18,14 +18,13 @@ from flax.linen.attention import combine_masks
 from jax import lax, vmap
 from jax import nn as jax_nn
 from jax import random as jax_random
-import pytest
 
 from transformer_engine.jax.attention import (
     AttnMaskType,
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
-from transformer_engine.jax.quantize.helper import DType as TEDType
+from transformer_engine.jax.fp8 import DType as TEDType
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -97,62 +96,6 @@ def combine_biases(*masks: Optional[Array]):
     return mask
 
 
-def parameterize_by_test_level(param_dict: dict, id_prefix: str = ""):
-    """
-    Takes an input dictionary of parameters keyed by test type "L0", etc.
-    Returns a list of pytest parameters to be used in a parameterized test for the current test type
-    """
-    DEFAULT_TEST_LEVEL = "L0"
-    test_level = os.environ.get("NVTE_JAX_UNITTEST_LEVEL", DEFAULT_TEST_LEVEL)
-    if test_level not in param_dict:
-        raise ValueError("Unsupported test level")
-    return values_to_named_params(param_dict[test_level], id_prefix)
-
-
-def value_to_test_name_str(value):
-    """Converts a value to how it should appear in a test name."""
-    if isinstance(value, tuple) or isinstance(value, list):
-        return "_".join([value_to_test_name_str(v) for v in value])
-
-    dtype_type = type(jnp.float32)
-    if isinstance(value, dtype_type):
-        return value.dtype
-
-    return str(value)
-
-
-def value_to_named_param(value, id_prefix: str = ""):
-    param_type = type(pytest.param(0))
-    if isinstance(value, param_type):
-        return value
-
-    x = pytest.param(value, id=f"{id_prefix}_{value_to_test_name_str(value)}")
-    return x
-
-
-def values_to_named_params(params, id_prefix: str = ""):
-    return [value_to_named_param(v, id_prefix=id_prefix) for v in params]
-
-
-def pytest_parametrize_wrapper(param_name, param_values):
-    """
-    A wrapper for pytest.mark.parametrize to allow for automatic
-    naming of tests based on the parameter values.
-    """
-    id_prefix = param_name
-    if isinstance(param_values, dict):
-        param_values = parameterize_by_test_level(param_values, id_prefix=param_name)
-    elif "," not in param_name:
-        param_values = values_to_named_params(param_values, id_prefix=id_prefix)
-
-    # Currently comma separated parameters in one parametrize call aren't supported for automatic naming
-    # and will just be passed through with default pytest names
-    def decorator(func):
-        return pytest.mark.parametrize(param_name, param_values)(func)
-
-    return decorator
-
-
 class DotProductAttention(nn.Module):
     transpose_batch_sequence: bool = True
     scale_attn_logits: bool = True
@@ -197,7 +140,6 @@ class DotProductAttention(nn.Module):
         Returns:
             Output of shape `[batch, length, num_heads, v_depth_per_head]`.
         """
-        input_dtype = query.dtype
         assert key.ndim == query.ndim == value.ndim, "q, k, v must have same rank."
         batch_dim = 1 if self.transpose_batch_sequence else 0
         assert (
@@ -210,7 +152,7 @@ class DotProductAttention(nn.Module):
 
         if self.scale_attn_logits:
             head_dim = query.shape[-1]
-            depth_scaling = jnp.sqrt(head_dim).astype(input_dtype)
+            depth_scaling = jnp.sqrt(head_dim).astype(self.dtype)
             query = query / depth_scaling
 
         # Casting logits and softmax computation for float32 for model stability.
@@ -239,7 +181,7 @@ class DotProductAttention(nn.Module):
             attn_weights = attn_weights + bias.astype(attn_weights.dtype)
 
         # Normalize the attention weights across `kv_length` dimension.
-        attn_weights = jax_nn.softmax(attn_weights).astype(input_dtype)
+        attn_weights = jax_nn.softmax(attn_weights).astype(self.dtype)
 
         # Apply attention dropout.
         if not deterministic and self.dropout_rate > 0.0:
@@ -249,19 +191,15 @@ class DotProductAttention(nn.Module):
             dropout_shape = list(attn_weights.shape)
             dropout_rng = self.make_rng("dropout")
             keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-            multiplier = keep.astype(input_dtype) / jnp.asarray(keep_prob, dtype=input_dtype)
+            multiplier = keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=self.dtype)
             attn_weights = attn_weights * multiplier
 
         attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
-        # attn_weights = attn_weights.astype(input_dtype)
+        attn_weights = attn_weights.astype(value.dtype)
 
         # Take the linear combination of `value`.
         if self.transpose_batch_sequence:
             return jnp.einsum("bhgqk,kbhd->qbhgd", attn_weights, value).reshape(query.shape)
-
-        assert (
-            attn_weights.dtype == input_dtype
-        ), f"input.dtype={input_dtype}, output.dtype={attn_weights.dtype}"
 
         return jnp.einsum("bhgqk,bkhd->bqhgd", attn_weights, value).reshape(query.shape)
 
@@ -308,6 +246,7 @@ class DenseGeneral(nn.Module):
         features = _canonicalize_tuple(self.features)
         axis = _canonicalize_tuple(self.axis)
 
+        inputs = jnp.asarray(inputs, self.dtype)
         axis = _normalize_axes(axis, inputs.ndim)
 
         kernel_shape = tuple(inputs.shape[ax] for ax in axis) + features
@@ -329,14 +268,11 @@ class DenseGeneral(nn.Module):
 
         contract_ind = tuple(range(0, len(axis)))
 
-        y = lax.dot_general(
-            inputs, kernel, ((axis, contract_ind), ((), ())), preferred_element_type=input_dtype
-        )
+        y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+        y = y.astype(input_dtype)
 
         if bias is not None:
             y += jnp.reshape(bias, (1,) * (y.ndim - 1) + (-1,))
-
-        assert y.dtype == inputs.dtype, f"input.dtype={inputs.dtype}, output.dtype={y.dtype}"
         return y
 
 
@@ -416,7 +352,6 @@ class MlpBlock(nn.Module):
         )(
             x, deterministic=deterministic
         )  # Broadcast along length.
-
         if self.transpose_batch_sequence:
             x = nn_partitioning.with_sharding_constraint(x, ("length", "batch", "mlp"))
         else:
@@ -430,7 +365,6 @@ class MlpBlock(nn.Module):
             bias_axes="embed",
             name="wo",
         )(x)
-
         assert (
             output.dtype == inputs.dtype
         ), f"input.dtype={input.dtype}, output.dtype={output.dtype}"
@@ -457,7 +391,7 @@ def apply_rotary_pos_emb_alternate(
     second_part = second_half * cos + first_half * sin
     first_part = first_part.astype(inputs.dtype)
     second_part = second_part.astype(inputs.dtype)
-    return jnp.concatenate([first_part, second_part], axis=-1).astype(inputs.dtype)
+    return jnp.concatenate([first_part, second_part], axis=-1)
 
 
 def apply_rotary_pos_emb_consecutive(
@@ -491,7 +425,7 @@ def apply_rotary_pos_emb_consecutive(
     sign = jnp.sign(jnp.mod(jnp.arange(embedding_dim, dtype=jnp.int32), 2) - 0.5)
     outputs = inputs * cos + inputs_shifted * sin * sign
 
-    return outputs.astype(inputs.dtype)
+    return outputs
 
 
 dynamic_vector_slice_in_dim = vmap(lax.dynamic_slice_in_dim, in_axes=(None, 0, None, None))
@@ -625,7 +559,6 @@ class MultiHeadAttention(nn.Module):
 
         if self.fuse_qkv:
             if is_qkvpack:
-
                 qkv_proj = DenseGeneral(
                     axis=-1,
                     features=self.num_heads * self.head_dim * 3,
@@ -636,13 +569,11 @@ class MultiHeadAttention(nn.Module):
                     name="qkv",
                     dtype=self.dtype,
                 )(inputs_kv)
-
                 query, key, value = jnp.split(
                     qkv_proj,
                     [self.num_heads * self.head_dim, self.num_heads * self.head_dim * 2],
                     axis=-1,
                 )
-
             else:
                 query = q_projection(kernel_init=query_init, name="query")(inputs_q)
 
@@ -780,7 +711,6 @@ class MultiHeadAttention(nn.Module):
         # Convert the boolean attention mask to an attention bias.
         if mask is not None:
             # attention mask in the form of attention bias
-
             attention_bias = lax.select(
                 mask > 0,
                 jnp.full(mask.shape, 0.0).astype(self.dtype),
@@ -810,7 +740,6 @@ class MultiHeadAttention(nn.Module):
             x = nn_partitioning.with_sharding_constraint(x, ("batch", "length", "joined_kv"))
 
         # Back to the original inputs dimensions.
-
         out = DenseGeneral(
             features=inputs_q.shape[-1],  # output dim is set to the input dim.
             axis=-1,
@@ -821,7 +750,6 @@ class MultiHeadAttention(nn.Module):
             dtype=self.dtype,
             name="out",
         )(x)
-
         assert (
             inputs_q.dtype == inputs_kv.dtype == out.dtype
         ), f"q.dtype={inputs_q.dtype}, kv.dtype={inputs_kv.dtype}, out.dtype={out.dtype}"
@@ -856,11 +784,12 @@ class LayerNorm(nn.Module):
         scale = nn_partitioning.param_with_axes(
             "scale", self.scale_init, (features,), self.dtype, axes=("embed",)
         )
-        x_ = x.astype(jnp.float32)
+        scale = jnp.asarray(scale, input_dtype)
+
         if self.layernorm_type == "layernorm":
-            mean = jnp.mean(x_, axis=-1, keepdims=True)
-            var = jnp.mean(jnp.square(x_ - mean), axis=-1, keepdims=True)
-            y = (x_ - mean) * lax.rsqrt(var + self.epsilon)
+            mean = jnp.mean(x, axis=-1, keepdims=True)
+            var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+            y = (x - mean) * lax.rsqrt(var + self.epsilon)
 
             bias = nn_partitioning.param_with_axes(
                 "ln_bias", self.bias_init, (features,), self.dtype, axes=("embed",)
@@ -874,10 +803,9 @@ class LayerNorm(nn.Module):
         else:
             assert self.layernorm_type == "rmsnorm"
             assert not self.zero_centered_gamma
-            mean2 = jnp.mean(lax.square(x_), axis=-1, keepdims=True)
-            y = x_ * lax.rsqrt(mean2 + self.epsilon)
+            mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
+            y = x * lax.rsqrt(mean2 + self.epsilon)
             z = y * scale
-        z = z.astype(input_dtype)
 
         assert z.dtype == x.dtype, f"output_dtype={z.dtype}, input_dtype={x.dtype}"
         return z
@@ -1157,11 +1085,9 @@ class EncoderLayer(nn.Module):
             fuse_wi=self.fuse_mlp_wi,
             name="mlp",
         )(y, deterministic=deterministic)
-
         y = nn.Dropout(rate=self.hidden_dropout, broadcast_dims=self.hidden_dropout_dims)(
             y, deterministic=deterministic
         )
-
         if self.drop_path > 0.0:
             drop_path_shape = _generate_drop_path_shape(y.shape, batch_dim)
             y = nn.Dropout(rate=self.drop_path, broadcast_dims=drop_path_shape)(
@@ -1177,7 +1103,6 @@ class EncoderLayer(nn.Module):
                 dtype=self.dtype,
                 name="output_layernorm",
             )(y)
-
         assert y.dtype == inputs.dtype, f"output_dtype={y.dtype}, input_dtype={inputs.dtype}"
         return y
 

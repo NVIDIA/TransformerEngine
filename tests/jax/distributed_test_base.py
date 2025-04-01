@@ -82,7 +82,7 @@ def assert_equal_collectives(target_hlo, coll_count_ref):
                 'i32[1024]{0}',
                 'bf16[1024,1024]{0}'
             """
-            match = re.search(r"(i|f|u)(\d+).*\[([0-9,]*)\]", t)
+            match = re.search(r"(i|f)(\d+).*\[([0-9,]*)\]", t)
             _, bits_of_type, shape = match.groups()
             bytes_of_type = int(bits_of_type) // 8
             if shape == "":

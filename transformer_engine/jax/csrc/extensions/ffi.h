@@ -81,30 +81,5 @@ inline size_t product(const xla::ffi::Span<const int64_t>& data, size_t start_id
                          std::multiplies<size_t>());
 }
 
-inline static size_t te_dtype_bytes(const DType& type) {
-  switch (type) {
-    case DType::kByte:
-      return 1;
-    case DType::kInt32:
-      return 4;
-    case DType::kInt64:
-      return 8;
-    case DType::kFloat32:
-      return 4;
-    case DType::kFloat16:
-      return 2;
-    case DType::kBFloat16:
-      return 2;
-    case DType::kFloat8E5M2:
-      return 1;
-    case DType::kFloat8E4M3:
-      return 1;
-    case DType::kFloat8E8M0:
-      return 1;
-    default:
-      NVTE_ERROR("Unsupported DType: ", static_cast<int>(type));
-  }
-}
-
 }  // namespace jax
 }  // namespace transformer_engine

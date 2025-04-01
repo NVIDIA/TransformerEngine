@@ -638,9 +638,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
             else:
                 assert qkv_layout.is_separate()
 
-            assert sequence_descriptor is None or isinstance(
-                sequence_descriptor, (jnp.ndarray, np.ndarray)
-            )
+            assert sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray)
 
             x = _UnfusedDotProductAttention(
                 attention_dropout=self.attention_dropout,
@@ -930,7 +928,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
     Optimization parameters
     -----------------------
     dtype: jax.numpy.dtype, default  = jax.numpy.float32
-        The data type used to allocate the initial parameters.
+        The data type used for computation.
     fuse_qkv_params: bool, default = True
         If set to True, this module exposes a single fused
         parameter for query-key-value for self-attention and key-value for
@@ -1790,7 +1788,6 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
-
         input_dtype = inputs.dtype
         assert (
             self.layer_type in TransformerLayerType

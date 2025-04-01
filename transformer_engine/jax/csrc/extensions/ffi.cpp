@@ -13,9 +13,8 @@ namespace jax {
 // For XLA_FFI_DataType Enum Reference: https://github.com/openxla/xla/blob/d054e8366c4e8807726961feeb28b1cdba681888/xla/ffi/api/c_api.h#L163-L186
 DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
   switch (type) {
-    // Using this for E8M0
     case xla::ffi::DataType::U8:
-      return DType::kFloat8E8M0;
+      return DType::kByte;
       break;
     case xla::ffi::DataType::S32:
       return DType::kInt32;
@@ -38,12 +37,8 @@ DType convert_ffi_datatype_to_te_dtype(const xla::ffi::DataType &type) {
     case xla::ffi::DataType::F8E4M3FN:
       return DType::kFloat8E4M3;
       break;
-    // case xla::ffi::DataType::F8E8M0FNU:
-    //   return DType::kFloat8E8M0;
-    //   break;
     default:
       auto type_num = static_cast<XLA_FFI_DataType>(type);
-      if (type_num == 33) return DType::kFloat8E8M0;
       NVTE_ERROR("TE does not support conversion of XLA_FFI_DataType %d",
                  static_cast<int>(type_num));
       break;

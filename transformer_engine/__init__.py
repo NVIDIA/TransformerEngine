@@ -19,4 +19,9 @@ try:
 except (ImportError, StopIteration) as e:
     pass
 
+try:
+    import transformer_engine_jax
+except ImportError:
+    pass
+
 __version__ = str(metadata.version("transformer_engine"))

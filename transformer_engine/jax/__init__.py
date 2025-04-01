@@ -1,35 +1,21 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Transformer Engine bindings for JAX.
-
-This module provides JAX bindings for NVIDIA's Transformer Engine, enabling
-high-performance transformer operations with mixed precision and quantization
-support. It includes implementations of key transformer components like attention,
-linear layers, and layer normalization, optimized for NVIDIA GPUs.
-
-The module exports various transformer operations and utilities:
-- Attention mechanisms (self-attention, cross-attention)
-- Linear transformations with optional quantization
-- Layer normalization operations
-- Activation functions
-- Softmax operations
-- Sharding utilities for distributed training
-
-All operations are designed to work seamlessly with JAX's functional programming
-model and support automatic differentiation.
-"""
+"""Transformer Engine bindings for JAX"""
 
 # pylint: disable=wrong-import-position,wrong-import-order
 
+import sys
 import logging
 import importlib
 import importlib.util
+import ctypes
 from importlib.metadata import version
-import sys
 
 from transformer_engine.common import get_te_path, is_package_installed
 from transformer_engine.common import _get_sys_extension
+
+_logger = logging.getLogger(__name__)
 
 
 def _load_library():
@@ -55,7 +41,7 @@ def _load_library():
 
     if is_package_installed("transformer-engine-cu12"):
         if not is_package_installed(module_name):
-            logging.info(
+            _logger.info(
                 "Could not find package %s. Install transformer-engine using "
                 "'pip3 install transformer-engine[jax]==VERSION'",
                 module_name,
@@ -81,10 +67,8 @@ def _load_library():
 
 _load_library()
 from . import flax
-from . import quantize
-
-from .quantize import fp8_autocast
-
+from .fp8 import fp8_autocast, update_collections, get_delayed_scaling
+from .fp8 import NVTE_FP8_COLLECTION_NAME
 from .sharding import MeshResource
 from .sharding import MajorShardingType, ShardingResource, ShardingType
 
@@ -101,7 +85,10 @@ ShardingResource = deprecate_wrapper(
 )
 
 __all__ = [
+    "NVTE_FP8_COLLECTION_NAME",
     "fp8_autocast",
+    "update_collections",
+    "get_delayed_scaling",
     "MeshResource",
     "MajorShardingType",
     "ShardingResource",

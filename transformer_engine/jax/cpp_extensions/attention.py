@@ -13,6 +13,8 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes, lax
+from jax.interpreters import mlir
+from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec, NamedSharding
 
 import transformer_engine_jax
@@ -27,12 +29,14 @@ from transformer_engine.jax.attention import (
 )
 
 from .base import BasePrimitive, register_primitive
+from .custom_call import custom_caller, CustomCallArgsWrapper
 from .misc import (
     check_valid_batch_dims,
     jax_dtype_to_te_dtype,
     te_dtype_to_jax_dtype,
     get_padded_spec,
     get_cudnn_version,
+    is_ffi_enabled,
 )
 from ..sharding import (
     global_mesh_resource,
@@ -223,7 +227,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
     Fused Attention Forward Primitive
     """
 
-    name = "te_fused_attn_forward_ffi"
+    name = "te_fused_attn_forward"
     multiple_results = True
     impl_static_args = (13,)
     inner_primitive = None
@@ -396,40 +400,90 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        return ffi.ffi_lowering(FusedAttnFwdPrimitive.name)(
-            ctx,
-            q,
-            k,
-            v,
-            bias,
-            seed,
-            q_cu_seqlen,
-            kv_cu_seqlen,
-            q_seq_offsets,
-            k_seq_offsets,
-            _q_segment_ids,
-            _kv_segment_ids,
-            _q_segment_pos,
-            _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            head_dim=head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=config.window_size[0],
-            window_size_right=config.window_size[1],
-        )
+        if is_ffi_enabled():
+            name = "te_fused_attn_forward_ffi"
+            out = ffi.ffi_lowering(name)(
+                ctx,
+                q,
+                k,
+                v,
+                bias,
+                seed,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+                input_batch=input_batch,
+                bias_batch=bias_batch,
+                q_max_seqlen=q_max_seqlen,
+                kv_max_seqlen=kv_max_seqlen,
+                attn_heads=attn_heads,
+                num_gqa_groups=num_gqa_groups,
+                bias_heads=bias_heads,
+                head_dim=head_dim,
+                max_segments_per_seq=config.max_segments_per_seq,
+                scaling_factor=float(config.scaling_factor),
+                dropout_probability=float(config.dropout_probability),
+                bias_type=int(config.attn_bias_type.value),
+                mask_type=int(config.attn_mask_type.value),
+                qkv_layout=int(config.qkv_layout.value),
+                is_training=config.is_training,
+                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+                window_size_left=config.window_size[0],
+                window_size_right=config.window_size[1],
+            )
+        else:
+            operands = [
+                q,
+                k,
+                v,
+                bias,
+                seed,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+            ]
+            operand_shapes = map(lambda x: x.type.shape, operands)
+            out_types = [
+                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+                for output in ctx.avals_out
+            ]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+            wkspace_aval = ctx.avals_out[-1]
+
+            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+                input_batch,
+                bias_batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                bias_heads,
+                head_dim,
+                config.max_segments_per_seq,
+                wkspace_aval.size,
+                config.scaling_factor,
+                config.dropout_probability,
+                config.attn_bias_type,
+                config.attn_mask_type,
+                config.qkv_layout,
+                jax_dtype_to_te_dtype(q_aval.dtype),
+                jax_dtype_to_te_dtype(wkspace_aval.dtype),
+                config.is_training,
+                not FusedAttnHelper.is_non_deterministic_allowed(),
+                config.window_size[0],
+                config.window_size[1],
+            )
+
+            out = custom_caller(FusedAttnFwdPrimitive.name, args, opaque, has_side_effect=False)
+
+        return out
 
     @staticmethod
     def impl(
@@ -627,7 +681,7 @@ class FusedAttnBwdPrimitive(BasePrimitive):
     Fused Attention Backward Primitive
     """
 
-    name = "te_fused_attn_backward_ffi"
+    name = "te_fused_attn_backward"
     multiple_results = True
     impl_static_args = (16,)
     inner_primitive = None
@@ -759,43 +813,96 @@ class FusedAttnBwdPrimitive(BasePrimitive):
             *bias_batch_shape, bias_heads, _, _ = bias_aval.shape
             bias_batch = reduce(operator.mul, bias_batch_shape)
 
-        return ffi.ffi_lowering(FusedAttnBwdPrimitive.name)(
-            ctx,
-            q,
-            k,
-            v,
-            bias,
-            softmax_aux,
-            rng_state,
-            output,
-            doutput,
-            q_cu_seqlen,
-            kv_cu_seqlen,
-            q_seq_offsets,
-            k_seq_offsets,
-            q_segment_ids,
-            kv_segment_ids,
-            q_segment_pos,
-            kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
-            input_batch=input_batch,
-            bias_batch=bias_batch,
-            q_max_seqlen=q_max_seqlen,
-            kv_max_seqlen=kv_max_seqlen,
-            attn_heads=attn_heads,
-            num_gqa_groups=num_gqa_groups,
-            bias_heads=bias_heads,
-            head_dim=head_dim,
-            max_segments_per_seq=config.max_segments_per_seq,
-            scaling_factor=float(config.scaling_factor),
-            dropout_probability=float(config.dropout_probability),
-            bias_type=int(config.attn_bias_type.value),
-            mask_type=int(config.attn_mask_type.value),
-            qkv_layout=int(config.qkv_layout.value),
-            is_training=config.is_training,
-            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
-            window_size_left=config.window_size[0],
-            window_size_right=config.window_size[1],
-        )
+        if is_ffi_enabled():
+            name = "te_fused_attn_backward_ffi"
+            out = ffi.ffi_lowering(name)(
+                ctx,
+                q,
+                k,
+                v,
+                bias,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                q_segment_ids,
+                kv_segment_ids,
+                q_segment_pos,
+                kv_segment_pos,  # ffi_lowering needs number of parameters meets primitive.lowering
+                input_batch=input_batch,
+                bias_batch=bias_batch,
+                q_max_seqlen=q_max_seqlen,
+                kv_max_seqlen=kv_max_seqlen,
+                attn_heads=attn_heads,
+                num_gqa_groups=num_gqa_groups,
+                bias_heads=bias_heads,
+                head_dim=head_dim,
+                max_segments_per_seq=config.max_segments_per_seq,
+                scaling_factor=float(config.scaling_factor),
+                dropout_probability=float(config.dropout_probability),
+                bias_type=int(config.attn_bias_type.value),
+                mask_type=int(config.attn_mask_type.value),
+                qkv_layout=int(config.qkv_layout.value),
+                is_training=config.is_training,
+                deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+                window_size_left=config.window_size[0],
+                window_size_right=config.window_size[1],
+            )
+        else:
+            operands = [
+                q,
+                k,
+                v,
+                bias,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+            ]
+            operand_shapes = map(lambda x: x.type.shape, operands)
+            out_types = [
+                ir.RankedTensorType.get(output.shape, mlir.dtype_to_ir_type(output.dtype))
+                for output in ctx.avals_out
+            ]
+            args = CustomCallArgsWrapper(out_types, operands, operand_shapes)
+
+            wkspace_aval = ctx.avals_out[-1]
+
+            opaque = transformer_engine_jax.pack_fused_attn_descriptor(
+                input_batch,
+                bias_batch,
+                q_max_seqlen,
+                kv_max_seqlen,
+                attn_heads,
+                num_gqa_groups,
+                bias_heads,
+                head_dim,
+                config.max_segments_per_seq,
+                wkspace_aval.size,
+                config.scaling_factor,
+                config.dropout_probability,
+                config.attn_bias_type,
+                config.attn_mask_type,
+                config.qkv_layout,
+                jax_dtype_to_te_dtype(q_aval.dtype),
+                jax_dtype_to_te_dtype(wkspace_aval.dtype),
+                config.is_training,
+                not FusedAttnHelper.is_non_deterministic_allowed(),
+                config.window_size[0],
+                config.window_size[1],
+            )
+
+            out = custom_caller(FusedAttnBwdPrimitive.name, args, opaque, has_side_effect=False)
+
+        return out
 
     @staticmethod
     def impl(

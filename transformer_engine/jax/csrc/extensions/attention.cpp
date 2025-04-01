@@ -301,6 +301,39 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+  const CustomCallFusedAttnDescriptor &descriptor =
+      *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+  auto is_ragged = nvte_get_qkv_format(descriptor.qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
+  /* Input buffers from XLA */
+  void *q = buffers[0];
+  void *k = buffers[1];
+  void *v = buffers[2];
+  void *bias = buffers[3];
+  void *seed = buffers[4];
+  void *q_cu_seqlens = buffers[5];
+  void *kv_cu_seqlens = buffers[6];
+  void *q_seq_offsets = is_ragged ? buffers[7] : nullptr;
+  void *k_seq_offsets = is_ragged ? buffers[8] : nullptr;
+
+  /* Output buffer from XLA */
+  void *output = buffers[9];
+  void *softmax_aux = buffers[10];
+  void *rng_state = buffers[11];
+  void *workspace = buffers[12];
+
+  FusedAttnForwardImpl(
+      stream, q, k, v, bias, seed, q_cu_seqlens, kv_cu_seqlens, q_seq_offsets, k_seq_offsets,
+      output, softmax_aux, rng_state, workspace, descriptor.input_batch, descriptor.bias_batch,
+      descriptor.q_max_seqlen, descriptor.kv_max_seqlen, descriptor.attn_heads,
+      descriptor.num_gqa_groups, descriptor.bias_heads, descriptor.head_dim,
+      descriptor.max_segments_per_seq, descriptor.wkspace_size, descriptor.scaling_factor,
+      descriptor.dropout_probability, descriptor.bias_type, descriptor.mask_type,
+      descriptor.qkv_layout, descriptor.dtype, descriptor.wkspace_dtype, descriptor.is_training,
+      descriptor.deterministic, descriptor.window_size_left, descriptor.window_size_right);
+}
+
 #define FUSED_ATTN_FFI_GET_ATTRS                                                        \
   size_t input_batch = get_attr_value<int64_t>(attrs, "input_batch");                   \
   size_t bias_batch = get_attr_value<int64_t>(attrs, "bias_batch");                     \
@@ -573,6 +606,45 @@ static void FusedAttnBackwardImpl(
   }
 
   nvte_tensor_pack_destroy(&aux_input_tensors);
+}
+
+void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
+  const CustomCallFusedAttnDescriptor &descriptor =
+      *UnpackOpaque<CustomCallFusedAttnDescriptor>(opaque, opaque_len);
+
+  auto qkv_layout = descriptor.qkv_layout;
+  auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
+  /* Input buffers from XLA */
+  void *q = buffers[0];
+  void *k = buffers[1];
+  void *v = buffers[2];
+  void *bias = buffers[3];
+  void *softmax_aux = buffers[4];
+  void *rng_state = buffers[5];
+  void *output = buffers[6];
+  void *doutput = buffers[7];
+  void *q_cu_seqlens = buffers[8];
+  void *kv_cu_seqlens = buffers[9];
+  void *q_seq_offsets = is_ragged ? buffers[10] : nullptr;
+  void *k_seq_offsets = is_ragged ? buffers[11] : nullptr;
+
+  /* Output buffer from XLA */
+  void *dq = buffers[12];
+  void *dk = buffers[13];
+  void *dv = buffers[14];
+  void *dbias = buffers[15];
+  void *workspace = buffers[16];
+
+  FusedAttnBackwardImpl(
+      stream, q, k, v, bias, softmax_aux, rng_state, output, doutput, q_cu_seqlens, kv_cu_seqlens,
+      q_seq_offsets, k_seq_offsets, dq, dk, dv, dbias, workspace, descriptor.input_batch,
+      descriptor.bias_batch, descriptor.q_max_seqlen, descriptor.kv_max_seqlen,
+      descriptor.attn_heads, descriptor.num_gqa_groups, descriptor.bias_heads, descriptor.head_dim,
+      descriptor.max_segments_per_seq, descriptor.wkspace_size, descriptor.scaling_factor,
+      descriptor.dropout_probability, descriptor.bias_type, descriptor.mask_type,
+      descriptor.qkv_layout, descriptor.dtype, descriptor.wkspace_dtype, descriptor.is_training,
+      descriptor.deterministic, descriptor.window_size_left, descriptor.window_size_right);
 }
 
 Error_Type FusedAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
