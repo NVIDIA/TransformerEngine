@@ -261,8 +261,6 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_out_return = None
         if return_layernorm_output or return_layernorm_output_gathered:
             ln_out_return = ln_out
-        if debug and not return_layernorm_output:
-            ln_out = fc1_input_quantizer(ln_out)
 
         # Prepare GEMM input
         # Note: Cast to expected dtype and perform tensor-parallel communication

@@ -230,7 +230,7 @@ class _LayerNormLinear(torch.autograd.Function):
                         quantizer=(input_quantizer if fp8 or debug else None),
                     )
         else:
-            if fp8 and not with_quantized_norm:
+            if (fp8 or debug) and not with_quantized_norm:
                 ln_out = input_quantizer(ln_out)
             ln_out_total = ln_out
         nvtx_range_pop(f"{nvtx_label}.gemm_input_cast_comm")
