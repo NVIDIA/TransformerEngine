@@ -301,11 +301,17 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return Float8BlockwiseQTensor.make_like(self)
 
-    def update_usage(self, rowwise_usage=True, columnwise_usage=True):
+    def update_usage(
+        self, rowwise_usage: Optional[bool] = None, columnwise_usage: Optional[bool] = None
+    ):
         """
         update_usage can be used to clear out one of two possible copies of the data.
         """
 
+        if rowwise_usage is None:
+            rowwise_usage = self._rowwise_data is not None
+        if columnwise_usage is None:
+            columnwise_usage = self._columnwise_data is not None
         assert (
             columnwise_usage or rowwise_usage
         ), "Must retain some data either columnwise or rowwise"
