@@ -991,7 +991,7 @@ def quantize_dact_dbias(
         out, _ = quantize_dact_dbias(
             dz=dz, x=x, activation_type=activation_type, is_dbias=False, quantizer=None
         )
-        return quantize_dbias(out, is_dbias=True, quantizer=quantizer)
+        return _quantize_dbias_impl(out, quantizer, is_dbias=True)
 
     is_gated = len(activation_type) == 2
     # TE/common does not support DelayedScaling2x for gated-act yet
@@ -1045,12 +1045,7 @@ def quantize_dact_dbias(
         if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
             out, dbias = _jax_quantize_dbias(dgated, quantizer=quantizer, dq_dtype=x.dtype)
         else:
-            out, dbias = quantize_dbias(
-                dgated,
-                quantizer=quantizer,
-                is_dbias=True,
-                dq_dtype=x.dtype,
-            )
+            out, dbias = _quantize_dbias_impl(dgated, quantizer, is_dbias=True, dq_dtype=x.dtype)
         return out, dbias
 
     out_shape = x.shape

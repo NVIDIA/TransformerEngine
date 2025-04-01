@@ -66,7 +66,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   auto input_dims = input_buf.dimensions();
   int64_t input_ndim = input_dims.size();
   if (quantize_axis < 0) quantize_axis += input_ndim;
-  NVTE_CHECK(quantize_axis < input_ndim, "quantize_axis is out of bounds!");
+  NVTE_CHECK(quantize_axis < input_ndim && quantize_axis > 0, "quantize_axis is out of bounds!");
 
   auto workspace_dims = workspace_buf->dimensions();
   auto m = product(input_dims, 0, quantize_axis);
@@ -83,7 +83,15 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
   if (quantize_layout == QuantizeLayout::ROWWISE ||
       quantize_layout == QuantizeLayout::ROWWISE_COLWISE) {
     output_tensor.set_rowwise_data(output, out_dtype, output_shape);
-    output_tensor.set_rowwise_scale_inv(
+
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      output_tensor.set_rowwise_scale_inv(
+          scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
+          std::vector<size_t>{1}
+          );
+    } else {
+      output_tensor.set_rowwise_scale_inv(
         scale_inv_buf->untyped_data(),
         convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
         std::vector<size_t>{
@@ -91,6 +99,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
             product(scale_inv_buf->dimensions(), quantize_axis, scale_inv_buf->dimensions().size())
           }
         );
+    }
   }
 
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
@@ -109,14 +118,23 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
     // For 2x delayed scaling, the scale buffer is shared between rowwise and columnwise scaling
     auto &colwise_scale_inv_buf =
         (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) ? scale_inv_buf : trans_scale_inv_buf;
-    output_tensor.set_columnwise_scale_inv(
-        colwise_scale_inv_buf->untyped_data(),
-        convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
-        std::vector<size_t>{
-            product(colwise_scale_inv_buf->dimensions(), 0, quantize_axis),
-            product(colwise_scale_inv_buf->dimensions(), quantize_axis, colwise_scale_inv_buf->dimensions().size())
-            }
-        );
+
+    if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
+      output_tensor.set_columnwise_scale_inv(
+          colwise_scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
+          std::vector<size_t>{1}
+          );
+    } else {
+      output_tensor.set_columnwise_scale_inv(
+          colwise_scale_inv_buf->untyped_data(),
+          convert_ffi_datatype_to_te_dtype(colwise_scale_inv_buf->element_type()),
+          std::vector<size_t>{
+          product(colwise_scale_inv_buf->dimensions(), 0, quantize_axis),
+          product(colwise_scale_inv_buf->dimensions(), quantize_axis, colwise_scale_inv_buf->dimensions().size())
+          }
+          );
+    }
   }
 
   auto dbias_tensor = TensorWrapper(dbias, dbias_shape, in_dtype);

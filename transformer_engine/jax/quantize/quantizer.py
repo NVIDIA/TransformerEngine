@@ -130,9 +130,9 @@ class Quantizer(ABC):
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
         if is_colwise:
-            return self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype)
+            return self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype, q_axis=q_axis)
 
-        return self._quantize_func(x, dq_dtype=dq_dtype)
+        return self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
 
     def get_scale_shapes(self, data_shape, is_padded=True, q_axis=-1):
         """Get shapes for scale tensors.
@@ -257,6 +257,10 @@ class DelayedScaleQuantizer(Quantizer):
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
+        if q_axis < 0:
+            q_axis += x.ndim
+        assert 0 < q_axis < x.ndim, "q_axis is out of bounds!"
+
         is_rowwise = (
             is_rowwise
             if is_rowwise is not None
@@ -268,11 +272,11 @@ class DelayedScaleQuantizer(Quantizer):
             else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
         )
 
-        rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype)
+        rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
         colwise_tensor = None
         if is_colwise:
             colwise_tensor = ScaledTensorFactory.create_1x(
-                data=jnp.transpose(rowwise_tensor.data, (-1, *range(rowwise_tensor.data.ndim - 1))),
+                data=jnp.transpose(rowwise_tensor.data, (*range(q_axis, x.ndim), *range(q_axis))),
                 scale_inv=rowwise_tensor.scale_inv,
                 scaling_mode=self.scaling_mode,
                 dq_dtype=dq_dtype,

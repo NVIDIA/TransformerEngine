@@ -83,7 +83,8 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
 def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
     if isinstance(a, ScaledTensor1x):
         if a.data_layout == "T":
-            b_transpose = jnp.transpose(b, (-1, *range(b.ndim - 1)))
+            q_axis = a.q_axis
+            b_transpose = jnp.transpose(b, (*range(q_axis, b.ndim), *range(q_axis)))
             assert_allclose(a.dequantize(), b_transpose, dtype=a.data.dtype)
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
@@ -444,13 +445,13 @@ QUANTIZE_OUTPUT_DTYPES = {
 }
 
 ALL_QUANTIZE_TEST_SHAPES = [
-    (128, 128),
-    (4, 256, 512),
+    (32, 64, 128),
+    (4, 32, 32, 512),
 ]
 
 QUANTIZE_TEST_SHAPES = {
     "L0": [
-        (256, 128),
+        (1, 256, 128),
         (64, 16, 2, 256),
     ],
     "L2": ALL_QUANTIZE_TEST_SHAPES,
@@ -467,6 +468,7 @@ QUANTIZATION_INPUT_DTYPE = {
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
 @pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+@pytest_parametrize_wrapper("q_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
@@ -475,7 +477,7 @@ class TestQuantize:
     Purely quantization related tests that will always test on a wider set of types and shapes
     """
 
-    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout):
+    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, q_axis):
         key = jax.random.PRNGKey(0)
 
         # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
@@ -489,10 +491,10 @@ class TestQuantize:
         for _ in range(n_iterations):
             x = jax.random.uniform(key, input_shape, in_dtype)
 
-            scaled_tensor = quantizer.quantize(x)
+            scaled_tensor = quantizer.quantize(x, q_axis=q_axis)
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
-    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout):
+    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, q_axis):
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
@@ -505,9 +507,9 @@ class TestQuantize:
             n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        jax_output = _jax_quantize(input, quantizer=jax_quantizer)
+        jax_output = _jax_quantize(input, quantizer=jax_quantizer, quantize_axis=q_axis)
 
-        te_output = tex.quantize(input, quantizer=te_quantizer)
+        te_output = tex.quantize(input, quantizer=te_quantizer, quantize_axis=q_axis)
         assert_bitwise_scaled_tensors(jax_output, te_output)
 
 

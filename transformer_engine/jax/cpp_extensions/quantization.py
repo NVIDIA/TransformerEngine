@@ -53,7 +53,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         7,
         8,
         9,
-    )  # out_dtype, scaling_mode, q_layout, scale_dtype, scale_shapes, is_dbias, is_outer, q_axis
+    )  # out_dtype, scaling_mode, q_layout, q_axis, scale_dtype, scale_shapes, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -65,11 +65,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        q_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
     ):
         """
         te_dbias_quantize_p abstract
@@ -98,7 +98,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         dbias_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            t_shape = multidim_transpose(x_aval.shape, transpose_axis=q_axis)
+            t_shape = multidim_transpose(x_aval.shape, transpose_axis_boundary=q_axis)
             if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
                 # Don't transpose output for MXFP8
                 t_shape = x_aval.shape
@@ -156,11 +156,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        q_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
     ):
         """
         te_dbias_quantize_p lowering rules
@@ -211,11 +211,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
             out_dtype=out_dtype,
             scaling_mode=scaling_mode,
             q_layout=q_layout,
+            q_axis=q_axis,
             scale_dtype=scale_dtype,
             scale_shapes=scale_shapes,
             is_dbias=is_dbias,
             is_outer=False,
-            q_axis=q_axis,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
@@ -246,11 +246,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        q_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
     ):
         """
         to describe batch rules for vmap
@@ -270,10 +270,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
                 q_layout=q_layout,
+                q_axis=q_axis,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
-                q_axis=q_axis,
             ),
             out_bdims,
         )
@@ -283,11 +283,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        q_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
         mesh,
         arg_infos,
         result_infos,
@@ -301,7 +301,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=q_axis)
+                colwise_out_spec = multidim_transpose(x_spec, transpose_axis_boundary=q_axis)
             else:
                 colwise_out_spec = x_spec
         else:
@@ -345,11 +345,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        q_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
         mesh,
         arg_infos,
         result_infos,
@@ -363,7 +363,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=q_axis)
+                colwise_out_spec = multidim_transpose(x_spec, transpose_axis_boundary=q_axis)
             else:
                 colwise_out_spec = x_spec
         else:
@@ -417,11 +417,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
                 q_layout=q_layout,
+                q_axis=q_axis,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
                 is_outer=True,
-                q_axis=q_axis,
             )
 
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
@@ -449,10 +449,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
 register_primitive(DBiasQuantizePrimitive)
 
 
-def _jax_quantize(x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, q_axis: int = -1):
+def _jax_quantize(x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, quantize_axis: int = -1):
     if quantizer is None:
         return x
-    return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=q_axis)
+    return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis)
 
 
 def _jax_dbias(dx: jnp.ndarray):
@@ -469,11 +469,11 @@ def _jax_quantize_dbias(
     x,
     quantizer: Quantizer = None,
     dq_dtype: Optional[jnp.dtype] = None,
-    q_axis: int = -1,
+    quantize_axis: int = -1,
 ):
     if quantizer is None:
         return x, None
-    return quantizer.quantize(x, dq_dtype=dq_dtype), _jax_dbias(x)
+    return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis), _jax_dbias(x)
 
 
 def _jax_dbias(
@@ -488,12 +488,12 @@ def _jax_dbias(
     return dbias.astype(dx.dtype)
 
 
-def _quantize_impl(
+def _quantize_dbias_impl(
     x: jnp.ndarray,
     quantizer: Quantizer,
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
-    q_axis: int = -1,
+    quantize_axis: int = -1,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -509,9 +509,9 @@ def _quantize_impl(
                 x,
                 quantizer=quantizer,
                 dq_dtype=dq_dtype,
-                q_axis=q_axis,
+                quantize_axis=quantize_axis,
             )
-        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, q_axis=q_axis), None
+        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis), None
 
     # TE/common doesn't support colwise only quantization yet
     if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
@@ -520,19 +520,19 @@ def _quantize_impl(
                 x,
                 quantizer=quantizer,
                 dq_dtype=dq_dtype,
-                q_axis=q_axis,
+                quantize_axis=quantize_axis,
             )
-        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, q_axis=q_axis), None
+        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis), None
     scale = jnp.empty((), jnp.float32)
 
     # TE/common dbias_quantize does not support 1x on arch < 100
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
-        out, _ = _quantize_impl(
+        out, _ = _quantize_dbias_impl(
             x=x,
             is_dbias=False,
             quantizer=quantizer,
             dq_dtype=dq_dtype,
-            q_axis=q_axis,
+            quantize_axis=quantize_axis,
         )
         dbias = _jax_dbias(x)
         return out, dbias
@@ -558,11 +558,11 @@ def _quantize_impl(
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=quantizer.q_layout.value,
+        q_axis=quantize_axis,
         scale_dtype=quantizer.get_scale_dtype(),
         scale_shapes=quantizer.get_scale_shapes(x.shape),
         is_dbias=is_dbias,
         is_outer=True,
-        q_axis=q_axis,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
     if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
@@ -579,16 +579,14 @@ def _quantize_impl(
         dq_dtype=dq_dtype if dq_dtype is not None else x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        q_axis=q_axis,
+        q_axis=quantize_axis,
     )
     return out, dbias
 
 
-# TODO(Phuong): do not expose dq_dtype to users
 def quantize(
     x: jnp.ndarray,
     quantizer: Quantizer,
-    dq_dtype: Optional[jnp.dtype] = None,
     quantize_axis: int = -1,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
@@ -597,29 +595,24 @@ def quantize(
         x: Input tensor to be quantized.
             Shape: (..., K) where K is the hidden size.
         quantizer: Quantizer for FP8 quantization of the output.
-        dq_dtype: Optional dtype for dequantization.
-            If None, uses the same dtype as the input tensor.
-        q_axis: The quantization axis in which input data can be flattened to 2D for quantization.
+        quantize_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
 
     Returns:
         A ScaledTensor containing the quantized input tensor.
     """
-    out, _ = _quantize_impl(
+    out, _ = _quantize_dbias_impl(
         x,
         quantizer=quantizer,
-        dq_dtype=dq_dtype,
-        q_axis=q_axis,
+        quantize_axis=quantize_axis,
     )
     return out
 
 
-# TODO(Phuong): do not expose dq_dtype to users
 def quantize_dbias(
     dz: jnp.ndarray,
     quantizer: Quantizer,
     is_dbias: bool = True,
-    dq_dtype: Optional[jnp.dtype] = None,
     quantize_axis: int = -1,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
@@ -629,9 +622,7 @@ def quantize_dbias(
             Shape: (..., K) where K is the hidden size.
         quantizer: Quantizer for FP8 quantization of the output.
         is_dbias: If True, compute bias gradient. Defaults to True.
-        dq_dtype: Optional dtype for dequantization.
-            If None, uses the same dtype as the input tensor.
-        q_axis: The quantization axis in which input data can be flattened to 2D for quantization.
+        quantize_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
 
     Returns:
@@ -641,10 +632,9 @@ def quantize_dbias(
         - The bias gradient tensor.
             Shape: (K,) or empty if is_dbias is False.
     """
-    return _quantize_impl(
+    return _quantize_dbias_impl(
         dz,
         quantizer=quantizer,
         is_dbias=is_dbias,
-        dq_dtype=dq_dtype,
-        q_axis=q_axis
+        quantize_axis=quantize_axis
     )
