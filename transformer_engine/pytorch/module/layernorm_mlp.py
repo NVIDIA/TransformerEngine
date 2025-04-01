@@ -221,7 +221,10 @@ class _LayerNormMLP(torch.autograd.Function):
         #                              high precision layernorm output and output of the linear are returned
         # for debug: : layernorm output = High precision to enable processing of this norm
         with_quantized_norm = (
-            fp8 and not return_layernorm_output and not return_layernorm_output_gathered and not debug
+            fp8
+            and not return_layernorm_output
+            and not return_layernorm_output_gathered
+            and not debug
         )
 
         tp_world_size = get_distributed_world_size(tp_group)
