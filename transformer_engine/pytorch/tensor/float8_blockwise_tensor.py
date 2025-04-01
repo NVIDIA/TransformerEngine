@@ -359,13 +359,13 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             # because of __torch_function__ in base class
             # and torch._C._disabled_torch_function_impl
             return _ViewFunc.forward(None, self, shape)
-        return super.view(self, *shape)
+        return super().view(self, *shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
         if not self.requires_grad:
             return _ReshapeFunc.forward(None, self, shape)
-        return super.reshape(self, *shape)
+        return super().reshape(self, *shape)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -477,10 +477,11 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 dst.requires_grad_(requires_grad=src.requires_grad)
 
         # Just copy FP8 data if other tensor is Float8BlockwiseQTensor
-        if (
-            isinstance(tensor, Float8BlockwiseQTensor)
+        compatible_layout = (isinstance(tensor, Float8BlockwiseQTensor)
             and self.size() == tensor.size()
-            and self.stride() == tensor.stride()
+            and self.stride() == tensor.stride())
+        if (
+            compatible_layout
             and self.storage_offset() == tensor.storage_offset()
             and self.dtype == tensor.dtype
             and self.layout == tensor.layout
@@ -488,7 +489,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         ):
             _set_from_tensor(self, tensor)
             return
-        elif isinstance(tensor, Float8BlockwiseQTensor):
+        if isinstance(tensor, Float8BlockwiseQTensor):
             assert tensor._quantizer is not None, "Can't quantize without a quantizer"
             quantizer = tensor._quantizer
         else:
@@ -555,7 +556,6 @@ class _ReshapeFunc(torch.autograd.Function):
         # pylint: disable=missing-function-docstring
 
         # Return input tensor if shape is not provided
-        shape_arg = shape
         if ctx is not None:
             ctx.shape = tensor.shape
         if shape is None:
