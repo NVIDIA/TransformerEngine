@@ -66,7 +66,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
-  constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
 
   const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -86,8 +85,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  __shared__ alignas(128) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-  __shared__ alignas(128) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
   constexpr int transaction_size = shmem_buff_size;
