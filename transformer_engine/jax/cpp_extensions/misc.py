@@ -107,7 +107,7 @@ def normalize_axis_boundary(axis, ndim):
     return axis if axis >= 0 else ndim + axis
 
 
-def multidim_transpose(shape, static_axis_boundary=-1, transpose_axis_boundary=-1):
+def multidim_transpose(shape,  transpose_axis=-1, static_axis_boundary=-1):
     """
     te_cast_transpose_p multi-dims transpose
 
