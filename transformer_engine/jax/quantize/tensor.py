@@ -122,7 +122,7 @@ class ScaledTensor1x(ScaledTensor):
         if self.q_axis < 0:
             self.q_axis = len(self.data.shape) + self.q_axis
         assert (
-            0 <= self.q_axis < len(self.data.shape)
+            0 < self.q_axis < len(self.data.shape)
         ), f"q_axis {self.q_axis} is out of bounds for shape {self.data.shape}"
 
         expected_scale_shape = self.scaling_mode.get_scale_shape(

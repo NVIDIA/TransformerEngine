@@ -164,8 +164,15 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         if q_axis < 0:
             q_axis = len(data_shape) + q_axis
         assert (
-            0 <= q_axis < len(data_shape)
+            0 < q_axis < len(data_shape)
         ), f"q_axis {q_axis} is out of bounds for shape {data_shape}"
+
+        assert data_shape[q_axis - 1] % block_x == 0, (
+            f"Data shape {data_shape} should be divisible by block_x {block_x} in axis {q_axis - 1}"
+        )
+        assert data_shape[-1] % block_y == 0, (
+            f"Data shape {data_shape} should be divisible by block_y {block_y} in axis -1"
+        )
 
         flattened_first_dim = reduce(operator.mul, data_shape[:q_axis], 1)
         flattened_last_dim = reduce(operator.mul, data_shape[q_axis:], 1)

@@ -2,6 +2,8 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
+import operator
+from functools import reduce
 from typing import Tuple, Optional
 from packaging import version
 
@@ -51,7 +53,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         7,
         8,
         9,
-    )  # out_dtype, scaling_mode, q_layout, scale_dtype, scale_shapes, is_dbias, is_outer, q_axis   
+    )  # out_dtype, scaling_mode, q_layout, scale_dtype, scale_shapes, is_dbias, is_outer, q_axis
     inner_primitive = None
     outer_primitive = None
 
@@ -114,7 +116,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 gi_hidden_size,
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(out_dtype),
-                q_axis=q_axis,
             )
             wkspace_aval = x_aval.update(
                 shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
@@ -588,7 +589,7 @@ def quantize(
     x: jnp.ndarray,
     quantizer: Quantizer,
     dq_dtype: Optional[jnp.dtype] = None,
-    q_axis: int = -1,
+    quantize_axis: int = -1,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -619,6 +620,7 @@ def quantize_dbias(
     quantizer: Quantizer,
     is_dbias: bool = True,
     dq_dtype: Optional[jnp.dtype] = None,
+    quantize_axis: int = -1,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -629,6 +631,8 @@ def quantize_dbias(
         is_dbias: If True, compute bias gradient. Defaults to True.
         dq_dtype: Optional dtype for dequantization.
             If None, uses the same dtype as the input tensor.
+        q_axis: The quantization axis in which input data can be flattened to 2D for quantization.
+            Defaults to -1.
 
     Returns:
         A tuple containing:
@@ -642,4 +646,5 @@ def quantize_dbias(
         quantizer=quantizer,
         is_dbias=is_dbias,
         dq_dtype=dq_dtype,
+        q_axis=q_axis
     )
