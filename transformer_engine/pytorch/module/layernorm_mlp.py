@@ -72,7 +72,6 @@ from ..cpp_extensions import (
 )
 from ...debug.pytorch.utils import any_feature_enabled
 from ...debug.pytorch.debug_state import TEDebugState
-from ...debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 __all__ = ["LayerNormMLP"]
 
