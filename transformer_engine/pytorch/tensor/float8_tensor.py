@@ -11,7 +11,7 @@ import torch
 import transformer_engine_torch as tex
 
 from transformer_engine_torch import DType as TE_DType
-from ..utils import devices_match, non_tn_fp8_gemm_supported
+from ..utils import canonicalize_process_group, devices_match, non_tn_fp8_gemm_supported
 from ._internal.float8_tensor_base import Float8TensorBase, _FromFloat8Func
 from .quantized_tensor import QuantizedTensor, Quantizer, _IdentityFunc
 from ..constants import dist_group_type
@@ -194,7 +194,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
     """amax reduction options"""
     with_amax_reduction: bool
     amax_reduction_group: Optional[dist_group_type]
-    amax_reduction_size: Optional[int]
     """Options about how to quantize the tensor"""
     force_pow_2_scales: bool
     amax_epsilon: float
@@ -208,7 +207,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
         columnwise: bool = True,
         with_amax_reduction: bool = False,
         amax_reduction_group: Optional[dist_group_type] = None,
-        amax_reduction_size: Optional[int] = 1,
         force_pow_2_scales: bool = False,
         amax_epsilon: float = 0.0,
     ) -> None:
@@ -218,7 +216,6 @@ class Float8CurrentScalingQuantizer(Quantizer):
         self.dtype = fp8_dtype
         self.with_amax_reduction = with_amax_reduction
         self.amax_reduction_group = amax_reduction_group
-        self.amax_reduction_size = amax_reduction_size
         self.force_pow_2_scales = force_pow_2_scales
         self.amax_epsilon = amax_epsilon
 
@@ -327,6 +324,10 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer=self,
         )
 
+    def _canonicalized_amax_reduction_group(self) -> dist_group_type:
+        """Get process group for amax reduction"""
+        return canonicalize_process_group(self.amax_reduction_group)
+
 
 class Float8Tensor(Float8TensorBase, QuantizedTensor):
     """Experimental tensor class with FP8 data
@@ -420,13 +421,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
     def detach(self) -> Float8Tensor:
         # pylint: disable=missing-function-docstring
         return Float8Tensor.make_like(self)
-
-    def _create_transpose(self):
-        data = self._data
-        if not data.is_contiguous():
-            data = data.contiguous()
-        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
-        self._transpose_invalid = False
 
     def update_usage(
         self,

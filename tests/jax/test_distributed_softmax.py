@@ -3,8 +3,8 @@
 # See LICENSE for license information.
 
 import warnings
-import pytest
 from functools import partial
+import pytest
 
 import jax
 import jax.numpy as jnp

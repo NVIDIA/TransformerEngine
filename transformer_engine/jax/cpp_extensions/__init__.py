@@ -7,4 +7,4 @@ from .attention import *
 from .normalization import *
 from .quantization import *
 from .softmax import *
-from .transpose import *
+from .gemm import *
