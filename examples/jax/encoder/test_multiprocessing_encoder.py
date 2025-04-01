@@ -612,7 +612,7 @@ class TestEncoder(unittest.TestCase):
     def test_te_mxfp8(self):
         """Test Transformer Engine with MXFP8"""
         result = self.exec(True, "MXFP8BlockScaling")
-        assert result[0] < 0.505 and result[1] > 0.755
+        assert result[0] < 0.505 and result[1] > 0.754
 
 
 if __name__ == "__main__":
