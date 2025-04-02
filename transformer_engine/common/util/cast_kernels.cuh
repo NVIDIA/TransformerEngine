@@ -37,6 +37,12 @@ constexpr size_t BUFFS_NUM = 2;
 constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
+// Number of 1-byte elements that span 32 banks (4-byte each) of shared memory
+constexpr size_t BANK_WIDTH = (32 * 4) / 1; // 128
+
+// Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
+constexpr size_t THREADS_PER_BANK = BANK_WIDTH / SCALE_DIM_X;   // 4 = 128 / 32
+
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 constexpr __device__ __forceinline__ bool is_cached_act_op() {
   return (OP == gelu<float, float>) || (OP == dgelu<float, float>) ||
@@ -113,9 +119,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
   const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
 
-  const int thread_group =
-      tid_Y_rowwise % (THREADS_PER_WARP / THREADS_X);  // helps to resolve bank conflicts in shmem
-  const int lane = tid_X_rowwise;                      // helps to resolve bank conflicts in shmem
+  // helps resolving bank conflicts in shmem
+  // const int bank_group = tid_Y_rowwise % (THREADS_PER_WARP / THREADS_X);
+  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
+  const int bank_group = thread_lane / THREADS_PER_BANK;
+  const int bank_lane = thread_lane % THREADS_PER_BANK;
 
   extern __shared__ __align__(TMA_SHMEM_ALIGNMENT) char dshmem[];
 
@@ -303,7 +311,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         IType thread_amax_2x[2] = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
+          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const int shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
           // Load elements
@@ -321,7 +329,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         IType thread_amax_2x[2] = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
+          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const int shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
 
@@ -355,7 +363,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
-          const int swizzled_group_idx = ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
+          const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
           const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
           const int shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
 
@@ -382,10 +390,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             // If DBIAS was computed in the 1st pass (COLWISE) then no need to compute it again
             if constexpr (IS_DBIAS && (!COLWISE_SCALING)) {
               thread_dbias_rowwise[j] += elt;
-              if (threadIdx.x == 1 && stage == 0) {
-                printf("Adding elt=%f to thread_dbias_rowwise at index j=%d (wave=%d  e=%d)\n", elt,
-                       j, w, e);
-              }
             }
             if constexpr (COMPUTE_ACTIVATIONS) {
               const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
@@ -433,8 +437,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                           block_scale_inverse_2x);
           }
         }
-        const int swizzled_idx =
-            thread_offset_X_rowwise + ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
+        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+        const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
         const int shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
         out.store_to(&out_rowwise_sh[shmem_offset_rowwise]);
       }
@@ -478,28 +482,34 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     if constexpr (COLWISE_SCALING) {
       thread_partial_dbias = partial_dbias_colwise;
     } else {
-      __shared__ float partial_dbias_rowwise[WARPS][BUFF_DIM_X];
-#pragma unroll
-      for (int w = 0; w < WARPS; ++w) {
-        partial_dbias_rowwise[w][threadIdx.x] = 0.0f;
-      }
-      __syncthreads();
-#pragma unroll
+      // Reusing dshmem (in_sh) as dbias buffer [HEIGHT x WIDTH]
+      // HEIGHT = THREADS_Y
+      // WIDTH = THREADS_X * (SCALE_DIM_X + 1)
+      // Added extra 1-element padding per thread_X to reduce bank conflicts
+      float* partial_dbias_rowwise = reinterpret_cast<float*>(dshmem);
+
+      constexpr int DBIAS_BUFF_HEIGHT = THREADS_Y;
+      constexpr int DBIAS_BUFF_WIDTH = THREADS_X * (SCALE_DIM_X + 1);
+
+      const int shmem_thread_offset = tid_Y_rowwise * DBIAS_BUFF_WIDTH 
+                                      + tid_X_rowwise * (SCALE_DIM_X + 1);
+      #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
-        const int swizzled_group_idx = ((w + thread_group) * PACK_SIZE) % SCALE_DIM_X;
-        const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-#pragma unroll
+        const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+        const int swizzled_group_offset = shmem_thread_offset + swizzled_group_idx;
+        #pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
           const int j = w * PACK_SIZE + e;
-          const int swizzled_lane_idx = (e + lane) % PACK_SIZE;
-          const int swizzled_elt_idx = swizzled_thread_idx + swizzled_lane_idx;
-          partial_dbias_rowwise[warp_id][swizzled_elt_idx] += thread_dbias_rowwise[j];
+          const int shmem_elt_idx = swizzled_group_offset + e;
+          partial_dbias_rowwise[shmem_elt_idx] = thread_dbias_rowwise[j];
         }
       }
       __syncthreads();
-#pragma unroll
-      for (int w = 0; w < WARPS; ++w) {
-        thread_partial_dbias += partial_dbias_rowwise[w][threadIdx.x];
+      #pragma unroll
+      for (int i = 0; i < THREADS_Y; ++i) {
+        // Add extra element offset per MXFP8 scaling block [1x32]
+        const int scaling_block = threadIdx.x / SCALE_DIM_X;
+        thread_partial_dbias += partial_dbias_rowwise[i * DBIAS_BUFF_WIDTH + threadIdx.x + scaling_block];
       }
     }
     const int dbias_stride = cols;
@@ -507,7 +517,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int dbias_offset_X = blockIdx.x * CHUNK_DIM_X + threadIdx.x;
     const int dbias_idx = dbias_offset_Y * dbias_stride + dbias_offset_X;
     const bool col_out_of_bounds_dbias = (dbias_offset_X >= cols);
-    printf("tid=%d  dbias=%f\n", threadIdx.x, thread_partial_dbias);
     if (!col_out_of_bounds_dbias) {
       dbias_workspace[dbias_idx] = thread_partial_dbias;
     }
