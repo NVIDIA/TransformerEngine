@@ -32,7 +32,7 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
   // the scale is not representable in FP32.
   if (isinf(scale)) {
     // use fp32 max to represent the scale
-    scale = inf_value;
+    scale = value_for_inf;
   }
   if (force_pow_2_scales) {
     uint32_t scale_bits = *reinterpret_cast<uint32_t *>(&scale);
