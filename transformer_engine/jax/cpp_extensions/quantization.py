@@ -449,20 +449,23 @@ class DBiasQuantizePrimitive(BasePrimitive):
 register_primitive(DBiasQuantizePrimitive)
 
 
-def _jax_quantize(x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, quantize_axis: int = -1):
+def _jax_quantize(
+    x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, quantize_axis: int = -1
+):
     if quantizer is None:
         return x
     return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis)
 
 
-def _jax_dbias(dx: jnp.ndarray):
+def _jax_dbias(dx: jnp.ndarray, quantize_axis: int = -1):
+    assert quantize_axis < 0
     dbias = jnp.sum(
-        dx,
-        axis=tuple(range(dx.ndim - 1)),
+        dx.astype(jnp.float32),
+        axis=tuple(range(dx.ndim + quantize_axis)),
         keepdims=False,
     )
     dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
-    return dbias
+    return dbias.astype(dx.dtype)
 
 
 def _jax_quantize_dbias(
@@ -473,19 +476,10 @@ def _jax_quantize_dbias(
 ):
     if quantizer is None:
         return x, None
-    return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis), _jax_dbias(x)
-
-
-def _jax_dbias(
-    dx: jnp.ndarray,
-):
-    dbias = jnp.sum(
-        dx.astype(jnp.float32),
-        axis=tuple(range(dx.ndim - 1)),
-        keepdims=False,
+    return (
+        quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis),
+        _jax_dbias(x, quantize_axis=quantize_axis),
     )
-    dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
-    return dbias.astype(dx.dtype)
 
 
 def _quantize_dbias_impl(
@@ -511,7 +505,10 @@ def _quantize_dbias_impl(
                 dq_dtype=dq_dtype,
                 quantize_axis=quantize_axis,
             )
-        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis), None
+        return (
+            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis),
+            None,
+        )
 
     # TE/common doesn't support colwise only quantization yet
     if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
@@ -522,7 +519,10 @@ def _quantize_dbias_impl(
                 dq_dtype=dq_dtype,
                 quantize_axis=quantize_axis,
             )
-        return _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis), None
+        return (
+            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis),
+            None,
+        )
     scale = jnp.empty((), jnp.float32)
 
     # TE/common dbias_quantize does not support 1x on arch < 100
@@ -633,8 +633,5 @@ def quantize_dbias(
             Shape: (K,) or empty if is_dbias is False.
     """
     return _quantize_dbias_impl(
-        dz,
-        quantizer=quantizer,
-        is_dbias=is_dbias,
-        quantize_axis=quantize_axis
+        dz, quantizer=quantizer, is_dbias=is_dbias, quantize_axis=quantize_axis
     )

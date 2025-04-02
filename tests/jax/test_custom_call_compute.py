@@ -95,7 +95,7 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         pytest.fail("a must be a ScaledTensor object")
 
 
-ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
+ALL_ACTIVATION_SHAPES = [(32, 1, 64), (16, 128, 1, 256)]
 ALL_ACTIVATION_TYPES = [
     ("gelu",),
     ("gelu", "linear"),
@@ -142,7 +142,7 @@ class TestActivation:
     def test_act_grad(self, shape, activation_type):
         key = jax.random.PRNGKey(0)
         x = jax.random.uniform(key, shape, jnp.float32)
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
 
         value_n_grad_primitive_func = jit(
             value_and_grad(self.primitive_func, (0,)), static_argnums=(1,)
@@ -160,7 +160,7 @@ class TestActivation:
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     def test_act_grad_with_delayed_scaling_fp8(self, random_inputs, activation_type, output_type):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         value_n_grad_primitive_func = jit(
@@ -190,7 +190,7 @@ class TestActivation:
         self, random_inputs, activation_type, output_type, q_layout
     ):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
@@ -206,7 +206,7 @@ class TestActivation:
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
     @pytest.mark.skipif(not is_mxfp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("shape", [(128, 128)])
+    @pytest_parametrize_wrapper("shape", [(2, 64, 1, 256)])
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper(
@@ -216,7 +216,7 @@ class TestActivation:
         self, random_inputs, activation_type, output_type, q_layout
     ):
         x = random_inputs
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
         quantizer = QuantizerFactory.create(
