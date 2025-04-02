@@ -1280,7 +1280,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                                first microbatch (since it is the first gradient being
                                produced)
         """
-        if TEDebugState.debug_enabled:
+        debug = TEDebugState.debug_enabled
+        if debug:
             self._validate_name()
 
         if FP8GlobalStateManager.fp8_graph_capturing():
@@ -1311,10 +1312,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 bias_tensor = getattr(self, self.bias_names[0])  # Unused
 
-            debug = TEDebugState.debug_enabled
             quantizers = (
                 self._get_quantizers(fp8_output)
-                if not TEDebugState.debug_enabled
+                if not debug
                 else self._get_debug_quantizers(fp8_output)
             )
             if debug:
@@ -1323,8 +1323,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                     quantizers = self._get_quantizers(fp8_output)
                     debug = False
 
-            if debug and isinstance(weight_tensor, QuantizedTensor):
-                raise RuntimeError("FP8 weights are not supported in debug mode.")
+                if isinstance(weight_tensor, QuantizedTensor):
+                    raise RuntimeError("FP8 weights are not supported in debug mode.")
 
             (
                 input_quantizer,

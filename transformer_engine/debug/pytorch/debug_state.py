@@ -18,7 +18,6 @@ class TEDebugState:
     layers_initialized = {}
     weight_tensor_tp_group_reduce = True
     debug_enabled = None
-    initialized = False
 
     @classmethod
     def initialize(cls):

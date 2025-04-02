@@ -1118,7 +1118,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         if self.name is None:
             debug_api.log_message(
-                "[DEBUG-WARNING] Names are not provided to debug modules. ",
+                "Names are not provided to debug modules. ",
                 "Creating and using generic names. Pass names to debug modules for better"
                 " insight. ",
                 level=logging.WARNING,
@@ -1136,7 +1136,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             import nvdlfw_inspect.api as debug_api
 
             debug_api.log_message(
-                "> UserBuffers are not supported in debug module. "
+                "UserBuffers are not supported in debug module. "
                 "Using UB optimization will not affect the debug module. ",
                 level=logging.WARNING,
             )
