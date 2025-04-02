@@ -681,18 +681,18 @@ class _LayerNormMLP(torch.autograd.Function):
             # Configure quantizer for FC2 grad output tensor
             # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
             # requires column-wise usage
-            if ctx.grad_fc2_output_quantizer is not None:
+            if ctx.fc2_grad_output_quantizer is not None:
                 rowwise_usage = True
                 columnwise_usage = True
                 if ctx.ub_overlap_ag and isinstance(
-                    ctx.grad_fc2_output_quantizer,
+                    ctx.fc2_grad_output_quantizer,
                     (Float8Quantizer, Float8CurrentScalingQuantizer),
                 ):
                     # If data is in FP8 and communication is handled
                     # with Userbuffers, we compute FP8 transposes
                     # manually
                     columnwise_usage = False
-                ctx.grad_fc2_output_quantizer.set_usage(
+                ctx.fc2_grad_output_quantizer.set_usage(
                     rowwise=rowwise_usage,
                     columnwise=columnwise_usage,
                 )
