@@ -329,8 +329,8 @@ Tensor::Tensor(const std::string& name,
       }
     }
     if (q_opts != nullptr) {
-      tensor_.set_qopt_force_pow_2_scales(q_opts->force_pow_2_scales);
-      tensor_.set_qopt_amax_epsilon(q_opts->amax_epsilon);
+      NVTE_CHECK(q_opts->force_pow_2_scales, "Pow2 scales is required for current implementation.");
+      NVTE_CHECK(q_opts->amax_epsilon == 0.0, "Amax epsilon must be zero for current implementation.");
     }
   }
 }
