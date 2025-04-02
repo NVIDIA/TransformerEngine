@@ -426,7 +426,7 @@ class ActLuPrimitive(BasePrimitive):
         x_rank = len(value_types[0].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank-1,
                                                                           unique_var='i')
-        x_axes = scale_rules.input + (f'x{x_rank-1}',)
+        x_axes = scale_rules.input_spec + (f'x{x_rank-1}',)
         out = (*x_axes[:-2], x_axes[-1])
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
             scale_inv = scale_rules.rowwise_rule[:-1] + (scale_rules.rowwise_rule[-1],)
@@ -887,7 +887,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         x_rank = len(value_types[0].shape)
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank,
                                                                           unique_var='i')
-        x_axes = scale_rules.input
+        x_axes = scale_rules.input_spec
         out = x_axes
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:

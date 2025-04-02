@@ -489,9 +489,9 @@ class DBiasQuantizePrimitive(BasePrimitive):
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(len(value_types[0].shape),
                                                                           unique_var='i')
 
-        x_axes = scale_rules.input
+        x_axes = scale_rules.input_spec
         out = x_axes
-        if q_axis == QuantizeAxis.COLWISE.value or q_axis == QuantizeAxis.ROWWISE_COLWISE.value:
+        if q_axis in (QuantizeAxis.COLWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
                 colwise_out = tuple(multidim_transpose(x_axes))
             else:

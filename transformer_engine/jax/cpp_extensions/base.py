@@ -101,6 +101,9 @@ class BasePrimitive(metaclass=ABCMeta):
     @staticmethod
     @abstractmethod
     def shardy_sharding_rule(*args):
+        """
+        Returns the sharding rule for this primitive.
+        """
         del args
         return '... -> ...'
 

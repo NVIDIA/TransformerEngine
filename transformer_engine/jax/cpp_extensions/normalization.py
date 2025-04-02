@@ -535,11 +535,11 @@ class NormFwdPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        del zero_centered_gamma, epsilon, out_dtype, scale_dtype, scale_shapes, is_outer, mesh
+        del zero_centered_gamma, epsilon, out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
 
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(len(value_types[0].shape),
                                                                           unique_var='i')
-        x_axes = scale_rules.input
+        x_axes = scale_rules.input_spec
 
         out = x_axes[:-1] + ('k',)
         if is_2x and norm_type != NVTE_Norm_Type.RMSNorm:
