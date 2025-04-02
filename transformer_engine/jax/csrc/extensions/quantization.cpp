@@ -45,7 +45,7 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
                             Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                             Result_Type amax_buf, Result_Type dbias_buf, Result_Type workspace_buf,
                             int64_t scaling_mode_enum, int64_t quantize_layout_enum, bool is_dbias,
-                            int64_t quantize_axis) {
+                            int64_t flatten_axis) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
@@ -64,12 +64,12 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
 
   auto input_dims = input_buf.dimensions();
   int64_t input_ndim = input_dims.size();
-  if (quantize_axis < 0) quantize_axis += input_ndim;
-  NVTE_CHECK(quantize_axis < input_ndim && quantize_axis > 0, "quantize_axis is out of bounds!");
+  if (flatten_axis < 0) flatten_axis += input_ndim;
+  NVTE_CHECK(flatten_axis < input_ndim && flatten_axis > 0, "flatten_axis is out of bounds!");
 
   auto workspace_dims = workspace_buf->dimensions();
-  auto m = product(input_dims, 0, quantize_axis);
-  auto n = product(input_dims, quantize_axis, input_ndim);
+  auto m = product(input_dims, 0, flatten_axis);
+  auto n = product(input_dims, flatten_axis, input_ndim);
   auto input_shape = std::vector<size_t>{m, n};
   auto output_shape = std::vector<size_t>{m, n};
   auto output_trans_shape = std::vector<size_t>{n, m};
@@ -100,8 +100,8 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
         output_tensor.set_rowwise_scale_inv(
             scale_inv_buf->untyped_data(),
             convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-            std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, quantize_axis),
-                                product(scale_inv_buf->dimensions(), quantize_axis,
+            std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, flatten_axis),
+                                product(scale_inv_buf->dimensions(), flatten_axis,
                                         scale_inv_buf->dimensions().size())});
       }
     }
@@ -124,8 +124,8 @@ Error_Type DBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_T
       output_tensor.set_columnwise_scale_inv(
           tmp_buf->untyped_data(), convert_ffi_datatype_to_te_dtype(tmp_buf->element_type()),
           std::vector<size_t>{
-              product(tmp_buf->dimensions(), 0, quantize_axis),
-              product(tmp_buf->dimensions(), quantize_axis, tmp_buf->dimensions().size())});
+              product(tmp_buf->dimensions(), 0, flatten_axis),
+              product(tmp_buf->dimensions(), flatten_axis, tmp_buf->dimensions().size())});
     }
   }
 
@@ -156,7 +156,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DBiasQuantizeHandler, DBiasQuantizeFFI,
                                   .Attr<int64_t>("scaling_mode")
                                   .Attr<int64_t>("q_layout")
                                   .Attr<bool>("is_dbias")
-                                  .Attr<int64_t>("q_axis"),
+                                  .Attr<int64_t>("flatten_axis"),
                               FFI_CudaGraph_Traits);
 
 Error_Type DequantizeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type amax_buf,

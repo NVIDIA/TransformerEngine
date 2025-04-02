@@ -96,20 +96,20 @@ class Quantizer(ABC):
         """
 
     @abstractmethod
-    def _quantize_func(self, x, is_colwise=False, dq_dtype=None, q_axis=-1) -> ScaledTensor1x:
+    def _quantize_func(self, x, is_colwise=False, dq_dtype=None, flatten_axis=-1) -> ScaledTensor1x:
         """Core quantization function to be implemented by subclasses.
 
         Args:
             x: Input tensor to quantize
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values, default is x.dtype
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor1x containing the quantized data
         """
 
-    def quantize(self, x, is_rowwise=False, is_colwise=False, dq_dtype=None, q_axis=-1):
+    def quantize(self, x, is_rowwise=False, is_colwise=False, dq_dtype=None, flatten_axis=-1):
         """Quantize a tensor using the internal _quantize_func().
 
         Args:
@@ -117,24 +117,24 @@ class Quantizer(ABC):
             is_rowwise: Whether to use row-wise quantization
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         if (is_rowwise and is_colwise) or self.is_2x2x():
-            rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
+            rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
             colwise_tensor = self._quantize_func(
-                x, is_colwise=True, dq_dtype=dq_dtype, q_axis=q_axis
+                x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis
             )
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
         if is_colwise:
-            return self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype, q_axis=q_axis)
+            return self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
-        return self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
+        return self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
-    def get_scale_shapes(self, data_shape, is_padded=True, q_axis=-1):
+    def get_scale_shapes(self, data_shape, is_padded=True, flatten_axis=-1):
         """Get shapes for scale tensors.
 
         Args:
@@ -144,7 +144,7 @@ class Quantizer(ABC):
         Returns:
             Tuple of (rowwise_scale_shape, colwise_scale_shape)
         """
-        return self.scaling_mode.get_scale_shape_2x(data_shape, is_padded, q_axis)
+        return self.scaling_mode.get_scale_shape_2x(data_shape, is_padded, flatten_axis)
 
     def get_scale_dtype(self):
         """Get the data type for scale tensors.
@@ -207,7 +207,7 @@ class DelayedScaleQuantizer(Quantizer):
         raise ValueError(f"Invalid q_layout: {self.q_layout}")
 
     def _quantize_func(
-        self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, q_axis=-1
+        self, x: jnp.ndarray, is_colwise=False, dq_dtype=None, flatten_axis=-1
     ) -> ScaledTensor1x:
         """Quantize function helper for delayed scaling FP8.
 
@@ -215,7 +215,7 @@ class DelayedScaleQuantizer(Quantizer):
             x: Input tensor to quantize
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
         Returns:
             A ScaledTensor1x containing the quantized data
         """
@@ -238,11 +238,11 @@ class DelayedScaleQuantizer(Quantizer):
             scale_inv=scale_inv,
             scaling_mode=self.scaling_mode,
             dq_dtype=dq_dtype,
-            q_axis=q_axis,
+            flatten_axis=flatten_axis,
         )
 
     def quantize(
-        self, x, is_rowwise: bool = None, is_colwise: bool = None, dq_dtype=None, q_axis=-1
+        self, x, is_rowwise: bool = None, is_colwise: bool = None, dq_dtype=None, flatten_axis=-1
     ):
         """Quantize a tensor using the internal _quantize_func().
 
@@ -251,15 +251,15 @@ class DelayedScaleQuantizer(Quantizer):
             is_rowwise: Whether to use row-wise quantization
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor1x or ScaledTensor2x containing the quantized data
         """
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
-        if q_axis < 0:
-            q_axis += x.ndim
-        assert 0 < q_axis < x.ndim, "q_axis is out of bounds!"
+        if flatten_axis < 0:
+            flatten_axis += x.ndim
+        assert 0 < flatten_axis < x.ndim, "flatten_axis is out of bounds!"
 
         is_rowwise = (
             is_rowwise
@@ -272,17 +272,17 @@ class DelayedScaleQuantizer(Quantizer):
             else (self.q_layout == QuantizeLayout.COLWISE or self.is_2x2x())
         )
 
-        rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, q_axis=q_axis)
+        rowwise_tensor = self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
         colwise_tensor = None
         if is_colwise:
             colwise_tensor = ScaledTensorFactory.create_1x(
-                data=jnp.transpose(rowwise_tensor.data, (*range(q_axis, x.ndim), *range(q_axis))),
+                data=jnp.transpose(rowwise_tensor.data, (*range(flatten_axis, x.ndim), *range(flatten_axis))),
                 scale_inv=rowwise_tensor.scale_inv,
                 scaling_mode=self.scaling_mode,
                 dq_dtype=dq_dtype,
                 is_colwise=True,
                 data_layout="T",
-                q_axis=q_axis,
+                flatten_axis=flatten_axis,
             )
         if is_colwise and is_rowwise:
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
@@ -384,38 +384,38 @@ class BlockScaleQuantizer(Quantizer):
             return "NN"
         return "N"
 
-    def _quantize_func(self, x, is_colwise=False, dq_dtype=None, q_axis=-1) -> ScaledTensor1x:
+    def _quantize_func(self, x, is_colwise=False, dq_dtype=None, flatten_axis=-1) -> ScaledTensor1x:
         """Quantize function helper for block scaling FP8.
 
         Args:
             x: Input tensor to quantize
             is_colwise: Whether to use column-wise quantization
             dq_dtype: Data type for dequantized values
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
 
         Returns:
             A ScaledTensor1x containing the quantized data
         """
         # TODO(Phuong): use quantize_func from JAX
-        if q_axis < 0:
-            q_axis = x.ndim + q_axis
-        assert 0 <= q_axis < x.ndim, f"Invalid q_axis: {q_axis} for tensor of shape {x.shape}"
+        if flatten_axis < 0:
+            flatten_axis = x.ndim + flatten_axis
+        assert 0 <= flatten_axis < x.ndim, f"Invalid flatten_axis: {flatten_axis} for tensor of shape {x.shape}"
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         x_shape = x.shape
         scale_shape = self.scaling_mode.get_scale_shape(
-            x_shape, is_colwise, is_padded=False, q_axis=q_axis
+            x_shape, is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
         scale_dtype = self.scaling_mode.get_scale_dtype()
         x = x.reshape(
-            *x_shape[: q_axis - 1],
-            scale_shape[q_axis - 1],
-            int(x_shape[q_axis - 1] / scale_shape[q_axis - 1]),
-            *x_shape[q_axis:-1],
+            *x_shape[: flatten_axis - 1],
+            scale_shape[flatten_axis - 1],
+            int(x_shape[flatten_axis - 1] / scale_shape[flatten_axis - 1]),
+            *x_shape[flatten_axis:-1],
             scale_shape[-1],
             int(x_shape[-1] / scale_shape[-1]),
         )
-        amax = jnp.max(jnp.abs(x), axis=(q_axis + 2 - 2, -1), keepdims=True)
+        amax = jnp.max(jnp.abs(x), axis=(flatten_axis + 2 - 2, -1), keepdims=True)
         MAX = jnp.finfo(self.q_dtype).max.astype(jnp.float32)
         scales = amax.astype(jnp.float32) / MAX
 
@@ -432,7 +432,7 @@ class BlockScaleQuantizer(Quantizer):
             self.scaling_mode,
             is_colwise=is_colwise,
             dq_dtype=dq_dtype,
-            q_axis=q_axis,
+            flatten_axis=flatten_axis,
         )
 
     def _cast_to_e8m0_with_rounding_up(self, scales):
@@ -543,7 +543,7 @@ class QuantizerFactory:
             scaling_mode: Scaling mode to use
             q_dtype: Quantization data type
             q_layout: Quantization axis
-            q_axis: The quantization axis for the tensor
+            flatten_axis: The quantization axis for the tensor
             **kwargs: Additional arguments for quantizer initialization
 
         Returns:

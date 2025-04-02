@@ -53,7 +53,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         7,
         8,
         9,
-    )  # out_dtype, scaling_mode, q_layout, q_axis, scale_dtype, scale_shapes, is_dbias, is_outer
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, scale_shapes, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -65,7 +65,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
-        q_axis,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -88,7 +88,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, q_axis=q_axis)
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=flatten_axis)
 
         scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
 
@@ -98,7 +98,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         dbias_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            t_shape = multidim_transpose(x_aval.shape, transpose_axis_boundary=q_axis)
+            t_shape = multidim_transpose(x_aval.shape, transpose_axis=flatten_axis)
             if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
                 # Don't transpose output for MXFP8
                 t_shape = x_aval.shape
@@ -108,7 +108,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             )
 
         if is_dbias:
-            gi_hidden_size = reduce(operator.mul, x_aval.shape[q_axis:])
+            gi_hidden_size = reduce(operator.mul, x_aval.shape[flatten_axis:])
             dbias_shape = (gi_hidden_size,)
             dbias_aval = x_aval.update(shape=dbias_shape, dtype=dtype)
             (wkspace_info,) = transformer_engine_jax.get_dbias_quantize_workspace_sizes(
@@ -156,7 +156,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
-        q_axis,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -176,7 +176,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             q_layout=q_layout,
             is_dbias=is_dbias,
-            q_axis=q_axis,
+            flatten_axis=flatten_axis,
         )
 
     @staticmethod
@@ -190,7 +190,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         scale_shapes,
         is_dbias,
         is_outer,
-        q_axis,
+        flatten_axis,
     ):
         """
         te_dbias_quantize_p implementation
@@ -211,7 +211,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             out_dtype=out_dtype,
             scaling_mode=scaling_mode,
             q_layout=q_layout,
-            q_axis=q_axis,
+            flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
             scale_shapes=scale_shapes,
             is_dbias=is_dbias,
@@ -219,7 +219,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x.shape, is_padded=False, q_axis=q_axis)
+        ).get_scale_shape_2x(x.shape, is_padded=False, flatten_axis=flatten_axis)
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
             if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
                 scale_inv = jax.lax.slice(
@@ -246,7 +246,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
-        q_axis,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -270,7 +270,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
                 q_layout=q_layout,
-                q_axis=q_axis,
+                flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
@@ -283,7 +283,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
-        q_axis,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -301,7 +301,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis_boundary=q_axis)
+                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
         else:
@@ -345,7 +345,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
-        q_axis,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
@@ -363,7 +363,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(x_spec, transpose_axis_boundary=q_axis)
+                colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
         else:
@@ -417,7 +417,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 out_dtype=out_dtype,
                 scaling_mode=scaling_mode,
                 q_layout=q_layout,
-                q_axis=q_axis,
+                flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
                 scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
@@ -450,19 +450,19 @@ register_primitive(DBiasQuantizePrimitive)
 
 
 def _jax_quantize(
-    x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, quantize_axis: int = -1
+    x, quantizer: Quantizer = None, dq_dtype: Optional[jnp.dtype] = None, flatten_axis: int = -1
 ):
     if quantizer is None:
         return x
-    return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis)
+    return quantizer.quantize(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
 
-def _jax_dbias(dx: jnp.ndarray, dtype=None, quantize_axis: int = -1):
-    assert quantize_axis < 0
+def _jax_dbias(dx: jnp.ndarray, dtype=None, flatten_axis: int = -1):
+    assert flatten_axis < 0
     dtype = dtype or dx.dtype
     dbias = jnp.sum(
         dx.astype(jnp.float32),
-        axis=tuple(range(dx.ndim + quantize_axis)),
+        axis=tuple(range(dx.ndim + flatten_axis)),
         keepdims=False,
     )
     dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
@@ -473,13 +473,13 @@ def _jax_quantize_dbias(
     x,
     quantizer: Quantizer = None,
     dq_dtype: Optional[jnp.dtype] = None,
-    quantize_axis: int = -1,
+    flatten_axis: int = -1,
 ):
     if quantizer is None:
         return x, None
     return (
-        quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis),
-        _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis),
+        quantizer.quantize(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis),
+        _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis),
     )
 
 
@@ -488,7 +488,7 @@ def _quantize_dbias_impl(
     quantizer: Quantizer,
     is_dbias: bool = False,
     dq_dtype: Optional[jnp.dtype] = None,
-    quantize_axis: int = -1,
+    flatten_axis: int = -1,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """
     Cast wrapper
@@ -506,10 +506,10 @@ def _quantize_dbias_impl(
                 x,
                 quantizer=quantizer,
                 dq_dtype=dq_dtype,
-                quantize_axis=quantize_axis,
+                flatten_axis=flatten_axis,
             )
         return (
-            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis),
+            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, flatten_axis=flatten_axis),
             None,
         )
 
@@ -520,10 +520,10 @@ def _quantize_dbias_impl(
                 x,
                 quantizer=quantizer,
                 dq_dtype=dq_dtype,
-                quantize_axis=quantize_axis,
+                flatten_axis=flatten_axis,
             )
         return (
-            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, quantize_axis=quantize_axis),
+            _jax_quantize(x, quantizer=quantizer, dq_dtype=dq_dtype, flatten_axis=flatten_axis),
             None,
         )
     scale = jnp.empty((), jnp.float32)
@@ -535,14 +535,14 @@ def _quantize_dbias_impl(
             is_dbias=False,
             quantizer=quantizer,
             dq_dtype=dq_dtype,
-            quantize_axis=quantize_axis,
+            flatten_axis=flatten_axis,
         )
-        dbias = _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis)
+        dbias = _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return out, dbias
 
     if quantizer is None:
         if is_dbias:
-            return x, _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis)
+            return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, None
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -561,9 +561,9 @@ def _quantize_dbias_impl(
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
         q_layout=quantizer.q_layout.value,
-        q_axis=quantize_axis,
+        flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape, q_axis=quantize_axis),
+        scale_shapes=quantizer.get_scale_shapes(x.shape, flatten_axis=flatten_axis),
         is_dbias=is_dbias,
         is_outer=True,
     )
@@ -582,7 +582,7 @@ def _quantize_dbias_impl(
         dq_dtype=dq_dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        q_axis=quantize_axis,
+        flatten_axis=flatten_axis,
     )
     return out, dbias.astype(dq_dtype)
 
@@ -590,7 +590,7 @@ def _quantize_dbias_impl(
 def quantize(
     x: jnp.ndarray,
     quantizer: Quantizer,
-    quantize_axis: int = -1,
+    flatten_axis: int = -1,
 ) -> Tuple[ScaledTensor]:
     """Quantize input tensor according to the quantizer.
 
@@ -598,7 +598,7 @@ def quantize(
         x: Input tensor to be quantized.
             Shape: (..., K) where K is the hidden size.
         quantizer: Quantizer for FP8 quantization of the output.
-        quantize_axis: The quantization axis in which input data can be flattened to 2D for quantization.
+        flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
 
     Returns:
@@ -607,7 +607,7 @@ def quantize(
     out, _ = _quantize_dbias_impl(
         x,
         quantizer=quantizer,
-        quantize_axis=quantize_axis,
+        flatten_axis=flatten_axis,
     )
     return out
 
@@ -616,7 +616,7 @@ def quantize_dbias(
     dz: jnp.ndarray,
     quantizer: Quantizer,
     is_dbias: bool = True,
-    quantize_axis: int = -1,
+    flatten_axis: int = -1,
 ) -> Tuple[ScaledTensor2x, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
@@ -625,7 +625,7 @@ def quantize_dbias(
             Shape: (..., K) where K is the hidden size.
         quantizer: Quantizer for FP8 quantization of the output.
         is_dbias: If True, compute bias gradient. Defaults to True.
-        quantize_axis: The quantization axis in which input data can be flattened to 2D for quantization.
+        flatten_axis: The quantization axis in which input data can be flattened to 2D for quantization.
             Defaults to -1.
 
     Returns:
@@ -636,5 +636,5 @@ def quantize_dbias(
             Shape: (K,) or empty if is_dbias is False.
     """
     return _quantize_dbias_impl(
-        dz, quantizer=quantizer, is_dbias=is_dbias, quantize_axis=quantize_axis
+        dz, quantizer=quantizer, is_dbias=is_dbias, flatten_axis=flatten_axis
     )

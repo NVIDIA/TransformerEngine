@@ -126,7 +126,7 @@ class ActLuPrimitive(BasePrimitive):
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out_shape, is_padded=not is_outer, q_axis=-1)
+        ).get_scale_shape_2x(out_shape, is_padded=not is_outer, flatten_axis=-1)
         if not is_2x:
             out_shape = (1,)
             colwise_scale_inv_shape = (1,)
@@ -201,7 +201,7 @@ class ActLuPrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out.shape, is_padded=False, q_axis=-1)
+        ).get_scale_shape_2x(out.shape, is_padded=False, flatten_axis=-1)
         # Slice out padding for MXFP8, noop for DelayedScaling
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
@@ -283,7 +283,7 @@ class ActLuPrimitive(BasePrimitive):
 
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(out_spec, transpose_axis_boundary=-1)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
         else:
@@ -340,7 +340,7 @@ class ActLuPrimitive(BasePrimitive):
 
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_spec = multidim_transpose(out_spec, transpose_axis_boundary=-1)
+                colwise_out_spec = multidim_transpose(out_spec, transpose_axis=-1)
             else:
                 colwise_out_spec = out_spec
         else:
@@ -464,10 +464,10 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, q_axis=-2)
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=-2)
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out_shape = multidim_transpose(out_shape, transpose_axis_boundary=-2)
+                colwise_out_shape = multidim_transpose(out_shape, transpose_axis=-2)
             else:
                 colwise_out_shape = out_shape
         else:
@@ -592,7 +592,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x.shape, is_padded=False, q_axis=-2)
+        ).get_scale_shape_2x(x.shape, is_padded=False, flatten_axis=-2)
         # Slice out padding for MXFP8, noop for DelayedScaling
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
@@ -677,7 +677,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_x_spec = multidim_transpose(x_spec, transpose_axis_boundary=-2)
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
         else:
@@ -837,7 +837,7 @@ def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, S
     x = reduce(operator.mul, acts)
     x = jnp.squeeze(x, axis=-2)
     if quantizer:
-        return quantizer.quantize(x, q_axis=-1)
+        return quantizer.quantize(x, flatten_axis=-1)
     return x
 
 
@@ -864,10 +864,10 @@ def _jax_quantize_dact_dbias(
 
     dbias = None
     if is_dbias:
-        dbias = _jax_dbias(dx, dtype=x.dtype, quantize_axis=-2)
+        dbias = _jax_dbias(dx, dtype=x.dtype, flatten_axis=-2)
 
     if quantizer is not None:
-        dx = quantizer.quantize(dx, dq_dtype=x.dtype, q_axis=-2)
+        dx = quantizer.quantize(dx, dq_dtype=x.dtype, flatten_axis=-2)
     else:
         dx = dx.astype(x.dtype)
 
@@ -952,7 +952,7 @@ def act_lu(
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
         # output does not have act axis
-        scale_shapes=quantizer.get_scale_shapes(output_shape, q_axis=-1),
+        scale_shapes=quantizer.get_scale_shapes(output_shape, flatten_axis=-1),
         is_outer=True,
     )
 
@@ -1012,7 +1012,7 @@ def quantize_dact_dbias(
         out, _ = quantize_dact_dbias(
             dz=dz, x=x, activation_type=activation_type, is_dbias=False, quantizer=None
         )
-        return _quantize_dbias_impl(out, quantizer, is_dbias=True, quantize_axis=-2)
+        return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
 
     is_gated = act_len == 2
     # TE/common does not support DelayedScaling2x for gated-act yet
@@ -1024,7 +1024,7 @@ def quantize_dact_dbias(
             activation_type=activation_type,
             is_dbias=is_dbias,
             quantizer=quantizer,
-            quantize_axis=-2,
+            flatten_axis=-2,
         )
         if war_output is not None:
             return war_output
@@ -1052,7 +1052,7 @@ def quantize_dact_dbias(
         )
         dbias = None
         if is_dbias:
-            dbias = _jax_dbias(output, dtype=x.dtype, quantize_axis=-2)
+            dbias = _jax_dbias(output, dtype=x.dtype, flatten_axis=-2)
         return output.astype(x.dtype), dbias
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1066,11 +1066,11 @@ def quantize_dact_dbias(
         # TODO(Jeremy): Debug - TE's quantize_dbias produced nans in this case for distributed layernorm_mlp tests
         if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
             out, dbias = _jax_quantize_dbias(
-                dgated, quantizer=quantizer, dq_dtype=x.dtype, quantize_axis=-2
+                dgated, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
             )
         else:
             out, dbias = _quantize_dbias_impl(
-                dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, quantize_axis=-2
+                dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
             )
         return out, dbias
 
@@ -1092,7 +1092,7 @@ def quantize_dact_dbias(
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
         # output has act axis
-        scale_shapes=quantizer.get_scale_shapes(out_shape, q_axis=-2),
+        scale_shapes=quantizer.get_scale_shapes(out_shape, flatten_axis=-2),
         is_dbias=is_dbias,
         act_enum=act_type_id,
         act_len=act_len,
@@ -1114,7 +1114,7 @@ def quantize_dact_dbias(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
-        q_axis=-2,  # as output has act axis
+        flatten_axis=-2,  # as output has act axis
     )
 
     return out, dbias

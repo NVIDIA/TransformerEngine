@@ -57,27 +57,27 @@ class Dequantizer:
         data = scaled_tensor.data.astype(jnp.float32)
         data_shape = data.shape
         scale = scaled_tensor.scale_inv.view(jnp.uint8).astype(jnp.float32)
-        q_axis = scaled_tensor.q_axis
-        q_axis = len(data_shape) + q_axis if q_axis < 0 else q_axis
+        flatten_axis = scaled_tensor.flatten_axis
+        flatten_axis = len(data_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
         assert (
-            0 < q_axis < len(data_shape)
-        ), f"q_axis {q_axis} is out of bounds for shape {data_shape}"
+            0 < flatten_axis < len(data_shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
         scale_shape = scaled_tensor.scaling_mode.get_scale_shape(
-            data_shape, scaled_tensor.is_colwise, is_padded=False, q_axis=q_axis
+            data_shape, scaled_tensor.is_colwise, is_padded=False, flatten_axis=flatten_axis
         )
         scale = jax.lax.slice(scale, [0] * len(scale_shape), scale_shape)  # slice out the padding
 
         data = data.reshape(
-            *data_shape[: q_axis - 1],
-            scale_shape[q_axis - 1],
-            int(data_shape[q_axis - 1] / scale_shape[q_axis - 1]),
-            *data_shape[q_axis:-1],
+            *data_shape[: flatten_axis - 1],
+            scale_shape[flatten_axis - 1],
+            int(data_shape[flatten_axis - 1] / scale_shape[flatten_axis - 1]),
+            *data_shape[flatten_axis:-1],
             scale_shape[-1],
             int(data_shape[-1] / scale_shape[-1]),
         )
 
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
-        scale = jnp.expand_dims(scale, axis=(q_axis + 2 - 2, -1))
+        scale = jnp.expand_dims(scale, axis=(flatten_axis + 2 - 2, -1))
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         return jnp.asarray(data * jnp.power(2, scale - 127), scaled_tensor.dq_dtype).reshape(
             data_shape

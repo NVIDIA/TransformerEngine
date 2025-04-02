@@ -36,7 +36,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto act_len = input_dims[input_dims.size() - 2];
   auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
   auto is_2x = static_cast<bool>(is_2x_int);
-  auto quantize_axis = output_buf->dimensions().size() - 1;  // output does not have act axis
+  auto flatten_axis = output_buf->dimensions().size() - 1;  // output does not have act axis
 
   auto input_shape = std::vector<size_t>{m, act_len * n};
   auto output_shape = std::vector<size_t>{m, n};
@@ -66,8 +66,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
       output_tensor.set_rowwise_scale_inv(
           scale_inv_buf->untyped_data(),
           convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-          std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, quantize_axis),
-                              product(scale_inv_buf->dimensions(), quantize_axis,
+          std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, flatten_axis),
+                              product(scale_inv_buf->dimensions(), flatten_axis,
                                       scale_inv_buf->dimensions().size())});
     }
   }
@@ -89,8 +89,8 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
         output_tensor.set_columnwise_scale_inv(
             tmp_buf->untyped_data(), convert_ffi_datatype_to_te_dtype(tmp_buf->element_type()),
             std::vector<size_t>{
-                product(tmp_buf->dimensions(), 0, quantize_axis),
-                product(tmp_buf->dimensions(), quantize_axis, tmp_buf->dimensions().size())});
+                product(tmp_buf->dimensions(), 0, flatten_axis),
+                product(tmp_buf->dimensions(), flatten_axis, tmp_buf->dimensions().size())});
       }
     }
   }
@@ -225,7 +225,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
-  auto quantize_axis = output_buf->dimensions().size() - 2;  // output has act axis
+  auto flatten_axis = output_buf->dimensions().size() - 2;  // output has act axis
 
   auto *output = output_buf->untyped_data();
   auto *colwise_output = colwise_output_buf->untyped_data();
@@ -275,8 +275,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
       output_tensor.set_rowwise_scale_inv(
           scale_inv_buf->untyped_data(),
           convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
-          std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, quantize_axis),
-                              product(scale_inv_buf->dimensions(), quantize_axis,
+          std::vector<size_t>{product(scale_inv_buf->dimensions(), 0, flatten_axis),
+                              product(scale_inv_buf->dimensions(), flatten_axis,
                                       scale_inv_buf->dimensions().size())});
     }
   }
@@ -298,8 +298,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
         output_tensor.set_columnwise_scale_inv(
             tmp_buf->untyped_data(), convert_ffi_datatype_to_te_dtype(tmp_buf->element_type()),
             std::vector<size_t>{
-                product(tmp_buf->dimensions(), 0, quantize_axis),
-                product(tmp_buf->dimensions(), quantize_axis, tmp_buf->dimensions().size())});
+                product(tmp_buf->dimensions(), 0, flatten_axis),
+                product(tmp_buf->dimensions(), flatten_axis, tmp_buf->dimensions().size())});
       }
     }
   }

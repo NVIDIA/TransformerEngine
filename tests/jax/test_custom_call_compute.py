@@ -83,8 +83,8 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
 def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
     if isinstance(a, ScaledTensor1x):
         if a.data_layout == "T":
-            q_axis = a.q_axis
-            b_transpose = jnp.transpose(b, (*range(q_axis, b.ndim), *range(q_axis)))
+            flatten_axis = a.flatten_axis
+            b_transpose = jnp.transpose(b, (*range(flatten_axis, b.ndim), *range(flatten_axis)))
             assert_allclose(a.dequantize(), b_transpose, dtype=a.data.dtype)
         else:
             assert_allclose(a.dequantize(), b, dtype=a.data.dtype)
@@ -471,7 +471,7 @@ QUANTIZATION_INPUT_DTYPE = {
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
 @pytest_parametrize_wrapper("input_shape", ALL_QUANTIZE_TEST_SHAPES)
 @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper("q_axis", [-1, -2])
+@pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
 )
@@ -480,7 +480,7 @@ class TestQuantize:
     Purely quantization related tests that will always test on a wider set of types and shapes
     """
 
-    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, q_axis):
+    def test_qdq(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
         key = jax.random.PRNGKey(0)
 
         # Quantizer is created once as some quantization approaches use state from previous iterations (e.g. delayed scaling)
@@ -494,10 +494,10 @@ class TestQuantize:
         for _ in range(n_iterations):
             x = jax.random.uniform(key, input_shape, in_dtype)
 
-            scaled_tensor = quantizer.quantize(x, q_axis=q_axis)
+            scaled_tensor = quantizer.quantize(x, flatten_axis=flatten_axis)
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
-    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, q_axis):
+    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
@@ -510,9 +510,9 @@ class TestQuantize:
             n_quantizers=2, q_dtype=q_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        jax_output = _jax_quantize(input, quantizer=jax_quantizer, quantize_axis=q_axis)
+        jax_output = _jax_quantize(input, quantizer=jax_quantizer, flatten_axis=flatten_axis)
 
-        te_output = tex.quantize(input, quantizer=te_quantizer, quantize_axis=q_axis)
+        te_output = tex.quantize(input, quantizer=te_quantizer, flatten_axis=flatten_axis)
         assert_bitwise_scaled_tensors(te_output, jax_output)
 
 
@@ -526,9 +526,9 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    @pytest_parametrize_wrapper("quantize_axis", [-1, -2])
+    @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
     def test_quantize_dbias(
-        self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, quantize_axis
+        self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, flatten_axis
     ):
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
@@ -544,13 +544,13 @@ class TestFusedQuantize:
 
         te_output, te_dbias = jit(
             lambda input: tex.quantize_dbias(
-                input, quantizer=te_quantizer, quantize_axis=quantize_axis
+                input, quantizer=te_quantizer, flatten_axis=flatten_axis
             )
         )(input)
 
         jax_output, jax_dbias = jit(
             lambda input: _jax_quantize_dbias(
-                input, quantizer=jax_quantizer, quantize_axis=quantize_axis
+                input, quantizer=jax_quantizer, flatten_axis=flatten_axis
             )
         )(input)
 
