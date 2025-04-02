@@ -161,12 +161,9 @@ void compute_ref_x1(const ProcessingMethod processing_method,
             }
         }
     }
-    printf("CPU dBias\n");
     for (size_t j = 0; j < cols; ++j) {
         output_dbias[j] = static_cast<InputType>(output_dbias_fp32[j]);
-        printf("j=%lu  dbias[j]=%f \n", j, output_dbias_fp32[j]);
     }
-    printf("\n");
 }
 
 template <typename InputType, typename OutputType, float (*OP)(const float)>
@@ -472,27 +469,27 @@ void performTest_x2(const ProcessingMethod processing_method,
 }
 
 std::vector<std::vector<size_t>> matrix_sizes = {
-    // {1, 16},
-    {1, 48},
-    // {16, 48},
-    // {65, 96},
-    // {128, 128},
-    // {256, 256},
-    // {993, 512},
-    // {256, 65536},
-    // {2048, 6144},
-    // {16384, 128},
-    // {32768, 160},
-    // {4096, 1632},
-    // {1024},
-    // {8, 32, 1024},
-    // {16, 8, 4, 512},
+    {1, 16},
+    {16, 48},
+    {65, 96},
+    {128, 128},
+    {256, 256},
+    {993, 512},
+    {256, 65536},
+    {2048, 6144},
+    {16384, 128},
+    {32768, 160},
+    {4096, 1632},
+    {1024},
+    {8, 32, 1024},
+    {16, 8, 4, 512},
+    // {4096, 13312},
 };
 
 std::vector<std::pair<size_t, size_t>> block_sizes = {
     {1, 32},
-    // {32, 1},
-    // {32, 32},
+    {32, 1},
+    {32, 32},
 };
 
 std::vector<InputsFillCase> input_scenarios = {
@@ -504,17 +501,17 @@ std::vector<InputsFillCase> input_scenarios = {
 };
 
 std::vector<ProcessingMethod> processing_methods = {
-    // ProcessingMethod::CAST_ONLY,
+    ProcessingMethod::CAST_ONLY,
     ProcessingMethod::CAST_DBIAS,
-    // ProcessingMethod::CAST_DBIAS_DACT,
-    // ProcessingMethod::CAST_DACT,
-    // ProcessingMethod::CAST_ACT,
+    ProcessingMethod::CAST_DBIAS_DACT,
+    ProcessingMethod::CAST_DACT,
+    ProcessingMethod::CAST_ACT,
 };
 
 // Only GeLU activation tests are supported
 std::vector<ActivationType> Activation_types = {
     ActivationType::Identity,
-    // ActivationType::GeLU,
+    ActivationType::GeLU,
     // ActivationType::SiLU,
     // ActivationType::ReLU,
     // ActivationType::QGeLU,
@@ -650,10 +647,8 @@ INSTANTIATE_TEST_SUITE_P(
         ::testing::ValuesIn(Activation_types),
         ::testing::ValuesIn(matrix_sizes),
         ::testing::ValuesIn(block_sizes),
-        // ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
-        // ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
-        ::testing::Values(DType::kBFloat16),
-        ::testing::Values(DType::kFloat8E4M3),
+        ::testing::Values(DType::kFloat32, DType::kBFloat16, DType::kFloat16),
+        ::testing::Values(DType::kFloat8E4M3, DType::kFloat8E5M2),
         ::testing::ValuesIn(input_scenarios)),
     [](const testing::TestParamInfo<FusedCastMXFP8TestSuite::ParamType>& info) {
         std::string name = to_string(std::get<0>(info.param)) + "X" +
