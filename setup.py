@@ -85,7 +85,11 @@ def setup_requirements() -> Tuple[List[str], List[str], List[str]]:
 
     # Common requirements
     setup_reqs: List[str] = []
-    install_reqs: List[str] = ["pydantic", "importlib-metadata>=1.0", "packaging"]
+    install_reqs: List[str] = [
+        "pydantic", 
+        "importlib-metadata>=1.0", 
+        "packaging"
+    ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
     # Requirements that may be installed outside of Python
