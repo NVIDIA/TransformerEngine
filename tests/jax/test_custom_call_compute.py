@@ -95,7 +95,7 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         pytest.fail("a must be a ScaledTensor object")
 
 
-ALL_ACTIVATION_SHAPES = [(32, 1, 64), (16, 128, 1, 256)]
+ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
 ALL_ACTIVATION_TYPES = [
     ("gelu",),
     ("gelu", "linear"),
@@ -142,6 +142,7 @@ class TestActivation:
     def test_act_grad(self, shape, activation_type):
         key = jax.random.PRNGKey(0)
         x = jax.random.uniform(key, shape, jnp.float32)
+        x = jnp.expand_dims(x, axis=-2)
         x = jnp.repeat(x, len(activation_type), axis=-2)
 
         value_n_grad_primitive_func = jit(
@@ -160,6 +161,7 @@ class TestActivation:
     @pytest_parametrize_wrapper("output_type", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     def test_act_grad_with_delayed_scaling_fp8(self, random_inputs, activation_type, output_type):
         x = random_inputs
+        x = jnp.expand_dims(x, axis=-2)
         x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
@@ -190,6 +192,7 @@ class TestActivation:
         self, random_inputs, activation_type, output_type, q_layout
     ):
         x = random_inputs
+        x = jnp.expand_dims(x, axis=-2)
         x = jnp.repeat(x, len(activation_type), axis=-2)
         self.activation_type = activation_type
 
@@ -451,8 +454,8 @@ ALL_QUANTIZE_TEST_SHAPES = [
 
 QUANTIZE_TEST_SHAPES = {
     "L0": [
-        (1, 256, 128),
-        (64, 16, 2, 256),
+        (32, 256, 128),
+        (64, 32, 32, 256),
     ],
     "L2": ALL_QUANTIZE_TEST_SHAPES,
 }
@@ -510,7 +513,7 @@ class TestQuantize:
         jax_output = _jax_quantize(input, quantizer=jax_quantizer, quantize_axis=q_axis)
 
         te_output = tex.quantize(input, quantizer=te_quantizer, quantize_axis=q_axis)
-        assert_bitwise_scaled_tensors(jax_output, te_output)
+        assert_bitwise_scaled_tensors(te_output, jax_output)
 
 
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
@@ -523,8 +526,10 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper(
         "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.ROWWISE_COLWISE]
     )
-    def test_quantize_dbias(self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout):
-        transpose_axis = -1
+    @pytest_parametrize_wrapper("quantize_axis", [-1, -2])
+    def test_quantize_dbias(
+        self, in_dtype, input_shape, out_dtype, scaling_mode, q_layout, quantize_axis
+    ):
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
@@ -537,20 +542,21 @@ class TestFusedQuantize:
             n_quantizers=2, q_dtype=out_dtype, scaling_mode=scaling_mode, q_layout=q_layout
         )
 
-        te_output, te_dbias = jit(lambda input: tex.quantize_dbias(input, quantizer=te_quantizer))(
-            input
-        )
-
-        jax_output, jax_dbias = jit(
-            lambda input: _jax_quantize_dbias(
-                input,
-                quantizer=jax_quantizer,
+        te_output, te_dbias = jit(
+            lambda input: tex.quantize_dbias(
+                input, quantizer=te_quantizer, quantize_axis=quantize_axis
             )
         )(input)
 
-        assert_bitwise_scaled_tensors(jax_output, te_output)
+        jax_output, jax_dbias = jit(
+            lambda input: _jax_quantize_dbias(
+                input, quantizer=jax_quantizer, quantize_axis=quantize_axis
+            )
+        )(input)
 
-        assert_allclose(jax_dbias, te_dbias)
+        assert_bitwise_scaled_tensors(te_output, jax_output)
+
+        assert_allclose(te_dbias, jax_dbias)
 
     def _test_quantize_dact_dbias(
         self, in_dtype, input_shape, out_dtype, scaling_mode, activation_type, is_dbias, q_layout
@@ -558,7 +564,8 @@ class TestFusedQuantize:
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)
         x = jax.random.uniform(subkeys[0], input_shape, in_dtype, -1, 1)
-        x = jnp.repeat(x, len(activation_type), axis=-1)
+        x = jnp.expand_dims(x, axis=-2)
+        x = jnp.repeat(x, len(activation_type), axis=-2)
         dz = jax.random.uniform(subkeys[1], input_shape, in_dtype, -1, 1)
 
         jax_quantizer, te_quantizer = QuantizerFactory.create(
@@ -587,12 +594,12 @@ class TestFusedQuantize:
         )(dz, x)
 
         if is_casted_output:
-            assert_bitwise_scaled_tensors(jax_output, te_output)
+            assert_bitwise_scaled_tensors(te_output, jax_output)
         else:
-            assert_allclose(jax_output, te_output)
+            assert_allclose(te_output, jax_output)
 
         if is_dbias:
-            assert_allclose(jax_dbias, te_dbias)
+            assert_allclose(te_dbias, jax_dbias)
 
     @pytest_parametrize_wrapper("activation_type", ACTIVATION_TYPES)
     @pytest_parametrize_wrapper("input_shape", ALL_ACTIVATION_SHAPES)

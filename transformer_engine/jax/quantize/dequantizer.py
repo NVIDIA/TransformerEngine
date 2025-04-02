@@ -58,7 +58,10 @@ class Dequantizer:
         data_shape = data.shape
         scale = scaled_tensor.scale_inv.view(jnp.uint8).astype(jnp.float32)
         q_axis = scaled_tensor.q_axis
-        assert q_axis >= 0
+        q_axis = len(data_shape) + q_axis if q_axis < 0 else q_axis
+        assert (
+            0 < q_axis < len(data_shape)
+        ), f"q_axis {q_axis} is out of bounds for shape {data_shape}"
         scale_shape = scaled_tensor.scaling_mode.get_scale_shape(
             data_shape, scaled_tensor.is_colwise, is_padded=False, q_axis=q_axis
         )

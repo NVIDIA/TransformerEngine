@@ -36,7 +36,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto act_len = input_dims[input_dims.size() - 2];
   auto scaling_mode = static_cast<NVTEScalingMode>(scaling_mode_enum);
   auto is_2x = static_cast<bool>(is_2x_int);
-  auto quantize_axis = output_buf->dimensions().size() -1;  // output does not have act axis
+  auto quantize_axis = output_buf->dimensions().size() - 1;  // output does not have act axis
 
   auto input_shape = std::vector<size_t>{m, act_len * n};
   auto output_shape = std::vector<size_t>{m, n};
@@ -51,9 +51,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
         convert_ffi_datatype_to_te_dtype(scale_inv_buf->element_type()),
         std::vector<size_t>{
             product(scale_inv_buf->dimensions(), 0, scale_inv_buf->dimensions().size() - 1),
-            scale_inv_buf->dimensions().back()
-            }
-            );
+            scale_inv_buf->dimensions().back()});
 
     if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
@@ -311,9 +309,9 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   // fused_dgated_dbias is not available, so we use dact_lu + quantize_dbias in Python instead
   NVTE_CHECK(!(act_len == 2 && is_dbias), "Unsupported DGatedActedDBias Fusion!");
-  NVTE_CHECK(!(scaling_mode == NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING && is_2x &&
-               act_len == 2),
-             "TE/common does not support delayed scaling for 2x with gated activations.");
+  NVTE_CHECK(
+      !(scaling_mode == NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING && is_2x && act_len == 2),
+      "TE/common does not support delayed scaling for 2x with gated activations.");
 
   if (is_dbias) {
     switch (act_type) {

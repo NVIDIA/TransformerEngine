@@ -457,15 +457,16 @@ def _jax_quantize(
     return quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis)
 
 
-def _jax_dbias(dx: jnp.ndarray, quantize_axis: int = -1):
+def _jax_dbias(dx: jnp.ndarray, dtype=None, quantize_axis: int = -1):
     assert quantize_axis < 0
+    dtype = dtype or dx.dtype
     dbias = jnp.sum(
         dx.astype(jnp.float32),
         axis=tuple(range(dx.ndim + quantize_axis)),
         keepdims=False,
     )
     dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
-    return dbias.astype(dx.dtype)
+    return dbias.astype(dtype)
 
 
 def _jax_quantize_dbias(
@@ -478,7 +479,7 @@ def _jax_quantize_dbias(
         return x, None
     return (
         quantizer.quantize(x, dq_dtype=dq_dtype, q_axis=quantize_axis),
-        _jax_dbias(x, quantize_axis=quantize_axis),
+        _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis),
     )
 
 
@@ -496,6 +497,8 @@ def _quantize_dbias_impl(
     assert (dq_dtype is None) or (
         quantizer is not None
     ), "quantizer must be provided if dq_dtype is provided"
+
+    dq_dtype = dq_dtype or x.dtype
 
     if not DBiasQuantizePrimitive.enabled():
         if is_dbias:
@@ -534,12 +537,12 @@ def _quantize_dbias_impl(
             dq_dtype=dq_dtype,
             quantize_axis=quantize_axis,
         )
-        dbias = _jax_dbias(x)
+        dbias = _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis)
         return out, dbias
 
     if quantizer is None:
         if is_dbias:
-            return x, _jax_dbias(x)
+            return x, _jax_dbias(x, dtype=dq_dtype, quantize_axis=quantize_axis)
         return x, None
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -560,7 +563,7 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout.value,
         q_axis=quantize_axis,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape),
+        scale_shapes=quantizer.get_scale_shapes(x.shape, q_axis=quantize_axis),
         is_dbias=is_dbias,
         is_outer=True,
     )
@@ -576,12 +579,12 @@ def _quantize_dbias_impl(
         colwise_data=colwise_casted_output,
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
-        dq_dtype=dq_dtype if dq_dtype is not None else x.dtype,
+        dq_dtype=dq_dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
         q_axis=quantize_axis,
     )
-    return out, dbias
+    return out, dbias.astype(dq_dtype)
 
 
 def quantize(

@@ -201,7 +201,7 @@ def should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias: bool = False, quant
     )
 
 
-def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
+def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, quantize_axis=-1, **kwargs):
     """
     Applies a workaround for delayed scaling 2x and can be used when the TE common kernels do not yet support 2x delayed scaling.
     It will call the given function 'f' with the given arguments and quantizer as 1x and calculate the colwise output by transposing result.
@@ -231,7 +231,12 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
         other_outputs = rowwise[1:]
         rowwise = rowwise[0]
     quantizer.q_layout = QuantizeLayout.ROWWISE_COLWISE
-    colwise_data = jnp.transpose(rowwise.data, (-1, *range(rowwise.data.ndim - 1)))
+    if quantize_axis < 0:
+        quantize_axis += rowwise.data.ndim
+    assert 0 < quantize_axis < rowwise.data.ndim, "quantize_axis is out of bounds"
+    colwise_data = jnp.transpose(
+        rowwise.data, (*range(quantize_axis, rowwise.data.ndim), *range(quantize_axis))
+    )
     output_2x = ScaledTensorFactory.create(
         data=rowwise.data,
         scale_inv=rowwise.scale_inv,
@@ -241,6 +246,7 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, **kwargs):
         dq_dtype=rowwise.dq_dtype,
         q_layout=QuantizeLayout.ROWWISE_COLWISE,
         data_layout=quantizer.get_data_layout(),
+        q_axis=quantize_axis,
     )
     if other_outputs is not None:
         return (output_2x,) + other_outputs

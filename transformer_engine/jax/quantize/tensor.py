@@ -119,17 +119,16 @@ class ScaledTensor1x(ScaledTensor):
         Ensures the scale_inv shape matches the expected shape based on the scaling mode
         and quantization direction. Pads the scale_inv if necessary.
         """
-        if self.q_axis < 0:
-            self.q_axis = len(self.data.shape) + self.q_axis
+        q_axis = len(self.data.shape) + self.q_axis if self.q_axis < 0 else self.q_axis
         assert (
-            0 < self.q_axis < len(self.data.shape)
-        ), f"q_axis {self.q_axis} is out of bounds for shape {self.data.shape}"
+            0 < q_axis < len(self.data.shape)
+        ), f"q_axis {q_axis} is out of bounds for shape {self.data.shape}"
 
         expected_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=True, q_axis=self.q_axis
+            self.data.shape, self.is_colwise, is_padded=True, q_axis=q_axis
         )
         expected_unpadded_scale_shape = self.scaling_mode.get_scale_shape(
-            self.data.shape, self.is_colwise, is_padded=False, q_axis=self.q_axis
+            self.data.shape, self.is_colwise, is_padded=False, q_axis=q_axis
         )
         if self.scale_inv.shape != expected_scale_shape:
             assert self.scale_inv.shape == expected_unpadded_scale_shape, (
@@ -158,6 +157,7 @@ class ScaledTensor1x(ScaledTensor):
             self._dq_func,
             self.is_colwise,
             self.data_layout,
+            self.q_axis,
         )
         return (children, aux_data)
 

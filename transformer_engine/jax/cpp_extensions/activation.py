@@ -26,7 +26,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_quantize_dbias, _jax_dbias, quantize_dbias
+from .quantization import _jax_quantize_dbias, _jax_dbias, quantize_dbias, _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
@@ -115,7 +115,7 @@ class ActLuPrimitive(BasePrimitive):
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
         assert x_aval.shape[-2] == act_len, (
-            f"activation input should be replicated by act_len in the -2 axis, got input shape"
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
             f" {x_aval.shape} and act_len {act_len}"
         )
 
@@ -126,7 +126,7 @@ class ActLuPrimitive(BasePrimitive):
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out_shape, is_padded=not is_outer)
+        ).get_scale_shape_2x(out_shape, is_padded=not is_outer, q_axis=-1)
         if not is_2x:
             out_shape = (1,)
             colwise_scale_inv_shape = (1,)
@@ -201,7 +201,7 @@ class ActLuPrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(out.shape, is_padded=False)
+        ).get_scale_shape_2x(out.shape, is_padded=False, q_axis=-1)
         # Slice out padding for MXFP8, noop for DelayedScaling
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
@@ -446,11 +446,11 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         te_dact_dbias_quantize_p abstract
         """
         del act_enum, scale_shapes
-        dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
-        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
-        assert x_aval.dtype == dtype
+        dz_dtype = dtypes.canonicalize_dtype(dz_aval.dtype)
+        assert dz_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert x_aval.dtype == dz_dtype
         assert x_aval.shape[-2] == act_len, (
-            f"activation input should be replicated by act_len in the -2 axis, got input shape"
+            "activation input should be replicated by act_len in the -2 axis, got input shape"
             f" {x_aval.shape} and act_len {act_len}"
         )
         assert scale_aval.dtype == jnp.float32
@@ -464,7 +464,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
 
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer)
+        ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, q_axis=-2)
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis_boundary=-2)
@@ -495,7 +495,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             dbias_shape = (1,)
             wkspace_shape = (1,)
             wkspace_dtype = jnp.float32
-        dbias_aval = jax.core.ShapedArray(shape=dbias_shape, dtype=jnp.float32)
+        dbias_aval = jax.core.ShapedArray(shape=dbias_shape, dtype=dz_dtype)
         wkspace_aval = jax.core.ShapedArray(shape=wkspace_shape, dtype=wkspace_dtype)
 
         return (
@@ -592,7 +592,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
-        ).get_scale_shape_2x(x.shape, is_padded=False)
+        ).get_scale_shape_2x(x.shape, is_padded=False, q_axis=-2)
         # Slice out padding for MXFP8, noop for DelayedScaling
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
@@ -825,7 +825,7 @@ def _jax_act_lu(inputs, activation_type, quantizer=None) -> Union[jnp.ndarray, S
     """
     act_len = len(activation_type)
     assert inputs.shape[-2] == act_len, (
-        f"activation input should be replicated by act_len in the -2 axis, got input shape"
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {inputs.shape} and act_len {act_len}"
     )
 
@@ -853,7 +853,7 @@ def _jax_quantize_dact_dbias(
     """
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
-        f"activation input should be replicated by act_len in the -2 axis, got input shape"
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {x.shape} and act_len {act_len}"
     )
 
@@ -864,7 +864,7 @@ def _jax_quantize_dact_dbias(
 
     dbias = None
     if is_dbias:
-        dbias = _jax_dbias(dx, quantize_axis=-2).astype(x.dtype)
+        dbias = _jax_dbias(dx, dtype=x.dtype, quantize_axis=-2)
 
     if quantizer is not None:
         dx = quantizer.quantize(dx, dq_dtype=x.dtype, q_axis=-2)
@@ -896,7 +896,7 @@ def act_lu(
     act_type_id = ActivationEnum[activation_type].value
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
-        f"activation input should be replicated by act_len in the -2 axis, got input shape"
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {x.shape} and act_len {act_len}"
     )
 
@@ -951,7 +951,8 @@ def act_lu(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(output_shape),
+        # output does not have act axis
+        scale_shapes=quantizer.get_scale_shapes(output_shape, q_axis=-1),
         is_outer=True,
     )
 
@@ -994,7 +995,7 @@ def quantize_dact_dbias(
 
     act_len = len(activation_type)
     assert x.shape[-2] == act_len, (
-        f"activation input should be replicated by act_len in the -2 axis, got input shape"
+        "activation input should be replicated by act_len in the -2 axis, got input shape"
         f" {x.shape} and act_len {act_len}"
     )
 
@@ -1006,6 +1007,7 @@ def quantize_dact_dbias(
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
+    # TODO: should one use dact_lu() here instead?
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
         out, _ = quantize_dact_dbias(
             dz=dz, x=x, activation_type=activation_type, is_dbias=False, quantizer=None
@@ -1022,6 +1024,7 @@ def quantize_dact_dbias(
             activation_type=activation_type,
             is_dbias=is_dbias,
             quantizer=quantizer,
+            quantize_axis=-2,
         )
         if war_output is not None:
             return war_output
@@ -1049,7 +1052,7 @@ def quantize_dact_dbias(
         )
         dbias = None
         if is_dbias:
-            dbias = _jax_dbias(output, quantize_axis=-2).astype(x.dtype)
+            dbias = _jax_dbias(output, dtype=x.dtype, quantize_axis=-2)
         return output.astype(x.dtype), dbias
 
     if isinstance(quantizer, DelayedScaleQuantizer):
@@ -1088,7 +1091,8 @@ def quantize_dact_dbias(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(out_shape),
+        # output has act axis
+        scale_shapes=quantizer.get_scale_shapes(out_shape, q_axis=-2),
         is_dbias=is_dbias,
         act_enum=act_type_id,
         act_len=act_len,
@@ -1110,6 +1114,7 @@ def quantize_dact_dbias(
         dq_dtype=x.dtype,
         q_layout=quantizer.q_layout,
         data_layout=quantizer.get_data_layout(),
+        q_axis=-2,  # as output has act axis
     )
 
     return out, dbias
