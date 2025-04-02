@@ -12,6 +12,7 @@ from packaging import version
 import jax
 import jax.numpy as jnp
 from jax import dtypes
+from jax.experimental.custom_partitioning import SdyShardingRule
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
 
@@ -519,6 +520,41 @@ class NormFwdPrimitive(BasePrimitive):
 
         return mesh, sharded_impl, out_shardings, arg_shardings
 
+    @staticmethod
+    def shardy_sharding_rule(
+        norm_type,
+        zero_centered_gamma,
+        epsilon,
+        out_dtype,
+        scaling_mode,
+        is_2x,
+        scale_dtype,
+        scale_shapes,
+        is_outer,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        del zero_centered_gamma, epsilon, out_dtype, scale_dtype, scale_shapes, is_outer, mesh
+
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(len(value_types[0].shape),
+                                                                          unique_var='i')
+        x_axes = scale_rules.input
+
+        out = x_axes[:-1] + ('k',)
+        if is_2x and norm_type != NVTE_Norm_Type.RMSNorm:
+            colwise_out = out
+        else:
+            colwise_out = ('…4',)
+        rsigma = x_axes[:-1]
+        mu = ('…5',) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = ('…6',)
+
+        return SdyShardingRule(
+            (x_axes, ('…1',), ('…2',), ('…3',)),
+            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, mu, rsigma),
+            **scale_rules.factor_sizes
+        )
 
 register_primitive(NormFwdPrimitive)
 
@@ -721,6 +757,11 @@ class NormBwdPrimitive(BasePrimitive):
             return local_dx, global_dgamma, global_dbeta
 
         return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '...0, ...1 i, ...2, ...3, ...4 -> ...1 j, k, l'
 
 
 register_primitive(NormBwdPrimitive)

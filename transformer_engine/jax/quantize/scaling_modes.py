@@ -16,14 +16,33 @@ from typing import Tuple, Dict
 from functools import reduce
 import operator
 
+from jax.experimental.custom_partitioning import CompoundFactor
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
 from transformer_engine_jax import JAXX_Scaling_Mode
 
 
-__all__ = ["ScalingMode"]
+__all__ = ["QuantizeShardyRules", "ScalingMode"]
 
+
+@dataclass
+class QuantizeShardyRules:
+    """Information necessary to shard scale tensors with Shardy.
+    
+    Attributes:
+        input: Specification for the input axes
+        rowwise_rule: Sharding rule for the row-wise scale tensor, depends on 
+          the axes in `input`
+        colwise_rule: Likewise for the column-wise scale tensor.
+        factor_sizes: For block scaling, contains the block size factor, which is
+          used in `input`.
+    """
+
+    input: Tuple[str]
+    rowwise_rule: Tuple[str]
+    colwise_rule: Tuple[str]
+    factor_sizes: Dict[str, int]
 
 class ScalingModeMetadataImpl(ABC):
     """Base class for scaling mode implementations.
@@ -59,6 +78,17 @@ class ScalingModeMetadataImpl(ABC):
             The shape for scale tensors
         """
 
+    @abstractmethod
+    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+        
+        Args:
+            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
 
 class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
     """Implementation for delayed scaling mode.
@@ -94,6 +124,19 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         """
         del data_shape, is_colwise
         return (1,)
+
+    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+        
+        Args:
+            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
+        input = tuple(f'x{i}' for i in range(input_rank))
+        return QuantizeShardyRules(input, (unique_var,), (unique_var,), {})
 
 
 class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
@@ -217,6 +260,24 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
+    def get_shardy_sharding_rules(self, input_rank, unique_var) -> QuantizeShardyRules:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+        
+        Args:
+            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
+        input = [f'x{i}' for i in range(input_rank)]
+        input[-2] = CompoundFactor(unique_var, 'block_size')
+
+        rowwise = input[:-1] + [f'{unique_var}_']
+        colwise = input[:-2] + [unique_var, f'{unique_var}__']
+
+        return QuantizeShardyRules(tuple(input), tuple(rowwise), tuple(colwise), {'block_size': 32})
+
 
 @dataclass(frozen=True)
 @register_pytree_node_class
@@ -289,6 +350,18 @@ class ScalingMode(Enum):
             The shape for scale tensors
         """
         return self._get_impl().get_scale_shape(data_shape, is_colwise, is_padded, flatten_axis)
+
+    def get_shardy_sharding_rules(self, input_rank, unique_var) -> Tuple[Tuple[str]]:
+        """Sharding rules for the input and (row, col)wise scale tensors.
+        
+        Args:
+            input_rank: The rank of the input tensor (for which we produce the scale tensor)
+            unique_var: An otherwise unused Shardy variable name prefix
+
+        Returns:
+            The Shardy rules for the scaling mode
+        """
+        return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var)
 
     def __eq__(self, other):
         """Compare this scaling mode with another.

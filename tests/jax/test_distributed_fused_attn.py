@@ -72,6 +72,13 @@ class TestDistributedSelfAttn:
         ],
     )
     @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "use_shardy",
+        [
+            pytest.param(False, id="GSPMD"),
+            pytest.param(True, id="Shardy"),
+        ],
+    )
     def test_self_attn(
         self,
         device_count,
@@ -83,7 +90,9 @@ class TestDistributedSelfAttn:
         bias_shape,
         attn_mask_type,
         dtype,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         dropout_prob = 0.0
         is_training = True
 
@@ -234,6 +243,13 @@ class TestDistributedCrossAttn:
     "load_balanced",
     [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
 )
+@pytest.mark.parametrize(
+    "use_shardy",
+    [
+        pytest.param(False, id="GSPMD"),
+        pytest.param(True, id="Shardy"),
+    ],
+)
 class TestDistributedContextParallelSelfAttn:
 
     def impl_test_context_parallel_attn(
@@ -337,9 +353,11 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_shardy,
     ):
         if qkv_layout.is_thd():
             pytest.skip("THD doesn't support all gather context parallelism.")
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         return self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
@@ -370,12 +388,14 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_shardy,
         use_scan,
     ):
         if use_scan:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "1"
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
 
         if qkv_layout.is_thd() and not load_balanced:
             pytest.skip("THD + ring doesn't support unbalanced context parallelism.")

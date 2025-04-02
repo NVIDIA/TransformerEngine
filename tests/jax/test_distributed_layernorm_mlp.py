@@ -151,9 +151,11 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
+    @pytest_parametrize_wrapper("use_shardy", [True, False])
     def test_layernorm_mlp_grad(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe, use_shardy
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
 
@@ -258,8 +260,17 @@ class TestDistributedLayernormMLP:
                     )
 
     def _test_layernorm_mlp(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8, fp8_recipe=None
+        self,
+        mesh_config,
+        activation_type,
+        use_bias,
+        input_shape,
+        dtype,
+        use_fp8,
+        fp8_recipe,
+        use_shardy,
     ):
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
 
@@ -322,9 +333,10 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
-    def test_layernorm_mlp_layer(self, mesh_config, activation_type, use_bias, input_shape, dtype):
+    @pytest_parametrize_wrapper("use_shardy", [False, True])
+    def test_layernorm_mlp_layer(self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy):
         self._test_layernorm_mlp(
-            mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8=False
+            mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8=False, fp8_recipe=None, use_shardy=use_shardy
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
