@@ -406,6 +406,11 @@ def _layernorm_mlp_bwd_rule(
         quantizer=ffn2_quantizer_set.dgrad,
     )
 
+    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
+    dact_out_ndim = casted_dact_out.get_rowwise_tensor().data.ndim
+    g_constracting_dim_1 = tuple(
+        range(dact_out_ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dact_out_ndim)
+    )
     # k_non_contracting_dims
     k_constracting_dim_1 = tuple(
         dim for dim in range(len(kernel_1_shape)) if dim not in k_contracting_dims_in_fwd
@@ -415,7 +420,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_1 = tex.gemm(
         casted_dact_out.get_rowwise_tensor(),
         rowwise_casted_kernel_1,
-        (k_constracting_dim_1, k_constracting_dim_1),
+        (g_constracting_dim_1, k_constracting_dim_1),
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, norm_input_axes)
