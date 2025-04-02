@@ -798,14 +798,14 @@ class _LayerNormLinear(torch.autograd.Function):
                 origin_weight.grad_added_to_main_grad = True
                 if getattr(origin_weight, "zero_out_wgrad", False):
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(origin_weight.main_grad.shape),
+                        origin_weight.dtype,
                         zero=True,
                     )
                 else:
                     wgrad = get_dummy_wgrad(
-                        list(weight.main_grad.shape),
-                        weight.dtype,
+                        list(origin_weight.main_grad.shape),
+                        origin_weight.dtype,
                     )
             elif ctx.fuse_wgrad_accumulation:
                 wgrad = None
