@@ -1497,11 +1497,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
         with self.prepare_forward(inp, num_gemms=2) as inp:
 
-            quantizers = (
-                self._get_quantizers()
-                if not debug
-                else self._get_debug_quantizers()
-            )
+            quantizers = self._get_quantizers() if not debug else self._get_debug_quantizers()
             if debug:
                 if not any_feature_enabled(quantizers):
                     quantizers = self._get_quantizers()
