@@ -44,6 +44,9 @@ torch.nn.Module.half = _make_module_cast_func(torch.float16)
 torch.nn.Module.bfloat16 = _make_module_cast_func(torch.bfloat16)
 
 def get_all_tensor_types():
+    """
+    Get all tensor-like types that can be used in TE.
+    """
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8TensorBase
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8TensorBase
     all_tensor_types = [
