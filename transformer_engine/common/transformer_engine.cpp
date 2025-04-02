@@ -199,16 +199,6 @@ NVTETensor nvte_create_tensor(NVTEScalingMode scaling_mode) {
   return ret;
 }
 
-NVTETensor nvte_create_tensor_with_shape(NVTEScalingMode scaling_mode, NVTEShape initial_shape) {
-  transformer_engine::Tensor *ret = new transformer_engine::Tensor;
-  ret->scaling_mode = scaling_mode;
-  ret->data.shape.reserve(initial_shape.ndim);
-  for (size_t i = 0; i < initial_shape.ndim; ++i) {
-    ret->data.shape.push_back(initial_shape.data[i]);
-  }
-  return ret;
-}
-
 void nvte_destroy_tensor(NVTETensor tensor) {
   if (tensor == nullptr) return;
   auto *t = reinterpret_cast<transformer_engine::Tensor *>(tensor);
@@ -230,54 +220,18 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
   switch (t.scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        // We can infer tensor shape if FP8 tensor only has FP8 data
-        // transpose. However, NVTEShape only contains a pointer and
-        // cannot store temporary data. We hack around this by caching
-        // the tensor shape within the empty FP8 data.
-        auto &shape_cache = const_cast<std::vector<size_t> &>(t.data.shape);
-        shape_cache.clear();
-        if (!t.columnwise_data.shape.empty()) {
-          for (size_t i = 1; i < t.columnwise_data.shape.size(); i++) {
-            shape_cache.push_back(t.columnwise_data.shape[i]);
-          }
-          shape_cache.push_back(t.columnwise_data.shape.front());
-        }
-        ret.data = shape_cache.data();
-        ret.ndim = shape_cache.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
+    case NVTE_DELAYED_TENSOR_SCALING:
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      const std::vector<size_t> &rowwise_shape = t.rowwise_shape_ref();
+      ret.data = rowwise_shape.data();
+      ret.ndim = rowwise_shape.size();
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
       if (!t.has_data() && t.has_columnwise_data()) {
         ret.data = t.columnwise_data.shape.data();
         ret.ndim = t.columnwise_data.shape.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    case NVTE_BLOCK_SCALING_1D:
-    case NVTE_BLOCK_SCALING_2D: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        std::vector<size_t> shape;
-        ret.ndim = t.columnwise_data.shape.size();
-        shape.reserve(ret.ndim);
-        for (int i = 0; i + 1 < static_cast<int>(ret.ndim); ++i) {
-          shape.push_back(t.columnwise_data.shape[i + 1]);
-        }
-        if (ret.ndim > 0) {
-          shape.push_back(t.columnwise_data.shape[0]);
-        }
-        NVTE_CHECK(t.data.shape == shape,
-                   "Must return shape allocated on tensor. "
-                   "data shape expected to match derivation from columnwise.");
-        ret.data = t.data.shape.data();
       } else {
         ret.data = t.data.shape.data();
         ret.ndim = t.data.shape.size();
