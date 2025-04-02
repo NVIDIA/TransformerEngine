@@ -177,6 +177,15 @@ class _GroupedLinear(torch.autograd.Function):
 
             ctx.weights_shape_1 = weights[0].shape[1]
 
+            if weight_requires_grad:
+                for inputmat in inputmats:
+                    if isinstance(inputmat, QuantizedTensor):
+                        inputmat.update_usage(rowwise_usage=False, columnwise_usage=True)
+            if inp.requires_grad:
+                for weight in weights_fp8:
+                    if isinstance(weight, QuantizedTensor):
+                        weight.update_usage(columnwise_usage=True)
+
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
