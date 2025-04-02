@@ -38,10 +38,10 @@ constexpr size_t PACK_SIZE = 4;
 constexpr size_t WAVES = SCALE_DIM_X / PACK_SIZE;
 
 // Number of 1-byte elements that span 32 banks (4-byte each) of shared memory
-constexpr size_t BANK_WIDTH = (32 * 4) / 1; // 128
+constexpr size_t BANK_WIDTH = (32 * 4) / 1;  // 128
 
 // Number of threads (rowwise scaling) that span 32 banks (4-byte banks) of shared memory
-constexpr size_t THREADS_PER_BANK = BANK_WIDTH / SCALE_DIM_X;   // 4 = 128 / 32
+constexpr size_t THREADS_PER_BANK = BANK_WIDTH / SCALE_DIM_X;  // 4 = 128 / 32
 
 template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 constexpr __device__ __forceinline__ bool is_cached_act_op() {
@@ -486,18 +486,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // HEIGHT = THREADS_Y
       // WIDTH = THREADS_X * (SCALE_DIM_X + 1)
       // Added extra 1-element padding per thread_X to reduce bank conflicts
-      float* partial_dbias_rowwise = reinterpret_cast<float*>(dshmem);
+      float *partial_dbias_rowwise = reinterpret_cast<float *>(dshmem);
 
       constexpr int DBIAS_BUFF_HEIGHT = THREADS_Y;
       constexpr int DBIAS_BUFF_WIDTH = THREADS_X * (SCALE_DIM_X + 1);
 
-      const int shmem_thread_offset = tid_Y_rowwise * DBIAS_BUFF_WIDTH 
-                                      + tid_X_rowwise * (SCALE_DIM_X + 1);
-      #pragma unroll
+      const int shmem_thread_offset =
+          tid_Y_rowwise * DBIAS_BUFF_WIDTH + tid_X_rowwise * (SCALE_DIM_X + 1);
+#pragma unroll
       for (int w = 0; w < WAVES; ++w) {
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_group_offset = shmem_thread_offset + swizzled_group_idx;
-        #pragma unroll
+#pragma unroll
         for (int e = 0; e < PACK_SIZE; ++e) {
           const int j = w * PACK_SIZE + e;
           const int shmem_elt_idx = swizzled_group_offset + e;
@@ -505,11 +505,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
       }
       __syncthreads();
-      #pragma unroll
+#pragma unroll
       for (int i = 0; i < THREADS_Y; ++i) {
         // Add extra element offset per MXFP8 scaling block [1x32]
         const int scaling_block = threadIdx.x / SCALE_DIM_X;
-        thread_partial_dbias += partial_dbias_rowwise[i * DBIAS_BUFF_WIDTH + threadIdx.x + scaling_block];
+        thread_partial_dbias +=
+            partial_dbias_rowwise[i * DBIAS_BUFF_WIDTH + threadIdx.x + scaling_block];
       }
     }
     const int dbias_stride = cols;
