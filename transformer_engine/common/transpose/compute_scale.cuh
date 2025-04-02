@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "../recipe/recipe_common.cuh"
+
 namespace transformer_engine {
 
 // Type trait for extreme values of fp8 types.
@@ -88,51 +90,8 @@ struct HighPrecisionFloatScaleLimitsTrait<half, true> {
 template <typename IType, typename OType, bool Power2Scaling>
 __device__ __forceinline__ float ComputeScale(const float amax, const float eps) {
   constexpr float fp8_max = F8LimitsTrait<OType>::max;
-
-  // Clamping amax to avoid division by small numbers
-  float amax_mod = fmaxf(amax, eps);
-
-  // Handle overflow cases for non-clamped amax (eps is 0 or very small)
-  if (amax_mod == 0.f) {
-    // If amax is 0, return 1
-    return 1.f;
-  }
-  // Compute scale factor
-  float scale = fp8_max / amax_mod;
-
-  if (isinf(scale)) {
-    // If scale is infinity, return max value of IType
-    return HighPrecisionFloatScaleLimitsTrait<IType, Power2Scaling>::max;
-  }
-  if (scale == 0.0) {
-    // Case that amax is "inf". The frexp, ldexp logic changes 0.0 scales.
-    // Return 0.0 for 0.0 scale here is consistent with non-Power2Scaling model.
-    // quantization will remove signal from the tensor,
-    // this is bad for the model, but define pow2Scale behavior
-    // as returning 0.0 scale. amax calculation can
-    // improve the situation to avoid this by taking largest finite.
-    return scale;
-  }
-  if constexpr (Power2Scaling) {
-    // NOTE: using bit fiddling rather than pow2, exp to
-    // be exact.
-    //
-    // inf scales already early returned, as did nan scales.
-    // The cases to consider here are normals, zero, and subnormals.
-    // zero is not possible with current math as
-    // 448.0 / float_max == 1.31655e-36, which is the smallest
-    // possible scale given current dtypes. It is still in the normal
-    // fp32 range with an exponent of -120, so subnormals are also
-    // not possible. To handle normals, we can simply mask off the
-    // mantissa.
-    uint32_t scale_bits = *reinterpret_cast<uint32_t*>(&scale);
-    scale_bits &= 0xFF800000;
-    // If the exponent was zero, we have a logic error.
-    __builtin_assume(scale_bits != 0);
-    __builtin_assume(scale_bits != 0x80000000);
-    scale = *reinterpret_cast<float*>(&scale_bits);
-  }
-  return scale;
+  constexpr float value_for_inf = HighPrecisionFloatScaleLimitsTrait<IType, Power2Scaling>::max;
+  return compute_scale_from_amax(amax, fp8_max, Power2Scaling, eps, value_for_inf);
 }
 
 }  // namespace transformer_engine

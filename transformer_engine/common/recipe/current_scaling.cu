@@ -152,7 +152,8 @@ namespace {
 __global__ void compute_scale_from_amax_kernel(const float *amax_ptr, float *scale_ptr,
                                                const float max_fp8, const bool force_pow_2_scales,
                                                const float epsilon) {
-  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon);
+  *scale_ptr = compute_scale_from_amax(*amax_ptr, max_fp8, force_pow_2_scales, epsilon,
+                                       std::numeric_limits<float>::max());
 }
 
 }  // namespace
