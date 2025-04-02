@@ -13,6 +13,7 @@
 #include <cuda/barrier>
 
 #include "common/common.h"
+#include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 #include "compute_scale.cuh"
 
@@ -23,11 +24,6 @@
 
 namespace transformer_engine {
 namespace {
-
-#ifdef TMA_HW_SUPPORTED
-using barrier = cuda::barrier<cuda::thread_scope_block>;
-namespace cde = cuda::device::experimental;
-#endif
 
 // const values configuration
 
@@ -214,21 +210,22 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     }
 
     // Wait for shared memory writes to be visible to TMA engine.
-    cde::fence_proxy_async_shared_cta();
+    ptx::fence_proxy_async_shared_cta();
     __syncthreads();
     // After syncthreads, writes by all threads are visible to TMA engine.
 
     // Step 5: store transpose output
     // Initiate TMA transfer to copy shared memory to global memory
     if (threadIdx.x == 0) {
-      cde::cp_async_bulk_tensor_2d_shared_to_global(
-          &tensor_map_output_t, tile_id_y * BLOCK_TILE_DIM, tile_id_x * BLOCK_TILE_DIM,
-          block_tile_trans_shared_otype_ptr);
+      ptx::cp_async_bulk_tensor_2d_shared_to_global(
+          reinterpret_cast<const uint64_t*>(&tensor_map_output_t), tile_id_y * BLOCK_TILE_DIM,
+          tile_id_x * BLOCK_TILE_DIM,
+          reinterpret_cast<uint64_t*>(block_tile_trans_shared_otype_ptr));
       // Wait for TMA transfer to have finished reading shared memory.
       // Create a "bulk async-group" out of the previous bulk copy operation.
-      cde::cp_async_bulk_commit_group();
+      ptx::cp_async_bulk_commit_group();
       // Wait for the group to have completed reading from shared memory.
-      cde::cp_async_bulk_wait_group_read<0>();
+      ptx::cp_async_bulk_wait_group_read<0>();
     }
 #else
     // Step 4 Alternative (when TMA is not available, skip writing to shared memory)

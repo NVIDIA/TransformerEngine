@@ -83,6 +83,29 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_global_to_shared(
       : "memory");
 }
 
+__device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, const uint32_t parity) {
+  uint32_t waitComplete;
+  asm volatile(
+      "{\n\t .reg .pred P_OUT; \n\t"
+      "mbarrier.try_wait.parity.shared::cta.b64  P_OUT, [%1], %2; \n\t"
+      "selp.b32 %0, 1, 0, P_OUT; \n"
+      "}"
+      : "=r"(waitComplete)
+      : "r"(mbar_ptr), "r"(parity)
+      : "memory");
+  return static_cast<bool>(waitComplete);
+}
+
+__device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
+  }
+}
+
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
@@ -104,30 +127,6 @@ __device__ __forceinline__ void cp_async_bulk_tensor_2d_shared_to_global(
                    tensor_map_ptr),
                "r"(offset_x), "r"(offset_y), "r"(src_shmem_ptr)
                : "memory");
-}
-
-__device__ __forceinline__ bool mbarrier_try_wait_parity(uint32_t mbar_ptr, const uint32_t parity) {
-  uint32_t waitComplete;
-  asm volatile(
-      "{\n\t .reg .pred P_OUT; \n\t"
-      "mbarrier.try_wait.parity.shared::cta.b64  P_OUT, [%1], %2; \n\t"
-      "selp.b32 %0, 1, 0, P_OUT; \n"
-      "}"
-      : "=r"(waitComplete)
-      : "r"(mbar_ptr), "r"(parity)
-      : "memory");
-  return static_cast<bool>(waitComplete);
-}
-
-__device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint32_t parity) {
-  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
-  while (!mbarrier_try_wait_parity(mbar_ptr, parity)) {
-  }
-}
-
-// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
-__device__ __forceinline__ void cp_async_bulk_commit_group() {
-  asm volatile("cp.async.bulk.commit_group;");
 }
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-wait-group
@@ -158,13 +157,19 @@ __device__ __forceinline__ void cp_async_bulk_wait_group_read<4>() {
   asm volatile("cp.async.bulk.wait_group.read 4;");
 }
 
+// https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-commit-group
+__device__ __forceinline__ void cp_async_bulk_commit_group() {
+  asm volatile("cp.async.bulk.commit_group;");
+}
+
 // Proxy fence (bi-directional):
 __device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.async;"); }
+
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
   asm volatile("fence.proxy.async.shared::cta;");
 }
 
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 }  // namespace ptx
 
