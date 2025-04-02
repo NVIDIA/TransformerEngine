@@ -1,8 +1,13 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""
-Sharding Meta for xmap with CustomCall
+"""Sharding utilities for Transformer Engine in JAX.
+
+This module provides utilities for managing tensor sharding in distributed training,
+including support for various parallelism strategies like data parallelism (DP),
+tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
+parallelism (FSDP). It includes functions for sharding constraints, mesh management,
+and collective operations.
 """
 import os
 from contextlib import contextmanager
@@ -181,27 +186,17 @@ def get_mesh_axis_rank(axis: str, mesh=None):
 
 @dataclass
 class MeshResource:
-    """
-    A data container to indicate which axis in Mesh for data parallelism and
-    which for tensor parallelism.
+    """A data container for managing mesh resources in distributed training.
 
-    Parameters
-    ----------
-    dp_resource : str, default = None
-        The axis name in Mesh used to shard batches along.
-        If it is None, then data parallelism is disabled.
-    tp_resource : str, default = None
-        The axis name in Mesh used to split the hidden dimensions along.
-        If it is None, then tensor parallelism is disabled.
-    fsdp_resource : str, default = None
-        The axis name in Mesh used to split the batch and weights along.
-        If it is None, then full-sharded data parallelism is disabled.
-    pp_resource : str, default = None
-        The axis name in Mesh used to split model layers along.
-        If it is None, then pipeline parallelism is disabled.
-    cp_resource : str, default = None
-        The axis name in Mesh used to split sequence (context) dimensions along
-        in the attention. If it is None, then context parallelism is disabled.
+    This class defines the mapping between logical axes and physical mesh axes
+    for different types of parallelism in distributed training.
+
+    Attributes:
+        dp_resource: Axis name for data parallelism (batch sharding), default is None
+        tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
+        fsdp_resource: Axis name for full-sharded data parallelism, default is None
+        pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
+        cp_resource: Axis name for context parallelism (sequence sharding), default is None
     """
 
     dp_resource: str = None
@@ -216,36 +211,55 @@ _GLOBAL_MESH_RESOURCE = MeshResource()
 
 @contextmanager
 def global_shard_guard(resource: MeshResource):
-    """
-    A context manager to switch the global MeshResource
+    """Context manager for setting global sharding configuration.
+
+    This context manager allows temporarily setting the global mesh resource
+    configuration for sharding operations.
+
+    Args:
+        resource: MeshResource instance defining the sharding configuration
     """
     global _GLOBAL_MESH_RESOURCE
-    prev_gmr = _GLOBAL_MESH_RESOURCE
+    old_resources = _GLOBAL_MESH_RESOURCE
     try:
         _GLOBAL_MESH_RESOURCE = resource
         yield
     finally:
-        _GLOBAL_MESH_RESOURCE = prev_gmr
+        _GLOBAL_MESH_RESOURCE = old_resources
 
 
 def global_mesh_resource() -> MeshResource:
-    """
-    A getter of the global MeshResource
+    """Get the current global mesh resource configuration.
+
+    Returns:
+        The current MeshResource instance
     """
     return _GLOBAL_MESH_RESOURCE
 
 
 def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
-    """
-    All-Reduce (Sum) along DP and FSDP mesh axes.
+    """Perform all-reduce sum operation along data parallelism and FSDP axes.
+
+    Args:
+        x: Input tensor to reduce
+        mesh: JAX mesh for distributed computation
+
+    Returns:
+        Reduced tensor
     """
     x = lax_paral_op(x, jax.lax.psum, global_mesh_resource().dp_resource, mesh)
     return lax_paral_op(x, jax.lax.psum, global_mesh_resource().fsdp_resource, mesh)
 
 
 def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mesh):
-    """
-    All-Reduce (Max) along all mesh axes.
+    """Perform all-reduce max operation along all axes except pipeline parallelism.
+
+    Args:
+        x: Input tensor to reduce
+        mesh: JAX mesh for distributed computation
+
+    Returns:
+        Reduced tensor
     """
     all_axes = get_all_mesh_axes()
     for axis in all_axes:
@@ -261,21 +275,16 @@ global_shard_resource = global_mesh_resource
 
 
 class MajorShardingType(Enum):
-    r"""
-    The major sharding type to indicate sharding pattern.
-    .. warning::
-        MajorShardingType is deprecating in the near feature.
+    """Enumeration of major sharding types for distributed training.
 
-    Values
-    ----------
-    SINGLE:
-        Single process training.
-    DP:
-        Data parallel training.
-    TP:
-        Standard tensor parallel training.
-    DPTP:
-        Data and Standard tensor parallel training.
+    This enum defines the basic sharding patterns available for distributed
+    training. Note that this class is deprecated and will be removed in the future.
+
+    Values:
+        SINGLE: Single process training
+        DP: Data parallel training
+        TP: Standard tensor parallel training
+        DPTP: Data and standard tensor parallel training
     """
 
     SINGLE = 0
@@ -285,25 +294,19 @@ class MajorShardingType(Enum):
 
 
 class ShardingType(Enum):
-    """
-    The sharding type to indicate sharding pattern.
-    .. warning::
-        ShardingType is deprecating in the near feature.
+    """Enumeration of detailed sharding types for distributed training.
 
-    Values
-    ----------
-    SINGLE:
-        No sharding.
-    DP:
-        Sharding along data parallelism.
-    TP_COL:
-        Sharding along column-split tensor parallelism.
-    TP_ROW:
-        Sharding along row-split tensor parallelism.
-    DP_TP_COL:
-        Sharding along data and column-split tensor parallelism.
-    DP_TP_ROW:
-        Sharding along data and row-split tensor parallelism.
+    This enum defines specific sharding patterns for distributed training,
+    including combinations of data parallelism and different tensor parallelism
+    strategies. Note that this class is deprecated and will be removed in the future.
+
+    Values:
+        SINGLE: No sharding
+        DP: Sharding along data parallelism
+        TP_COL: Sharding along column-split tensor parallelism
+        TP_ROW: Sharding along row-split tensor parallelism
+        DP_TP_COL: Sharding along data and column-split tensor parallelism
+        DP_TP_ROW: Sharding along data and row-split tensor parallelism
     """
 
     SINGLE = (MajorShardingType.SINGLE, "single")

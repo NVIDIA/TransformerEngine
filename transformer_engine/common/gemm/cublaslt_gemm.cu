@@ -577,3 +577,11 @@ void nvte_multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVT
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, cublas_event[s]));
   }
 }
+
+namespace transformer_engine {
+
+using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublasHandle>;
+
+void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHandle(); }
+
+}  //  namespace transformer_engine

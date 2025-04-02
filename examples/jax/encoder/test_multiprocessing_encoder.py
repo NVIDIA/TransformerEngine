@@ -21,9 +21,15 @@ from flax.training import train_state
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
-from common import is_bf16_supported, is_fp8_supported
+from common import (
+    is_bf16_supported,
+    is_fp8_supported,
+    is_mxfp8_supported,
+    get_fp8_recipe_from_name_string,
+)
 import transformer_engine.jax as te
 import transformer_engine.jax.flax as te_flax
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode
 
 
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -298,9 +304,8 @@ def get_datasets(max_seq_len):
 def check_fp8(state, var_collect, inputs, masks, labels):
     "Check if model includes FP8."
     rngs = {DROPOUT_KEY: jax.random.PRNGKey(0)}
-    assert "fp8_" in str(
-        jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs)
-    )
+    func_jaxpr = str(jax.make_jaxpr(train_step)(state, inputs, masks, labels, var_collect, rngs))
+    assert "f8_e5m2" in func_jaxpr or "f8_e4m3" in func_jaxpr
 
 
 def get_params_sharding(sharding_rules, abs_var_collect, mesh):
@@ -359,10 +364,16 @@ def train_and_evaluate(args):
         num_gpu_dp = 1
         num_gpu_tp = 1
 
-    assert args.batch_size % num_gpu_dp == 0, f"Batch size needs to be multiple of {num_gpu_dp}"
-    assert (
-        args.test_batch_size % num_gpu_dp == 0
-    ), f"Test batch size needs to be multiple of {num_gpu_dp}"
+    if args.fp8_recipe == "MXFP8BlockScaling":
+        assert args.batch_size % 32 == 0, "Batch size needs to be multiple of 32 for MXFP8"
+        assert (
+            args.test_batch_size % 32 == 0
+        ), "Test batch size needs to be multiple of 32 for MXFP8"
+
+    if args.use_fp8:
+        fp8_recipe = get_fp8_recipe_from_name_string(args.fp8_recipe)
+    else:
+        fp8_recipe = None
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     with jax.sharding.Mesh(
@@ -379,7 +390,9 @@ def train_and_evaluate(args):
         label_shape = [args.batch_size]
 
         with te.fp8_autocast(
-            args.use_fp8, mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None)
+            enabled=args.use_fp8,
+            fp8_recipe=fp8_recipe,
+            mesh_resource=te.MeshResource(DEVICE_DP_AXIS, DEVICE_TP_AXIS, None, None),
         ):
             encoder = Net(num_embed)
             inputs = jnp.zeros(input_shape, dtype=jnp.int32)
@@ -482,23 +495,23 @@ def encoder_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=64,
+        default=128,
         metavar="N",
-        help="input batch size for training (default: 64)",
+        help="input batch size for training (default: 128)",
     )
     parser.add_argument(
         "--test-batch-size",
         type=int,
-        default=64,
+        default=128,
         metavar="N",
-        help="input batch size for testing (default: 64)",
+        help="input batch size for testing (default: 128)",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=32,
+        default=64,
         metavar="N",
-        help="maximum sequence length (default: 32)",
+        help="maximum sequence length (default: 64)",
     )
     parser.add_argument(
         "--epochs",
@@ -528,12 +541,18 @@ def encoder_parser(args):
         help="Use FP8 for inference and training without recalibration",
     )
     parser.add_argument(
+        "--fp8-recipe",
+        action="store_true",
+        default="DelayedScaling",
+        help="Use FP8 recipe (default: DelayedScaling)",
+    )
+    parser.add_argument(
         "--coordinator-address",
         type=str,
         default="127.0.0.1:1234",
         help=(
-            "the IP address of process 0 and a port on                              which that"
-            " process should launch a coordinator service                              (default:"
+            "the IP address of process 0 and a port on which that"
+            " process should launch a coordinator service (default:"
             " 127.0.0.1:1234)"
         ),
     )
@@ -554,37 +573,46 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    gpu_has_fp8 = is_fp8_supported()
-    gpu_has_bf16 = is_bf16_supported()
-
-    def exec(self, use_fp8):
+    def exec(self, use_fp8, fp8_recipe):
         """Run 3 epochs for testing"""
         args = encoder_parser([])
 
         num_gpu = self.num_process
         tp_size = 2 if num_gpu > 1 and num_gpu % 2 == 0 else 1
         dp_size = num_gpu // tp_size
-        batch_size = 64 // dp_size
+        assert args.batch_size % dp_size == 0, f"Batch size needs to be multiple of {dp_size}"
+        batch_size = args.batch_size // dp_size
 
         args.use_fp8 = use_fp8
         args.batch_size = batch_size
         args.test_batch_size = batch_size
         args.num_process = num_gpu
         args.process_id = self.process_id
+        args.fp8_recipe = fp8_recipe
 
         return train_and_evaluate(args)
 
-    @unittest.skipIf(not gpu_has_bf16, "Device compute capability 8.0+ is required for BF16")
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
     def test_te_bf16(self):
         """Test Transformer Engine with BF16"""
-        result = self.exec(False)
-        assert result[0] < 0.45 and result[1] > 0.79
+        result = self.exec(False, None)
+        assert result[0] < 0.505 and result[1] > 0.755
 
-    @unittest.skipIf(not gpu_has_fp8, "Device compute capability 9.0+ is required for FP8")
-    def test_te_fp8(self):
-        """Test Transformer Engine with FP8"""
-        result = self.exec(True)
-        assert result[0] < 0.455 and result[1] > 0.79
+    @unittest.skipIf(
+        not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
+    )
+    def test_te_delayed_scaling_fp8(self):
+        """Test Transformer Engine with DelayedScaling FP8"""
+        result = self.exec(True, "DelayedScaling")
+        assert result[0] < 0.505 and result[1] > 0.755
+
+    @unittest.skipIf(
+        not is_mxfp8_supported(), "Device compute capability 10.0+ is required for MXFP8"
+    )
+    def test_te_mxfp8(self):
+        """Test Transformer Engine with MXFP8"""
+        result = self.exec(True, "MXFP8BlockScaling")
+        assert result[0] < 0.505 and result[1] > 0.754
 
 
 if __name__ == "__main__":

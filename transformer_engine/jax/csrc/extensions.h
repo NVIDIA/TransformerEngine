@@ -13,6 +13,7 @@
 #include <cudnn.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 
 #include <cassert>
@@ -33,226 +34,42 @@
 namespace transformer_engine {
 namespace jax {
 
-// Phuong: These 3 functions need to stay in the header file for compilation purpose
-// 1.
 inline bool use_fp8(DType type) { return type == DType::kFloat8E4M3 || type == DType::kFloat8E5M2; }
-// 2.
-template <typename T>
-pybind11::bytes PackOpaque(const T &descriptor) {
-  auto str = std::string(reinterpret_cast<const char *>(&descriptor), sizeof(T));
-  return pybind11::bytes(str);
-}
-// 3.
-template <typename T>
-const T *UnpackOpaque(const char *opaque, size_t opaque_len) {
-  if (opaque_len != sizeof(T)) {
-    throw std::runtime_error("Invalid opaque object size");
-  }
-  return reinterpret_cast<const T *>(opaque);
-}
-
-// Packing
-
-struct CustomCallCommonDescriptor {
-  Shape shape;
-  DType in_dtype;
-  DType out_dtype;
-  size_t act_enum;
-};
-
-pybind11::bytes PackCustomCallCommonDescriptor(const std::vector<size_t> &shape, DType in_dtype,
-                                               DType out_dtype, size_t act_enum = 0);
-
-struct CustomCallCommonWkDescriptor {
-  Shape shape;
-  Shape wkshape;
-  DType in_dtype;
-  DType out_dtype;
-  DType wk_dtype;
-  size_t act_enum;
-};
-
-pybind11::bytes PackCustomCallCommonWkDescriptor(const std::vector<size_t> &shape,
-                                                 const std::vector<size_t> &wkshape, DType in_dtype,
-                                                 DType out_dtype, DType wk_dtype,
-                                                 size_t act_enum = 0);
-
-struct CustomCallNormDescriptor {
-  size_t batch_size;
-  size_t hidden_size;
-  size_t wkspace_size;
-  DType x_dtype;
-  DType w_dtype;
-  DType wkspace_dtype;
-  bool zero_centered_gamma;
-  float eps;
-  int sm_margin;
-};
-
-pybind11::bytes PackCustomCallNormDescriptor(size_t batch_size, size_t hidden_size,
-                                             size_t wkspace_size, DType x_dtype, DType w_dtype,
-                                             DType wkspace_dtype, bool zero_centered_gamma,
-                                             float eps, int sm_margin);
-
-struct SoftmaxDescriptor {
-  size_t batch_size;
-  size_t padding_size;
-  size_t head_dim;
-  size_t q_seqlen;
-  size_t k_seqlen;
-  DType dtype;
-  float scale_factor;
-};
-
-pybind11::bytes PackCustomCallSoftmaxDescriptor(size_t batch_size, size_t padding_size,
-                                                size_t head_dim, size_t q_seqlen, size_t k_seqlen,
-                                                DType dtype, float scale_factor);
-
-struct CustomCallFusedAttnDescriptor {
-  size_t input_batch;
-  size_t bias_batch;
-  size_t q_max_seqlen;
-  size_t kv_max_seqlen;
-  size_t attn_heads;
-  size_t num_gqa_groups;
-  size_t bias_heads;
-  size_t head_dim;
-  size_t max_segments_per_seq;
-  size_t wkspace_size;
-  float scaling_factor;
-  float dropout_probability;
-  NVTE_Bias_Type bias_type;
-  NVTE_Mask_Type mask_type;
-  NVTE_QKV_Layout qkv_layout;
-  DType dtype;
-  DType wkspace_dtype;
-  bool is_training;
-  bool deterministic;
-  int64_t window_size_left;
-  int64_t window_size_right;
-};
-
-pybind11::bytes PackCustomCallFusedAttnDescriptor(
-    size_t input_batch, size_t batch_size, size_t q_max_seqlen, size_t kv_max_seqlen,
-    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
-    size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
-    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
-    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
-    bool deterministic, int64_t window_size_left, int64_t window_size_right);
-
-// Transpose
-
-void Transpose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(TransposeHandler);
-
-void CastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CastTransposeHandler);
-
-pybind11::tuple GetDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                    DType in_dtype, DType out_dtype);
-
-void DBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasCastTransposeHandler);
 
 // Activation
 
-size_t get_activation_len(NVTE_Activation_Type activation_enum);
-
-void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
-void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
-
-void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuHandler);
-
-pybind11::tuple GetDActDBiasCastTransposeWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                        DType in_dtype, DType out_dtype);
-
-void DActLuDBiasCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
-                              size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasCastTransposeHandler);
-
-void DGatedActLuCastTranspose(cudaStream_t stream, void **buffers, const char *opaque,
-                              size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(DGatedActLuCastTransposeHandler);
-
 // Normalization
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormForwardHandler);
 
-pybind11::tuple GetLayerNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                  DType in_dtype, DType w_dtype, DType out_dtype,
-                                                  bool is_layer_norm, bool zero_centered_gamma,
-                                                  float eps, int sm_margin);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(NormBackwardHandler);
 
-void LayerNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
+                                             DType w_dtype, DType out_dtype,
+                                             NVTE_Norm_Type norm_type, int scaling_mode,
+                                             bool zero_centered_gamma, float epsilon, int sm_margin,
+                                             bool is_training);
 
-XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardHandler);
-
-void LayerNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque,
-                         size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormForwardFP8Handler);
-
-pybind11::tuple GetLayerNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size,
-                                                   DType in_dtype, DType w_dtype,
-                                                   bool is_layer_norm, bool zero_centered_gamma,
-                                                   float eps, int sm_margin);
-
-void LayerNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(LayerNormBackwardHandler);
-
-void RMSNormForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardHandler);
-
-void RMSNormForwardFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormForwardFP8Handler);
-
-void RMSNormBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(RMSNormBackwardHandler);
+pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
+                                              DType w_dtype, NVTE_Norm_Type norm_type,
+                                              bool zero_centered_gamma, int sm_margin);
 
 // Quantization
-
-void Quantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(QuantizeHandler);
-
-void Dequantize(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DBiasQuantizeHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(DequantizeHandler);
 
+pybind11::tuple GetDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                               DType in_dtype, DType out_dtype);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler);
+
+pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hidden_size,
+                                                   DType in_dtype, DType out_dtype,
+                                                   int scaling_mode, bool is_2x);
+
 // Softmax
-
-void ScaledSoftmaxForward(cudaStream_t stream, void **buffers, const char *opaque,
-                          std::size_t opaque_len);
-
-void ScaledSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                           std::size_t opaque_len);
-
-void ScaledMaskedSoftmaxForward(cudaStream_t stream, void **buffers, const char *opaque,
-                                std::size_t opaque_len);
-
-void ScaledMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                                 std::size_t opaque_len);
-
-void ScaledUpperTriangMaskedSoftmaxForward(cudaStream_t stream, void **buffers, const char *opaque,
-                                           std::size_t opaque_len);
-
-void ScaledUpperTriangMaskedSoftmaxBackward(cudaStream_t stream, void **buffers, const char *opaque,
-                                            std::size_t opaque_len);
-
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxForwardHandler);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledSoftmaxBackwardHandler);
@@ -266,9 +83,9 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ScaledUpperTriangMaskedSoftmaxBackwardHandler);
 
 // Attention
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
 
-// Cudnn helpers
-XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
 
 NVTE_Fused_Attn_Backend GetFusedAttnBackend(DType q_dtype, DType kv_dtype,
                                             NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
@@ -285,10 +102,6 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right);
 
-void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
-
-XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnForwardHandler);
-
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
     size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t head_dim,
@@ -297,9 +110,14 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
     int64_t window_size_right);
 
-void FusedAttnBackward(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
+// Grouped GEMM
+XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
-XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedAttnBackwardHandler);
+// Cudnn helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
+
+// CuBLAS helpers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
