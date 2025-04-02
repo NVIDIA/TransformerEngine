@@ -632,16 +632,22 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         rng_sharding = (f'…{len(value_types)}',)
 
         if config.qkv_layout.is_qkvpacked():
-            input_spec[0] = ('…0', 'i', 'j', 'k', 'l')
-            return SdyShardingRule(
-                tuple(input_spec),
-                (('…0', 'i', 'k', 'l'), ('…0', 'k', 'i', 'm'), rng_sharding))
+            input_spec[0] = ('…0', 'seqlen', 'three', 'head', 'hidden')
+        elif config.qkv_layout.is_kvpacked() or config.qkv_layout.is_separate():
+            input_spec[0] = ('…0', 'seqlen', 'head', 'hidden')
+        else:
+            raise ValueError(f"Unsupported {config.qkv_layout=}")
 
-        # All other layouts.
-        input_spec[0] = ('…0', 'i', 'j', 'k')
+        is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
+        out_sharding = ('…0', 'seqlen', 'head', 'hidden')
+        if is_packed_softmax:
+            softmax_aux_sharding = ('…0', 'seqlen', 'head', 'i')
+        else:
+            softmax_aux_sharding = ('…0', 'head', 'seqlen', 'i')
+
         return SdyShardingRule(
             tuple(input_spec),
-            (('…0', 'i', 'j', 'k'), ('…0', 'j', 'i', 'l'), rng_sharding))
+            (out_sharding, softmax_aux_sharding, rng_sharding))
 
 register_primitive(FusedAttnFwdPrimitive)
 
