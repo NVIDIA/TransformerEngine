@@ -21,7 +21,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm", "grouped_gemm"]
+__all__ = ["gemm", "grouped_gemm", "grouped_add"]
 
 
 num_cublas_streams = 4
@@ -518,3 +518,38 @@ def grouped_gemm(
         out_tensors.append(out_flat.reshape(*lhs_remain_shape, *rhs_remain_shape))
 
     return out_tensors
+
+class GroupedAddPrimitive(BasePrimitive):
+    multiple_results = True
+    impl_static_args = ()
+    inner_primitive = None
+    outer_primitive = None
+    name = "te_grouped_add_ffi"
+
+    @staticmethod
+    def abstract(*args, out_dtype):
+        num_pairs = len(args) // 2
+        A_list = args[:num_pairs]
+        return tuple(jax.core.ShapedArray(A.shape, dtype=out_dtype) for A in A_list)
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        return GroupedAddPrimitive.abstract(*args, **kwargs)
+
+    @staticmethod
+    def lowering(ctx, *args, out_dtype):
+        del out_dtype
+        num_pairs = len(args) // 2
+        return jax.ffi.ffi_lowering(GroupedAddPrimitive.name)(
+            ctx, *args, num_pairs=num_pairs
+        )
+
+    @staticmethod
+    def impl(*args, out_dtype):
+        assert GroupedAddPrimitive.inner_primitive is not None
+        return GroupedAddPrimitive.inner_primitive.bind(*args, out_dtype=out_dtype)
+
+register_primitive(GroupedAddPrimitive)
+
+def grouped_add(A_list, B_list, out_dtype):
+    return GroupedAddPrimitive.outer_primitive.bind(*A_list, *B_list, out_dtype=out_dtype)

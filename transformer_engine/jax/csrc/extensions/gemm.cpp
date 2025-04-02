@@ -209,5 +209,57 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode"),
                               FFI_CudaGraph_Traits);
 
+Error_Type GroupedAddFFI(cudaStream_t stream, Variadic_Buffer_Type input_list,
+                         Variadic_Result_Type output_list, int64_t num_pairs) {
+  for (size_t i = 0; i < static_cast<size_t>(num_pairs); i++) {
+    auto A_i_get = input_list.get<Buffer_Type>(i);
+    auto B_i_get = input_list.get<Buffer_Type>(num_pairs + i);
+    auto C_i_get = output_list.get<Buffer_Type>(i);
+    Buffer_Type A_i = A_i_get.value();
+    Buffer_Type B_i = B_i_get.value();
+    Result_Type C_i = C_i_get.value();
+    auto A_ptr = reinterpret_cast<float *>(A_i.untyped_data());
+    auto B_ptr = reinterpret_cast<float *>(B_i.untyped_data());
+    auto C_ptr = reinterpret_cast<float *>(C_i->untyped_data());
+    auto A_shape = A_i.dimensions();
+    auto B_shape = B_i.dimensions();
+    auto C_shape = C_i->dimensions();
+    printf("Pair %ld: A shape ", i);
+    for (size_t j = 0; j < A_shape.size(); j++) printf("%ld ", A_shape[j]);
+    printf("; B shape ");
+    for (size_t j = 0; j < B_shape.size(); j++) printf("%ld ", B_shape[j]);
+    printf("; C shape ");
+    for (size_t j = 0; j < C_shape.size(); j++) printf("%ld ", C_shape[j]);
+    printf("\n");
+    size_t A_size = product(A_shape);
+    size_t B_size = product(B_shape);
+    size_t C_size = product(C_shape);
+    float *A_ptr_host = (float *) malloc(A_size * sizeof(float));
+    float *B_ptr_host = (float *) malloc(B_size * sizeof(float));
+    float *C_ptr_host = (float *) malloc(C_size * sizeof(float));
+    cudaMemcpyAsync(A_ptr_host, A_ptr, A_size * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(B_ptr_host, B_ptr, B_size * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(C_ptr_host, C_ptr, C_size * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    for (size_t j = 0; j < A_size; j++)
+      C_ptr_host[j] = A_ptr_host[j] + B_ptr_host[j];
+    cudaMemcpyAsync(C_ptr, C_ptr_host, C_size * sizeof(float), cudaMemcpyHostToDevice, stream);
+    cudaStreamSynchronize(stream);
+    free(A_ptr_host);
+    free(B_ptr_host);
+    free(C_ptr_host);
+  }
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedAddHandler, GroupedAddFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .RemainingArgs()         // input list
+                                  .RemainingRets()         // output list
+                                  .Attr<int64_t>("num_pairs"),
+                              FFI_CudaGraph_Traits);
+
+
 }  // namespace jax
 }  // namespace transformer_engine
