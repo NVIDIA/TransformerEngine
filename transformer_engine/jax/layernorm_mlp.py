@@ -223,17 +223,16 @@ def _layernorm_mlp_fwd_rule(
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
     # x should be in shape of (batch..., hidden)
-    # Kernel_1 should be in shape of (hidden_in, activation_len * intermediate)
+    # Kernel_1 should be in shape of (hidden_in, activation_len, intermediate)
     # Kernel_2 should be in shape of (intermediate, hidden_in)
-    assert len(kernel_1.shape) == 2
+    assert len(kernel_1.shape) == 3
     assert len(kernel_2.shape) == 2
-    assert kernel_1.shape[1] == kernel_2.shape[0] * len(activation_type)
+    assert kernel_1.shape[-2] == len(activation_type)
 
     x_contracting_dims = (len(x.shape) - 1,)
     k_contracting_dims = (0,)
 
     assert x.shape[x_contracting_dims[0]] == kernel_1.shape[k_contracting_dims[0]]
-    assert kernel_1.shape[1] == len(activation_type) * kernel_2.shape[0]
 
     use_bias_1 = bias_1 is not None
     use_bias_2 = bias_1 is not None
@@ -250,7 +249,7 @@ def _layernorm_mlp_fwd_rule(
         quantizer=ffn1_quantizer_set.x,
     )
 
-    casted_kernel_1 = tex.quantize(kernel_1, quantizer=ffn1_quantizer_set.kernel)
+    casted_kernel_1 = tex.quantize(kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel)
 
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
@@ -407,10 +406,6 @@ def _layernorm_mlp_bwd_rule(
         quantizer=ffn2_quantizer_set.dgrad,
     )
 
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
-    g_constracting_dim_1 = tuple(
-        range(dgrad_2.ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dgrad_2.ndim)
-    )
     # k_non_contracting_dims
     k_constracting_dim_1 = tuple(
         dim for dim in range(len(kernel_1_shape)) if dim not in k_contracting_dims_in_fwd
@@ -420,7 +415,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_1 = tex.gemm(
         casted_dact_out.get_rowwise_tensor(),
         rowwise_casted_kernel_1,
-        (g_constracting_dim_1, k_constracting_dim_1),
+        (k_constracting_dim_1, k_constracting_dim_1),
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, norm_input_axes)

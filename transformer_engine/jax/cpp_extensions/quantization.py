@@ -108,8 +108,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
             )
 
         if is_dbias:
+            dbias_shape = x_aval.shape[flatten_axis:]
             gi_hidden_size = reduce(operator.mul, x_aval.shape[flatten_axis:])
-            dbias_shape = (gi_hidden_size,)
             dbias_aval = x_aval.update(shape=dbias_shape, dtype=dtype)
             (wkspace_info,) = transformer_engine_jax.get_dbias_quantize_workspace_sizes(
                 x_aval.size // gi_hidden_size,
@@ -465,7 +465,6 @@ def _jax_dbias(dx: jnp.ndarray, dtype=None, flatten_axis: int = -1):
         axis=tuple(range(dx.ndim + flatten_axis)),
         keepdims=False,
     )
-    dbias = dbias.ravel()  # C++ function returns an 1D array for dbias
     return dbias.astype(dtype)
 
 

@@ -480,7 +480,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         if is_dbias:
-            dbias_shape = gi_hidden_size
+            dbias_shape = (act_len, ir_hidden_size)
             (wkspace_info,) = transformer_engine_jax.get_dact_dbias_quantize_workspace_sizes(
                 x_aval.size // gi_hidden_size,
                 gi_hidden_size,

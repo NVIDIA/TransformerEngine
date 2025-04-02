@@ -925,13 +925,13 @@ class TestFusedDense:
 
         x = jax.random.normal(subkeys[0], (m, k), jnp.bfloat16)
         kernel_1 = jax.random.normal(
-            subkeys[1], (k, len(activation_type) * n), jnp.bfloat16
+            subkeys[1], (k, len(activation_type), n), jnp.bfloat16
         ) / jnp.sqrt(k)
         kernel_2 = jax.random.normal(subkeys[2], (n, k), jnp.bfloat16) / jnp.sqrt(n)
         gamma = jax.random.normal(subkeys[5], (k,), jnp.bfloat16)
         beta = None  # was tested in TestNorm
         if use_bias:
-            bias_1 = jax.random.normal(subkeys[3], (len(activation_type) * n), jnp.bfloat16)
+            bias_1 = jax.random.normal(subkeys[3], (len(activation_type), n), jnp.bfloat16)
             bias_2 = jax.random.normal(subkeys[4], (k,), jnp.bfloat16)
         else:
             bias_1 = None
