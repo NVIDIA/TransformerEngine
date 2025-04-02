@@ -82,7 +82,7 @@ def cublas_gemm_fp8_blockwise_case(
         rowwise=True,
         columnwise=True,
         amax_epsilon=0.0,
-        force_pow_2_scales=False,
+        force_pow_2_scales=True,
         block_scaling_dim=x_block_scaling_dim,
     )
     w_quantizer = Float8BlockQuantizer(
@@ -90,7 +90,7 @@ def cublas_gemm_fp8_blockwise_case(
         rowwise=True,
         columnwise=True,
         amax_epsilon=0.0,
-        force_pow_2_scales=False,
+        force_pow_2_scales=True,
         block_scaling_dim=w_block_scaling_dim,
     )
 
@@ -252,7 +252,7 @@ def cublas_gemm_test_constraint_enforced(
         rowwise=True,
         columnwise=True,
         amax_epsilon=0.0,
-        force_pow_2_scales=False,
+        force_pow_2_scales=True,
         block_scaling_dim=x_block_scaling_dim,
     )
     w_quantizer = Float8BlockQuantizer(
@@ -260,7 +260,7 @@ def cublas_gemm_test_constraint_enforced(
         rowwise=True,
         columnwise=True,
         amax_epsilon=0.0,
-        force_pow_2_scales=False,
+        force_pow_2_scales=True,
         block_scaling_dim=w_block_scaling_dim,
     )
 
