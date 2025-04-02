@@ -422,13 +422,6 @@ class Float8Tensor(Float8TensorBase, QuantizedTensor):
         # pylint: disable=missing-function-docstring
         return Float8Tensor.make_like(self)
 
-    def _create_transpose(self):
-        data = self._data
-        if not data.is_contiguous():
-            data = data.contiguous()
-        self._transpose = tex.fp8_transpose(data, self._fp8_dtype, out=self._transpose)
-        self._transpose_invalid = False
-
     def update_usage(
         self,
         rowwise_usage: Optional[bool] = None,

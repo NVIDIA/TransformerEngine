@@ -57,7 +57,11 @@ from ..distributed import (
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
-from ..tensor.float8_tensor import Float8Tensor
+from ..tensor.float8_tensor import (
+    Float8CurrentScalingQuantizer,
+    Float8Quantizer,
+    Float8Tensor,
+)
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ._common import apply_normalization, _fix_gathered_fp8_transpose
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
@@ -674,15 +678,27 @@ class _LayerNormMLP(torch.autograd.Function):
             ctx.ub_bulk_dgrad = ctx.fc1_weight_requires_grad and ctx.ub_bulk_dgrad
             ctx.ub_bulk_wgrad = ctx.fc1_weight_requires_grad and ctx.ub_bulk_wgrad
 
-            # Prepare grad output tensor
-            # Note: Cast to expected dtype and perform tensor-parallel communication
-            if ctx.fc2_grad_output_quantizer is not None:
-                # Reduce duplicated transpose, which is performed in grad_output.update_usage
-                if ctx.ub_overlap_ag and ctx.fp8_recipe.float8_per_tensor_scaling():
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
-                else:
-                    ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            # Configure quantizer for FC2 grad output tensor
+            # Note: dgrad GEMM requires row-wise usage, wgrad GEMM
+            # requires column-wise usage
+            if ctx.grad_fc2_output_quantizer is not None:
+                rowwise_usage = True
+                columnwise_usage = True
+                if ctx.ub_overlap_ag and isinstance(
+                    ctx.grad_fc2_output_quantizer,
+                    (Float8Quantizer, Float8CurrentScalingQuantizer),
+                ):
+                    # If data is in FP8 and communication is handled
+                    # with Userbuffers, we compute FP8 transposes
+                    # manually
+                    columnwise_usage = False
+                ctx.grad_fc2_output_quantizer.set_usage(
+                    rowwise=rowwise_usage,
+                    columnwise=columnwise_usage,
+                )
 
+            # Prepare FC2 grad output tensor
+            # Note: Cast to expected dtype and perform tensor-parallel communication
             ub_obj_fc2_dgrad = None
             if ctx.ub_overlap_ag:
                 ub_obj_fc2_dgrad = get_ub("fc2_dgrad")
@@ -694,8 +710,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 ctx, grad_outputs[0], True, ctx.fc2_grad_output_quantizer
             )
 
-            # Prepare FC1 GEMM input
-            # Note: Perform tensor-parallel communication if needed
+            # Launch tensor-parallel communication for FC1 GEMM input
             ln_out_total = None
             ln_out_total_work = None
             if (
@@ -707,7 +722,12 @@ class _LayerNormMLP(torch.autograd.Function):
                 quantizer = None
                 if ctx.fp8 or ctx.debug:
                     quantizer = ctx.fc1_input_quantizer
-                    quantizer.set_usage(rowwise=False, columnwise=True)
+                    if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+                        # If data is in FP8, we compute FP8 transposes manually
+                        quantizer.set_usage(rowwise=True, columnwise=False)
+                    else:
+                        # wgrad GEMM requires input with column-wise usage
+                        quantizer.set_usage(rowwise=False, columnwise=True)
                 ln_out_total, ln_out_total_work = gather_along_first_dim(
                     ln_out,
                     ctx.tp_group,
@@ -911,6 +931,8 @@ class _LayerNormMLP(torch.autograd.Function):
             # FC1 WGRAD
             fc1_wgrad = None
             if ctx.fc1_weight_requires_grad:
+
+                # Synchronize tensor-parallel communication for FC1 GEMM input tensor
                 if ctx.ub_bulk_dgrad:
                     ln_out_total = ub_obj_fc1_dgrad.get_buffer(ctx.fc1_input_quantizer)
                     if ctx.fp8:
@@ -922,24 +944,24 @@ class _LayerNormMLP(torch.autograd.Function):
                             # FP8 GEMM on Hopper only supports TN layout so the gathered input must
                             # have a valid transpose.
                             ln_out_total._create_transpose()
+                if ln_out_total_work is not None:
+                    ln_out_total_work.wait()
+                    ln_out_total_work = None
 
-                else:
-                    if ln_out_total_work is not None:
-                        # Synchronize tensor-parallel communication
-                        ln_out_total_work.wait()
-                        ln_out_total_work = None
-
-                # Make sure GEMM inputs have expected data
+                # Make sure GEMM inputs have required data
                 if isinstance(ln_out_total, QuantizedTensor):
-                    ln_out_total.update_usage(rowwise_usage=True, columnwise_usage=True)
+                    ln_out_total.update_usage(columnwise_usage=True)
                 if isinstance(dact, QuantizedTensor):
-                    dact.update_usage(rowwise_usage=True, columnwise_usage=True)
+                    dact.update_usage(columnwise_usage=True)
 
+                # Output buffer for overlapping grad input
+                # reduce-scatter with wgrad GEMM
                 if ctx.ub_bulk_wgrad and ub_obj_fc1_wgrad.is_fp8_ubuf():
                     fc1_dgrad_rs_out = torch.empty(
                         fc1_dgrad_shape, dtype=ctx.activation_dtype, device="cuda"
                     )
 
+                # wgrad GEMM
                 fc1_wgrad_outputs = general_gemm(
                     ln_out_total,
                     dact,
@@ -974,7 +996,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     else:
                         fc1_dgrad = ub_obj_fc1_wgrad.get_buffer(None, local_chunk=True)
 
-            # Synchronize tensor parallel communication
+            # Make sure all tensor-parallel communication is finished
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
