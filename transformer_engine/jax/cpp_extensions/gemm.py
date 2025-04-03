@@ -186,7 +186,6 @@ def __jitted_jax_gemm_delayed_scaling_fp8(lhs, rhs, lhs_dn, rhs_dn, precision):
     lhs_3d = _shape_normalization(lhs_dq, lhs_dn, lhs.data_layout == "N")
     rhs_3d = _shape_normalization(rhs_dq, rhs_dn, rhs.data_layout == "T")
 
-    # _shape_normalization ensures contracting_dims=2 and batch_dims=0
     dim_nums = (((2,), (2,)), ((0,), (0,)))
     out_3d = jax.lax.dot_general(
         lhs_3d, rhs_3d, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype

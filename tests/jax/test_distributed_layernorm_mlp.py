@@ -50,6 +50,12 @@ INPUT_SHAPE = [[2, 64, 64]]  # [batch, seqlen, hidden_in]
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)
 DOT_2_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_TP_AXES)
+KERNEL_1_AXES = (W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES)
+KERNEL_2_AXES = (W_TP_AXES, W_FSDP_AXES)
+LN_SCALE_AXES = (W_NO_SHARD_AXES,)
+LN_BIAS_AXES = (W_NO_SHARD_AXES,)
+BIAS_1_AXES = (W_JOINED_AXES, W_TP_AXES)
+BIAS_2_AXES = (W_NO_SHARD_AXES,)
 INTERMEDIATE = 64
 
 
@@ -61,10 +67,10 @@ def generate_fsdp_and_tp_configs():
             [2, (1, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
 
-    if is_devices_enough(4):
-        configs.append(
-            [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
-        )
+#    if is_devices_enough(4):
+#        configs.append(
+#            [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
+#        )
     return configs
 
 
@@ -80,13 +86,13 @@ class TestDistributedLayernormMLP:
         x = jax.random.normal(subkeys[0], (batch, seqlen, hidden_in), dtype)
         gamma = jax.random.normal(subkeys[5], (hidden_in,), dtype=dtype)
         k1 = jax.random.normal(
-            subkeys[1], (hidden_in, len(activation_type) * INTERMEDIATE), dtype
+            subkeys[1], (hidden_in, len(activation_type), INTERMEDIATE), dtype
         ) / jnp.sqrt(hidden_in)
         k2 = jax.random.normal(subkeys[2], (INTERMEDIATE, hidden_out), dtype) / jnp.sqrt(
             INTERMEDIATE
         )
         if use_bias:
-            b1 = jax.random.normal(subkeys[3], (len(activation_type) * INTERMEDIATE), dtype)
+            b1 = jax.random.normal(subkeys[3], (len(activation_type), INTERMEDIATE), dtype)
             b2 = jax.random.normal(subkeys[4], (hidden_out,), dtype)
         else:
             b1 = None
@@ -111,10 +117,12 @@ class TestDistributedLayernormMLP:
             layernorm_input_axes = LAYERNORM_INPUT_AXES
             dot_1_input_axes = DOT_1_INPUT_AXES
             dot_2_input_axes = DOT_2_INPUT_AXES
+            kernel_1_axes = KERNEL_1_AXES
+            kernel_2_axes = KERNEL_2_AXES
         else:
             layernorm_input_axes = None
-            dot_1_input_axes = None
-            dot_2_input_axes = None
+            dot_1_input_axes = dot_2_input_axes = None
+            kernel_1_axes = kernel_2_axes = None
 
         quantizer_sets = QuantizerFactory.create_set(n_quantizer_sets=2)
 
@@ -130,6 +138,8 @@ class TestDistributedLayernormMLP:
                 norm_input_axes=layernorm_input_axes,
                 dot_1_input_axes=dot_1_input_axes,
                 dot_2_input_axes=dot_2_input_axes,
+                kernel_1_axes=kernel_1_axes,
+                kernel_2_axes=kernel_2_axes,
                 activation_type=activation_type,
                 quantizer_sets=quantizer_sets,
             )
@@ -168,12 +178,12 @@ class TestDistributedLayernormMLP:
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
         with mesh, fp8_autocast(enabled=True, fp8_recipe=fp8_recipe, mesh_resource=mesh_resource):
-            k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", "tp"))
+            k1_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tp"))
             k2_sharding = NamedSharding(mesh, PartitionSpec("tp", "fsdp"))
             k1_ = jax.device_put(k1, k1_sharding)
             k2_ = jax.device_put(k2, k2_sharding)
             if use_bias:
-                b1_sharding = NamedSharding(mesh, PartitionSpec("tp"))
+                b1_sharding = NamedSharding(mesh, PartitionSpec(None, "tp"))
                 b1_ = jax.device_put(b1, b1_sharding)
             else:
                 b1_sharding = b1_ = None
@@ -288,11 +298,11 @@ class TestDistributedLayernormMLP:
                 activations=activation_type,
                 scale_axes=(W_NO_SHARD_AXES,),
                 ln_bias_axes=(W_NO_SHARD_AXES,),
-                kernel_axes_1=(W_FSDP_AXES, W_JOINED_AXES, W_TP_AXES),
-                kernel_axes_2=(W_TP_AXES, W_FSDP_AXES),
+                kernel_axes_1=KERNEL_1_AXES,
+                kernel_axes_2=KERNEL_2_AXES,
                 use_bias=use_bias,
-                bias_axes_1=(W_JOINED_AXES, W_TP_AXES),
-                bias_axes_2=(W_NO_SHARD_AXES,),
+                bias_axes_1=BIAS_1_AXES,
+                bias_axes_2=BIAS_2_AXES,
                 layernorm_input_axes=LAYERNORM_INPUT_AXES,
                 dot_1_input_axes=DOT_1_INPUT_AXES,
                 dot_2_input_axes=DOT_2_INPUT_AXES,

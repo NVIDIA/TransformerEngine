@@ -83,7 +83,7 @@ def assert_bitwise_scaled_tensors(a: ScaledTensor, b: ScaledTensor):
 def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
     if isinstance(a, ScaledTensor1x):
         if a.data_layout == "T":
-            flatten_axis = a.flatten_axis
+            flatten_axis = a.data.ndim - a.flatten_axis
             b_transpose = jnp.transpose(b, (*range(flatten_axis, b.ndim), *range(flatten_axis)))
             assert_allclose(a.dequantize(), b_transpose, dtype=a.data.dtype)
         else:

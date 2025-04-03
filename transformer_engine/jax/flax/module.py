@@ -406,6 +406,10 @@ class DenseGeneral(TransformerEngineBase):
         :math:`\frac{alpha}{rank} * lora_output`. None means no scaling.
     axis:  Union[Iterable[int], int], default = -1
         An integer tuple with axes to apply the transformation on.
+    input_axes: Tuple[str, ...], default = None
+        Indicate the logical axes of sharding constraint to the input, like
+        (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
+        sharding constraint.
 
     Optimization parameters
     -----------------------
@@ -429,6 +433,7 @@ class DenseGeneral(TransformerEngineBase):
     axis: Union[Iterable[int], int] = -1
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
+    input_axes: Tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.kernel_init is None:
@@ -483,7 +488,10 @@ class DenseGeneral(TransformerEngineBase):
         quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
         y = dense(
-            inputs, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set
+            inputs, kernel, contracting_dims=(axis, contract_ind),
+            input_axes=self.input_axes,
+            kernel_axes=self.kernel_axes,
+            quantizer_set=quantizer_set
         )
 
         if self.enable_low_rank_adaptation:
@@ -522,7 +530,6 @@ class DenseGeneral(TransformerEngineBase):
             y += jnp.reshape(bias, bias_shape)
 
         assert y.dtype == input_dtype
-        # y = y.reshape(*inputs.shape[: self.axis], *features)
         return y
 
 
@@ -744,11 +751,15 @@ class LayerNormDenseGeneral(TransformerEngineBase):
                 epsilon=self.epsilon,
                 layernorm_input_axes=self.layernorm_input_axes,
                 dot_input_axes=self.dot_input_axes,
+                kernel_axes=self.kernel_axes,
                 quantizer_set=quantizer_set,
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = dense(y, kernel, contracting_dims=(axis, contract_ind), quantizer_set=quantizer_set)
+            z = dense(y, kernel, contracting_dims=(axis, contract_ind),
+                      input_axes=self.dot_input_axes,
+                      kernel_axes=self.kernel_axes,
+                      quantizer_set=quantizer_set)
 
         if self.enable_low_rank_adaptation:
             lora_a_kernel_shape = (
@@ -1120,6 +1131,8 @@ class LayerNormMLP(TransformerEngineBase):
                 norm_input_axes=self.layernorm_input_axes,
                 dot_1_input_axes=self.dot_1_input_axes,
                 dot_2_input_axes=self.dot_2_input_axes,
+                kernel_1_axes=self.kernel_axes_1,
+                kernel_2_axes=self.kernel_axes_2,
                 ffn1_ckpt_name=ffn1_ckpt_name,
                 ffn2_ckpt_name=ffn2_ckpt_name,
                 activation_type=normalized_acts,
@@ -1140,6 +1153,7 @@ class LayerNormMLP(TransformerEngineBase):
                     epsilon=self.epsilon,
                     layernorm_input_axes=self.layernorm_input_axes,
                     dot_input_axes=self.dot_1_input_axes,
+                    kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
             else:
@@ -1148,6 +1162,8 @@ class LayerNormMLP(TransformerEngineBase):
                     y,
                     kernel_1,
                     contracting_dims=(axis, contract_ind),
+                    input_axes=self.dot_1_input_axes,
+                    kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
 
@@ -1219,7 +1235,10 @@ class LayerNormMLP(TransformerEngineBase):
 
             # DenseGeneral 2
             out = dense(
-                z, kernel_2, contracting_dims=(axis, contract_ind), quantizer_set=ffn2_quantizer_set
+                z, kernel_2, contracting_dims=(axis, contract_ind),
+                input_axes=self.dot_2_input_axes,
+                kernel_axes=self.kernel_axes_2,
+                quantizer_set=ffn2_quantizer_set
             )
 
             if self.enable_low_rank_adaptation:

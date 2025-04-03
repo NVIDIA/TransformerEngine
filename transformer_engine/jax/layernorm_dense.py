@@ -22,6 +22,7 @@ from .quantize import (
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
 )
+from .sharding import get_non_contracting_logical_axes
 
 
 def layernorm_dense(
@@ -33,10 +34,9 @@ def layernorm_dense(
     norm_type: str = "layernorm",
     zero_centered_gamma: bool = False,
     epsilon: float = 1e-6,
-    # The logic axes of sharding constraint to the layernorm input.
     layernorm_input_axes: Tuple[str, ...] = None,
-    # The logic axes of sharding constraint to the dot input.
     dot_input_axes: Tuple[str, ...] = None,
+    kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ) -> jnp.ndarray:
     """Apply layer normalization followed by dense layer transformation.
@@ -56,6 +56,7 @@ def layernorm_dense(
         epsilon: Small constant for numerical stability in normalization
         layernorm_input_axes: Logical axes for sharding the layernorm input
         dot_input_axes: Logical axes for sharding the matrix multiplication input
+        kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: Set of quantizers for different tensor types
 
     Returns:
@@ -78,6 +79,7 @@ def layernorm_dense(
         epsilon,
         layernorm_input_axes,
         dot_input_axes,
+        kernel_axes,
         quantizer_set,
     )
     return output
@@ -91,6 +93,7 @@ def layernorm_dense(
         7,
         8,
         9,
+        10,
     ),
 )
 def _layernorm_dense(
@@ -104,6 +107,7 @@ def _layernorm_dense(
     epsilon: float,
     layernorm_input_axes: Tuple[str, ...],
     dot_input_axes: Tuple[str, ...],
+    kernel_axes: Tuple[str, ...],
     quantizer_set,
 ):
     """Internal implementation of layernorm_dense with custom VJP.
@@ -139,6 +143,7 @@ def _layernorm_dense(
         epsilon,
         layernorm_input_axes,
         dot_input_axes,
+        kernel_axes,
         quantizer_set,
     )
     return output
@@ -155,6 +160,7 @@ def _layernorm_dense_fwd_rule(
     epsilon,
     layernorm_input_axes,
     dot_input_axes,
+    kernel_axes,
     quantizer_set,
 ):
     """Forward pass rule for layernorm_dense.
@@ -171,7 +177,6 @@ def _layernorm_dense_fwd_rule(
     x_contracting_dims = (len(x.shape) - 1,)
     k_contracting_dims = (0,)
     assert x.shape[-1] == kernel.shape[0]
-    assert len(kernel.shape) == 2  # Otherwise need to merge dims in quantize
 
     x = with_sharding_constraint_by_logical_axes(x, layernorm_input_axes)
 
@@ -186,7 +191,8 @@ def _layernorm_dense_fwd_rule(
     )
 
     # Kernel in (hidden_in, hidden_out...)
-    casted_kernel = tex.quantize(kernel, quantizer_set.kernel)
+    flatten_axis = 1 - len(kernel.shape)
+    casted_kernel = tex.quantize(kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel)
 
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
@@ -197,6 +203,12 @@ def _layernorm_dense_fwd_rule(
         casted_kernel.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
+
+    output_axes = (
+            *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims),
+            *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims)
+            )
+    output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
     use_bias = bias is not None
     if use_bias:
@@ -217,6 +229,7 @@ def _layernorm_dense_fwd_rule(
         k_contracting_dims,
         use_bias,
         quantizer_set,
+        flatten_axis,
     )
 
     return output, ctx
@@ -228,6 +241,7 @@ def _layernorm_dense_bwd_rule(
     epsilon,
     layernorm_input_axes,
     dot_input_axes,  # pylint: disable=unused-argument
+    kernel_axes,
     ctx,
     grad,
 ):
@@ -256,11 +270,16 @@ def _layernorm_dense_bwd_rule(
         k_contracting_dims_in_fwd,
         use_bias,
         quantizer_set,
+        flatten_axis,
     ) = ctx
 
-    grad = with_sharding_constraint_by_logical_axes(grad, dot_input_axes)
+    grad_axes = (
+            *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
+            *get_non_contracting_logical_axes(len(kernel_shape), kernel_axes, k_contracting_dims_in_fwd)
+            )
+    grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
-    casted_grad, dbias = tex.quantize_dbias(grad, is_dbias=use_bias, quantizer=quantizer_set.dgrad)
+    casted_grad, dbias = tex.quantize_dbias(grad, is_dbias=use_bias, flatten_axis=flatten_axis, quantizer=quantizer_set.dgrad)
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
     g_constracting_dim = tuple(
@@ -290,6 +309,8 @@ def _layernorm_dense_bwd_rule(
         casted_grad.get_colwise_tensor(),
         (x_constracting_dim, g_constracting_dim),
     )
+
+    wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
     dx, dgamma, dbeta = tex.normalization_bwd(
         dgrad,

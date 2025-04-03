@@ -77,12 +77,14 @@ class DBiasQuantizePrimitive(BasePrimitive):
         del scale_shapes
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        out_shape = x_aval.shape
         assert scale_aval is None or scale_aval.dtype == jnp.float32
 
-        rowwise_out_aval = jax.core.ShapedArray(shape=(1,), dtype=out_dtype)
-
         if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            rowwise_out_aval = x_aval.update(shape=x_aval.shape, dtype=out_dtype)
+            rowwise_out_shape = out_shape
+        else:
+            rowwise_out_shape = (1,)
+        rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
 
         updated_amax_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
 
@@ -90,36 +92,37 @@ class DBiasQuantizePrimitive(BasePrimitive):
             scaling_mode
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=flatten_axis)
 
-        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
-
-        colwise_out_aval = jax.core.ShapedArray(shape=(1,), dtype=out_dtype)
-        colwise_scale_inv_aval = jax.core.ShapedArray(shape=(1,), dtype=scale_dtype)
-
-        dbias_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
-        wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            t_shape = multidim_transpose(x_aval.shape, transpose_axis=flatten_axis)
-            if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-                # Don't transpose output for MXFP8
-                t_shape = x_aval.shape
-            colwise_out_aval = x_aval.update(shape=t_shape, dtype=out_dtype)
-            colwise_scale_inv_aval = jax.core.ShapedArray(
-                shape=colwise_scale_inv_shape, dtype=scale_dtype
-            )
+            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+                colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
+            else:
+                colwise_out_shape = out_shape
+        else:
+            colwise_out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
 
         if is_dbias:
             dbias_shape = x_aval.shape[flatten_axis:]
-            gi_hidden_size = reduce(operator.mul, x_aval.shape[flatten_axis:])
-            dbias_aval = x_aval.update(shape=dbias_shape, dtype=dtype)
+            gi_hidden_size = reduce(operator.mul, x_aval.shape[flatten_axis:], 1)
             (wkspace_info,) = transformer_engine_jax.get_dbias_quantize_workspace_sizes(
                 x_aval.size // gi_hidden_size,
                 gi_hidden_size,
                 jax_dtype_to_te_dtype(x_aval.dtype),
                 jax_dtype_to_te_dtype(out_dtype),
             )
-            wkspace_aval = x_aval.update(
-                shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
-            )
+            wkspace_shape = wkspace_info[0]
+            wkspace_dtype = te_dtype_to_jax_dtype(wkspace_info[1])
+        else:
+            dbias_shape = (1,)
+            wkspace_shape = (1,)
+            wkspace_dtype = jnp.float32
+        dbias_aval = jax.core.ShapedArray(shape=dbias_shape, dtype=dtype)
+        wkspace_aval = jax.core.ShapedArray(shape=wkspace_shape, dtype=wkspace_dtype)
 
         return (
             rowwise_out_aval,
@@ -175,8 +178,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
             scale,
             scaling_mode=scaling_mode,
             q_layout=q_layout,
-            is_dbias=is_dbias,
             flatten_axis=flatten_axis,
+            is_dbias=is_dbias,
         )
 
     @staticmethod
@@ -186,11 +189,11 @@ class DBiasQuantizePrimitive(BasePrimitive):
         out_dtype,
         scaling_mode,
         q_layout,
+        flatten_axis,
         scale_dtype,
         scale_shapes,
         is_dbias,
         is_outer,
-        flatten_axis,
     ):
         """
         te_dbias_quantize_p implementation
@@ -220,14 +223,12 @@ class DBiasQuantizePrimitive(BasePrimitive):
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False, flatten_axis=flatten_axis)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-                scale_inv = jax.lax.slice(
-                    scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
+        scale_inv = jax.lax.slice(
+                scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
                 )
-            if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-                colwise_scale_inv = jax.lax.slice(
-                    colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
+        # if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+        colwise_scale_inv = jax.lax.slice(
+                colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
                 )
         return (
             out,
@@ -292,8 +293,9 @@ class DBiasQuantizePrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del (out_dtype, result_infos, scale_dtype, scale_shapes, is_dbias, is_outer)  # Unused.
+        del (out_dtype, result_infos, scale_dtype, scale_shapes, is_outer)  # Unused.
         x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*x_spec),
@@ -311,26 +313,33 @@ class DBiasQuantizePrimitive(BasePrimitive):
             PartitionSpec(*colwise_out_spec),
             desc="DBiasQuantizePrimitive.colwise_out_sharding",
         )
-        scale_inv_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(*get_padded_spec(arg_infos[1])),
-            desc="DBiasQuantizePrimitive.scale_inv",
-        )
-        amax_sharding = scale_inv_sharding.duplicate_with_new_description(
-            desc="DBiasQuantizePrimitive.amax_sharding"
-        )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="DBiasQuantizePrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "DBiasQuantizePrimitive.colwise_scale_inv"
-        )
+
+        dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DBiasQuantizePrimitive.dbias_sharding",
         )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="DBiasQuantizePrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec),
+                                      desc="DBiasQuantizePrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec),
+            desc="DBiasQuantizePrimitive.colwise_scale_inv"
+        )
+
         return (
             out_sharding,
             colwise_out_sharding,
@@ -356,6 +365,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
     ):
         del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
             mesh,
             PartitionSpec(*x_spec),
@@ -373,26 +383,33 @@ class DBiasQuantizePrimitive(BasePrimitive):
             PartitionSpec(*colwise_out_spec),
             desc="DBiasQuantizePrimitive.colwise_out_sharding",
         )
-        scale_inv_sharding = NamedSharding(
-            mesh,
-            PartitionSpec(*get_padded_spec(arg_infos[1])),
-            desc="DBiasQuantizePrimitive.scale_inv",
-        )
-        amax_sharding = scale_inv_sharding.duplicate_with_new_description(
-            desc="DBiasQuantizePrimitive.amax_sharding"
-        )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
-            scale_inv_sharding = NamedSharding(
-                mesh, PartitionSpec(*x_spec), desc="DBiasQuantizePrimitive.scale_inv"
-            )
-        colwise_scale_inv_sharding = scale_inv_sharding.duplicate_with_new_description(
-            "DBiasQuantizePrimitive.colwise_scale_inv"
-        )
+
+        dbias_spec = x_spec[flatten_axis:] if is_dbias else (None,)
         dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DBiasQuantizePrimitive.dbias_sharding",
         )
+
+        scale_inv_spec = amax_spec = colwise_scale_inv_spec = (None,)
+        if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            scale_inv_spec = amax_spec = scale_spec
+        elif scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            scale_inv_spec = x_spec
+
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            colwise_scale_inv_spec = scale_inv_spec
+
+        scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*scale_inv_spec), desc="DBiasQuantizePrimitive.scale_inv"
+        )
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec),
+                                      desc="DBiasQuantizePrimitive.amax")
+        colwise_scale_inv_sharding = NamedSharding(
+            mesh, PartitionSpec(*colwise_scale_inv_spec),
+            desc="DBiasQuantizePrimitive.colwise_scale_inv"
+        )
+
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (
             out_sharding,
@@ -543,6 +560,12 @@ def _quantize_dbias_impl(
         if is_dbias:
             return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, None
+
+    # TODO(Jeremy): Debug - TE's quantize_dbias produced nans in this case for distributed layernorm_mlp tests
+    if flatten_axis == -2 and quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+        return _jax_quantize_dbias(
+                x, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
+                )
 
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale

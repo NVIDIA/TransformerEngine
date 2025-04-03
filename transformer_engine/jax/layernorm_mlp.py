@@ -23,6 +23,7 @@ from jax.ad_checkpoint import checkpoint_name
 from . import cpp_extensions as tex
 from .layernorm import canonicalize_norm_type
 from .quantize import with_sharding_constraint_by_logical_axes, QuantizerSet, noop_quantizer_set
+from .sharding import get_non_contracting_logical_axes
 
 
 def layernorm_mlp(
@@ -37,6 +38,8 @@ def layernorm_mlp(
     norm_input_axes: Tuple[str, ...] = None,
     dot_1_input_axes: Tuple[str, ...] = None,
     dot_2_input_axes: Tuple[str, ...] = None,
+    kernel_1_axes: Tuple[str, ...] = None,
+    kernel_2_axes: Tuple[str, ...] = None,
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
@@ -66,6 +69,8 @@ def layernorm_mlp(
         norm_input_axes: Logical axes for sharding the layernorm input
         dot_1_input_axes: Logical axes for sharding the first matrix multiplication
         dot_2_input_axes: Logical axes for sharding the second matrix multiplication
+        kernel_1_axes: Logical axes for sharding the first weight matrix
+        kernel_2_axes: Logical axes for sharding the second weight matrix
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
         activation_type: Activation function(s) to apply after the first dense layer transformation
@@ -109,6 +114,8 @@ def layernorm_mlp(
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
+        kernel_1_axes,
+        kernel_2_axes,
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
@@ -117,7 +124,7 @@ def layernorm_mlp(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -132,6 +139,8 @@ def _layernorm_mlp(
     norm_input_axes: Tuple[str, ...],
     dot_1_input_axes: Tuple[str, ...],
     dot_2_input_axes: Tuple[str, ...],
+    kernel_1_axes: Tuple[str, ...],
+    kernel_2_axes: Tuple[str, ...],
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
@@ -179,6 +188,8 @@ def _layernorm_mlp(
         norm_input_axes,
         dot_1_input_axes,
         dot_2_input_axes,
+        kernel_1_axes,
+        kernel_2_axes,
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
@@ -201,6 +212,8 @@ def _layernorm_mlp_fwd_rule(
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
+    kernel_1_axes,
+    kernel_2_axes,
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
@@ -220,6 +233,8 @@ def _layernorm_mlp_fwd_rule(
     Returns:
         Tuple of (output, context) for automatic differentiation
     """
+    del kernel_2_axes
+
     ffn1_quantizer_set, ffn2_quantizer_set = quantizer_sets
 
     # x should be in shape of (batch..., hidden)
@@ -248,10 +263,9 @@ def _layernorm_mlp_fwd_rule(
         norm_type,
         quantizer=ffn1_quantizer_set.x,
     )
+    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel)
-
-    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out)
@@ -260,6 +274,13 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_1.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
+
+    dot_1_output_axes = (
+            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
+            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims)
+            )
+    dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
+
     if use_bias_1:
         bias_1_shape = bias_1.shape
         bias_1_new_shape = (1,) * (dot_1_output.ndim - bias_1.ndim) + bias_1_shape
@@ -281,6 +302,12 @@ def _layernorm_mlp_fwd_rule(
         casted_kernel_2.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
+
+    dot_2_output_axes = (
+            *get_non_contracting_logical_axes(x.ndim, dot_2_input_axes, x_contracting_dims),
+            *get_non_contracting_logical_axes(kernel_2.ndim, None, k_contracting_dims)
+            )
+    dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_2_output_axes)
 
     if use_bias_2:
         bias_2_shape = bias_2.shape
@@ -319,6 +346,8 @@ def _layernorm_mlp_bwd_rule(
     norm_input_axes,
     dot_1_input_axes,
     dot_2_input_axes,
+    kernel_1_axes,
+    kernel_2_axes,
     ffn1_ckpt_name,  # pylint: disable=unused-argument
     ffn2_ckpt_name,  # pylint: disable=unused-argument
     activation_type,
@@ -368,11 +397,11 @@ def _layernorm_mlp_bwd_rule(
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
-    g_constracting_dim_2 = tuple(
+    g_contracting_dims_2 = tuple(
         range(grad.ndim - len(kernel_2_shape) + len(k_contracting_dims_in_fwd), grad.ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim_2 = tuple(
+    k_contracting_dims_2 = tuple(
         dim for dim in range(len(kernel_2_shape)) if dim not in k_contracting_dims_in_fwd
     )
 
@@ -381,12 +410,12 @@ def _layernorm_mlp_bwd_rule(
     dgrad_2 = tex.gemm(
         casted_grad.get_rowwise_tensor(),
         rowwise_casted_kernel_2,
-        (g_constracting_dim_2, k_constracting_dim_2),
+        (g_contracting_dims_2, k_contracting_dims_2),
     )
 
     dgrad_2 = with_sharding_constraint_by_logical_axes(dgrad_2, dot_2_input_axes)
 
-    x_constracting_dim = g_constracting_dim = tuple(
+    x_contracting_dims = g_contracting_dims = tuple(
         range(0, len(x.shape) - len(x_contracting_dims_in_fwd))
     )
 
@@ -395,8 +424,9 @@ def _layernorm_mlp_bwd_rule(
     wgrad_2 = tex.gemm(
         colwise_casted_act_out,
         casted_grad.get_colwise_tensor(),
-        (x_constracting_dim, g_constracting_dim),
+        (x_contracting_dims, g_contracting_dims),
     )
+    wgrad_2 = with_sharding_constraint_by_logical_axes(wgrad_2, kernel_2_axes)
 
     casted_dact_out, dbias_1 = tex.quantize_dact_dbias(
         dgrad_2,
@@ -408,11 +438,11 @@ def _layernorm_mlp_bwd_rule(
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
     dact_out_ndim = casted_dact_out.get_rowwise_tensor().data.ndim
-    g_constracting_dim_1 = tuple(
+    g_contracting_dims_1 = tuple(
         range(dact_out_ndim - len(kernel_1_shape) + len(k_contracting_dims_in_fwd), dact_out_ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim_1 = tuple(
+    k_contracting_dims_1 = tuple(
         dim for dim in range(len(kernel_1_shape)) if dim not in k_contracting_dims_in_fwd
     )
 
@@ -420,7 +450,7 @@ def _layernorm_mlp_bwd_rule(
     dgrad_1 = tex.gemm(
         casted_dact_out.get_rowwise_tensor(),
         rowwise_casted_kernel_1,
-        (g_constracting_dim_1, k_constracting_dim_1),
+        (g_contracting_dims_1, k_contracting_dims_1),
     )
 
     dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, norm_input_axes)
@@ -430,8 +460,10 @@ def _layernorm_mlp_bwd_rule(
     wgrad_1 = tex.gemm(
         colwise_casted_ln_out,
         casted_dact_out.get_colwise_tensor(),
-        (x_constracting_dim, g_constracting_dim),
+        (x_contracting_dims, g_contracting_dims),
     )
+
+    wgrad_1 = with_sharding_constraint_by_logical_axes(wgrad_1, kernel_1_axes)
 
     dx, dgamma, dbeta = tex.normalization_bwd(
         dgrad_1,

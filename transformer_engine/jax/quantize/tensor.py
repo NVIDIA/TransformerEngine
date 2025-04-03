@@ -84,6 +84,27 @@ class ScaledTensor(ABC):
             ValueError: If called on a tensor that doesn't support column-wise access
         """
 
+    def with_sharding_constraint_by_logical_axes(x, logical_axis_names: Tuple[str, ...]):
+        """Applies sharding constraints to a tensor based on logical axis names.
+
+        Args:
+            x: The tensor to apply sharding constraints to
+            logical_axis_names: Tuple of logical axis names for sharding
+
+        Returns:
+            The tensor with applied sharding constraints
+        """
+        if isinstance(x, ScaledTensor1x):
+            return ScaledTensor1x(
+                data=with_sharding_constraint_by_logical_axes(x.data, logical_axis_names),
+                scale_inv=x.scale_inv,
+                scaling_mode=x.scaling_mode,
+                dq_dtype=x.dq_dtype,
+                _dq_func=x._dq_func,
+                is_colwise=x.is_colwise,
+                data_layout=x.data_layout,
+                flatten_axis=x.flatten_axis,
+            )
 
 @register_pytree_node_class
 @dataclass
@@ -123,6 +144,10 @@ class ScaledTensor1x(ScaledTensor):
         assert (
             0 < flatten_axis < len(self.data.shape)
         ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
+
+        if self.data_layout == 'T':
+            flatten_axis = self.data.ndim - flatten_axis
+        self.flatten_axis = flatten_axis
 
         expected_scale_shape = self.scaling_mode.get_scale_shape(
             self.data.shape, self.is_colwise, is_padded=True, flatten_axis=flatten_axis
@@ -197,6 +222,41 @@ class ScaledTensor1x(ScaledTensor):
 
         raise ValueError("Calling get_colwise_tensor() from a rowwise ScaledTensor1x!")
 
+    def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
+        """Applies sharding constraints to a tensor based on logical axis names.
+
+        Args:
+            logical_axis_names: Tuple of logical axis names for sharding
+
+        Returns:
+            The tensor with applied sharding constraints
+        """
+        if not logical_axis_names:
+            return self
+
+        # axis_names were given for N layout, so needs to be transpose for T layout
+        if self.data_layout == 'T':
+            assert self.flatten_axis > 0
+            flatten_axis = self.flatten_axis - self.data.ndim
+            axis_names = (*logical_axis_names[flatten_axis:],
+                          *logical_axis_names[:flatten_axis])
+        else:
+            axis_names = logical_axis_names
+
+        data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
+
+        # TODO(Phuong): constaint padded scale_inv?
+        return ScaledTensor1x(
+                data=data,
+                scale_inv=self.scale_inv,
+                scaling_mode=self.scaling_mode,
+                dq_dtype=self.dq_dtype,
+                _dq_func=self._dq_func,
+                is_colwise=self.is_colwise,
+                data_layout=self.data_layout,
+                flatten_axis=self.flatten_axis,
+                )
+
 
 @register_pytree_node_class
 @dataclass
@@ -246,6 +306,23 @@ class ScaledTensor2x(ScaledTensor):
             The column-wise tensor component
         """
         return self.colwise_tensor
+
+    def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
+        """Applies sharding constraints to a tensor based on logical axis names.
+
+        Args:
+            logical_axis_names: Tuple of logical axis names for sharding
+
+        Returns:
+            The tensor with applied sharding constraints
+        """
+        if not logical_axis_names:
+            return self
+
+        rowwise_tensor = self.rowwise_tensor.apply_sharding_constraint_by_logical_axes(logical_axis_names)
+        colwise_tensor = self.colwise_tensor.apply_sharding_constraint_by_logical_axes(logical_axis_names)
+
+        return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
 
 @dataclass
@@ -395,25 +472,7 @@ def with_sharding_constraint_by_logical_axes(x, logical_axis_names: Tuple[str, .
     Returns:
         The tensor with applied sharding constraints
     """
-    if isinstance(x, ScaledTensor1x):
-        return ScaledTensor1x(
-            data=with_sharding_constraint_by_logical_axes(x.data, logical_axis_names),
-            scale_inv=x.scale_inv,
-            scaling_mode=x.scaling_mode,
-            dq_dtype=x.dq_dtype,
-            _dq_func=x._dq_func,
-            is_colwise=x.is_colwise,
-            data_layout=x.data_layout,
-            flatten_axis=x.flatten_axis,
-        )
-    if isinstance(x, ScaledTensor2x):
-        return ScaledTensor2x(
-            rowwise_tensor=with_sharding_constraint_by_logical_axes(
-                x.rowwise_tensor, logical_axis_names
-            ),
-            colwise_tensor=with_sharding_constraint_by_logical_axes(
-                x.colwise_tensor, logical_axis_names
-            ),
-        )
+    if isinstance(x, ScaledTensor):
+        return x.apply_sharding_constraint_by_logical_axes(logical_axis_names)
 
     return original_with_sharding_constraint_by_logical_axes(x, logical_axis_names)

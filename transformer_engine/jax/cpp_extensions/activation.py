@@ -366,9 +366,6 @@ class ActLuPrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
         )
 
-        # arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
-        # arg_shardings[0] = NamedSharding(mesh, PartitionSpec(*out_spec))
-        # arg_shardings = tuple(arg_shardings)
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
         out_shardings = (
             out_sharding,
@@ -668,7 +665,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del out_dtype, result_infos, act_enum
-        del scale_dtype, scale_shapes, is_dbias, act_len, is_outer
+        del scale_dtype, scale_shapes, act_len, is_outer
         x_spec = get_padded_spec(arg_infos[1])
         scale_spec = get_padded_spec(arg_infos[2])
 
@@ -686,9 +683,10 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
         )
 
-        dbias_shaprding = NamedSharding(
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DActLuDBiasQuantizePrimitive.dbias",
         )
 
@@ -702,11 +700,13 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             colwise_scale_inv_spec = scale_inv_spec
 
         scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*scale_inv_spec), desc="ActLuPrimitive.scale_inv"
+            mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
         )
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec), desc="ActLuPrimitive.amax")
+        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec),
+                                      desc="DActLuDBiasQuantizePrimitive.amax")
         colwise_scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_scale_inv_spec), desc="ActLuPrimitive.colwise_scale_inv"
+            mesh, PartitionSpec(*colwise_scale_inv_spec),
+            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv"
         )
         return (
             out_sharding,
@@ -714,7 +714,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             scale_inv_sharding,
             colwise_scale_inv_sharding,
             amax_sharding,
-            dbias_shaprding,
+            dbias_sharding,
         )
 
     @staticmethod
@@ -742,7 +742,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
 
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_x_spec = multidim_transpose(x_spec)
+                colwise_x_spec = multidim_transpose(x_spec, transpose_axis=-2)
             else:
                 colwise_x_spec = x_spec
         else:
@@ -751,9 +751,10 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             mesh, PartitionSpec(*colwise_x_spec), desc="DActLuDBiasQuantizePrimitive.colwise_out"
         )
 
-        dbias_shaprding = NamedSharding(
+        dbias_spec = x_spec[-2:] if is_dbias else (None,)
+        dbias_sharding = NamedSharding(
             mesh,
-            PartitionSpec(x_spec[-1]),
+            PartitionSpec(*dbias_spec),
             desc="DActLuDBiasQuantizePrimitive.dbias",
         )
 
@@ -775,13 +776,14 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         )
 
         arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+
         out_shardings = (
             out_sharding,
             colwise_out_sharding,
             scale_inv_sharding,
             colwise_scale_inv_sharding,
             amax_sharding,
-            dbias_shaprding,
+            dbias_sharding,
         )
 
         def sharded_impl(dz, x, scale):
