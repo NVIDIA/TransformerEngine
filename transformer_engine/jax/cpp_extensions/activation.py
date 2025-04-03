@@ -702,11 +702,13 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         scale_inv_sharding = NamedSharding(
             mesh, PartitionSpec(*scale_inv_spec), desc="DActLuDBiasQuantizePrimitive.scale_inv"
         )
-        amax_sharding = NamedSharding(mesh, PartitionSpec(*amax_spec),
-                                      desc="DActLuDBiasQuantizePrimitive.amax")
+        amax_sharding = NamedSharding(
+            mesh, PartitionSpec(*amax_spec), desc="DActLuDBiasQuantizePrimitive.amax"
+        )
         colwise_scale_inv_sharding = NamedSharding(
-            mesh, PartitionSpec(*colwise_scale_inv_spec),
-            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv"
+            mesh,
+            PartitionSpec(*colwise_scale_inv_spec),
+            desc="DActLuDBiasQuantizePrimitive.colwise_scale_inv",
         )
         return (
             out_sharding,
@@ -1009,11 +1011,8 @@ def quantize_dact_dbias(
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
-    # TODO: should one use dact_lu() here instead?
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
-        out, _ = quantize_dact_dbias(
-            dz=dz, x=x, activation_type=activation_type, is_dbias=False, quantizer=None
-        )
+        out = dact_lu(dz, x, activation_type, quantizer=None)
         return _quantize_dbias_impl(out, quantizer, is_dbias=True, flatten_axis=-2)
 
     is_gated = act_len == 2
