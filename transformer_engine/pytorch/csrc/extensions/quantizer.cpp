@@ -145,24 +145,21 @@ Float8CurrentScalingQuantizer::Float8CurrentScalingQuantizer(const py::handle& q
   const at::Tensor& scale = quantizer.attr("scale").cast<at::Tensor>();
   const at::Tensor& amax = quantizer.attr("amax").cast<at::Tensor>();
   const DType type = quantizer.attr("dtype").cast<DType>();
-  // For current scaling, need several other components:
-  // 1. with_amax_reduction: bool
-  // 2. amax_reduction_group: torch.distributed.ProcessGroup or None
-  // 3. amax_reduction_size: int
-  const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
-  const py::object amax_reduction_group_obj = quantizer.attr("amax_reduction_group");
-  const c10::intrusive_ptr<dist_group_type> amax_reduction_group =
-      amax_reduction_group_obj.is_none()
-          ? nullptr
-          : amax_reduction_group_obj.cast<c10::intrusive_ptr<dist_group_type>>();
-  const int amax_reduction_size = quantizer.attr("amax_reduction_size").cast<int>();
-
   this->amax = amax;
   this->scale = scale;
   this->dtype = type;
+
+  // Get amax reduction group if needed
+  const bool with_amax_reduction = quantizer.attr("with_amax_reduction").cast<bool>();
+  c10::intrusive_ptr<dist_group_type> amax_reduction_group;
+  if (with_amax_reduction) {
+    auto group = quantizer.attr("_canonicalized_amax_reduction_group")();
+    NVTE_CHECK(!group.is_none(),
+               "Float8CurrentScalingQuantizer could not canonicalize amax reduction group");
+    amax_reduction_group = group.cast<c10::intrusive_ptr<dist_group_type>>();
+  }
   this->with_amax_reduction = with_amax_reduction;
   this->amax_reduction_group = amax_reduction_group;
-  this->amax_reduction_size = amax_reduction_size;
 
   // fp8 current scaling specific quantization params
   this->force_pow_2_scales = quantizer.attr("force_pow_2_scales").cast<bool>();
@@ -223,9 +220,8 @@ std::pair<TensorWrapper, py::object> Float8CurrentScalingQuantizer::create_tenso
   }
   const py::object py_columnwise_data = create_transpose ? py::cast(columnwise_data) : py::none();
 
-  //unlike delayed scaling, in current scaling, scale is not known, so scale_inv should be empty buffer
-  opts = opts.dtype(torch::kFloat32).device(torch::kCUDA);
-  at::Tensor scale_inv = at::empty(scale_inv_torch_shape, opts);
+  // In current scaling, scale is not known but we initialize it with 1 to avoid division by zero. If scale is already calculated, it can be correctly set.
+  at::Tensor scale_inv = at::reciprocal(scale);
 
   py::object ret;
   if (internal) {

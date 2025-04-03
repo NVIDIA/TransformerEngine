@@ -173,7 +173,7 @@ To install the latest stable version of Transformer Engine,
 
 .. code-block:: bash
 
-    pip install git+https://github.com/NVIDIA/TransformerEngine.git@stable
+    pip3 install git+https://github.com/NVIDIA/TransformerEngine.git@stable
 
 This will automatically detect if any supported deep learning frameworks are installed and build
 Transformer Engine support for them. To explicitly specify frameworks, set the environment variable
@@ -184,7 +184,7 @@ Alternatively, the package can be directly installed from
 
 .. code-block:: bash
 
-    pip install transformer_engine[pytorch]
+    pip3 install transformer_engine[pytorch]
 
 To obtain the necessary Python bindings for Transformer Engine, the frameworks needed must be
 explicitly specified as extra dependencies in a comma-separated list (e.g. [jax,pytorch]).

@@ -14,6 +14,8 @@
 #include <ATen/cudnn/Handle.h>
 #include <ATen/native/DispatchStub.h>
 #include <c10/macros/Macros.h>
+#include <c10/util/Float8_e4m3fn.h>
+#include <c10/util/Float8_e5m2.h>
 #include <cublasLt.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
@@ -147,7 +149,6 @@ class Float8CurrentScalingQuantizer : public Quantizer {
   DType dtype;
   bool with_amax_reduction;
   c10::intrusive_ptr<dist_group_type> amax_reduction_group;
-  int amax_reduction_size;
   bool force_pow_2_scales = false;
   float amax_epsilon = 0.0;
 

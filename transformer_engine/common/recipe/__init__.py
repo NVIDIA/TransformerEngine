@@ -77,6 +77,10 @@ class Recipe:
         """Whether the given recipe is (per-tensor) current scaling."""
         return isinstance(self, Float8CurrentScaling)
 
+    def float8_per_tensor_scaling(self):
+        """Whether the given recipe is per-tensor scaling."""
+        return isinstance(self, (DelayedScaling, Float8CurrentScaling))
+
 
 @dataclass()
 class DelayedScaling(Recipe):
@@ -158,7 +162,6 @@ class DelayedScaling(Recipe):
     """
 
     margin: int = 0
-    interval: int = -1
     fp8_format: Format = Format.HYBRID
     amax_history_len: int = 1024
     amax_compute_algo: Union[Literal["max", "most_recent"], Callable] = "max"
@@ -169,12 +172,6 @@ class DelayedScaling(Recipe):
 
     def __post_init__(self) -> None:
         assert self.fp8_format != Format.E5M2, "Pure E5M2 training is not supported."
-        if self.interval >= 0:
-            warnings.warn(
-                "`interval` argument is deprecated and unused. "
-                "It will be removed in an upcoming release.",
-                DeprecationWarning,
-            )
 
     def __repr__(self) -> str:
         return (
