@@ -1041,7 +1041,7 @@ def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
     out = block(inp_hidden_states)
     loss = out.sum()
     loss.backward()
-    if split_bw and hasattr(block, 'wgrad_comp'):
+    if split_bw and hasattr(block, "wgrad_comp"):
         block.wgrad_comp()
 
     torch.cuda.synchronize()
@@ -1052,7 +1052,7 @@ def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
                 outputs.append(p.main_grad)
                 assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
             else:
-                outputs.append(p.grad)    
+                outputs.append(p.grad)
     return outputs
 
 
@@ -1164,6 +1164,7 @@ def test_linear_accuracy(dtype, bs, model):
         for te_output, torch_output in zip(te_outputs, torch_outputs):
             assert_allclose(te_output, torch_output, tolerance, rtol[dtype])
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
@@ -1200,7 +1201,7 @@ def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulatio
         if fuse_wgrad_accumulation:
             weight = getattr(te_linear, f"weight")
             weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
-            te_linear_ref.weight.main_grad = weight.main_grad.clone()            
+            te_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(te_linear, bs, dtype, config, split_bw=True)
     te_outputs_ref = _test_granular_accuracy(te_linear_ref, bs, dtype, config, split_bw=False)
@@ -1208,6 +1209,7 @@ def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulatio
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1383,6 +1385,7 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
         for te_output, torch_output in zip(te_outputs[1:], torch_outputs[1:]):
             assert_allclose(te_output, torch_output, atol[dtype], rtol[dtype])
 
+
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
@@ -1390,7 +1393,9 @@ def test_layernorm_linear_accuracy(dtype, bs, model, normalization, zero_centere
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
 @pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
-def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation):
+def test_layernorm_linear_accuracy_split_bw(
+    dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
+):
     config = model_configs[model]
 
     ln_linear_ref = LayerNormLinear(
@@ -1417,8 +1422,7 @@ def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zer
         device="cuda",
         split_bw=True,
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
-    ).eval()    
-
+    ).eval()
 
     # Share params
     with torch.no_grad():
@@ -1431,7 +1435,7 @@ def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zer
         if fuse_wgrad_accumulation:
             weight = getattr(ln_linear, f"weight")
             weight.main_grad = torch.rand_like(weight, dtype=torch.float32)
-            ln_linear_ref.weight.main_grad = weight.main_grad.clone()                       
+            ln_linear_ref.weight.main_grad = weight.main_grad.clone()
 
     te_outputs = _test_granular_accuracy(ln_linear, bs, dtype, config, split_bw=True)
     te_outputs_ref = _test_granular_accuracy(ln_linear_ref, bs, dtype, config, split_bw=False)
@@ -1439,6 +1443,7 @@ def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zer
     # Shoule be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -1648,7 +1653,15 @@ def test_grouped_linear_accuracy(
                 sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
 
     outputs_ref = _test_grouped_linear_accuracy(
-        sequential_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        split_bw,
     )
     outputs = _test_grouped_linear_accuracy(
         grouped_linear, num_gemms, bs, dtype, config, recipe, fp8, fuse_wgrad_accumulation, split_bw
