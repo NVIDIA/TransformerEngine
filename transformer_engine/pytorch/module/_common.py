@@ -225,7 +225,7 @@ class WeightGradStore:
     This class enables split backward propagation for better memory efficiency.
     """
 
-    def __init__(self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True):
+    def __init__(self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True, ub_bulk_wgrad=False):
         """
         Initialize the WeightGradStore.
         
@@ -233,8 +233,8 @@ class WeightGradStore:
             split_bw (bool): Whether to enable split backward propagation
         """
         self.context = queue.Queue()
-        assert use_bias == False, "use_bias is not supported when enable split_bw"
-        assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enable split_bw"
+        assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enabling split_bw"
+        assert ub_bulk_wgrad == False, "ub_bulk_wgrad is not supported when enabling split_bw"
         self.enabled = split_bw
 
     def split_bw(self):
@@ -272,7 +272,7 @@ class WeightGradStore:
         """
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
-            func(*tensor_list)
+            return func(*tensor_list)
         else:
             rank = torch.distributed.get_rank()
             raise Exception(f"Pop empty queue. rank {rank}")

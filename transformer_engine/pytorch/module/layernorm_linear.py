@@ -752,7 +752,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     else:
                         dgrad = ub_obj_wgrad.get_buffer(None, local_chunk=True)                    
 
-            # Make sure all tensor-parallel communication is finished
+            # Don't return grad bias if not needed
+            if not ctx.use_bias or ctx.wgrad_store.split_bw():
+                grad_bias = None
+
+            # Synchronize tensor parallel communication
             if ln_out_total_work is not None:
                 ln_out_total_work.wait()
                 ln_out_total_work = None
@@ -1001,7 +1005,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
 
-        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
+        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation, ub_bulk_wgrad)
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1472,4 +1476,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_LayerNormLinear_wgrad"):
-            self.wgrad_store.pop()
+            _, grad_bias_, _, _ = self.wgrad_store.pop()
+            if self.use_bias:
+                for bias_name in self.bias_names:
+                    bias_param = getattr(self, bias_name)
+                    if bias_param.grad is None:
+                        bias_param.grad = grad_bias_.to(bias_param.dtype)
+            del grad_bias_

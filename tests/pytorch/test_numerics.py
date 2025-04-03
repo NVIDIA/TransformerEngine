@@ -106,13 +106,6 @@ fp8_recipes = [
     recipe.Float8CurrentScaling(),
 ]
 
-# param_types = [torch.bfloat16]
-# batch_sizes = [2]
-# all_boolean = [False]
-# mask_types = ["causal"]
-# fp8_recipes = [
-#     recipe.Float8CurrentScaling(),
-# ]
 
 
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
@@ -1057,9 +1050,7 @@ def _test_granular_accuracy(block, bs, dtype, config, split_bw=False):
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    for name, p in block.named_parameters():
-        # print(f"参数名称: {name}, 参数形状: {p.shape}", {p.main_grad})
-        # breakpoint()
+    for p in block.parameters():
         if p.requires_grad:
             if getattr(p, "main_grad", None) is not None:
                 outputs.append(p.main_grad)
@@ -1201,7 +1192,7 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
-@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
 def test_linear_accuracy_split_bw(dtype, bs, model, bias, fuse_wgrad_accumulation):
     config = model_configs[model]
@@ -1432,7 +1423,7 @@ def test_layernorm_linear_accuracy(
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("normalization", all_normalizations)
 @pytest.mark.parametrize("zero_centered_gamma", all_boolean)
-@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
 def test_layernorm_linear_accuracy_split_bw(dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation):
     config = model_configs[model]
@@ -1613,10 +1604,7 @@ def _test_grouped_linear_accuracy(
 
     torch.cuda.synchronize()
     outputs = [out, inp_hidden_states.grad]
-    # breakpoint()
-    for name, p in block.named_parameters():
-        # print(f"参数名称: {name}, 参数形状: {p.shape}", {p.main_grad})
-        # breakpoint()
+    for p in block.parameters():
         if p.requires_grad:
             if getattr(p, "main_grad", None) is not None:
                 outputs.append(p.main_grad)
@@ -1634,7 +1622,7 @@ def _test_grouped_linear_accuracy(
 @pytest.mark.parametrize("recipe", fp8_recipes)
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
-@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("bias", all_boolean)
 @pytest.mark.parametrize("split_bw", all_boolean)
 def test_grouped_linear_accuracy(
     dtype,

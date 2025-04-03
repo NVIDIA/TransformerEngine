@@ -312,7 +312,6 @@ class _GroupedLinear(torch.autograd.Function):
                 )
                 # WGRAD
                 if ctx.wgrad_store.split_bw():
-                    # if True:
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
                     _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
@@ -359,7 +358,7 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 wgrad_list = [None] * ctx.num_gemms
 
-            if not ctx.use_bias:
+            if not ctx.use_bias or (ctx.wgrad_store.split_bw() and not ctx.fp8):
                 grad_biases = [None] * ctx.num_gemms
 
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
@@ -699,4 +698,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
-            self.wgrad_store.pop()
+            _, grad_biases_, _ = self.wgrad_store.pop()
+            if self.use_bias:
+                for i in range(self.num_gemms):
+                    bias_param = getattr(self, f"bias{i}")
+                    if bias_param.grad is None:
+                        bias_param.grad = grad_biases_[i].to(bias_param.dtype)
+            del grad_biases_

@@ -636,24 +636,9 @@ class _Linear(torch.autograd.Function):
                 # wgrad GEMM
                 # Note: Fuse with bgrad computation if needed
                 nvtx_range_push(f"{nvtx_label}.wgrad_gemm")
-<<<<<<< HEAD
-                wgrad, grad_bias_, _, rs_out = general_gemm(
-                    inputmat_total,
-                    grad_output,
-                    get_workspace(),
-=======
-                wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
-                if ctx.fp8:
-                    recipe = ctx.fp8_recipe
-                    if hasattr(recipe, "fp8_gemm_wgrad"):
-                        wgrad_gemm_use_split_accumulator = (
-                            recipe.fp8_gemm_wgrad.use_split_accumulator
-                        )
-
                 general_gemm_wgrad = functools.partial(general_gemm,
                     out_dtype=main_grad.dtype if ctx.fuse_wgrad_accumulation else ctx.activation_dtype,
                     workspace=get_workspace(),
->>>>>>> 267b38e (support wgrad split for linear and ln_linear)
                     layout="NT",
                     grad=True,
                     bias=(bias if (grad_bias is None and not ctx.fp8) else None),
@@ -687,7 +672,7 @@ class _Linear(torch.autograd.Function):
                         dgrad = ub_obj_wgrad.get_buffer(ctx.grad_input_quantizer, local_chunk=True)                    
 
             # Don't return grad bias if not needed
-            if not ctx.use_bias:
+            if not ctx.use_bias or ctx.wgrad_store.split_bw():
                 grad_bias = None
 
             # Make sure all tensor-parallel communication is finished
@@ -876,7 +861,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
+        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation, ub_bulk_wgrad)
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1297,4 +1282,10 @@ class Linear(TransformerEngineBaseModule):
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_Linear_wgrad"):
-            self.wgrad_store.pop()
+            _, grad_bias_, _, _ = self.wgrad_store.pop()
+            if self.use_bias:
+                for bias_name in self.bias_names:
+                    bias_param = getattr(self, bias_name)
+                    if bias_param.grad is None:
+                        bias_param.grad = grad_bias_.to(bias_param.dtype)    
+            del grad_bias_
