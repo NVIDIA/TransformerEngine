@@ -276,9 +276,7 @@ def _layernorm_dense_bwd_rule(
 
     grad_axes = (
         *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
-        *get_non_contracting_logical_axes(
-            len(kernel_shape), None, k_contracting_dims_in_fwd
-        ),
+        *get_non_contracting_logical_axes(len(kernel_shape), None, k_contracting_dims_in_fwd),
     )
     grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
