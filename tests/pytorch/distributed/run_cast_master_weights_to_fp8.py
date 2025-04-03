@@ -16,12 +16,14 @@ import torch.distributed as dist
 from transformer_engine.common.recipe import (
     DelayedScaling,
     Float8CurrentScaling,
+    Float8BlockScaling,
     Format,
     Recipe,
 )
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor import QuantizedTensor, cast_master_weights_to_fp8
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockwiseQTensor
 
 
 def _get_raw_data(quantized_tensor):
@@ -30,6 +32,14 @@ def _get_raw_data(quantized_tensor):
         assert hasattr(quantized_tensor, "_data"), "Float8Tensor does not have _data attribute"
         assert quantized_tensor._data.dtype == torch.uint8, "Float8Tensor _data must be uint8"
         return quantized_tensor._data
+    elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
+        assert hasattr(
+            quantized_tensor, "_rowwise_data"
+        ), "Float8BlockwiseQTensor does not have _rowwise_data attribute"
+        assert (
+            quantized_tensor._rowwise_data.dtype == torch.uint8
+        ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
+        return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
 
@@ -268,12 +278,13 @@ def _test_zero_1(dp_group):
 
 def quantization_recipe(quantization) -> Recipe:
     """Quantization recipe setup"""
+    fp8_format = Format.HYBRID
     if quantization == "fp8":
-        return DelayedScaling(
-            fp8_format=Format.HYBRID, amax_history_len=32, amax_compute_algo="max"
-        )
+        return DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
     elif quantization == "fp8_cs":
-        return Float8CurrentScaling()
+        return Float8CurrentScaling(fp8_format=fp8_format)
+    elif quantization == "fp8_block":
+        return Float8BlockScaling(fp8_format=fp8_format)
     else:
         raise ValueError(f"Unsupported quantization: {quantization}")
 
@@ -297,15 +308,15 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 16, **linear_kwargs),
+            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 16, **linear_kwargs),
+        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 
@@ -322,7 +333,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
     optimizer_fp8 = MiniZero_1([w for w in model_fp8.parameters()], 10.0, dp_group)
     optimizer = MiniZero_1([w for w in model.parameters()], 10.0, dp_group)
 
-    for _ in range(100):
+    for i in range(100):
         for w_fp8, w in zip(model_fp8.parameters(), model.parameters()):
             w_fp8.main_grad.zero_()
             w.main_grad.zero_()
@@ -383,7 +394,9 @@ def main(argv=None, namespace=None):
     dist.init_process_group(**dist_init_kwargs)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--quantization", type=str, default=None, choices=["fp8", "fp8_cs"])
+    parser.add_argument(
+        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
+    )
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")
