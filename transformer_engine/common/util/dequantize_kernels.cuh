@@ -64,7 +64,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t SCALES_COLWISE_PER_CHUNK_X = CHUNK_DIM_X;                //  128
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
-      DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
+      DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);  // 2 = 32 / 16
 
   const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
