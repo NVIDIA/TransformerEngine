@@ -259,6 +259,10 @@ class FusedAdam(torch.optim.Optimizer):
             scale (torch.Tensor): A FP32 tensor representing the scaling factor.
         """
         assert unscaled_state.dtype == torch.float32
+        if scaled_state.dtype == torch.bfloat16:
+            scaled_state.copy_(unscaled_state.bfloat16())
+            return
+        
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(scaled_state, Float8Tensor)
@@ -315,7 +319,7 @@ class FusedAdam(torch.optim.Optimizer):
             unscaled = state[state_name]
         elif dtype == torch.bfloat16:
             assert state[state_name].dtype == torch.bfloat16
-            unscaled = state[state_name]
+            unscaled = state[state_name].float()
         else:
             raise RuntimeError(f"Dtype of {state_name} can only be fp8/fp16/bf16/fp32.")
         return unscaled
@@ -348,7 +352,7 @@ class FusedAdam(torch.optim.Optimizer):
             self._initialize_state(param, state_name, False, store_param_remainders)
 
         dtype = self.name_to_dtype_map[state_name]
-        if dtype not in [torch.float32, torch.bfloat16]:
+        if dtype != torch.float32:
             scale = self._scales[param]
             self._apply_scale(state_name, unscaled_state, state[state_name], scale[state_name])
         else:
@@ -387,7 +391,7 @@ class FusedAdam(torch.optim.Optimizer):
             self.state[param][state_name] = data
 
         # Create scale if necessary.
-        if dtype not in [torch.float32, torch.bfloat16]:
+        if dtype != torch.float32:
             if param not in self._scales:
                 self._scales[param] = {}
             self._scales[param][state_name] = torch.ones(
@@ -559,7 +563,7 @@ class FusedAdam(torch.optim.Optimizer):
                         else:
                             unscaled = self.get_unscaled_state(p, name)
                             unscaled_state[name] = unscaled
-                        if self.name_to_dtype_map[name] not in [torch.float32, torch.bfloat16]:
+                        if self.name_to_dtype_map[name] != torch.float32:
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
                             state_scales[name].append(self._scales[p][name])
