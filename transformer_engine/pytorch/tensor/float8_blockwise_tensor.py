@@ -384,7 +384,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 kwargs,
             )
             if orig_size != out_data.size():
-                raise NotImplementedException(
+                raise NotImplementedError(
                     "Changing shape with view not implemented "
                     " (scales and columnwise data untouched)."
                 )
