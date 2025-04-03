@@ -45,7 +45,7 @@ if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
 
 DTYPES = [jnp.bfloat16, jnp.float16]
-INPUT_SHAPE = [[2, 64, 64]]  # [batch, seqlen, hidden_in]
+INPUT_SHAPE = [[2, 128, 128]]  # [batch, seqlen, hidden_in]
 
 LAYERNORM_INPUT_AXES = (BATCH_AXES, SEQLEN_TP_AXES, HIDDEN_AXES)
 DOT_1_INPUT_AXES = (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES)

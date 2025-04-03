@@ -348,8 +348,8 @@ def _layernorm_mlp_bwd_rule(
     dot_2_input_axes,
     kernel_1_axes,
     kernel_2_axes,
-    ffn1_ckpt_name,  # pylint: disable=unused-argument
-    ffn2_ckpt_name,  # pylint: disable=unused-argument
+    ffn1_ckpt_name,
+    ffn2_ckpt_name,
     activation_type,
     ctx,
     grad,
@@ -367,6 +367,7 @@ def _layernorm_mlp_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
+    del norm_input_axes, ffn1_ckpt_name, ffn2_ckpt_name
     (
         x,
         mu,
@@ -453,7 +454,7 @@ def _layernorm_mlp_bwd_rule(
         (g_contracting_dims_1, k_contracting_dims_1),
     )
 
-    dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, norm_input_axes)
+    dgrad_1 = with_sharding_constraint_by_logical_axes(dgrad_1, dot_1_input_axes)
 
     # TN GEMM
     # (hidden, batch...) x (hidden, batch...)
