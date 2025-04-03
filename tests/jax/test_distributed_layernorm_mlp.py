@@ -66,11 +66,10 @@ def generate_fsdp_and_tp_configs():
         configs.append(
             [2, (1, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
-
-#    if is_devices_enough(4):
-#        configs.append(
-#            [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
-#        )
+   if is_devices_enough(4):
+       configs.append(
+           [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
+       )
     return configs
 
 
@@ -152,7 +151,7 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    def test_layernorm_fp8_mlp_primitive(
+    def test_layernorm_mlp_grad(
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
     ):
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
