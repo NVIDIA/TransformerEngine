@@ -310,15 +310,15 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group):
         preserve_high_precision_init_val=True,
     ):
         model_fp8 = nn.Sequential(
-            te.Linear(128, 256, **linear_kwargs),
-            te.Linear(256, 256 * 3, **linear_kwargs),
+            te.Linear(128, 256 + 16, **linear_kwargs),
+            te.Linear(256 + 16, 256 * 3, **linear_kwargs),
             te.Linear(256 * 3, 128, **linear_kwargs),
         )
 
     # Create model with BF16 weights
     model = nn.Sequential(
-        te.Linear(128, 256, **linear_kwargs),
-        te.Linear(256, 256 * 3, **linear_kwargs),
+        te.Linear(128, 256 + 16, **linear_kwargs),
+        te.Linear(256 + 16, 256 * 3, **linear_kwargs),
         te.Linear(256 * 3, 128, **linear_kwargs),
     )
 

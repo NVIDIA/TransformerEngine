@@ -503,8 +503,8 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
-            if dst.requires_grad != src.requires_grad:
-                dst.requires_grad_(requires_grad=src.requires_grad)
+            # if dst.requires_grad != src.requires_grad:
+            #     dst.requires_grad_(requires_grad=src.requires_grad)
 
         # Just copy FP8 data if other tensor is Float8BlockwiseQTensor
         compatible_layout = (
