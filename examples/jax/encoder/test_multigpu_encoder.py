@@ -414,7 +414,6 @@ def encoder_parser(args):
         "--enable-shardy", action="store_true", default=False, help="Enable Shardy (experimental)."
     )
 
-
     return parser.parse_args(args)
 
 

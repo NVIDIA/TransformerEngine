@@ -419,14 +419,15 @@ class ActLuPrimitive(BasePrimitive):
         is_outer,
         mesh,
         value_types,
-        result_types
+        result_types,
     ):
         del out_dtype, act_enum, act_len, scale_dtype, scale_shapes, is_outer, mesh, result_types
 
         x_rank = len(value_types[0].shape)
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank-1,
-                                                                          unique_var='i')
-        x_axes = scale_rules.input_spec + (f'x{x_rank-1}',)
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            x_rank - 1, unique_var="i"
+        )
+        x_axes = scale_rules.input_spec + (f"x{x_rank-1}",)
         out = (*x_axes[:-2], x_axes[-1])
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
             scale_inv = scale_rules.rowwise_rule[:-1] + (scale_rules.rowwise_rule[-1],)
@@ -437,21 +438,24 @@ class ActLuPrimitive(BasePrimitive):
 
         if is_2x:
             if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
-                colwise_out = tuple(multidim_transpose(
-                    x_axes, static_axis_boundary=-1, transpose_axis_boundary=-1
-                ))
+                colwise_out = tuple(
+                    multidim_transpose(x_axes, static_axis_boundary=-1, transpose_axis_boundary=-1)
+                )
             else:
                 colwise_out = out
         else:
-            colwise_out = ('j',)
+            colwise_out = ("j",)
 
         # amax is always a unit tensor.
-        amax = ('k',)
+        amax = ("k",)
 
         return SdyShardingRule(
-            (x_axes, ('…1'),),
+            (
+                x_axes,
+                "…1",
+            ),
             (out, colwise_out, scale_inv, colwise_scale_inv, amax),
-            **scale_rules.factor_sizes
+            **scale_rules.factor_sizes,
         )
 
 
@@ -885,8 +889,7 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
         del out_dtype, scale_dtype, scale_shapes, act_enum, act_len, is_outer, mesh, result_types
 
         x_rank = len(value_types[0].shape)
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank,
-                                                                          unique_var='i')
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(x_rank, unique_var="i")
         x_axes = scale_rules.input_spec
         out = x_axes
         if is_2x:
@@ -895,15 +898,15 @@ class DActLuDBiasQuantizePrimitive(BasePrimitive):
             else:
                 colwise_out = tuple(x_axes)
         else:
-            colwise_out = ('j',)
+            colwise_out = ("j",)
 
-        dbias = (x_axes[-1],) if is_dbias else ('k',)
-        amax = ('…4',)
+        dbias = (x_axes[-1],) if is_dbias else ("k",)
+        amax = ("…4",)
 
         return SdyShardingRule(
-            (('…0',), tuple(x_axes), ('…2',)),
+            (("…0",), tuple(x_axes), ("…2",)),
             (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
-            **scale_rules.factor_sizes
+            **scale_rules.factor_sizes,
         )
 
 

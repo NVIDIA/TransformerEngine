@@ -105,7 +105,7 @@ class BasePrimitive(metaclass=ABCMeta):
         Returns the sharding rule for this primitive.
         """
         del args
-        return '... -> ...'
+        return "... -> ..."
 
 
 def register_primitive(cls):
@@ -132,8 +132,9 @@ def register_primitive(cls):
     batching.primitive_batchers[outer_p] = cls.batcher
     outer_p_lower = custom_partitioning(cls.impl, static_argnums=cls.impl_static_args)
     outer_p_lower.def_partition(
-        infer_sharding_from_operands=cls.infer_sharding_from_operands, partition=cls.partition,
-        sharding_rule=cls.shardy_sharding_rule
+        infer_sharding_from_operands=cls.infer_sharding_from_operands,
+        partition=cls.partition,
+        sharding_rule=cls.shardy_sharding_rule,
     )
     mlir.register_lowering(
         outer_p, mlir.lower_fun(outer_p_lower, multiple_results=cls.multiple_results)

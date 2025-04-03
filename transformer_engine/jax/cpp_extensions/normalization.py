@@ -535,26 +535,45 @@ class NormFwdPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        del zero_centered_gamma, epsilon, out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
+        del (
+            zero_centered_gamma,
+            epsilon,
+            out_dtype,
+            scale_dtype,
+            scale_shapes,
+            is_outer,
+            mesh,
+            result_types,
+        )
 
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(len(value_types[0].shape),
-                                                                          unique_var='i')
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            len(value_types[0].shape), unique_var="i"
+        )
         x_axes = scale_rules.input_spec
 
-        out = x_axes[:-1] + ('k',)
+        out = x_axes[:-1] + ("k",)
         if is_2x and norm_type != NVTE_Norm_Type.RMSNorm:
             colwise_out = out
         else:
-            colwise_out = ('…4',)
+            colwise_out = ("…4",)
         rsigma = x_axes[:-1]
-        mu = ('…5',) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
-        amax = ('…6',)
+        mu = ("…5",) if norm_type == NVTE_Norm_Type.RMSNorm else rsigma
+        amax = ("…6",)
 
         return SdyShardingRule(
-            (x_axes, ('…1',), ('…2',), ('…3',)),
-            (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, mu, rsigma),
-            **scale_rules.factor_sizes
+            (x_axes, ("…1",), ("…2",), ("…3",)),
+            (
+                out,
+                colwise_out,
+                scale_rules.rowwise_rule,
+                scale_rules.colwise_rule,
+                amax,
+                mu,
+                rsigma,
+            ),
+            **scale_rules.factor_sizes,
         )
+
 
 register_primitive(NormFwdPrimitive)
 
@@ -761,7 +780,7 @@ class NormBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '...0, ...1 i, ...2, ...3, ...4 -> ...1 j, k, l'
+        return "...0, ...1 i, ...2, ...3, ...4 -> ...1 j, k, l"
 
 
 register_primitive(NormBwdPrimitive)

@@ -333,7 +333,7 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '... -> ...'
+        return "... -> ..."
 
 
 register_primitive(ScaledSoftmaxFwdPrimitive)
@@ -408,7 +408,7 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '..., ... -> ...'
+        return "..., ... -> ..."
 
 
 register_primitive(ScaledSoftmaxBwdPrimitive)
@@ -538,7 +538,7 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '...1, ...2 -> ...1'
+        return "...1, ...2 -> ...1"
 
 
 register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
@@ -614,7 +614,8 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '..., ... -> ...'
+        return "..., ... -> ..."
+
 
 register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
 
@@ -704,7 +705,8 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '... -> ...'
+        return "... -> ..."
+
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
 
@@ -787,7 +789,7 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return '..., ... -> ...'
+        return "..., ... -> ..."
 
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)

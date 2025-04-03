@@ -28,7 +28,9 @@ class TestDistributedSoftmax:
         all_reduce_loss_bytes = 4  # 1 * FP32
         return generate_collectives_count(allreduce=all_reduce_loss_bytes, allgather=0, other=0)
 
-    def generate_inputs(self, shape, mesh_resource, softmax_type, dtype, bad_sharding, broadcast_batch_mask):
+    def generate_inputs(
+        self, shape, mesh_resource, softmax_type, dtype, bad_sharding, broadcast_batch_mask
+    ):
         batch, _, sqelen, _ = shape
 
         x = random.normal(random.PRNGKey(1124), shape, dtype=dtype)
@@ -139,5 +141,6 @@ class TestDistributedSoftmax:
                     for w in warns:
                         assert "Sharding the hidden dimension is not supported" in str(w), (
                             "Softmax primitive did not raise the correct warning for "
-                            "unsupported sharding in the hidden dimension." f"{str(w)}"
+                            "unsupported sharding in the hidden dimension."
+                            f"{str(w)}"
                         )

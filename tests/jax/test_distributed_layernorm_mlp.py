@@ -334,9 +334,18 @@ class TestDistributedLayernormMLP:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("use_shardy", [False, True])
-    def test_layernorm_mlp_layer(self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy):
+    def test_layernorm_mlp_layer(
+        self, mesh_config, activation_type, use_bias, input_shape, dtype, use_shardy
+    ):
         self._test_layernorm_mlp(
-            mesh_config, activation_type, use_bias, input_shape, dtype, use_fp8=False, fp8_recipe=None, use_shardy=use_shardy
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=False,
+            fp8_recipe=None,
+            use_shardy=use_shardy,
         )
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)

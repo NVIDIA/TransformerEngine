@@ -486,8 +486,9 @@ class DBiasQuantizePrimitive(BasePrimitive):
     ):
         del out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
 
-        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(len(value_types[0].shape),
-                                                                          unique_var='i')
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            len(value_types[0].shape), unique_var="i"
+        )
 
         x_axes = scale_rules.input_spec
         out = x_axes
@@ -497,15 +498,15 @@ class DBiasQuantizePrimitive(BasePrimitive):
             else:
                 colwise_out = x_axes
         else:
-            colwise_out = ('j',)
+            colwise_out = ("j",)
 
-        dbias = (x_axes[-1],) if is_dbias else ('k',)
-        amax = ('l',)
+        dbias = (x_axes[-1],) if is_dbias else ("k",)
+        amax = ("l",)
 
         return SdyShardingRule(
-            (x_axes, ('…1',)),
+            (x_axes, ("…1",)),
             (out, colwise_out, scale_rules.rowwise_rule, scale_rules.colwise_rule, amax, dbias),
-            **scale_rules.factor_sizes
+            **scale_rules.factor_sizes,
         )
 
 

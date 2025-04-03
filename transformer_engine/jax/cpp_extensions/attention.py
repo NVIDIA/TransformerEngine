@@ -626,28 +626,29 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
         # Keep in sync with `infer_sharding_from_operands`.
         # We only need the first input. Fill up the rest with placeholders.
-        input_spec = [(f'…{x}',) for x in range(len(value_types))]
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
         # The RNG state sharding cannot be expressed as a Shardy rule. We use with_sharding_constraint
         # instead. This has to happen outside of the primitive, see `fused_attn_fwd`.
-        rng_sharding = (f'…{len(value_types)}',)
+        rng_sharding = (f"…{len(value_types)}",)
 
         if config.qkv_layout.is_qkvpacked():
-            input_spec[0] = ('…0', 'seqlen', 'three', 'head', 'hidden')
+            input_spec[0] = ("…0", "seqlen", "three", "head", "hidden")
         elif config.qkv_layout.is_kvpacked() or config.qkv_layout.is_separate():
-            input_spec[0] = ('…0', 'seqlen', 'head', 'hidden')
+            input_spec[0] = ("…0", "seqlen", "head", "hidden")
         else:
             raise ValueError(f"Unsupported {config.qkv_layout=}")
 
         is_packed_softmax = get_cudnn_version() >= (9, 6, 0) and config.qkv_layout.is_thd()
-        out_sharding = ('…0', 'seqlen', 'head', 'hidden')
+        out_sharding = ("…0", "seqlen", "head", "hidden")
         if is_packed_softmax:
-            softmax_aux_sharding = ('…0', 'seqlen', 'head', 'i')
+            softmax_aux_sharding = ("…0", "seqlen", "head", "i")
         else:
-            softmax_aux_sharding = ('…0', 'head', 'seqlen', 'i')
+            softmax_aux_sharding = ("…0", "head", "seqlen", "i")
 
         return SdyShardingRule(
-            tuple(input_spec),
-            (out_sharding, softmax_aux_sharding, rng_sharding))
+            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+        )
+
 
 register_primitive(FusedAttnFwdPrimitive)
 
@@ -1033,8 +1034,8 @@ class FusedAttnBwdPrimitive(BasePrimitive):
         del config, mesh
         # We only care about the four first arguments.
         # Keep in sync with `infer_sharding_from_operands`.
-        input_spec = tuple((f'…{x}',) for x in range(len(value_types)))
-        output_spec = tuple((f'…{x}',) for x in range(len(result_types)))
+        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
         return SdyShardingRule(input_spec, output_spec)
 
 
