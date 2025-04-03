@@ -318,12 +318,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   std::vector<size_t> single_output_begins;
   std::vector<size_t> single_output_ends;
-  int slicing_dim;
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
 
-  void* output_data_ptr;
+  void* output_data_ptr = nullptr;
   if (single_output) {
     output_data_ptr = (*D)[0].data_ptr();
   }

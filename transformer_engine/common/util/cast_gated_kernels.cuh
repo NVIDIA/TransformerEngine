@@ -96,8 +96,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t in_mem = in_act_mem + in_gate_mem;
 
   constexpr size_t out_act_mem = buff_size_aligned_out;
-  constexpr size_t out_gate_mem = buff_size_aligned_out;
-  constexpr size_t out_mem = out_act_mem + out_gate_mem;
 
   // const size_t in_transaction_size = grad_mem + in_mem;
   constexpr size_t in_transaction_size = buff_elems * sizeof(IType);
@@ -108,7 +106,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   IType *in_gate_sh = reinterpret_cast<IType *>(dshmem + grad_mem + in_act_mem);
   OType *out_act_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem);
   OType *out_gate_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_act_mem);
-  // uint64_t *mbar = reinterpret_cast<uint64_t *>(dshmem + grad_mem + in_mem + out_mem);
 
   const uint64_t *TMAP_grad_in = reinterpret_cast<const uint64_t *>(&tensor_map_grad);
   const uint64_t *TMAP_in_act = reinterpret_cast<const uint64_t *>(&tensor_map_input_act);
@@ -289,7 +286,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
-  constexpr bool COMPUTE_IN_ROWWISE_SECTION = !USE_COLWISE_SCALING;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM_X;  //    4 = 128 / 32
@@ -825,8 +821,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
 
   size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
   size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
-
-  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
   e8m0_t *const scales_rowwise_ptr =
       USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;

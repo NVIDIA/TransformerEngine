@@ -142,7 +142,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       OType out_colwise_sh[MXFP8_BUFFERS_NUM][MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / MXFP8_BUFFERS_NUM;
-  constexpr int transaction_size = shmem_buff_size * (IS_DACT ? 2 : 1);
 
   const bool is_master_thread = (threadIdx.x == 0);
 
@@ -513,7 +512,6 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   __shared__ alignas(128) OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / FP8_BUFFERS_NUM;
-  constexpr int transaction_size = shmem_buff_size * (IS_DACT ? 2 : 1);
 
   const bool is_master_thread = (threadIdx.x == 0);
 
@@ -927,7 +925,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   bool use_colwise_scaling = output->has_columnwise_data();
   checkCuDriverContext(stream);
   NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
-  const auto &input_shape = input.data.shape;
   NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
 
   if (use_rowwise_scaling) {
