@@ -1001,7 +1001,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.return_layernorm_output_gathered = return_layernorm_output_gathered
         self.zero_centered_gamma = zero_centered_gamma
 
-        self.wgrad_store = WeightGradStore(split_bw)
+        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
 
         if tp_group is None:
             self.tp_size = tp_size
@@ -1465,8 +1465,11 @@ class LayerNormLinear(TransformerEngineBaseModule):
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
 
     def wgrad_comp(self):
-        # return
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
         if not self.wgrad_store.split_bw():
             return
-        with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
+        with torch.cuda.nvtx.range("_LayerNormLinear_wgrad"):
             self.wgrad_store.pop()

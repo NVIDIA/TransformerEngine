@@ -475,7 +475,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self.wgrad_store = WeightGradStore(split_bw)
+        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
 
         self._offsets = {"input": 0, "weight": num_gemms, "output": 2 * num_gemms, "grad_output": 0}
 
@@ -692,6 +692,10 @@ class GroupedLinear(TransformerEngineBaseModule):
         return out
 
     def wgrad_comp(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
         if not self.wgrad_store.split_bw():
             return
         with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):

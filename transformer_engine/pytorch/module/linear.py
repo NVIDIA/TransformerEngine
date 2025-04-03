@@ -876,7 +876,7 @@ class Linear(TransformerEngineBaseModule):
         self.get_rng_state_tracker = get_rng_state_tracker
         self.rng_tracker_name = rng_tracker_name
 
-        self.wgrad_store = WeightGradStore(split_bw)
+        self.wgrad_store = WeightGradStore(split_bw, bias, fuse_wgrad_accumulation)
 
         if device == "meta":
             assert parameters_split is None, "Cannot split module parameters on 'meta' device."
@@ -1290,7 +1290,11 @@ class Linear(TransformerEngineBaseModule):
                 ].amax_reduction_group = self.tp_group
    
     def wgrad_comp(self):
+        """
+        Execute the delayed weight gradient computation.
+        This method is called after the main backward pass to compute weight gradients.
+        """
         if not self.wgrad_store.split_bw():
             return
-        with torch.cuda.nvtx.range("_GroupedLinear_wgrad"):
+        with torch.cuda.nvtx.range("_Linear_wgrad"):
             self.wgrad_store.pop()

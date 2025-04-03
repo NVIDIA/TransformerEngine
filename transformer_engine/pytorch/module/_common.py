@@ -220,33 +220,56 @@ class _ParameterInitMeta:
 
 
 class WeightGradStore:
+    """
+    A class to manage weight gradient storage and computation in Transformer modules.
+    This class enables split backward propagation for better memory efficiency.
+    """
 
-    def __init__(self, split_bw=False):
+    def __init__(self, split_bw=False, use_bias=False, fuse_wgrad_accumulation=True):
+        """
+        Initialize the WeightGradStore.
+        
+        Args:
+            split_bw (bool): Whether to enable split backward propagation
+        """
         self.context = queue.Queue()
+        assert use_bias == False, "use_bias is not supported when enable split_bw"
+        assert fuse_wgrad_accumulation == True, "fuse_wgrad_accumulation is not supported when enable split_bw"
         self.enabled = split_bw
 
-    def is_supported(self):
-        # doesn't support use_bias
-        # doesn't support fuse_wgrad_accumulation
-        # doesn't support
-        return True
-
     def split_bw(self):
-        if not self.is_supported():
-            return False
+        """
+        Get the current split backward propagation status.
+        
+        Returns:
+            bool: True if split backward is enabled, False otherwise
+        """
         return self.enabled
 
     def enable_split_bw(self):
+        """Enable split backward propagation."""
         self.enabled = True
 
     def disable_split_bw(self):
+        """Disable split backward propagation."""
         self.enabled = False
 
     def put(self, tensor_list, func):
+        """
+        Store tensors and computation function for later execution.
+        
+        Args:
+            tensor_list (list): List of tensors needed for computation
+            func (callable): Function to be executed with the tensors
+        """
         self.context.put([tensor_list, func])
         return
 
     def pop(self):
+        """
+        Execute the stored computation with the stored tensors.
+        Raises an exception if the queue is empty.
+        """
         if self.context.qsize() > 0:
             tensor_list, func = self.context.get()
             func(*tensor_list)
@@ -255,5 +278,9 @@ class WeightGradStore:
             raise Exception(f"Pop empty queue. rank {rank}")
 
     def assert_empty(self):
+        """
+        Assert that the queue is empty.
+        Used for debugging and ensuring proper cleanup.
+        """
         rank = torch.distributed.get_rank()
         assert self.context.empty(), f"Queue is not empty. rank {rank}"
