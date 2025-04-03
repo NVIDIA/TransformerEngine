@@ -360,25 +360,35 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     def view(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        if not self.requires_grad:
-            # Autograd removes the quantized return type
-            # because of __torch_function__ in base class
-            # and torch._C._disabled_torch_function_impl
-            return _ViewFunc.forward(None, self, shape)
-        return super().view(self, *shape)
+        return _ViewFunc.apply(self, shape)
 
     def reshape(self, *shape: Tuple[int]) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
-        if not self.requires_grad:
-            return _ReshapeFunc.forward(None, self, shape)
-        return super().reshape(self, *shape)
+        return _ReshapeFunc.apply(self, shape)
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
 
         # View op
         if func == aten.view.default:
-            return _ViewFunc.apply(args[0], *args[1:])
+            tensor = args[0]
+            data = tensor._rowwise_data
+            if data is None:
+                # Columnwise data only.
+                super().__torch_dispatch__(func, types, args, kwargs)
+            orig_size = data.size()
+            out_data = data.__torch_dispatch__(
+                func,
+                types,
+                [data] + list(args[1:]),
+                kwargs,
+            )
+            if orig_size != out_data.size():
+                raise NotImplementedException(
+                    "Changing shape with view not implemented "
+                    " (scales and columnwise data untouched)."
+                )
+            return Float8BlockwiseQTensor.make_like(tensor)
 
         # Default case
         return super().__torch_dispatch__(func, types, args, kwargs)
@@ -458,7 +468,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
 
     def _get_data(self) -> Float8BlockwiseQTensor:
         """Get tensor data property"""
-        return self.dequantize()
+        return self
 
     @torch.no_grad()
     def _set_data(self, tensor: torch.Tensor) -> None:
