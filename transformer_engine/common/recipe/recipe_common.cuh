@@ -7,6 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
 #define TRANSFORMER_ENGINE_RECIPE_RECIPE_COMMON_CUH_
 
+#include "common/common.h"
+
 namespace transformer_engine {
 
 __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_fp8,
@@ -44,6 +46,26 @@ __device__ __forceinline__ float compute_scale_from_amax(float amax, float max_f
   }
 
   return scale;
+}
+
+// Calculate the quantization scale for an individual data element
+// given the amax(abs(tile)) value for a given quantization tile.
+//
+//
+// Arguments:
+// IType: data type of the tensor being quantized (float or bf16)
+// OType: quantized data type (e4m3 or e5m2)
+// amax: The evaluation of amax(abs(tile)) for the quantization tile.
+// eps: An epsilon used as a floor for amax.
+// pow_2_scaling: Whether to force the scale to be a power of 2.
+template <typename IType, typename OType>
+__device__ __forceinline__ float compute_scale_from_types(const float amax, const float eps,
+                                                          const float pow_2_scaling) {
+  constexpr float fp8_max = TypeInfo<OType>::max_finite_value;
+  // NOTE: We're relying on compute_scale_from_amax to have behavior where it
+  // clips the mantissa of the max_finite_value if power of 2 scaling applies.
+  constexpr float value_for_inf = TypeInfo<IType>::max_finite_value;
+  return compute_scale_from_amax(amax, fp8_max, pow_2_scaling, eps, value_for_inf);
 }
 
 }  // namespace transformer_engine

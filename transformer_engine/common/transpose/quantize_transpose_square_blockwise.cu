@@ -13,9 +13,9 @@
 #include <cuda/barrier>
 
 #include "common/common.h"
+#include "common/recipe/recipe_common.cuh"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
-#include "compute_scale.cuh"
 
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
@@ -149,11 +149,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   __syncthreads();
   block_tile_amax = block_tile_amax_shared[0];
 
-  if (pow_2_scaling) {
-    block_tile_scale = ComputeScale<IType, OType, true>(block_tile_amax, epsilon);
-  } else {
-    block_tile_scale = ComputeScale<IType, OType, false>(block_tile_amax, epsilon);
-  }
+  block_tile_scale =
+      compute_scale_from_types<IType, OType>(block_tile_amax, epsilon, pow_2_scaling);
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);
@@ -375,11 +372,8 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   __syncthreads();
   block_tile_amax = block_tile_amax_shared[0];
 
-  if (pow_2_scaling) {
-    block_tile_scale = ComputeScale<IType, OType, true>(block_tile_amax, epsilon);
-  } else {
-    block_tile_scale = ComputeScale<IType, OType, false>(block_tile_amax, epsilon);
-  }
+  block_tile_scale =
+      compute_scale_from_types<IType, OType>(block_tile_amax, epsilon, pow_2_scaling);
 
   if (threadIdx.x == 0) {
     static_assert(std::is_same<CType, float>::value);

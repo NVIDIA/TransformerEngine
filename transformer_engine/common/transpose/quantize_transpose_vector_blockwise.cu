@@ -15,8 +15,8 @@
 #include <utility>
 
 #include "common/common.h"
+#include "common/recipe/recipe_common.cuh"
 #include "common/utils.cuh"
-#include "compute_scale.cuh"
 
 namespace transformer_engine {
 namespace {
@@ -254,11 +254,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
       amax = __shfl_sync(mask, amax, src_lane);
       CType scale;
       // Step 2.4: Compute scale
-      if (pow_2_scaling) {
-        scale = ComputeScale<IType, OType, true>(amax, epsilon);
-      } else {
-        scale = ComputeScale<IType, OType, false>(amax, epsilon);
-      }
+      scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
       // Step 2.5: Write scale_inv
       bool write_scale_inv = is_src_lane;
       if constexpr (!kAligned) {
@@ -347,11 +343,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
         amax = __shfl_sync(mask, amax, src_lane);
         // Step 3.4: Compute scale
         CType scale;
-        if (pow_2_scaling) {
-          scale = ComputeScale<IType, OType, true>(amax, epsilon);
-        } else {
-          scale = ComputeScale<IType, OType, false>(amax, epsilon);
-        }
+        scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
         // Step 3.5: Write scale_inv_t
         bool write_scale_inv = is_src_lane;
         if constexpr (!kAligned) {
