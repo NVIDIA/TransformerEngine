@@ -68,7 +68,6 @@ union FP8x2_union<__nv_fp8x2_e5m2> {
 };
 static_assert(sizeof(FP8x2_union<__nv_fp8x2_e5m2>) == 2);
 
-
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
@@ -86,10 +85,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && NO_ACTIVATIONS;
 
-  using IType2 = std::conditional_t<std::is_same_v<IType, float>, float2,
-                 std::conditional_t<std::is_same_v<IType, bf16>, __nv_bfloat162, __half2>>;
+  using IType2 =
+      std::conditional_t<std::is_same_v<IType, float>, float2,
+                         std::conditional_t<std::is_same_v<IType, bf16>, __nv_bfloat162, __half2>>;
 
-  using OType2 = std::conditional_t<std::is_same_v<OType, fp8e4m3>, __nv_fp8x2_e4m3, __nv_fp8x2_e5m2>;
+  using OType2 =
+      std::conditional_t<std::is_same_v<OType, fp8e4m3>, __nv_fp8x2_e4m3, __nv_fp8x2_e5m2>;
   static_assert(sizeof(OType2) == 2);
 
   if constexpr (NO_ACTIVATIONS) {
@@ -240,18 +241,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const int shmem_offset_base_colwise = buff * BUFF_DIM + tid_X_colwise;
       thread_amax = 0.0f;
       float in_compute_colwise[BUFF_DIM_Y];
-      IType2 in_colwise_IType[BUFF_DIM_Y/2];
+      IType2 in_colwise_IType[BUFF_DIM_Y / 2];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; i += 2) {
           const int shmem_offset_colwise_elt1 = shmem_offset_base_colwise + i * BUFF_DIM_X;
           const int shmem_offset_colwise_elt2 = shmem_offset_base_colwise + (i + 1) * BUFF_DIM_X;
-          in_colwise_IType[i/2].x = in_sh[shmem_offset_colwise_elt1];
-          in_colwise_IType[i/2].y = in_sh[shmem_offset_colwise_elt2];
-          ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_colwise_IType[i/2]);
+          in_colwise_IType[i / 2].x = in_sh[shmem_offset_colwise_elt1];
+          in_colwise_IType[i / 2].y = in_sh[shmem_offset_colwise_elt2];
+          ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_colwise_IType[i / 2]);
         }
         thread_amax =
             static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
@@ -308,10 +309,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         IType2 in;
         FP8x2_union<OType2> out;
         if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-          in = in_colwise_IType[i/2];
+          in = in_colwise_IType[i / 2];
         } else {
           in.x = in_compute_colwise[i];
-          in.y = in_compute_colwise[i+1];
+          in.y = in_compute_colwise[i + 1];
         }
         ptx::mul_cvt_2x<OType2, IType2>(out.packed_elts, in, block_scale_inverse_2x);
 
@@ -329,7 +330,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
       // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
-      Vec<IType2, PACK_SIZE/2> in_IType[WAVES];
+      Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
@@ -342,7 +343,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           // Load elements
           in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
 #pragma unroll
-          for (int e = 0; e < PACK_SIZE/2; ++e) {
+          for (int e = 0; e < PACK_SIZE / 2; ++e) {
             ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
           }
         }
@@ -375,7 +376,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } else {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; e += 2) {
-                const IType2 in_cached_2x = {in_cached[w].data.elt[e], in_cached[w].data.elt[e+1]};
+                const IType2 in_cached_2x = {in_cached[w].data.elt[e],
+                                             in_cached[w].data.elt[e + 1]};
                 ptx::abs_max_2x<IType2>(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
             }
@@ -444,12 +446,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const float block_scale_inverse = exp2f_rcp(biased_exponent);
       const float2 block_scale_inverse_2x = make_float2(block_scale_inverse, block_scale_inverse);
 
-// 3. Scale elements
-      #pragma unroll
+      // 3. Scale elements
+#pragma unroll
       for (int w = 0; w < WAVES; ++w) {
-        Vec<OType2, PACK_SIZE/2> out;
-        #pragma unroll
-        for (int e = 0; e < PACK_SIZE/2; ++e) {
+        Vec<OType2, PACK_SIZE / 2> out;
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE / 2; ++e) {
           IType2 in;
           if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
             in = in_IType[w].data.elt[e];
@@ -459,7 +461,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           } else {
             const int j = w * PACK_SIZE + 2 * e;
             in.x = in_compute_rowwise[j];
-            in.y = in_compute_rowwise[j+1];
+            in.y = in_compute_rowwise[j + 1];
           }
           ptx::mul_cvt_2x<OType2, IType2>(out.data.elt[e], in, block_scale_inverse_2x);
         }
