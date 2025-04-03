@@ -317,12 +317,28 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         ), "Must retain some data either columnwise or rowwise"
 
         if columnwise_usage and rowwise_usage:
-            assert (
-                self._rowwise_data is not None
-                and self._rowwise_scale_inv is not None
-                and self._columnwise_data is not None
-                and self._columnwise_scale_inv is not None
-            ), "Cannot update to rowwise and columnwise usage."
+            if not self._is_2D_scaled:
+                # For 1D scaling, we cannot create columnwise data/scale_inv from rowwise
+                # data/scale_inv because their scale values are different.
+                assert (
+                    self._rowwise_data is not None
+                    and self._rowwise_scale_inv is not None
+                    and self._columnwise_data is not None
+                    and self._columnwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage."
+            else:
+                # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
+                # rowwise data/scale_inv.
+                assert (
+                    self._rowwise_data is not None
+                    and self._rowwise_scale_inv is not None
+                ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
+                if (
+                    self._columnwise_data is None
+                    or self._columnwise_scale_inv is None
+                    or self._columnwise_invalid
+                ):
+                    self._create_columnwise()
             return
 
         if rowwise_usage:
@@ -341,6 +357,14 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             return
 
         return
+
+    def _reset_columnwise(self) -> None:
+        """
+        Set columnwise data and columnwise scale inv as invalid.
+        Should only be called when _is_2D_scaled == True.
+        """
+        assert self._is_2D_scaled, "Cannot reset columnwise data when not using 2D scaling."
+        self._columnwise_invalid = True
 
     def clone(self) -> Float8BlockwiseQTensor:
         # pylint: disable=missing-function-docstring
