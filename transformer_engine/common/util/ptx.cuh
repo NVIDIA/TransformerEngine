@@ -176,12 +176,11 @@ using fp8e5m2x2 = __nv_fp8x2_e5m2;
 
 // SIMD like "Fused" cast + multiplication (x2)
 template <typename T1, typename T2>
-__device__ __forceinline__ void
-mul_cvt_2x(T1 &out, const T2 &in, const float2 &scale);
+__device__ __forceinline__ void mul_cvt_2x(T1 &out, const T2 &in, const float2 &scale);
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e4m3x2, float2>(fp8e4m3x2 &out, const float2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e4m3x2, float2>(fp8e4m3x2 &out, const float2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -197,8 +196,8 @@ mul_cvt_2x<fp8e4m3x2, float2>(fp8e4m3x2 &out, const float2 &in, const float2 &sc
 }
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e5m2x2, float2>(fp8e5m2x2 &out, const float2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e5m2x2, float2>(fp8e5m2x2 &out, const float2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair; \n\t"
@@ -214,8 +213,8 @@ mul_cvt_2x<fp8e5m2x2, float2>(fp8e5m2x2 &out, const float2 &in, const float2 &sc
 }
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e4m3x2, bf16x2>(fp8e4m3x2 &out, const bf16x2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e4m3x2, bf16x2>(fp8e4m3x2 &out, const bf16x2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -238,8 +237,8 @@ mul_cvt_2x<fp8e4m3x2, bf16x2>(fp8e4m3x2 &out, const bf16x2 &in, const float2 &sc
 }
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e5m2x2, bf16x2>(fp8e5m2x2 &out, const bf16x2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e5m2x2, bf16x2>(fp8e5m2x2 &out, const bf16x2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -262,8 +261,8 @@ mul_cvt_2x<fp8e5m2x2, bf16x2>(fp8e5m2x2 &out, const bf16x2 &in, const float2 &sc
 }
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e4m3x2, fp16x2>(fp8e4m3x2 &out, const fp16x2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e4m3x2, fp16x2>(fp8e4m3x2 &out, const fp16x2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -286,8 +285,8 @@ mul_cvt_2x<fp8e4m3x2, fp16x2>(fp8e4m3x2 &out, const fp16x2 &in, const float2 &sc
 }
 
 template <>
-__device__ __forceinline__ void
-mul_cvt_2x<fp8e5m2x2, fp16x2>(fp8e5m2x2 &out, const fp16x2 &in, const float2 &scale) {
+__device__ __forceinline__ void mul_cvt_2x<fp8e5m2x2, fp16x2>(fp8e5m2x2 &out, const fp16x2 &in,
+                                                              const float2 &scale) {
   asm volatile(
       "{\n"
       ".reg.b64 val_pair_before; \n\t"
@@ -310,27 +309,24 @@ mul_cvt_2x<fp8e5m2x2, fp16x2>(fp8e5m2x2 &out, const fp16x2 &in, const float2 &sc
 }
 
 template <typename T>
-__device__ __forceinline__ void
-abs_max_2x(T &dest, const T &p1, const T &p2);
+__device__ __forceinline__ void abs_max_2x(T &dest, const T &p1, const T &p2);
 
 template <>
-__device__ __forceinline__ void
-abs_max_2x<bf16x2>(bf16x2 &dst, const bf16x2 &p1, const bf16x2 &p2) {
-  asm volatile(
-      "max.xorsign.abs.bf16x2 %0, %1, %2;"
-      : "=r"(reinterpret_cast<uint32_t &>(dst))
-      : "r"(reinterpret_cast<const uint32_t &>(p1)),
-        "r"(reinterpret_cast<const uint32_t &>(p2)));
+__device__ __forceinline__ void abs_max_2x<bf16x2>(bf16x2 &dst, const bf16x2 &p1,
+                                                   const bf16x2 &p2) {
+  asm volatile("max.xorsign.abs.bf16x2 %0, %1, %2;"
+               : "=r"(reinterpret_cast<uint32_t &>(dst))
+               : "r"(reinterpret_cast<const uint32_t &>(p1)),
+                 "r"(reinterpret_cast<const uint32_t &>(p2)));
 }
 
 template <>
-__device__ __forceinline__ void
-abs_max_2x<fp16x2>(fp16x2 &dst, const fp16x2 &p1, const fp16x2 &p2) {
-  asm volatile(
-      "max.xorsign.abs.f16x2 %0, %1, %2;"
-      : "=r"(reinterpret_cast<uint32_t &>(dst))
-      : "r"(reinterpret_cast<const uint32_t &>(p1)),
-        "r"(reinterpret_cast<const uint32_t &>(p2)));
+__device__ __forceinline__ void abs_max_2x<fp16x2>(fp16x2 &dst, const fp16x2 &p1,
+                                                   const fp16x2 &p2) {
+  asm volatile("max.xorsign.abs.f16x2 %0, %1, %2;"
+               : "=r"(reinterpret_cast<uint32_t &>(dst))
+               : "r"(reinterpret_cast<const uint32_t &>(p1)),
+                 "r"(reinterpret_cast<const uint32_t &>(p2)));
 }
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
