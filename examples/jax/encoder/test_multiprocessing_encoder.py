@@ -577,7 +577,7 @@ def encoder_parser(args):
 class TestEncoder(unittest.TestCase):
     """Encoder unittests"""
 
-    def exec(self, use_fp8, fp8_recipe, *, enable_shardy = False):
+    def exec(self, use_fp8, fp8_recipe, *, enable_shardy=False):
         """Run 3 epochs for testing"""
         args = encoder_parser([])
 
@@ -625,12 +625,14 @@ class TestEncoder(unittest.TestCase):
         result = self.exec(False, None, enable_shardy=True)
         assert result[0] < 0.45 and result[1] > 0.79
 
-    @unittest.skipIf(not is_fp8_supported(),
-                     "Device compute capability 9.0+ is required for DelayedScaling FP8")
+    @unittest.skipIf(
+        not is_fp8_supported(), "Device compute capability 9.0+ is required for DelayedScaling FP8"
+    )
     def test_te_delayed_scaling_fp8_shardy(self):
         """Test Transformer Engine with DelayedScaling FP8"""
         result = self.exec(True, "DelayedScaling", enable_shardy=True)
         assert result[0] < 0.455 and result[1] > 0.79
+
 
 if __name__ == "__main__":
     train_and_evaluate(encoder_parser(None))

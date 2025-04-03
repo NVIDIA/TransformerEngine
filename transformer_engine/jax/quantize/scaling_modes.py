@@ -42,6 +42,7 @@ class QuantizeShardyRules:
     colwise_rule: Tuple[str]
     factor_sizes: Dict[str, int]
 
+
 class ScalingModeMetadataImpl(ABC):
     """Base class for scaling mode implementations.
 
@@ -84,6 +85,7 @@ class ScalingModeMetadataImpl(ABC):
             The Shardy rules for the scaling mode
         """
 
+
 class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
     """Implementation for delayed scaling mode.
 
@@ -124,7 +126,7 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        input_spec = tuple(f'x{i}' for i in range(input_rank))
+        input_spec = tuple(f"x{i}" for i in range(input_rank))
         return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
 
 
@@ -218,13 +220,15 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         Returns:
             The Shardy rules for the scaling mode
         """
-        input_spec = [f'x{i}' for i in range(input_rank)]
-        input_spec[-2] = CompoundFactor(unique_var, 'block_size')
+        input_spec = [f"x{i}" for i in range(input_rank)]
+        input_spec[-2] = CompoundFactor(unique_var, "block_size")
 
-        rowwise = input_spec[:-1] + [f'{unique_var}_']
-        colwise = input_spec[:-2] + [unique_var, f'{unique_var}__']
+        rowwise = input_spec[:-1] + [f"{unique_var}_"]
+        colwise = input_spec[:-2] + [unique_var, f"{unique_var}__"]
 
-        return QuantizeShardyRules(tuple(input_spec), tuple(rowwise), tuple(colwise), {'block_size': 32})
+        return QuantizeShardyRules(
+            tuple(input_spec), tuple(rowwise), tuple(colwise), {"block_size": 32}
+        )
 
 
 # (Phuong: Map the NVTEScalingMode value to the ScalingMode
