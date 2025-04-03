@@ -262,7 +262,7 @@ class FusedAdam(torch.optim.Optimizer):
         if scaled_state.dtype == torch.bfloat16:
             scaled_state.copy_(unscaled_state.bfloat16())
             return
-        
+
         dtype = self.name_to_dtype_map[state_name]
         if dtype == torch.uint8:
             assert isinstance(scaled_state, Float8Tensor)
