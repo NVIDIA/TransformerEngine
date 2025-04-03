@@ -330,6 +330,11 @@ class ScaledSoftmaxFwdPrimitive(SoftmaxPrimitive):
             ScaledSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '... -> ...'
+
 
 register_primitive(ScaledSoftmaxFwdPrimitive)
 
@@ -399,6 +404,11 @@ class ScaledSoftmaxBwdPrimitive(SoftmaxPrimitive):
         return ScaledSoftmaxBwdPrimitive.backward_partition(
             ScaledSoftmaxBwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '..., ... -> ...'
 
 
 register_primitive(ScaledSoftmaxBwdPrimitive)
@@ -525,6 +535,11 @@ class ScaledMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
             ScaledMaskedSoftmaxFwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '...1, ...2 -> ...1'
+
 
 register_primitive(ScaledMaskedSoftmaxFwdPrimitive)
 
@@ -596,6 +611,10 @@ class ScaledMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             ScaledMaskedSoftmaxBwdPrimitive.impl, scale_factor, mesh, arg_infos, result_infos
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '..., ... -> ...'
 
 register_primitive(ScaledMaskedSoftmaxBwdPrimitive)
 
@@ -682,6 +701,10 @@ class ScaledUpperTriangMaskedSoftmaxFwdPrimitive(SoftmaxPrimitive):
             result_infos,
         )
 
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '... -> ...'
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxFwdPrimitive)
 
@@ -760,6 +783,11 @@ class ScaledUpperTriangMaskedSoftmaxBwdPrimitive(SoftmaxPrimitive):
             arg_infos,
             result_infos,
         )
+
+    @staticmethod
+    def shardy_sharding_rule(*args):
+        del args
+        return '..., ... -> ...'
 
 
 register_primitive(ScaledUpperTriangMaskedSoftmaxBwdPrimitive)

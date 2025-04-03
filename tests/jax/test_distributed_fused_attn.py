@@ -72,6 +72,13 @@ class TestDistributedSelfAttn:
         ],
     )
     @pytest.mark.parametrize("dtype", DTYPES)
+    @pytest.mark.parametrize(
+        "use_shardy",
+        [
+            pytest.param(False, id="GSPMD"),
+            pytest.param(True, id="Shardy"),
+        ],
+    )
     def test_self_attn(
         self,
         device_count,
@@ -83,6 +90,7 @@ class TestDistributedSelfAttn:
         bias_shape,
         attn_mask_type,
         dtype,
+        use_shardy,
     ):
         dropout_prob = 0.0
         is_training = True
@@ -105,6 +113,7 @@ class TestDistributedSelfAttn:
         ):
             pytest.skip("No FusedAttn backend found")
 
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         col_ref = self.generate_collectives_count_ref(
             mesh_shape,
             mesh_axes,
@@ -136,6 +145,7 @@ class TestDistributedSelfAttn:
             coll_count_ref=col_ref,
         )
         runner.test_backward()
+        jax.config.update("jax_use_shardy_partitioner", False)
 
 
 class TestDistributedCrossAttn:
@@ -233,6 +243,13 @@ class TestDistributedCrossAttn:
 @pytest.mark.parametrize(
     "load_balanced",
     [pytest.param(True, id="BALANCED"), pytest.param(False, id="UNBALANCED")],
+)
+@pytest.mark.parametrize(
+    "use_shardy",
+    [
+        pytest.param(False, id="GSPMD"),
+        pytest.param(True, id="Shardy"),
+    ],
 )
 class TestDistributedContextParallelSelfAttn:
 
@@ -337,10 +354,14 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_shardy,
     ):
         if qkv_layout.is_thd():
             pytest.skip("THD doesn't support all gather context parallelism.")
-        return self.impl_test_context_parallel_attn(
+        if use_shardy and data_shape != [2, 128, 8, 128]:
+            pytest.skip("Reducing number of tests run with Shardy.")
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
+        result = self.impl_test_context_parallel_attn(
             device_count,
             mesh_shape,
             mesh_axes,
@@ -353,6 +374,8 @@ class TestDistributedContextParallelSelfAttn:
             load_balanced,
             CPStrategy.ALL_GATHER,
         )
+        jax.config.update("jax_use_shardy_partitioner", False)
+        return result
 
     @pytest.mark.parametrize(
         "use_scan",
@@ -370,6 +393,7 @@ class TestDistributedContextParallelSelfAttn:
         dtype,
         qkv_layout,
         load_balanced,
+        use_shardy,
         use_scan,
     ):
         if use_scan:
@@ -377,6 +401,10 @@ class TestDistributedContextParallelSelfAttn:
         else:
             os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"] = "0"
 
+        if use_shardy and (not use_scan or data_shape != [2, 128, 8, 128]):
+            pytest.skip("Reducing number of tests run with Shardy.")
+
+        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         if qkv_layout.is_thd() and not load_balanced:
             pytest.skip("THD + ring doesn't support unbalanced context parallelism.")
 
@@ -394,6 +422,7 @@ class TestDistributedContextParallelSelfAttn:
             CPStrategy.RING,
         )
         del os.environ["NVTE_FUSED_RING_ATTENTION_USE_SCAN"]
+        jax.config.update("jax_use_shardy_partitioner", False)
         return
 
 
