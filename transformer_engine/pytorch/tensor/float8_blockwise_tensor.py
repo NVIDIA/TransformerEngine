@@ -468,7 +468,6 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
         casts to FP8.
 
         """
-
         # Tensor device
         new_device = tensor.device if tensor.is_cuda else self.device
 
@@ -479,24 +478,25 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
             dst._fp8_dtype = src._fp8_dtype
             dst._rowwise_scale_inv = src._rowwise_scale_inv
             dst._columnwise_scale_inv = src._columnwise_scale_inv
-            if dst.requires_grad != src.requires_grad:
-                dst.requires_grad_(requires_grad=src.requires_grad)
+            dst.dtype = src.dtype
+
+        # Check that tensor dimensions match
+        if (
+            self.size() != tensor.size()
+            or self.stride() != tensor.stride()
+            or self.layout != tensor.layout
+        ):
+            raise ValueError("Invalid tensor for updating Float8BlockwiseQTensor data")
 
         # Just copy FP8 data if other tensor is Float8BlockwiseQTensor
-        compatible_layout = (
-            isinstance(tensor, Float8BlockwiseQTensor)
-            and self.size() == tensor.size()
-            and self.stride() == tensor.stride()
-        )
         if (
-            compatible_layout
+            isinstance(tensor, Float8BlockwiseQTensor)
             and self.storage_offset() == tensor.storage_offset()
-            and self.dtype == tensor.dtype
-            and self.layout == tensor.layout
             and devices_match(self.device, new_device)
         ):
             _set_from_tensor(self, tensor)
             return
+
         if isinstance(tensor, Float8BlockwiseQTensor):
             assert tensor._quantizer is not None, "Can't quantize without a quantizer"
             quantizer = tensor._quantizer

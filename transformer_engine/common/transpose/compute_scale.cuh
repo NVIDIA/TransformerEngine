@@ -1,11 +1,11 @@
 /*************************************************************************
- * Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
-#ifndef TRANSFORMER_ENGINE_COMPUTE_SCALE_CUH_
-#define TRANSFORMER_ENGINE_COMPUTE_SCALE_CUH_
+#ifndef TRANSFORMER_ENGINE_COMMON_TRANSPOSE_COMPUTE_SCALE_CUH_
+#define TRANSFORMER_ENGINE_COMMON_TRANSPOSE_COMPUTE_SCALE_CUH_
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -96,4 +96,4 @@ __device__ __forceinline__ float ComputeScale(const float amax, const float eps)
 
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_COMPUTE_SCALE_CUH_
+#endif  // TRANSFORMER_ENGINE_COMMON_TRANSPOSE_COMPUTE_SCALE_CUH_
