@@ -59,7 +59,7 @@ from ..tensor.quantized_tensor import (
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-
+from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 from transformer_engine.common.recipe import Recipe
 
@@ -144,19 +144,25 @@ class _Linear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
-                if not isinstance(inputmat, QuantizedTensor):
-                    columnwise_usage = backward_needs_input and isinstance(
-                        input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)
+                # TODO: force BF16 allgather in the case when fp8 gather is not fully supported
+                force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
+                if force_high_precision_gather:
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    inputmat_total, _ = gather_along_first_dim(inputmat, tp_group, quantizer=input_quantizer)
+                else:
+                    if not isinstance(inputmat, QuantizedTensor):
+                        columnwise_usage = backward_needs_input and isinstance(
+                            input_quantizer, (MXFP8Quantizer, Float8BlockQuantizer)
+                        )
+                        input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
+                        inputmat = input_quantizer(inputmat)
+                        own_quantized_input = True
+                    input_quantizer.set_usage(rowwise=True, columnwise=False)
+                    inputmat_total, _ = gather_along_first_dim(
+                        inputmat,
+                        tp_group,
+                        quantizer=input_quantizer,
                     )
-                    input_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
-                    inputmat = input_quantizer(inputmat)
-                    own_quantized_input = True
-                input_quantizer.set_usage(rowwise=True, columnwise=False)
-                inputmat_total, _ = gather_along_first_dim(
-                    inputmat,
-                    tp_group,
-                    quantizer=input_quantizer,
-                )
             else:
                 if (
                     FP8GlobalStateManager.get_fp8_recipe().float8_per_tensor_scaling()
@@ -517,6 +523,9 @@ class _Linear(torch.autograd.Function):
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
+                    elif isinstance(quantizer, Float8BlockQuantizer):
+                        # TODO: I had to set both True even though only columnwise is used, beucase there is no columnwise only kernel
+                        quantizer.set_usage(rowwise=True, columnwise=True)
                     else:
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)
