@@ -144,11 +144,13 @@ class _Linear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
-                # TODO: force BF16 allgather in the case when fp8 gather is not fully supported
+                # TODO: Support FP8 allgather for FP8 block quantization.
                 force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
                 if force_high_precision_gather:
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
-                    inputmat_total, _ = gather_along_first_dim(inputmat, tp_group, quantizer=input_quantizer)
+                    inputmat_total, _ = gather_along_first_dim(
+                        inputmat, tp_group, quantizer=input_quantizer
+                    )
                 else:
                     if not isinstance(inputmat, QuantizedTensor):
                         columnwise_usage = backward_needs_input and isinstance(
@@ -524,7 +526,8 @@ class _Linear(torch.autograd.Function):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     elif isinstance(quantizer, Float8BlockQuantizer):
-                        # TODO: I had to set both True even though only columnwise is used, beucase there is no columnwise only kernel
+                        # TODO: Support rowwise=False, columnwise=True in quantizer
+                        # and configure that here.
                         quantizer.set_usage(rowwise=True, columnwise=True)
                     else:
                         # wgrad GEMM requires input with column-wise usage

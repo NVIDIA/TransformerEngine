@@ -241,7 +241,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_total = None
         ub_obj_fprop = None
         if with_input_all_gather:
-            # TODO: force BF16 allgather in the case when fp8 gather is not fully supported
+            # TODO: Support FP8 gather of Float8BlockQuantizer.
             force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered
@@ -645,7 +645,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
                     elif isinstance(quantizer, Float8BlockQuantizer):
-                        # TODO: I had to set both True even though only columnwise is used, beucase there is no columnwise only kernel
+                        # TODO: Add support in the quantizer for
+                        # rowwise=False, columnwise=True and configure that here.
                         quantizer.set_usage(rowwise=True, columnwise=True)
                     else:
                         # wgrad GEMM requires input with column-wise usage

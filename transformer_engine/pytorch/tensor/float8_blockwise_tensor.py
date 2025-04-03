@@ -167,18 +167,11 @@ class Float8BlockQuantizer(Quantizer):
         for i in range(len(shape) - 1):
             colwise_shape.append(shape[i])
         return tuple(colwise_shape)
-    
-    def is_quantizable(self, inp: torch.Tensor) -> bool:
-        """Returns whether or not given inp can be quantized"""
-        # if inp.ndim < 2:
-        #     return False
-        # if inp.shape[-1] % self.block_len != 0:
-        #     return False
-        # if math.prod(inp.shape[:-1]) % self.block_len != 0:
-        #     return False
-        # return True
 
-        return False # TODO: remove this, returning False for now to trigger BF16 allgather
+    # TODO(kwyss): With FP8 gather support, we need to implement a
+    # shape/layout/swizzle check to know whether FP8 gather works
+    # cleanly by stacking data without aliasing tiles and whether
+    # the scales also stack on the proper dimensions.
 
     def make_empty(
         self,

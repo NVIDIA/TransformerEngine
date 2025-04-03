@@ -937,6 +937,7 @@ def _all_gather_fp8(
 
     return out, handle
 
+
 def _all_gather_fp8_blockwise(
     inp: torch.Tensor,
     process_group: dist_group_type,
@@ -957,45 +958,38 @@ def _all_gather_fp8_blockwise(
         dtype = inp.dtype
     elif isinstance(inp, Float8BlockwiseQTensorBase):
         if inp._rowwise_data is not None:
-            in_shape = inp._rowwise_data.device.size()
+            in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
-            dtype = inp._rowwise_data.dtype
         elif inp._columnwise_data is not None:
-            in_shape = inp._columnwise_data.device.size()
+            in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
-            dtype = inp._columnwise_data.dtype
         else:
             raise ValueError("Got Float8BlockwiseQTensor input tensor without any data")
-        dtype = torch.bfloat16
+        dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or Float8BlockwiseQTensorBase, "
             f"found {inp.__class__.__name__})"
         )
-    
     world_size = get_distributed_world_size(process_group)
 
     # Check that quantizer is valid
     if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
-    else:
-        assert quantizer.block_scaling_dim == 1 and quantizer.block_len == 128, "Only 1D blockwise quantization is supported for allgather"
+    elif not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
+        raise NotImplementedError("Only 1D blockwise quantization is supported for allgather")
 
     # Output tensor dims
     if out_shape is None:
         out_shape = list(inp.size())
         out_shape[0] *= world_size
 
-    # Since gather is for inp tensor or grad tensor, the block scaling dimension should be 1D 1x128
-    # This means that we need to do quantization in both directions, and then gather twice 
-    # This also requires a bidirectional quantization without transpose kernel
-    # Scaling factors should be in compact format without sizzling fused for the purpose of communication
     # Doing BF16 gather for now as baseline because it's simpler
-    if (
-        not isinstance(inp, Float8BlockwiseQTensorBase)
-        and quantizer is not None
-        and not quantizer.is_quantizable(inp)
-    ):
+    if not isinstance(inp, Float8BlockwiseQTensorBase) and quantizer is not None:
+        # TODO: Because the quantization is after the gather,
+        # async_op is ignored. A better solution would be
+        # to quantize as a future callback and chain async
+        # handles.
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -1005,88 +999,12 @@ def _all_gather_fp8_blockwise(
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
         return out, None
-    
-    raise Exception("Not implemented for doing fp8 blockwise allgather")
-
-    # TODO: finish the scheleton below for doing fp8 blockwise allgather
-
-    # # Cast input tensor to Float8BlockwiseQTensor with required data
-    # if not isinstance(inp, Float8BlockwiseQTensorBase):
-    #     inp = quantizer(inp)
-    # elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
-    #     quantizer.columnwise_usage and inp._columnwise_data is None
-    # ):
-    #     warnings.warn(
-    #         "Input and quantizer do not have matching usages. "
-    #         "Dequantizing and requantizing to Float8BlockwiseQTensor."
-    #     )
-    #     inp = quantizer(inp.dequantize())
-
-    # # Construct Float8BlockwiseQTensor output tensor
-    # out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
-
-    # # Coalesce NCCL collectives
-    # with torch.distributed._coalescing_manager(
-    #     group=process_group,
-    #     device=device,
-    #     async_ops=async_op,
-    # ) as coalescing_manager:
-
-    #     # Gather Float8BlockwiseQTensor data for row-wise usage
-    #     if quantizer.rowwise_usage:
-
-    #         # Remove padding from Float8BlockwiseQTensor scale-inverses
-    #         # TODO: figure out scale inv tensor shape here
-
-    #         # Launch all-gathers
-    #         torch.distributed.all_gather_into_tensor(
-    #             out_scale_inv,
-    #             in_scale_inv,
-    #             group=process_group,
-    #         )
-    #         torch.distributed.all_gather_into_tensor(
-    #             out._rowwise_data,
-    #             inp._rowwise_data,
-    #             group=process_group,
-    #         )
-
-    #     # Gather Float8BlockwiseQTensor data for column-wise usage
-    #     if quantizer.columnwise_usage:
-
-    #         # Remove padding from Float8BlockwiseQTensor scale-inverses
-    #         # TODO: figure out columnwise scale inv tensor shape here 
-
-    #         # Launch all-gathers
-    #         torch.distributed.all_gather_into_tensor(
-    #             out_scale_inv,
-    #             in_scale_inv,
-    #             group=process_group,
-    #         )
-    #         torch.distributed.all_gather_into_tensor(
-    #             out._columnwise_data,
-    #             inp._columnwise_data,
-    #             group=process_group,
-    #         )
-
-    # handle = coalescing_manager if async_op else None
-    
-    # # Unlink MXFP8, this fp8 blockwise tensor should also work with Hopper
-    # # This means that we need to transpose the gathered columnwise data
-    # # Example usage is grad_output tensor, ie. dY in linear backward
-    # # We want to gather two FP8 tensors (rowwise and columnwise) along dim0
-    # # and then transpose the columnwise data to match the rowwise data
-    # # Make sure FP8 transpose is populated if needed
-    # needs_transpose = (
-    #     quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
-    # )
-    # if needs_transpose:
-    #     if handle is not None:
-    #         handle.wait()
-    #         handle = None
-    #     # TODO: this transpose will transpose both data and scale inverses
-    #     # out._create_transpose()
-
-    # return out, handle
+    # Implementation of fp8 gather needs to account for:
+    # * Getting columnwise data as a transpose of how it is stored for GEMMS.
+    # * Gathering non GEMM swizzled scales.
+    # * Refer to scaffold code when implementing at:
+    # https://github.com/kwyss-nvidia/TransformerEngine/commit/6659ee9dc84fb515d1d47699d8bfd20a72b76477
+    raise NotImplementedError("fp8 blockwise allgather not yet implemented")
 
 
 def _all_gather_mxfp8(
@@ -1251,7 +1169,7 @@ def gather_along_first_dim(
             quantizer=quantizer,
             out_shape=out_shape,
         )
-    
+
     # FP8 block scaling case, block length = 128
     if isinstance(inp, Float8BlockwiseQTensorBase) or isinstance(quantizer, Float8BlockQuantizer):
         return _all_gather_fp8_blockwise(
