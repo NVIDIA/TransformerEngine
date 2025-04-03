@@ -468,9 +468,9 @@ class DenseGeneral(TransformerEngineBase):
 
         if self.kernel_axes:
             assert len(kernel_shape) == len(self.kernel_axes), (
-                    "Expected len(kernel_shape) to match len(kernel_axes),"
-                    f"got kernel_shape {kernel_shape} and kernel_axes {self.kernel_axes}"
-                    )
+                "Expected len(kernel_shape) to match len(kernel_axes),"
+                f"got kernel_shape {kernel_shape} and kernel_axes {self.kernel_axes}"
+            )
         kernel = nn_partitioning.param_with_axes(
             "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
@@ -488,10 +488,12 @@ class DenseGeneral(TransformerEngineBase):
         quantizer_set = self.generate_quantizer_set()
         contract_ind = tuple(range(0, len(axis)))
         y = dense(
-            inputs, kernel, contracting_dims=(axis, contract_ind),
+            inputs,
+            kernel,
+            contracting_dims=(axis, contract_ind),
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
-            quantizer_set=quantizer_set
+            quantizer_set=quantizer_set,
         )
 
         if self.enable_low_rank_adaptation:
@@ -756,10 +758,14 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             )
         else:
             y = with_sharding_constraint_by_logical_axes(y, self.dot_input_axes)
-            z = dense(y, kernel, contracting_dims=(axis, contract_ind),
-                      input_axes=self.dot_input_axes,
-                      kernel_axes=self.kernel_axes,
-                      quantizer_set=quantizer_set)
+            z = dense(
+                y,
+                kernel,
+                contracting_dims=(axis, contract_ind),
+                input_axes=self.dot_input_axes,
+                kernel_axes=self.kernel_axes,
+                quantizer_set=quantizer_set,
+            )
 
         if self.enable_low_rank_adaptation:
             lora_a_kernel_shape = (
@@ -1235,10 +1241,12 @@ class LayerNormMLP(TransformerEngineBase):
 
             # DenseGeneral 2
             out = dense(
-                z, kernel_2, contracting_dims=(axis, contract_ind),
+                z,
+                kernel_2,
+                contracting_dims=(axis, contract_ind),
                 input_axes=self.dot_2_input_axes,
                 kernel_axes=self.kernel_axes_2,
-                quantizer_set=ffn2_quantizer_set
+                quantizer_set=ffn2_quantizer_set,
             )
 
             if self.enable_low_rank_adaptation:

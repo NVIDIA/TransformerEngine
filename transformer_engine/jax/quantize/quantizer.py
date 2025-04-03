@@ -130,7 +130,9 @@ class Quantizer(ABC):
             return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
         if is_colwise:
-            return self._quantize_func(x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
+            return self._quantize_func(
+                x, is_colwise=True, dq_dtype=dq_dtype, flatten_axis=flatten_axis
+            )
 
         return self._quantize_func(x, dq_dtype=dq_dtype, flatten_axis=flatten_axis)
 
@@ -276,7 +278,9 @@ class DelayedScaleQuantizer(Quantizer):
         colwise_tensor = None
         if is_colwise:
             colwise_tensor = ScaledTensorFactory.create_1x(
-                data=jnp.transpose(rowwise_tensor.data, (*range(flatten_axis, x.ndim), *range(flatten_axis))),
+                data=jnp.transpose(
+                    rowwise_tensor.data, (*range(flatten_axis, x.ndim), *range(flatten_axis))
+                ),
                 scale_inv=rowwise_tensor.scale_inv,
                 scaling_mode=self.scaling_mode,
                 dq_dtype=dq_dtype,
@@ -399,7 +403,9 @@ class BlockScaleQuantizer(Quantizer):
         # TODO(Phuong): use quantize_func from JAX
         if flatten_axis < 0:
             flatten_axis = x.ndim + flatten_axis
-        assert 0 <= flatten_axis < x.ndim, f"Invalid flatten_axis: {flatten_axis} for tensor of shape {x.shape}"
+        assert (
+            0 <= flatten_axis < x.ndim
+        ), f"Invalid flatten_axis: {flatten_axis} for tensor of shape {x.shape}"
 
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         x_shape = x.shape

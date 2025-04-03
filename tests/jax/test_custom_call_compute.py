@@ -497,7 +497,9 @@ class TestQuantize:
             scaled_tensor = quantizer.quantize(x, flatten_axis=flatten_axis)
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
-    def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis):
+    def test_quantize_bitwise(
+        self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
+    ):
         if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):

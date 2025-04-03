@@ -66,10 +66,10 @@ def generate_fsdp_and_tp_configs():
         configs.append(
             [2, (1, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
-   if is_devices_enough(4):
-       configs.append(
-           [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
-       )
+    if is_devices_enough(4):
+        configs.append(
+            [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
+        )
     return configs
 
 

@@ -57,7 +57,7 @@ class Net(nn.Module):
             self_attn_mask_type="padding",
             enable_relative_embedding=False,
             enable_sequence_parallel=self.enable_seq_paral,
-            mlp_activations=('gelu', 'linear'),
+            mlp_activations=("gelu", "linear"),
         )
         x = te_Encoder()(x, attention_mask=mask, deterministic=disable_dropout)
 

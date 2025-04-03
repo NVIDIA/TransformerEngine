@@ -167,9 +167,10 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             0 < flatten_axis < len(data_shape)
         ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
 
-        assert (
-            data_shape[flatten_axis - 1] % block_x == 0
-        ), f"Data shape {data_shape} should be divisible by block_x {block_x} in axis {flatten_axis - 1}"
+        assert data_shape[flatten_axis - 1] % block_x == 0, (
+            f"Data shape {data_shape} should be divisible by block_x {block_x} in axis"
+            f" {flatten_axis - 1}"
+        )
         assert (
             data_shape[-1] % block_y == 0
         ), f"Data shape {data_shape} should be divisible by block_y {block_y} in axis -1"
@@ -182,8 +183,9 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             f" {data_shape} - should be divisible by block_x {block_x}"
         )
         assert flattened_last_dim % block_y == 0, (
-            f"Flattened last dim - mutiplication of axes={tuple(range(flatten_axis, len(data_shape)))} of"
-            f" shape {data_shape} - should be divisible by block_y {block_y}"
+            "Flattened last dim - mutiplication of"
+            f" axes={tuple(range(flatten_axis, len(data_shape)))} of shape {data_shape} - should be"
+            f" divisible by block_y {block_y}"
         )
 
         n_block_x = int(flattened_first_dim / block_x)
@@ -193,8 +195,12 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         n_block_x = int(((n_block_x + alignment_x - 1) // alignment_x) * alignment_x)
         n_block_y = int(((n_block_y + alignment_y - 1) // alignment_y) * alignment_y)
 
-        first_dim_scale_shape = self._apply_scale_shape_correction(data_shape[:flatten_axis], n_block_x)
-        last_dim_scale_shape = self._apply_scale_shape_correction(data_shape[flatten_axis:], n_block_y)
+        first_dim_scale_shape = self._apply_scale_shape_correction(
+            data_shape[:flatten_axis], n_block_x
+        )
+        last_dim_scale_shape = self._apply_scale_shape_correction(
+            data_shape[flatten_axis:], n_block_y
+        )
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
@@ -260,7 +266,9 @@ class ScalingMode(Enum):
         )
         return (rowwise_scale_shape, colwise_scale_shape)
 
-    def get_scale_shape(self, data_shape, is_colwise, is_padded=True, flatten_axis=-1) -> Tuple[int]:
+    def get_scale_shape(
+        self, data_shape, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
         Args:

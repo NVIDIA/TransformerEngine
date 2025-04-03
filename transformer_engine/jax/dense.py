@@ -78,7 +78,9 @@ def _dense(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer
     Returns:
         Transformed output tensor
     """
-    output, _ = _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set)
+    output, _ = _dense_fwd_rule(
+        x, kernel, bias, contracting_dims, input_axes, kernel_axes, quantizer_set
+    )
     return output
 
 
@@ -93,7 +95,9 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     flatten_axis_x = -len(x_contracting_dims)
     flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
     casted_x = tex.quantize(x, flatten_axis=flatten_axis_x, quantizer=quantizer_set.x)
-    casted_kernel = tex.quantize(kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel)
+    casted_kernel = tex.quantize(
+        kernel, flatten_axis=flatten_axis_k, quantizer=quantizer_set.kernel
+    )
 
     # GEMM NN
     output = tex.gemm(
@@ -102,9 +106,9 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
         (x_contracting_dims, k_contracting_dims),
     )
     output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims)
-            )
+        *get_non_contracting_logical_axes(x.ndim, input_axes, x_contracting_dims),
+        *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims),
+    )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
     use_bias = bias is not None
@@ -124,7 +128,9 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     return output, ctx
 
 
-def _dense_bwd_rule(contracting_dims, input_axes, kernel_axes, ctx, grad):  # pylint: disable=unused-argument
+def _dense_bwd_rule(
+    contracting_dims, input_axes, kernel_axes, ctx, grad
+):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
     Returns:
@@ -143,13 +149,14 @@ def _dense_bwd_rule(contracting_dims, input_axes, kernel_axes, ctx, grad):  # py
     ) = ctx
 
     grad_axes = (
-            *get_non_contracting_logical_axes(len(x_shape), input_axes, fwd_x_contracting_dims),
-            *get_non_contracting_logical_axes(len(kernel_shape), kernel_axes, fwd_k_contracting_dims)
-            )
+        *get_non_contracting_logical_axes(len(x_shape), input_axes, fwd_x_contracting_dims),
+        *get_non_contracting_logical_axes(len(kernel_shape), kernel_axes, fwd_k_contracting_dims),
+    )
     grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
-    casted_grad, dbias = tex.quantize_dbias(grad, is_dbias=use_bias, flatten_axis=flatten_axis_k,
-                                            quantizer=quantizer_set.dgrad)
+    casted_grad, dbias = tex.quantize_dbias(
+        grad, is_dbias=use_bias, flatten_axis=flatten_axis_k, quantizer=quantizer_set.dgrad
+    )
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim

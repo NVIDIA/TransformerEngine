@@ -106,6 +106,7 @@ class ScaledTensor(ABC):
                 flatten_axis=x.flatten_axis,
             )
 
+
 @register_pytree_node_class
 @dataclass
 class ScaledTensor1x(ScaledTensor):
@@ -140,12 +141,14 @@ class ScaledTensor1x(ScaledTensor):
         Ensures the scale_inv shape matches the expected shape based on the scaling mode
         and quantization direction. Pads the scale_inv if necessary.
         """
-        flatten_axis = len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
+        flatten_axis = (
+            len(self.data.shape) + self.flatten_axis if self.flatten_axis < 0 else self.flatten_axis
+        )
         assert (
             0 < flatten_axis < len(self.data.shape)
         ), f"flatten_axis {flatten_axis} is out of bounds for shape {self.data.shape}"
 
-        if self.data_layout == 'T':
+        if self.data_layout == "T":
             flatten_axis = self.data.ndim - flatten_axis
         self.flatten_axis = flatten_axis
 
@@ -235,11 +238,10 @@ class ScaledTensor1x(ScaledTensor):
             return self
 
         # axis_names were given for N layout, so needs to be transpose for T layout
-        if self.data_layout == 'T':
+        if self.data_layout == "T":
             assert self.flatten_axis > 0
             flatten_axis = self.flatten_axis - self.data.ndim
-            axis_names = (*logical_axis_names[flatten_axis:],
-                          *logical_axis_names[:flatten_axis])
+            axis_names = (*logical_axis_names[flatten_axis:], *logical_axis_names[:flatten_axis])
         else:
             axis_names = logical_axis_names
 
@@ -247,15 +249,15 @@ class ScaledTensor1x(ScaledTensor):
 
         # TODO(Phuong): constaint padded scale_inv?
         return ScaledTensor1x(
-                data=data,
-                scale_inv=self.scale_inv,
-                scaling_mode=self.scaling_mode,
-                dq_dtype=self.dq_dtype,
-                _dq_func=self._dq_func,
-                is_colwise=self.is_colwise,
-                data_layout=self.data_layout,
-                flatten_axis=self.flatten_axis,
-                )
+            data=data,
+            scale_inv=self.scale_inv,
+            scaling_mode=self.scaling_mode,
+            dq_dtype=self.dq_dtype,
+            _dq_func=self._dq_func,
+            is_colwise=self.is_colwise,
+            data_layout=self.data_layout,
+            flatten_axis=self.flatten_axis,
+        )
 
 
 @register_pytree_node_class
@@ -319,8 +321,12 @@ class ScaledTensor2x(ScaledTensor):
         if not logical_axis_names:
             return self
 
-        rowwise_tensor = self.rowwise_tensor.apply_sharding_constraint_by_logical_axes(logical_axis_names)
-        colwise_tensor = self.colwise_tensor.apply_sharding_constraint_by_logical_axes(logical_axis_names)
+        rowwise_tensor = self.rowwise_tensor.apply_sharding_constraint_by_logical_axes(
+            logical_axis_names
+        )
+        colwise_tensor = self.colwise_tensor.apply_sharding_constraint_by_logical_axes(
+            logical_axis_names
+        )
 
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 

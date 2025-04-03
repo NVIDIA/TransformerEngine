@@ -276,9 +276,9 @@ def _layernorm_mlp_fwd_rule(
     )
 
     dot_1_output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims)
-            )
+        *get_non_contracting_logical_axes(x.ndim, dot_1_input_axes, x_contracting_dims),
+        *get_non_contracting_logical_axes(kernel_1.ndim, kernel_1_axes, k_contracting_dims),
+    )
     dot_1_output = with_sharding_constraint_by_logical_axes(dot_1_output, dot_1_output_axes)
 
     if use_bias_1:
@@ -304,9 +304,9 @@ def _layernorm_mlp_fwd_rule(
     )
 
     dot_2_output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_2_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel_2.ndim, None, k_contracting_dims)
-            )
+        *get_non_contracting_logical_axes(x.ndim, dot_2_input_axes, x_contracting_dims),
+        *get_non_contracting_logical_axes(kernel_2.ndim, None, k_contracting_dims),
+    )
     dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_2_output_axes)
 
     if use_bias_2:

@@ -205,9 +205,9 @@ def _layernorm_dense_fwd_rule(
     )
 
     output_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims),
-            *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims)
-            )
+        *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims),
+        *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims),
+    )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
     use_bias = bias is not None
@@ -274,12 +274,16 @@ def _layernorm_dense_bwd_rule(
     ) = ctx
 
     grad_axes = (
-            *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
-            *get_non_contracting_logical_axes(len(kernel_shape), kernel_axes, k_contracting_dims_in_fwd)
-            )
+        *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
+        *get_non_contracting_logical_axes(
+            len(kernel_shape), kernel_axes, k_contracting_dims_in_fwd
+        ),
+    )
     grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
-    casted_grad, dbias = tex.quantize_dbias(grad, is_dbias=use_bias, flatten_axis=flatten_axis, quantizer=quantizer_set.dgrad)
+    casted_grad, dbias = tex.quantize_dbias(
+        grad, is_dbias=use_bias, flatten_axis=flatten_axis, quantizer=quantizer_set.dgrad
+    )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
     g_constracting_dim = tuple(
