@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include "common/utils.cuh"
 #include "common/common.h"
+#include "common/utils.cuh"
 #include "extensions.h"
 #include "type_shim.h"
 
@@ -14,16 +14,9 @@ constexpr int kThreadsPerBlock = 256;
 
 template <typename IType>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-  compute_partial_amax_kernel(
-    const IType *input,
-    float *amax_ptr,
-    const size_t amax_stride_h,
-    const size_t amax_stride_w,
-    const size_t h,
-    const size_t w,
-    const size_t start_offset,
-    const size_t len
-) {
+    compute_partial_amax_kernel(const IType *input, float *amax_ptr, const size_t amax_stride_h,
+                                const size_t amax_stride_w, const size_t h, const size_t w,
+                                const size_t start_offset, const size_t len) {
   constexpr int kThreadsPerWarp = 32;
   constexpr int kLoopsPerRow = kTileDim / kThreadsPerWarp;
   constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
@@ -77,17 +70,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 template <typename IType, typename OType, bool kWidthAligned>
 __global__ void __launch_bounds__(kThreadsPerBlock)
-    partial_cast_kernel(
-      const IType *input,
-      OType *output,
-      const float *scale_ptr,
-      const size_t scale_stride_h,
-      const size_t scale_stride_w,
-      const size_t h,
-      const size_t w,
-      const size_t start_offset,
-      const size_t len
-) {
+    partial_cast_kernel(const IType *input, OType *output, const float *scale_ptr,
+                        const size_t scale_stride_h, const size_t scale_stride_w, const size_t h,
+                        const size_t w, const size_t start_offset, const size_t len) {
   using transformer_engine::Vec;
 
   static_assert(sizeof(OType) == 1);
@@ -163,7 +148,7 @@ void compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, s
   TORCH_CHECK(amax.dim() == 2, "amax must be a 2D tensor");
   TORCH_CHECK(amax.scalar_type() == at::ScalarType::Float, "amax must be a float tensor");
   TORCH_CHECK(tensor.scalar_type() == at::ScalarType::Float ||
-              tensor.scalar_type() == at::ScalarType::BFloat16,
+                  tensor.scalar_type() == at::ScalarType::BFloat16,
               "tensor must be a float or bfloat16 tensor");
 
   size_t amax_stride_h = amax.stride(0);
@@ -182,11 +167,11 @@ void compute_partial_amax(const at::Tensor &tensor, at::Tensor amax, size_t h, s
 
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  DISPATCH_FLOAT_HALF_AND_BFLOAT(
-      tensor.scalar_type(), 0, "compute_partial_amax",
-      compute_partial_amax_kernel<scalar_t_0><<<grid, kThreadsPerBlock, 0, stream>>>(
-          tensor.data_ptr<scalar_t_0>(), amax.data_ptr<float>(), amax_stride_h, amax_stride_w, h, w,
-          start_offset, len);)
+  DISPATCH_FLOAT_HALF_AND_BFLOAT(tensor.scalar_type(), 0, "compute_partial_amax",
+                                 compute_partial_amax_kernel<scalar_t_0>
+                                 <<<grid, kThreadsPerBlock, 0, stream>>>(
+                                     tensor.data_ptr<scalar_t_0>(), amax.data_ptr<float>(),
+                                     amax_stride_h, amax_stride_w, h, w, start_offset, len);)
 }
 
 void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale, size_t h,
@@ -195,12 +180,12 @@ void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale
   TORCH_CHECK(block_len == 128, "Currently only support block_len = 128");
   TORCH_CHECK(scale.dim() == 2, "scale must be a 2D tensor");
   TORCH_CHECK(scale.scalar_type() == at::ScalarType::Float, "scale must be a float tensor");
-  TORCH_CHECK(inp.scalar_type() == at::ScalarType::Float ||
-              inp.scalar_type() == at::ScalarType::BFloat16,
-              "input must be a float or bfloat16 tensor");
+  TORCH_CHECK(
+      inp.scalar_type() == at::ScalarType::Float || inp.scalar_type() == at::ScalarType::BFloat16,
+      "input must be a float or bfloat16 tensor");
   TORCH_CHECK(out.scalar_type() == at::ScalarType::Byte, "output must be a uint8 tensor");
   TORCH_CHECK(out_dtype == transformer_engine::DType::kFloat8E4M3 ||
-              out_dtype == transformer_engine::DType::kFloat8E5M2,
+                  out_dtype == transformer_engine::DType::kFloat8E5M2,
               "out_dtype must be kFloat8E4M3 or kFloat8E5M2");
 
   size_t scale_stride_h = scale.stride(0);
@@ -226,8 +211,8 @@ void partial_cast(const at::Tensor &inp, at::Tensor out, const at::Tensor &scale
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               w % kTileDim == 0, kWidthAligned,
               partial_cast_kernel<scalar_t_0, fp8_type, kWidthAligned>
-              <<<grid, kThreadsPerBlock, 0, stream>>>(
-                  inp.data_ptr<scalar_t_0>(), reinterpret_cast<fp8_type *>(out.data_ptr()),
-                  scale.data_ptr<float>(), scale_stride_h, scale_stride_w, h, w, start_offset,
-                  len);)))
+              <<<grid, kThreadsPerBlock, 0, stream>>>(inp.data_ptr<scalar_t_0>(),
+                                                      reinterpret_cast<fp8_type *>(out.data_ptr()),
+                                                      scale.data_ptr<float>(), scale_stride_h,
+                                                      scale_stride_w, h, w, start_offset, len);)))
 }

@@ -318,7 +318,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(params, group):
 
     # Get the total number of amax elements in all the model weights.
     cu_amax_sizes = [0]
-    for (model_weight, _, _) in params:
+    for model_weight, _, _ in params:
         scale_shape = model_weight._get_quantizer().get_scale_shape(model_weight.shape, False)
         num_amaxes = scale_shape[0] * scale_shape[1]
         cu_amax_sizes.append(cu_amax_sizes[-1] + num_amaxes)
@@ -366,7 +366,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(params, group):
     # ---------------------------------------------------------------------------------------------
     torch.distributed.all_reduce(packed_amaxes, op=torch.distributed.ReduceOp.MAX, group=group)
 
-     # ---------------------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------------------------
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
     if fp8_dtype == tex.DType.kFloat8E4M3:
@@ -405,4 +405,5 @@ def _cast_master_weights_to_fp8_blockwise_scaling(params, group):
         assert len(model_weight.shape) == 2
         h, w = model_weight.shape
         tex.partial_cast(
-            master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype)
+            master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
+        )

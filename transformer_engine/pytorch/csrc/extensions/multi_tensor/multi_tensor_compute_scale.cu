@@ -13,8 +13,8 @@
 
 #include <assert.h>
 // Stringstream is a big hammer, but I want to rely on operator<< for dtype.
-#include <sstream>
 #include <limits>
+#include <sstream>
 
 #include "common/recipe/recipe_common.cuh"
 #include "common/utils.cuh"

@@ -33,12 +33,12 @@ def _get_raw_data(quantized_tensor):
         assert quantized_tensor._data.dtype == torch.uint8, "Float8Tensor _data must be uint8"
         return quantized_tensor._data
     elif isinstance(quantized_tensor, Float8BlockwiseQTensor):
-        assert hasattr(quantized_tensor, "_rowwise_data"), (
-            "Float8BlockwiseQTensor does not have _rowwise_data attribute"
-        )
-        assert quantized_tensor._rowwise_data.dtype == torch.uint8, (
-            "Float8BlockwiseQTensor _rowwise_data must be uint8"
-        )
+        assert hasattr(
+            quantized_tensor, "_rowwise_data"
+        ), "Float8BlockwiseQTensor does not have _rowwise_data attribute"
+        assert (
+            quantized_tensor._rowwise_data.dtype == torch.uint8
+        ), "Float8BlockwiseQTensor _rowwise_data must be uint8"
         return quantized_tensor._rowwise_data
     else:
         raise ValueError(f"Unsupported quantized tensor type: {type(quantized_tensor)}")
@@ -280,9 +280,7 @@ def quantization_recipe(quantization) -> Recipe:
     """Quantization recipe setup"""
     fp8_format = Format.HYBRID
     if quantization == "fp8":
-        return DelayedScaling(
-            fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max"
-        )
+        return DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
     elif quantization == "fp8_cs":
         return Float8CurrentScaling(fp8_format=fp8_format)
     elif quantization == "fp8_block":
@@ -397,7 +395,8 @@ def main(argv=None, namespace=None):
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"])
+        "--quantization", type=str, default=None, choices=["fp8", "fp8_cs", "fp8_block"]
+    )
     args = parser.parse_args(argv, namespace)
 
     dp_group = dist.new_group(backend="nccl")

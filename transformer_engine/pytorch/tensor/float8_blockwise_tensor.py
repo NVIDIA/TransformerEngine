@@ -330,8 +330,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
                 # For 2D scaling, if columnwise data/scale_inv is None, we can create them from
                 # rowwise data/scale_inv.
                 assert (
-                    self._rowwise_data is not None
-                    and self._rowwise_scale_inv is not None
+                    self._rowwise_data is not None and self._rowwise_scale_inv is not None
                 ), "Cannot update to rowwise and columnwise usage because rowwise data is None."
                 if (
                     self._columnwise_data is None
