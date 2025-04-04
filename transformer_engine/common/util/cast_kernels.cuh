@@ -1279,11 +1279,17 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, const NVTETe
       NVTE_CHECK((!IS_DBIAS && !IS_DACT && !IS_ACT),
                  "IS_DBIAS, IS_DACT, and IS_ACT not implemented for NVTE_BLOCK_SCALING_1D");
       constexpr bool force_pow_2_scales = true;
+      RowwiseUsageOption rowwise_option = output_tensor->has_data()
+          ? RowwiseUsageOption::ROWWISE
+          : RowwiseUsageOption::NONE;
+      ColumnwiseUsageOption columnwise_option = output_tensor->has_columnwise_data()
+          ? ColumnwiseUsageOption::COLUMNWISE_TRANSPOSE
+          : ColumnwiseUsageOption::NONE;
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
           output_tensor->data, output_tensor->columnwise_data,
           /*epsilon=*/0.0,
-          /*return_transpose=*/output_tensor->has_columnwise_data(), force_pow_2_scales, stream);
+          rowwise_option, columnwise_option, force_pow_2_scales, stream);
       break;
     }
     default:

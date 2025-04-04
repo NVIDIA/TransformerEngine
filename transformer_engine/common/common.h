@@ -44,6 +44,21 @@ inline bool is_delayed_tensor_scaling(const NVTEScalingMode &mode) {
 
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
+// enum class for rowwise usage: None, ROWWISE
+// there is no need to transpose the rowwise usage tensor, so no ROWWISE_TRANSPOSE
+enum class RowwiseUsageOption {
+  NONE, // No rowwise data
+  ROWWISE // Rowwise data
+};
+
+// enum class for columnwise usage: None, COLUMNWISE, COLUMNWISE_TRANSPOSE
+// For Hopper sm90 with only TN fp8 gemm, there is need to do columnwise transpose when doing 1D block scaling
+enum class ColumnwiseUsageOption {
+  NONE, // No columnwise data
+  COLUMNWISE, // TODO(zhongbo): Columnwise data (current not supported getting columnwise data without transposing)
+  COLUMNWISE_TRANSPOSE // Columnwise data with transpose
+};
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");

@@ -644,10 +644,6 @@ class _LayerNormLinear(torch.autograd.Function):
                     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
                         # If data is in FP8, we compute FP8 transposes manually
                         quantizer.set_usage(rowwise=True, columnwise=False)
-                    elif isinstance(quantizer, Float8BlockQuantizer):
-                        # TODO: Add support in the quantizer for
-                        # rowwise=False, columnwise=True and configure that here.
-                        quantizer.set_usage(rowwise=True, columnwise=True)
                     else:
                         # wgrad GEMM requires input with column-wise usage
                         quantizer.set_usage(rowwise=False, columnwise=True)

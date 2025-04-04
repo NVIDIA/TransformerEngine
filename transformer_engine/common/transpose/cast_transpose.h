@@ -32,8 +32,9 @@ void quantize_transpose_square_blockwise(const SimpleTensor &input, SimpleTensor
 void quantize_transpose_vector_blockwise(const SimpleTensor &input, SimpleTensor &scale_inv,
                                          SimpleTensor &scale_inv_t, SimpleTensor &output,
                                          SimpleTensor &output_t, const float epsilon,
-                                         const bool return_transpose, const bool pow_2_scale,
-                                         cudaStream_t stream);
+                                         RowwiseUsageOption rowwise_option,
+                                         ColumnwiseUsageOption columnwise_option,
+                                         const bool pow_2_scale, cudaStream_t stream);
 
 }  // namespace transformer_engine::detail
 

@@ -44,7 +44,6 @@ class Float8BlockQuantizer(Quantizer):
         block_scaling_dim: int = 2,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        assert rowwise
         self.dtype = fp8_dtype
         self.block_len = 128
         self.force_pow_2_scales = force_pow_2_scales
