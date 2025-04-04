@@ -448,8 +448,8 @@ QUANTIZE_OUTPUT_DTYPES = {
 }
 
 ALL_QUANTIZE_TEST_SHAPES = [
-    (32, 64, 128),
-    (4, 32, 32, 512),
+    (32, 64),
+    (2, 64, 32),
 ]
 
 QUANTIZE_TEST_SHAPES = {
@@ -489,6 +489,9 @@ class TestQuantize:
             q_dtype=q_dtype,
             q_layout=q_layout,
         )
+        # Adding dimension to test if padding is done correctly when flatten 3D to 2D
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
 
         n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
@@ -500,12 +503,10 @@ class TestQuantize:
     def test_quantize_bitwise(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis
     ):
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
-            input_shape
-        ):
-            pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
 
         key = jax.random.PRNGKey(0)
+        if flatten_axis == -2:
+            input_shape = input_shape[:-1] + (2,) + input_shape[-1:]
         input = jax.random.uniform(key, input_shape, in_dtype)
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
@@ -703,7 +704,7 @@ class TestDense:
 
         return (x, w, contracting_dims)
 
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
     def test_gemm_bf16(self, m, n, k, data_layout):
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
@@ -714,7 +715,7 @@ class TestDense:
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
@@ -730,7 +731,7 @@ class TestDense:
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)
 
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     def test_dense_grad_bf16(self, m, n, k):
         data_layout = "NN"
         x, w, contracting_dims = self._generate_gemm_input(m, n, k, data_layout)
@@ -756,7 +757,7 @@ class TestDense:
         assert_allclose(primitive_w_grad, ref_w_grad, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("m,n,k", [(512, 128, 256)])
+    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     def test_dense_grad_fp8(self, m, n, k, q_dtype, scaling_mode):
@@ -820,7 +821,7 @@ def _ref_jax_norm_impl(x, gamma, beta, norm_type, zero_centered_gamma, eps, quan
 
 class TestFusedDense:
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("m,n,k", [(512, 128, 128)])
+    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
     @pytest.mark.parametrize("norm_type", ["layernorm", "rmsnorm"])
@@ -902,7 +903,7 @@ class TestFusedDense:
             assert_allclose(prim_beta_grad, ref_beta_grad, dtype=q_dtype)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest.mark.parametrize("m,n,k", [(512, 128, 256)])
+    @pytest.mark.parametrize("m,n,k", [(64, 32, 64)])
     @pytest.mark.parametrize("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest.mark.parametrize("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest.mark.parametrize("scaling_mode", supported_scaling_modes)
