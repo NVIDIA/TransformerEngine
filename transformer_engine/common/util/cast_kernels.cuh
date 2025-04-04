@@ -51,23 +51,6 @@ constexpr __device__ __forceinline__ bool is_cached_act_op() {
          (OP == silu<float, float>) || (OP == dsilu<float, float>);
 }
 
-template <typename T>
-union FP8x2_union;
-
-template <>
-union FP8x2_union<__nv_fp8x2_e4m3> {
-  __nv_fp8x2_e4m3 packed_elts;
-  fp8e4m3 elt[2];
-};
-static_assert(sizeof(FP8x2_union<__nv_fp8x2_e4m3>) == 2);
-
-template <>
-union FP8x2_union<__nv_fp8x2_e5m2> {
-  __nv_fp8x2_e5m2 packed_elts;
-  fp8e5m2 elt[2];
-};
-static_assert(sizeof(FP8x2_union<__nv_fp8x2_e5m2>) == 2);
-
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
           bool COLWISE_SCALING, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
@@ -87,10 +70,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   using IType2 =
       std::conditional_t<std::is_same_v<IType, float>, float2,
-                         std::conditional_t<std::is_same_v<IType, bf16>, __nv_bfloat162, __half2>>;
+                         std::conditional_t<std::is_same_v<IType, bf16>, ptx::bf16x2, ptx::fp16x2>>;
 
-  using OType2 =
-      std::conditional_t<std::is_same_v<OType, fp8e4m3>, __nv_fp8x2_e4m3, __nv_fp8x2_e5m2>;
+  using OType2 = std::conditional_t<std::is_same_v<OType, fp8e4m3>, ptx::fp8e4m3x2, ptx::fp8e5m2x2>;
   static_assert(sizeof(OType2) == 2);
 
   if constexpr (NO_ACTIVATIONS) {
@@ -307,19 +289,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #pragma unroll
       for (int i = 0; i < SCALE_DIM_Y; i += 2) {
         IType2 in;
-        FP8x2_union<OType2> out;
+        OType2 out_pair;
+
         if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
           in = in_colwise_IType[i / 2];
         } else {
           in.x = in_compute_colwise[i];
           in.y = in_compute_colwise[i + 1];
         }
-        ptx::mul_cvt_2x<OType2, IType2>(out.packed_elts, in, block_scale_inverse_2x);
+        ptx::mul_cvt_2x<OType2, IType2>(out_pair, in, block_scale_inverse_2x);
 
         const int shmem_offset_elt_1 = shmem_offset_base_colwise + i * BUFF_DIM_X;
         const int shmem_offset_elt_2 = shmem_offset_base_colwise + (i + 1) * BUFF_DIM_X;
-        out_colwise_sh[shmem_offset_elt_1] = out.elt[0];
-        out_colwise_sh[shmem_offset_elt_2] = out.elt[1];
+        out_colwise_sh[shmem_offset_elt_1] = out_pair.x;
+        out_colwise_sh[shmem_offset_elt_2] = out_pair.y;
       }
     }
 
@@ -453,6 +436,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
           IType2 in;
+          OType2& out_pair = reinterpret_cast<OType2&>(out.data.elt[e]);
           if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
             in = in_IType[w].data.elt[e];
           } else if constexpr (IS_CACHED_ACT_OP) {
@@ -463,7 +447,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             in.x = in_compute_rowwise[j];
             in.y = in_compute_rowwise[j + 1];
           }
-          ptx::mul_cvt_2x<OType2, IType2>(out.data.elt[e], in, block_scale_inverse_2x);
+          ptx::mul_cvt_2x<OType2, IType2>(out_pair, in, block_scale_inverse_2x);
         }
         const int swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
