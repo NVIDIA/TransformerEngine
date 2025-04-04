@@ -945,8 +945,20 @@ def _all_gather_fp8_blockwise(
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
     out_shape: Optional[list[int]] = None,
-) -> tuple[Float8BlockwiseQTensorBase, Optional[torch.distributed.Work]]:
-    """All-gather FP8 tensor along first dimension for blockwise quantization."""
+) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
+    """
+    All-gather FP8 tensor along first dimension for blockwise quantization.
+
+    Usually returns a Float8BlockwiseQTensorBase. In the case that the
+    all gather is done asynchronously, but quantization is deferred until
+    after the gather, this returns the full precision tensor.
+
+    NOTE: It would be preferable to always honor the quantizer and quantize
+    the result, and this may be possible via calling `get_future()` on the
+    asynchronous handler, calling `make_empty()` on the quantizer, and chaining
+    a callback with `then()` to perform `update_quantized`. This invites
+    complications and also requires pre-allocating the quantized tensor.
+    """
 
     # Input tensor attributes
     in_shape: Iterable[int]
@@ -986,10 +998,6 @@ def _all_gather_fp8_blockwise(
 
     # Doing BF16 gather for now as baseline because it's simpler
     if not isinstance(inp, Float8BlockwiseQTensorBase) and quantizer is not None:
-        # TODO: Because the quantization is after the gather,
-        # async_op is ignored. A better solution would be
-        # to quantize as a future callback and chain async
-        # handles.
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -999,6 +1007,7 @@ def _all_gather_fp8_blockwise(
         handle = torch.distributed.all_gather_into_tensor(
             out, inp, group=process_group, async_op=async_op
         )
+        # NOTE: if async, out will not be quantized.
         if handle is None:
             out = quantizer(out)
         return out, handle
@@ -1148,7 +1157,13 @@ def gather_along_first_dim(
     async_op: bool = False,
     quantizer: Optional[Quantizer] = None,
 ) -> tuple[torch.Tensor, Optional[torch.distributed.Work]]:
-    """All-gather tensors and concatenate along first dimension."""
+    """
+    All-gather tensors and concatenate along first dimension.
+
+    NOTE: Caller should be aware that there are asynchronous cases
+    where quantizer is not None, but the output will not be quantized.
+    This affects Float8BlockQuantizer.
+    """
 
     # Return immediately if no communication is required
     world_size = get_distributed_world_size(process_group)

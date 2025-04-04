@@ -622,6 +622,8 @@ class _Linear(torch.autograd.Function):
                     if ctx.input_quantizer is not None and not isinstance(
                         inputmat_total, QuantizedTensor
                     ):
+                        # Async gather in BF16 does not asynchronously
+                        # call quantizer after gather.
                         inputmat_total = ctx.input_quantizer(inputmat_total)
 
                 # Make sure GEMM inputs have required data
