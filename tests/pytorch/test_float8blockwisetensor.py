@@ -12,11 +12,11 @@ import torch
 
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
+from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes
@@ -42,11 +42,12 @@ def _to_list(x: Union[Iterable, Any]) -> List:
 # Types that can be interpreted as tensor dims
 DimsType = Union[Iterable[int], int]
 
-# Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
+# TODO replace with call to fp8.py when recipe added.
+recipe_available = get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8
+reason_for_no_recipe = "Quantize kernels require TMA and are only relevant with GEMMS."
 
 
-@pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 class TestFloat8BlockwiseTensor:
 
     @staticmethod
