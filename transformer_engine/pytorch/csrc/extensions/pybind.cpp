@@ -250,14 +250,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Correct the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
   m.def("thd_read_second_half_lse", &thd_read_second_half_lse,
         "Read the second half of the softmax_lse", py::call_guard<py::gil_scoped_release>());
-  m.def("thd_out_correction", &thd_out_correction,
-        "Correct the THD format output of context parallelism in forward pass",
-        py::call_guard<py::gil_scoped_release>());
   m.def("thd_grad_correction", &thd_grad_correction,
         "Correct the THD format gradients of context parallelism in backward pass",
         py::call_guard<py::gil_scoped_release>());
   m.def("thd_get_partitioned_indices", &thd_get_partitioned_indices,
         "Generate partitioned indices for inputs in THD format",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("fused_out_correction", &fused_out_correction, "fused out correction after qkv calculation",
         py::call_guard<py::gil_scoped_release>());
 
   // nvshmem functions
