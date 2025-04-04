@@ -189,12 +189,12 @@ def _layernorm_dense_fwd_rule(
         norm_type,
         quantizer_set.x,
     )
+    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
     # Kernel in (hidden_in, hidden_out...)
     flatten_axis = 1 - len(kernel.shape)
     casted_kernel = tex.quantize(kernel, flatten_axis=flatten_axis, quantizer=quantizer_set.kernel)
-
-    casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
+    casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 
     # NN GEMM
     # (batch..., hidden_in) x (hidden_in, hidden_out...)
@@ -203,12 +203,6 @@ def _layernorm_dense_fwd_rule(
         casted_kernel.get_colwise_tensor(),
         (x_contracting_dims, k_contracting_dims),
     )
-
-    output_axes = (
-        *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims),
-        *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims),
-    )
-    output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
     use_bias = bias is not None
     if use_bias:
@@ -272,14 +266,6 @@ def _layernorm_dense_bwd_rule(
         quantizer_set,
         flatten_axis,
     ) = ctx
-
-    grad_axes = (
-        *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
-        *get_non_contracting_logical_axes(
-            len(kernel_shape), kernel_axes, k_contracting_dims_in_fwd
-        ),
-    )
-    grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
     casted_grad, dbias = tex.quantize_dbias(
         grad, is_dbias=use_bias, flatten_axis=flatten_axis, quantizer=quantizer_set.dgrad
