@@ -996,9 +996,10 @@ def _all_gather_fp8_blockwise(
             device=device,
             memory_format=torch.contiguous_format,
         )
-        torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
-        out = quantizer(out)
-        return out, None
+        handle = torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=async_op)
+        if handle is None:
+            out = quantizer(out)
+        return out, handle
     # Implementation of fp8 gather needs to account for:
     # * Getting columnwise data as a transpose of how it is stored for GEMMS.
     # * Gathering non GEMM swizzled scales.
