@@ -6,9 +6,9 @@
 from typing import Tuple, Sequence, Union, Dict, List
 from functools import partial, reduce
 import operator
-from transformer_engine_jax import get_device_compute_capability
 import jax
 import jax.numpy as jnp
+from transformer_engine_jax import get_device_compute_capability
 
 from .base import BasePrimitive, register_primitive
 

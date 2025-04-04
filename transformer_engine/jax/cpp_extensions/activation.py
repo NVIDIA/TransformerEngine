@@ -26,7 +26,7 @@ from .misc import (
     should_apply_1x_fused_dbias_war_for_arch_l_100,
     NamedSharding,
 )
-from .quantization import _jax_quantize_dbias, _jax_dbias, quantize_dbias, _quantize_dbias_impl
+from .quantization import _jax_dbias,  _quantize_dbias_impl
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (

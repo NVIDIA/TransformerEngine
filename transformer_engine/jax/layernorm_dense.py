@@ -22,7 +22,6 @@ from .quantize import (
     noop_quantizer_set,
     with_sharding_constraint_by_logical_axes,
 )
-from .sharding import get_non_contracting_logical_axes
 
 
 def layernorm_dense(
