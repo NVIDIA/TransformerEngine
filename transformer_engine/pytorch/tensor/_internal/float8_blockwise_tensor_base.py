@@ -36,8 +36,8 @@ class Float8BlockwiseQTensorBase:
     def __new__(
         cls,
         *args,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
+        rowwise_data: Optional[torch.Tensor],
+        rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
         fp8_dtype: TE_DType,

@@ -185,13 +185,16 @@ class Float8BlockQuantizer(Quantizer):
             device = torch.device("cuda")
 
         # Allocate FP8 data
-        data = torch.empty(shape, dtype=torch.uint8, device=device)
-        scale_shape = self.get_scale_shape(shape, columnwise=False)
-        scale_inv = torch.empty(
-            scale_shape,
-            dtype=torch.float32,
-            device=device,
-        )
+        data = None
+        scale_inv = None
+        if self.rowwise_usage:
+            data = torch.empty(shape, dtype=torch.uint8, device=device)
+            scale_shape = self.get_scale_shape(shape, columnwise=False)
+            scale_inv = torch.empty(
+                scale_shape,
+                dtype=torch.float32,
+                device=device,
+            )
 
         # Allocate FP8 data transpose if needed
         columnwise_data = None
