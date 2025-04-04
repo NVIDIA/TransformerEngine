@@ -44,6 +44,10 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
 
+  NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+             "Current tensor scaling does not support fused operations. Please call this primitive "
+             "in higher-precision then quantize with current scaling.");
+
   if (is_fp8_dtype(out_dtype)) {
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
@@ -152,6 +156,10 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
   auto output_trans_shape = std::vector<size_t>{hidden_size, batch_size};
   auto dbias_shape = std::vector<size_t>{hidden_size};
 
+  NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+             "Current tensor scaling does not support fused operations. Please call this primitive "
+             "in higher-precision then quantize with current scaling.");
+
   // Evil hack to specify TE impl
   // Note: nvte_quantize_dbias_dgelu chooses its internal impl based
   // on what pointers are allocated, e.g. whether to output with
@@ -218,6 +226,10 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
   auto flatten_axis = output_buf->dimensions().size() - 2;  // output has act axis
+
+  NVTE_CHECK(scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
+             "Current tensor scaling does not support fused operations. Please call this primitive "
+             "in higher-precision then quantize with current scaling.");
 
   auto *output = output_buf->untyped_data();
   auto *colwise_output = colwise_output_buf->untyped_data();
