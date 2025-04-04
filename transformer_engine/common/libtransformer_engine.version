@@ -14,7 +14,9 @@
 			transformer_engine::typeToSize*;
 			*transformer_engine::CommOverlapBase*;
 			*transformer_engine::CommOverlapP2PBase*;
-			*transformer_engine::CommOverlapCore*
+			*transformer_engine::CommOverlapCore*;
+			*nvshmem_wait_on_stream*;
+			*nvshmemi_init_thread*
 		};
 	local: *;
 };
