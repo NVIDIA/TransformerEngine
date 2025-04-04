@@ -122,16 +122,25 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         """
         return jnp.float8_e8m0fnu
 
-    def _apply_scale_shape_correction(self, data_shape, n_scale_blocks):
+    def _apply_scale_shape_correction(self, data_shape, n_scale_blocks, scale_block_dim):
         """Remove excess padding from the scale shape and return the shape with respect to the original data shape."""
-        scale_shape = ()
-        for d in data_shape[:-1]:
-            scale_shape += (d,)
-            assert n_scale_blocks % d == 0
-            n_scale_blocks //= d
+        if len(data_shape) > 1:
+            # handle last dim
+            assert data_shape[-1] % scale_block_dim == 0
+            last = data_shape[-1] // scale_block_dim
+            scale_shape = (last,)
+            assert n_scale_blocks % last == 0
+            n_scale_blocks //= last
+            # handle middle dim, exclude first and last
+            for mid in reversed(data_shape[1:-1]):
+                scale_shape = (mid,) + scale_shape
+                assert n_scale_blocks % mid == 0
+                n_scale_blocks //= mid
+            scale_shape = (n_scale_blocks,) + scale_shape
+        else:
+            scale_shape = (n_scale_blocks,)
 
-        scale_shape += (n_scale_blocks,)
-        assert len(scale_shape) == len(data_shape)
+        assert len(scale_shape) == len(data_shape), f"scale_shape {scale_shape}, data_shape {data_shape}"
         return scale_shape
 
     def get_scale_shape(
@@ -196,10 +205,10 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         n_block_y = int(((n_block_y + alignment_y - 1) // alignment_y) * alignment_y)
 
         first_dim_scale_shape = self._apply_scale_shape_correction(
-            data_shape[:flatten_axis], n_block_x
+            data_shape[:flatten_axis], n_block_x, block_x
         )
         last_dim_scale_shape = self._apply_scale_shape_correction(
-            data_shape[flatten_axis:], n_block_y
+            data_shape[flatten_axis:], n_block_y, block_y
         )
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
