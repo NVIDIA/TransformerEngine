@@ -234,6 +234,23 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Generate partitioned indices for inputs in THD format",
         py::call_guard<py::gil_scoped_release>());
 
+  // nvshmem functions
+  m.def("init_nvshmem_backend", &nvshmem_api::init_nvshmem_backend,
+        "Initialize nvshmem backend with Pytorch distributed process groups",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("create_nvshmem_tensor", &nvshmem_api::create_nvshmem_tensor,
+        "Create a tensor in NVSHMEM shared memory", py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_send_on_current_stream", &nvshmem_api::nvshmem_send_on_current_stream,
+        "Asynchronously send tensor data to a remote PE using NVSHMEM on the current CUDA stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_wait_on_current_stream", &nvshmem_api::nvshmem_wait_on_current_stream,
+        "Wait for a signal value to be updated by a remote PE using NVSHMEM on the current CUDA "
+        "stream",
+        py::call_guard<py::gil_scoped_release>());
+  m.def("nvshmem_finalize", &nvshmem_api::nvshmem_finalize,
+        "Clean up and finalize the NVSHMEM communication backend and free associated resources",
+        py::call_guard<py::gil_scoped_release>());
+
   // multi-tensor functions
   m.def("multi_tensor_scale", &multi_tensor_scale_cuda,
         "Fused overflow check + scale for a list of contiguous tensors",
