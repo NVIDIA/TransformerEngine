@@ -154,7 +154,7 @@ if (NVTE_WITH_CUBLASMP)
     target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
 
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${LIBCAL_DIR}/include)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${LIBCAL_DIR}/include ${NVSHMEM_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
@@ -165,9 +165,15 @@ if (NVTE_WITH_CUBLASMP)
                  PATHS ${LIBCAL_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${LIBCAL_LIB})
+    find_library(NVSHMEM_LIB
+                 NAMES nvshmem libnvshmem
+                 PATHS ${NVSHMEM_DIR}
+                 PATH_SUFFIXES lib
+                 REQUIRED)
+  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${LIBCAL_LIB} ${NVSHMEM_DIR})
     message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
     message(STATUS "Using libcal at: ${LIBCAL_DIR}")
+    message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
 
 # Hack to enable dynamic loading in cuDNN frontend

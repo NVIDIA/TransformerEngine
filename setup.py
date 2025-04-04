@@ -69,10 +69,12 @@ def setup_common_extension() -> CMakeExtension:
 
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", "1"))):
         cmake_flags.append("-DNVTE_WITH_CUBLASMP=ON")
-        cublasmp_dir = metadata.distribution("nvidia-cublasmp-cu12").locate_file("nvidia/cublasmp/cu12")
+        cublasmp_dir = os.getenv("CUBLASMP_HOME") or metadata.distribution("nvidia-cublasmp-cu12").locate_file("nvidia/cublasmp/cu12")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
-        libcal_dir = metadata.distribution("nvidia-libcal-cu12").locate_file("nvidia/libcal/cu12")
+        libcal_dir = os.getenv("CAL_HOME") or metadata.distribution("nvidia-libcal-cu12").locate_file("nvidia/libcal/cu12")
         cmake_flags.append(f"-DLIBCAL_DIR={libcal_dir}")
+        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution("nvidia-nvshmem-cu12").locate_file("nvidia/nvshmem/cu12")
+        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
         print("CMAKE_FLAGS:", cmake_flags[-2:])
 
     # Add custom CMake arguments from environment variable

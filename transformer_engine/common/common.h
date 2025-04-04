@@ -270,6 +270,8 @@ struct QuantizationConfig {
   };
 };
 
+cudaDataType_t get_cuda_dtype(const transformer_engine::DType t);
+
 template <typename T>
 constexpr T DIVUP(const T &x, const T &y) {
   return (((x) + ((y)-1)) / (y));
