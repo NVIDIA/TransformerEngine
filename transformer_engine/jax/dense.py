@@ -107,7 +107,7 @@ def _dense_fwd_rule(x, kernel, bias, contracting_dims, input_axes, kernel_axes, 
     )
     output_axes = (
         *get_non_contracting_logical_axes(x.ndim, input_axes, x_contracting_dims),
-        *get_non_contracting_logical_axes(kernel.ndim, None, k_contracting_dims),
+        *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims),
     )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
@@ -150,7 +150,7 @@ def _dense_bwd_rule(
 
     grad_axes = (
         *get_non_contracting_logical_axes(len(x_shape), input_axes, fwd_x_contracting_dims),
-        *get_non_contracting_logical_axes(len(kernel_shape), None, fwd_k_contracting_dims),
+        *get_non_contracting_logical_axes(len(kernel_shape), kernel_axes, fwd_k_contracting_dims),
     )
     grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 

@@ -206,7 +206,7 @@ def _layernorm_dense_fwd_rule(
 
     output_axes = (
         *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims),
-        *get_non_contracting_logical_axes(kernel.ndim, None, k_contracting_dims),
+        *get_non_contracting_logical_axes(kernel.ndim, kernel_axes, k_contracting_dims),
     )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
@@ -240,7 +240,7 @@ def _layernorm_dense_bwd_rule(
     zero_centered_gamma,
     epsilon,
     layernorm_input_axes,
-    dot_input_axes,
+    dot_input_axes,  # pylint: disable=unused-argument
     kernel_axes,
     ctx,
     grad,
@@ -256,7 +256,6 @@ def _layernorm_dense_bwd_rule(
     Returns:
         Tuple of gradients for all input parameters
     """
-    del layernorm_input_axes
     (
         colwise_casted_ln_out,
         rowwise_casted_kernel,
@@ -276,7 +275,9 @@ def _layernorm_dense_bwd_rule(
 
     grad_axes = (
         *get_non_contracting_logical_axes(x.ndim, dot_input_axes, x_contracting_dims_in_fwd),
-        *get_non_contracting_logical_axes(len(kernel_shape), None, k_contracting_dims_in_fwd),
+        *get_non_contracting_logical_axes(
+            len(kernel_shape), kernel_axes, k_contracting_dims_in_fwd
+        ),
     )
     grad = with_sharding_constraint_by_logical_axes(grad, grad_axes)
 
@@ -300,7 +301,7 @@ def _layernorm_dense_bwd_rule(
         (g_constracting_dim, k_constracting_dim),
     )
 
-    dgrad = with_sharding_constraint_by_logical_axes(dgrad, dot_input_axes)
+    dgrad = with_sharding_constraint_by_logical_axes(dgrad, layernorm_input_axes)
 
     g_constracting_dim = x_constracting_dim = tuple(
         range(0, len(x_shape) - len(x_contracting_dims_in_fwd))
