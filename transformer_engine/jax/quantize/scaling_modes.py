@@ -95,10 +95,10 @@ class ScalingModeMetadataImpl(ABC):
         """
 
 
-class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
-    """Implementation for delayed scaling mode.
+class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
+    """Implementation for current scaling mode.
 
-    This implementation provides metadata for delayed scaling mode, including scale data type and shape.
+    This implementation provides metadata for current scaling mode, including scale data type and shape.
     """
 
     def get_scale_dtype(self) -> jnp.dtype:
@@ -146,6 +146,13 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del flatten_axis
         input_spec = tuple(f"x{i}" for i in range(input_rank))
         return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
+
+
+class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
+    """Implementation for delayed scaling mode.
+
+    This implementation provides metadata for delayed scaling mode, including scale data type and shape.
+    """
 
 
 class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
@@ -317,12 +324,14 @@ class ScalingMode(Enum):
     This class defines the available scaling modes for tensor quantization:
     - DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
     - MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
+    - CURRENT_TENSOR_SCALING: Uses current scaling with FP8 data type and float32 scales
     - NO_SCALING: No scaling applied
     """
 
     NO_SCALING = JAXX_Scaling_Mode.NO_SCALING
     DELAYED_TENSOR_SCALING = JAXX_Scaling_Mode.DELAYED_TENSOR_SCALING
     MXFP8_1D_SCALING = JAXX_Scaling_Mode.MXFP8_1D_SCALING
+    CURRENT_TENSOR_SCALING = JAXX_Scaling_Mode.CURRENT_TENSOR_SCALING
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -434,5 +443,6 @@ SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
     ScalingMode.DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
     ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
+    ScalingMode.CURRENT_TENSOR_SCALING: CurrentScalingModeMetadataImpl(),
     ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
 }

@@ -216,7 +216,8 @@ def try_apply_delayed_scaling_2x_war(f, *args, quantizer=None, flatten_axis=-1, 
     """
     should_apply_war = (
         quantizer is not None
-        and quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        and quantizer.scaling_mode
+        in (ScalingMode.DELAYED_TENSOR_SCALING, ScalingMode.CURRENT_TENSOR_SCALING)
         and quantizer.is_2x2x()
     )
     if not should_apply_war:
