@@ -1420,15 +1420,17 @@ class TestBasicOps:
             test_device=device,
             test_is_fp8=quantized_compute,
         )
-        if quantized_compute:
-            with torch.no_grad():
-                x_test = x_test.dequantize().requires_grad_()
         dy_ref, dy_test = make_reference_and_test_tensors(
             out_shape,
             test_dtype=dtype,
             test_device=device,
+            test_is_fp8=quantized_compute,
             requires_grad=False,
         )
+        if quantized_compute:
+            with torch.no_grad():
+                x_test = x_test.dequantize().requires_grad_()
+                dy_test = dy_test.dequantize()
 
         # Plain PyTorch implementation
         y_ref: torch.Tensor
@@ -1459,6 +1461,7 @@ class TestBasicOps:
             swiglu=te_ops.SwiGLU,
         )[activation]
         forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=quantized_compute),
             make_op(),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
