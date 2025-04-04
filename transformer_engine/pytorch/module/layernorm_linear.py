@@ -61,7 +61,6 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
 
-from transformer_engine.common.recipe import Recipe
 from ..cpp_extensions import (
     general_gemm,
 )
@@ -241,7 +240,7 @@ class _LayerNormLinear(torch.autograd.Function):
         ln_out_total = None
         ub_obj_fprop = None
         if with_input_all_gather:
-            # TODO: Support FP8 gather of Float8BlockQuantizer.
+            # TODO(kwyss): Support FP8 allgather for FP8 block quantization.
             force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered

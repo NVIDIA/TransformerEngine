@@ -24,7 +24,7 @@ from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
 from .tensor.mxfp8_tensor import MXFP8Quantizer
-from .tensor.float8_blockwise_tensor import Float8BlockQuantizer, Float8BlockwiseQTensor
+from .tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from .tensor.quantized_tensor import QuantizedTensor, Quantizer
 from .tensor._internal.float8_tensor_base import Float8TensorBase
 from .tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
@@ -961,22 +961,18 @@ def _all_gather_fp8_blockwise(
     """
 
     # Input tensor attributes
-    in_shape: Iterable[int]
     device: torch.device
     dtype: torch.dtype
     if isinstance(inp, torch.Tensor):
-        in_shape = inp.size()
         device = inp.device
         dtype = inp.dtype
     elif isinstance(inp, Float8BlockwiseQTensorBase):
         if inp._rowwise_data is not None:
-            in_shape = inp._rowwise_data.size()
             device = inp._rowwise_data.device
         elif inp._columnwise_data is not None:
-            in_shape = inp._columnwise_data.size()
             device = inp._columnwise_data.device
         else:
-            raise ValueError("Got Float8BlockwiseQTensor input tensor without any data")
+            raise ValueError("Got Float8BlockwiseQTensorBase input tensor without any data")
         dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
     else:
         raise ValueError(
@@ -988,7 +984,7 @@ def _all_gather_fp8_blockwise(
     # Check that quantizer is valid
     if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
         raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
-    elif not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
+    if not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
         raise NotImplementedError("Only 1D blockwise quantization is supported for allgather")
 
     # Output tensor dims

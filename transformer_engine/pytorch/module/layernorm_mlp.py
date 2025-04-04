@@ -52,7 +52,6 @@ from ..distributed import (
     in_fp8_activation_recompute_phase,
     _fsdp_scatter_tensors,
 )
-from transformer_engine.common.recipe import Recipe
 from ..constants import dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
@@ -117,8 +116,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "srelu": (tex.srelu, tex.dsrelu, None),
         }
-    else:
-        raise NotImplementedError(f"Unhandled recipe type {recipe}")
+    raise NotImplementedError(f"Unhandled recipe type {recipe}")
 
 
 def _act_func(activation: str, recipe: Optional[Recipe] = None):
@@ -262,7 +260,7 @@ class _LayerNormMLP(torch.autograd.Function):
         ln_out_total = None
         ub_obj_lnout = None
         if sequence_parallel:
-            # TODO: Support FP8 allgather of Float8Block quantization.
+            # TODO(kwyss): Support FP8 allgather of Float8Block quantization.
             force_high_precision_gather = isinstance(fc1_input_quantizer, Float8BlockQuantizer)
             if return_layernorm_output_gathered:
                 # Perform all-gather in high precision if gathered

@@ -61,7 +61,6 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ..cpu_offload import is_cpu_offload_enabled, set_offloading_param
-from transformer_engine.common.recipe import Recipe
 
 
 __all__ = ["Linear"]
@@ -144,7 +143,7 @@ class _Linear(torch.autograd.Function):
             if input_quantizer is None:
                 raise ValueError("Missing quantizer for input tensor")
             if with_input_all_gather_nccl:
-                # TODO: Support FP8 allgather for FP8 block quantization.
+                # TODO(kwyss): Support FP8 allgather for FP8 block quantization.
                 force_high_precision_gather = isinstance(input_quantizer, Float8BlockQuantizer)
                 if force_high_precision_gather:
                     input_quantizer.set_usage(rowwise=True, columnwise=False)
