@@ -21,7 +21,7 @@ from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
 )
-from tests.pytorch.test_float8_current_scaling_exact import (
+from test_float8_current_scaling_exact import (
     TestFP8RecipeLinearBase,
     TestFP8RecipeLayerNormLinearBase,
 )
