@@ -292,7 +292,7 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
     numel *= s;
   }
 
-  TensorWrapper tensor((block_scaling_dim == 2) ? NVTE_BLOCK_SCALING_2D : NVTE_BLOCK_SCALING_1D);
+  TensorWrapper tensor(this->get_scaling_mode());
   at::TensorOptions opts;
   at::TensorOptions scale_opts;
   at::Tensor data_rowwise, data_colwise, scale_inv_rowwise, scale_inv_colwise;
@@ -318,7 +318,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
       sinv0 = (k_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup(m_dim, 4);
     } else {
-      NVTE_CHECK(false, "Unsupported block_scaling_dim in create_tensor rowwise.");
+      NVTE_CHECK(false,
+                 "Unsupported block_scaling_dim in create_tensor rowwise."
+                 "Expected 1 or 2. Got ",
+                 block_scaling_dim);
     }
     scale_inv_rowwise = at::empty({sinv0, sinv1}, scale_opts);
     tensor.set_rowwise_data(data_rowwise.data_ptr(), this->dtype, shape);
@@ -329,7 +332,8 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
   if (columnwise_usage) {
     std::vector<int64_t> torch_columnwise_shape;
     std::vector<size_t> columnwise_shape;
-    NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape.");
+    NVTE_CHECK(torch_shape.size() == shape.size(), "Shape expected to match torch shape. Shape ",
+               columnwise_shape, " torch shape: ", torch_columnwise_shape);
     if (torch_shape.size() > 0) {
       torch_columnwise_shape.reserve(torch_shape.size());
       columnwise_shape.reserve(shape.size());
@@ -349,7 +353,10 @@ std::pair<TensorWrapper, py::object> Float8BlockQuantizer::create_tensor(
       sinv0 = (m_dim + kBlockLen - 1) / kBlockLen;
       sinv1 = roundup(k_dim, 4);
     } else {
-      NVTE_CHECK(false, "Unsupported block_scaling_dim in create_tensor columnwise.");
+      NVTE_CHECK(false,
+                 "Unsupported block_scaling_dim in create_tensor columnwise."
+                 "Expected 1 or 2. Got ",
+                 block_scaling_dim);
     }
     data_colwise = at::empty(torch_columnwise_shape, opts);
     scale_inv_colwise = at::empty({sinv0, sinv1}, scale_opts);

@@ -251,6 +251,7 @@ class Float8BlockwiseQTensor(Float8BlockwiseQTensorBase, QuantizedTensor):
     def __repr__(self, *, tensor_contents=None):
         return (
             f"Float8BlockwiseQTensor(fp8_dtype={self._fp8_dtype},"
+            f" is_2D_scaled={self._is_2D_scaled},"
             f" data={self.dequantize(dtype=self.dtype)})"
         )
 

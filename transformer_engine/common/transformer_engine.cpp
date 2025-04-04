@@ -215,34 +215,14 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   if (tensor == nullptr) {
     NVTE_ERROR("Invalid tensor");
   }
-  NVTEShape ret;
 
   // Determine tensor shape depending on tensor format
   const auto &t = *reinterpret_cast<const transformer_engine::Tensor *>(tensor);
-  switch (t.scaling_mode) {
-    case NVTE_DELAYED_TENSOR_SCALING:
-    case NVTE_BLOCK_SCALING_1D:
-    case NVTE_BLOCK_SCALING_2D: {
-      const std::vector<size_t> &rowwise_shape = t.rowwise_shape_ref();
-      ret.data = rowwise_shape.data();
-      ret.ndim = rowwise_shape.size();
-      break;
-    }
-    case NVTE_MXFP8_1D_SCALING: {
-      if (!t.has_data() && t.has_columnwise_data()) {
-        ret.data = t.columnwise_data.shape.data();
-        ret.ndim = t.columnwise_data.shape.size();
-      } else {
-        ret.data = t.data.shape.data();
-        ret.ndim = t.data.shape.size();
-      }
-      break;
-    }
-    default:
-      NVTE_ERROR("Cannot parse tensor shape with scaling mode \"",
-                 transformer_engine::to_string(t.scaling_mode), "\"");
-  }
+  const std::vector<size_t> &rowwise_shape = t.rowwise_shape_ref();
 
+  NVTEShape ret;
+  ret.data = rowwise_shape.data();
+  ret.ndim = rowwise_shape.size();
   return ret;
 }
 

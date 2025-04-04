@@ -6,7 +6,7 @@ import dataclasses
 import math
 import torch
 from typing import Optional, Protocol, Tuple
-from tests.pytorch.references.quantize_scale_calc import scale_from_amax_tensor
+from references.quantize_scale_calc import scale_from_amax_tensor
 
 
 @dataclasses.dataclass()

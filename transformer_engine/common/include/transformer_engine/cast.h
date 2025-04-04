@@ -17,16 +17,20 @@
 extern "C" {
 #endif
 
-/*  Cast the tensor to FP8 (or microscaling FP8 if the compute capability of the device is 10.0 or newer)
+/*  Quantize the tensor
+ *
+ *  The type of quantized tensor in the output depends on the scaling mode of the output
+ *  tensor.
+ *
  *  Supported formats are:
  *
- *  1) MXFP8 scaling (for 10.0 or newer)
+ *  1) MXFP8 scaling (for compute capability 10.0 or newer)
  *
  *  The MXFP8 implementation is per the microscaling format MXFP8 defined by the OCP specification:
  *  https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
  *
  *
- *  Supported modes of MXFP8 scaling (live scaling):
+ *  Supported modes of MXFP8 scaling (live scaling) for scaling mode NVTE_MXFP8_1D_SCALING
  *      a) Rowwise scaling (along the dim=0) computes one set of the output data, which includes:
  *          - the scaled output tensor
  *          - the corresponding scaling factors
@@ -46,12 +50,12 @@ extern "C" {
  *  To cast the input tensor to the MXFP8, the scaling_mode.delayed_scaling parameter
  *  of the output tensor should be set to 0.
  *
- *  Also supported are
- *
- *  2) per-tensor scaling modes that quantize the entire tensor
+ *  2) NVTE_DELAYED_TENSOR_SCALING that quantize the entire tensor
  *  using a single scaling factor. The absolute maximum value of the tensor should
  *  be precalculated either online (current scaling) or based on a tensor history
  *  (delayed scaling). The calls to nvte_quantize scale based on that data value.
+ *  Note the NVTE_DELAYED_TENSOR_SCALING NVTEScalingMode is reused for online
+ *  per tensor scaling.
  *
  *
  *  3) FP8 block scaling formats NVTE_BLOCK_SCALING_1D and NVTE_BLOCK_SCALING_2D
@@ -59,30 +63,25 @@ extern "C" {
  *  of size 1x128 (with columnwise mode of 128x1) and 128x128 respectively.
  *
  *  The supported modes are:
- *      a) Rowwise scaling (along the dim=0) yields output data
+ *      a) Rowwise scaling yields output data:
  *          - the scaled output tensor in fp8 coefficients with identical shape to the
  *            input tensor.
  *          - Scale factors which are computed for either 1D 1x128 or 2D 128x128 blocks.
- *      b) Columnwise scaling (along the dim=1) yields output data
+ *      b) Columnwise scaling yields output data:
  *          - the scaled output tensor in fp8 coefficients with a shape equivalent to
  *            the transpose of the input tensor.
  *          - Scale factors which are calculated for either 1D 128x1 or 2D 128x128 blocks
  *            of the input tensor.
- *      c) Both: In which all four tensors of the above are calculated.
+ *      c) Both: In which both tensors and both scales are calculated.
  *
  *  This quantization mode includes both the calculation of the scaling factors
  *  per-tile and quantization of the row and/or columnwise tiles. No precalculated
- *  absolute max is required. The scaling factors are also rounded to powers of 2,
- *  such that even if they are stored in fp32 on compute capability 9.0, they are
- *  numerically compatible with e8m0 scales such that the quantization is portable
- *  to hardware supporting MXFP8 without numerical disruption.
+ *  absolute max is required. The scaling factors are also rounded to powers of 2.
  */
 
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8.
- *         If the scaling mode of the output tensor is set to NVTE_MXFP8_1D_SCALING,
- *         the MXFP8 block quantization of the specified shape of the block will be used.
- *         If the scaling mode of the output tensor is set to NVTE_BLOCK_SCALING_1D or NVTE_BLOCK_SCALING_2D,
- *         blockwise float8 scaling will be used.
+ *         The type of quantized tensor in the output depends on the scaling mode of the output
+ *         tensor. See file level comments.
  *
  *  \param[in]     input            Input tensor to be cast.
  *  \param[in,out] output           Output FP8/MXFP8/BlockwiseFP8 tensor.
@@ -93,7 +92,7 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 /*! \brief Casts input tensor to FP8/MXFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output
- *         tensor.
+ *         tensor. See file level comments.
  *
  *  \param[in]      input            Input tensor to be cast.
  *  \param[in,out]  output           Output quantized tensor.

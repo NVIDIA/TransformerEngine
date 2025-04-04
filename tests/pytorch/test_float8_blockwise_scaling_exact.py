@@ -14,7 +14,7 @@ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
-from tests.pytorch.references.blockwise_quantizer_reference import (
+from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
 )
