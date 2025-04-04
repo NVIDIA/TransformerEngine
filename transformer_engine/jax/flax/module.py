@@ -1088,6 +1088,10 @@ class LayerNormMLP(TransformerEngineBase):
         kernel_1 = jnp.reshape(kernel_1, kernel_1_compute_shape)
         if not QuantizeConfig.is_fp8_enabled():
             kernel_1 = kernel_1.astype(input_dtype)
+        if self.kernel_axes_1 is not None:
+            kernel_1 = with_sharding_constraint_by_logical_axes(
+                kernel_1, self.kernel_axes_1[:-2] + self.kernel_axes_1[-1:]
+            )
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
@@ -1105,7 +1109,8 @@ class LayerNormMLP(TransformerEngineBase):
         kernel_2 = jnp.reshape(kernel_2, kernel_2_compute_shape)
         if not QuantizeConfig.is_fp8_enabled():
             kernel_2 = kernel_2.astype(input_dtype)
-
+        if self.kernel_axes_2 is not None:
+            kernel_2 = with_sharding_constraint_by_logical_axes(kernel_2, self.kernel_axes_2)
         contract_ind = tuple(range(0, len(axis)))
 
         if self.use_bias:
