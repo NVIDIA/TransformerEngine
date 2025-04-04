@@ -996,7 +996,9 @@ def _all_gather_fp8_blockwise(
             device=device,
             memory_format=torch.contiguous_format,
         )
-        handle = torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=async_op)
+        handle = torch.distributed.all_gather_into_tensor(
+            out, inp, group=process_group, async_op=async_op
+        )
         if handle is None:
             out = quantizer(out)
         return out, handle

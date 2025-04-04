@@ -935,7 +935,9 @@ class _LayerNormMLP(torch.autograd.Function):
                 if ln_out_total_work is not None:
                     ln_out_total_work.wait()
                     ln_out_total_work = None
-                    if ctx.fc1_input_quantizer is not None and not isinstance(ln_out_total, QuantizedTensor):
+                    if ctx.fc1_input_quantizer is not None and not isinstance(
+                        ln_out_total, QuantizedTensor
+                    ):
                         ln_out_total = ctx.fc1_input_quantizer(ln_out_total)
 
                 # Make sure GEMM inputs have required data

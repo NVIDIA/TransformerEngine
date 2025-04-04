@@ -619,7 +619,9 @@ class _Linear(torch.autograd.Function):
                 if inputmat_total_work is not None:
                     inputmat_total_work.wait()
                     inputmat_total_work = None
-                    if ctx.input_quantizer is not None and not isinstance(inputmat_total, QuantizedTensor):
+                    if ctx.input_quantizer is not None and not isinstance(
+                        inputmat_total, QuantizedTensor
+                    ):
                         inputmat_total = ctx.input_quantizer(inputmat_total)
 
                 # Make sure GEMM inputs have required data
