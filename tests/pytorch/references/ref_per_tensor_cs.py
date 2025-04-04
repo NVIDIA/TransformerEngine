@@ -66,7 +66,3 @@ def ref_per_tensor_cs_cast(
         qx_t = _multi_dim_transpose(qx)
         sx_t = sx
     return qx, sx, qx_t, sx_t
-
-
-def ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales):
-    return _ref_compute_scale_and_scale_inv_from_amax(amax, fp8_max, eps, pow_2_scales)
