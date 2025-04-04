@@ -128,9 +128,9 @@ class InferenceParams:
         self,
         max_batch_size: int,
         max_sequence_length: int,
-        num_heads_kv: int = 16,
-        head_dim_k: int = 64,
-        dtype: torch.dtype = torch.bfloat16,
+        num_heads_kv: int = None,
+        head_dim_k: int = None,
+        dtype: torch.dtype = None,
         head_dim_v: int = None,
         is_paged: bool = False,
         total_num_pages: int = None,
@@ -141,6 +141,10 @@ class InferenceParams:
     ):
         self.max_batch_size = max_batch_size
         self.max_sequence_length = max_sequence_length
+        assert all(x is not None for x in [num_heads_kv, head_dim_k, dtype]), (
+            "num_heads_kv, head_dim_k, and dtype are required for InferenceParams since Transformer"
+            " Engine 2.2."
+        )
         self.num_heads_kv = num_heads_kv
         self.head_dim_k = head_dim_k
         self.dtype = dtype

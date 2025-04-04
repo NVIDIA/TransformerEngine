@@ -231,8 +231,8 @@ class ScalingMode(Enum):
 
     NVTE_DELAYED_TENSOR_SCALING = 0
     NVTE_MXFP8_1D_SCALING = 1
-    NVTE_INVALID_SCALING = 2
-    NVTE_NO_SCALING = 3
+    NVTE_INVALID_SCALING = 4
+    NVTE_NO_SCALING = 5
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
