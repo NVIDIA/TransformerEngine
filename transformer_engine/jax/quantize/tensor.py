@@ -236,10 +236,16 @@ class ScaledTensor1x(ScaledTensor):
 
         data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
 
+        if self.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
+            # TODO(Phuong): Handle padding !?
+            scale_inv = with_sharding_constraint_by_logical_axes(self.scale_inv, axis_names)
+        else:
+            scale_inv = self.scale_inv
+
         # TODO(Phuong): constaint padded scale_inv?
         return ScaledTensor1x(
             data=data,
-            scale_inv=self.scale_inv,
+            scale_inv=scale_inv,
             scaling_mode=self.scaling_mode,
             dq_dtype=self.dq_dtype,
             _dq_func=self._dq_func,
