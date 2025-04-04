@@ -1065,8 +1065,8 @@ def quantize_dact_dbias(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type
         )
         out, dbias = _quantize_dbias_impl(
-                dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
-            )
+            dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
+        )
         return out, dbias
 
     out_shape = x.shape

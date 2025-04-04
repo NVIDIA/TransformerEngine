@@ -140,7 +140,9 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         else:
             scale_shape = (n_scale_blocks,)
 
-        assert len(scale_shape) == len(data_shape), f"scale_shape {scale_shape}, data_shape {data_shape}"
+        assert len(scale_shape) == len(
+            data_shape
+        ), f"scale_shape {scale_shape}, data_shape {data_shape}"
         return scale_shape
 
     def get_scale_shape(

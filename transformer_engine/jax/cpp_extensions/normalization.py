@@ -283,8 +283,8 @@ class NormFwdPrimitive(BasePrimitive):
         )
         if is_2x:
             colwise_scale_inv = colwise_scale_inv.flatten()[
-                    : reduce(operator.mul, colwise_scale_inv_shape, 1)
-                    ].reshape(colwise_scale_inv_shape)
+                : reduce(operator.mul, colwise_scale_inv_shape, 1)
+            ].reshape(colwise_scale_inv_shape)
         return (
             out,
             colwise_out,

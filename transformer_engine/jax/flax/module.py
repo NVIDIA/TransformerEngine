@@ -1174,9 +1174,9 @@ class LayerNormMLP(TransformerEngineBase):
                     quantizer_set=ffn1_quantizer_set,
                 )
             dot_1_output_axes = (
-                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                    *get_non_contracting_logical_axes(kernel_1.ndim, self.kernel_axes_1, contract_ind),
-                    )
+                *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
+                *get_non_contracting_logical_axes(kernel_1.ndim, self.kernel_axes_1, contract_ind),
+            )
             x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:

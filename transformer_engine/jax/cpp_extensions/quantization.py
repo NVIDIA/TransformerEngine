@@ -228,8 +228,8 @@ class DBiasQuantizePrimitive(BasePrimitive):
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
             colwise_scale_inv = jax.lax.slice(
-                    colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
-                    )
+                colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
+            )
         return (
             out,
             colwise_out,

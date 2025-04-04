@@ -329,9 +329,7 @@ class TestDistributedLayernormMLP:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tp_configs())
-    @pytest_parametrize_wrapper(
-        "activation_type", [("gelu",), ("gelu", "linear")]
-    )
+    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
     @pytest_parametrize_wrapper("use_bias", [True, False])
     @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
     @pytest_parametrize_wrapper("dtype", DTYPES)
@@ -340,6 +338,11 @@ class TestDistributedLayernormMLP:
         self, mesh_config, activation_type, use_bias, input_shape, dtype, fp8_recipe
     ):
         self._test_layernorm_mlp(
-            mesh_config, activation_type, use_bias, input_shape, dtype,
-            use_fp8=True, fp8_recipe=fp8_recipe
+            mesh_config,
+            activation_type,
+            use_bias,
+            input_shape,
+            dtype,
+            use_fp8=True,
+            fp8_recipe=fp8_recipe,
         )
