@@ -164,7 +164,9 @@ class TestFloat8BlockwiseTensor:
             columnwise=True,
             block_scaling_dim=block_scaling_dim,
         )
-        self._test_quantize_dequantize(quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol, use_cpp_allocation=True)
+        self._test_quantize_dequantize(
+            quantizer=quantizer, dtype=dtype, atol=atol, rtol=rtol, use_cpp_allocation=True
+        )
 
     @pytest.mark.parametrize(
         "dims", [[], 256, 311, [264], [256, 512], [250, 500], [7, 5, 3], [2, 3, 5, 3]]
