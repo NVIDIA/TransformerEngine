@@ -34,7 +34,7 @@ inline size_t product(const std::vector<size_t> &shape) {
   return ret;
 }
 
-enum class QuantizeAxis {
+enum class QuantizeLayout {
   ROWWISE,
   COLWISE,
   ROWWISE_COLWISE,

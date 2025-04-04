@@ -30,7 +30,7 @@ from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_a
 from ..quantize import ScaledTensor, ScaledTensorFactory
 from ..quantize import (
     Quantizer,
-    QuantizeAxis,
+    QuantizeLayout,
     DelayedScaleQuantizer,
     ScalingMode,
 )
@@ -277,14 +277,14 @@ class NormFwdPrimitive(BasePrimitive):
         rowwise_scale_inv_shape, colwise_scale_inv_shape = scaling_mode.get_scale_shape_2x(
             x.shape, is_padded=False
         )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            scale_inv = scale_inv.flatten()[
-                : reduce(operator.mul, rowwise_scale_inv_shape)
-            ].reshape(rowwise_scale_inv_shape)
-            if is_2x:
-                colwise_scale_inv = colwise_scale_inv.flatten()[
-                    : reduce(operator.mul, colwise_scale_inv_shape)
-                ].reshape(colwise_scale_inv_shape)
+        # slice out padding for mxfp8, noop for DelayedScaling
+        scale_inv = scale_inv.flatten()[: reduce(operator.mul, rowwise_scale_inv_shape, 1)].reshape(
+            rowwise_scale_inv_shape
+        )
+        if is_2x:
+            colwise_scale_inv = colwise_scale_inv.flatten()[
+                : reduce(operator.mul, colwise_scale_inv_shape, 1)
+            ].reshape(colwise_scale_inv_shape)
         return (
             out,
             colwise_out,
@@ -816,7 +816,7 @@ def layernorm_fwd(
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_layernorm(x, gamma, beta, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
@@ -900,8 +900,8 @@ def layernorm_fwd(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
     )
 
     return scaled_tensor, mu, rsigma
@@ -997,7 +997,7 @@ def rmsnorm_fwd(
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     # TE/common does not support normalization with colwise only quantization yet
-    if quantizer is not None and quantizer.q_axis == QuantizeAxis.COLWISE:
+    if quantizer is not None and quantizer.q_layout == QuantizeLayout.COLWISE:
         return _jax_rmsnorm(x, gamma, zero_centered_gamma, epsilon, quantizer)
 
     scale = (
@@ -1082,8 +1082,8 @@ def rmsnorm_fwd(
         colwise_scale_inv=colwise_scale_inv,
         scaling_mode=quantizer.scaling_mode,
         dq_dtype=x.dtype,
-        q_axis=quantizer.q_axis,
-        layout=quantizer.get_layout(),
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
     )
 
     return scaled_tensor, rsigma
