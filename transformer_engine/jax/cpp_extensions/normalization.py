@@ -278,13 +278,13 @@ class NormFwdPrimitive(BasePrimitive):
             x.shape, is_padded=False
         )
         # slice out padding for mxfp8, noop for DelayedScaling
-        scale_inv = scale_inv.flatten()[: reduce(operator.mul, rowwise_scale_inv_shape)].reshape(
+        scale_inv = scale_inv.flatten()[: reduce(operator.mul, rowwise_scale_inv_shape, 1)].reshape(
             rowwise_scale_inv_shape
         )
         if is_2x:
             colwise_scale_inv = colwise_scale_inv.flatten()[
-                : reduce(operator.mul, colwise_scale_inv_shape)
-            ].reshape(colwise_scale_inv_shape)
+                    : reduce(operator.mul, colwise_scale_inv_shape, 1)
+                    ].reshape(colwise_scale_inv_shape)
         return (
             out,
             colwise_out,

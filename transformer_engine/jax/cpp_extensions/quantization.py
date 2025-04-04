@@ -226,10 +226,10 @@ class DBiasQuantizePrimitive(BasePrimitive):
         scale_inv = jax.lax.slice(
             scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
         )
-        # if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-        colwise_scale_inv = jax.lax.slice(
-            colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
-        )
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            colwise_scale_inv = jax.lax.slice(
+                    colwise_scale_inv, [0] * len(colwise_scale_inv_shape), colwise_scale_inv_shape
+                    )
         return (
             out,
             colwise_out,
@@ -564,10 +564,6 @@ def _quantize_dbias_impl(
         if is_dbias:
             return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, None
-
-    # TODO(Jeremy): Debug - TE's quantize_dbias produced nans in this case for distributed layernorm_mlp tests
-    if flatten_axis == -2 and quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-        return _jax_quantize_dbias(x, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2)
 
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale

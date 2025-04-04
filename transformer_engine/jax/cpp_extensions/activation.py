@@ -1064,13 +1064,7 @@ def quantize_dact_dbias(
         dgated = dact_lu(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type
         )
-        # TODO(Jeremy): Debug - TE's quantize_dbias produced nans in this case for distributed layernorm_mlp tests
-        if quantizer.scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING:
-            out, dbias = _jax_quantize_dbias(
-                dgated, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2
-            )
-        else:
-            out, dbias = _quantize_dbias_impl(
+        out, dbias = _quantize_dbias_impl(
                 dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2
             )
         return out, dbias

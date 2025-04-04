@@ -237,7 +237,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto workspace_dims = workspace_buf->dimensions();
   // m = x_batch_size = reduce(operator.mul, x_shape[:-2]), x_shape == act_input_dims
   // n = ir_dz_shape[-1] * act_len, ir_dz_shape == input_dims
-  auto act_len = act_input_dims.end()[-2];
+  auto act_len = act_input_dims[act_input_dims.size() - 2];
   NVTE_CHECK(act_input_dims.back() == input_dims.back(),
              "Shape mismatch between activation input and gradient input");
   auto m = product(act_input_dims, 0, act_input_dims.size() - 2);
