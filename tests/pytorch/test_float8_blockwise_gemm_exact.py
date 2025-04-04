@@ -12,8 +12,8 @@ from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
 )
-from tests.pytorch.references.blockwise_quantizer_reference import CuBLASScaleMunger
-from tests.pytorch.references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
+from references.blockwise_quantizer_reference import CuBLASScaleMunger
+from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
 
 def fp8_blockwise_gemm_supported() -> bool:
