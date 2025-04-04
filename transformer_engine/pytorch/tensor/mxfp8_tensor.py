@@ -347,6 +347,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
         columnwise_scale_inv: torch.Tensor,
         fp8_dtype: TE_DType,
         dtype: torch.dtype,
+        shape: torch.shape,
     ) -> MXFP8Tensor:
         """Build MXFP8Tensor, for use in __reduce__
 
@@ -361,10 +362,11 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
             columnwise_data=columnwise_data,
             columnwise_scale_inv=columnwise_scale_inv,
             dtype=dtype,
+            shape=shape,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
-        """Custom pickling to remove references to FP8 metadata objects"""
+        """Custom pickling"""
         return (
             MXFP8Tensor._make_in_reduce_ex,
             (
@@ -374,6 +376,7 @@ class MXFP8Tensor(MXFP8TensorBase, QuantizedTensor):
                 self._columnwise_scale_inv,
                 self._fp8_dtype,
                 self.dtype,
+                self.shape,
             ),
         )
 
