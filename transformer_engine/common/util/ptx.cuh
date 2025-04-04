@@ -171,8 +171,22 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
 
 using bf16x2 = __nv_bfloat162;
 using fp16x2 = __half2;
-using fp8e4m3x2 = __nv_fp8x2_e4m3;
-using fp8e5m2x2 = __nv_fp8x2_e5m2;
+
+template <typename T>
+struct fp8x2_t {
+  T x;
+  T y;
+};
+
+// Instantiate for two FP8 kinds (E4M3 and E5M2)
+template struct fp8x2_t<fp8e4m3>;
+template struct fp8x2_t<fp8e5m2>;
+
+using fp8e4m3x2 = fp8x2_t<fp8e4m3>;
+using fp8e5m2x2 = fp8x2_t<fp8e5m2>;
+
+static_assert(sizeof(fp8e4m3x2) == 2);
+static_assert(sizeof(fp8e5m2x2) == 2);
 
 // SIMD like "Fused" cast + multiplication (x2)
 template <typename T1, typename T2>
