@@ -141,7 +141,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTEScalingMode>(m, "NVTE_Scaling_Mode", pybind11::module_local())
       .value("NVTE_DELAYED_TENSOR_SCALING", NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING)
       .value("NVTE_MXFP8_1D_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
-      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_MXFP8_1D_SCALING)
+      .value("NVTE_INVALID_SCALING", NVTEScalingMode::NVTE_INVALID_SCALING)
       .export_values();
 
   pybind11::enum_<transformer_engine::jax::QuantizeAxis>(m, "QuantizeAxis",

@@ -36,7 +36,7 @@ from transformer_engine.jax.quantize import QuantizerFactory
 
 
 is_fp8_supported, reason = is_fp8_available()
-is_mxfp8_supported, reason = is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 SUPPORTED_RECIPES = []
 if is_fp8_supported:

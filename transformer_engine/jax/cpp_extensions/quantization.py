@@ -95,7 +95,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         wkspace_aval = jax.core.ShapedArray(shape=(1,), dtype=jnp.float32)
         if q_axis in (QuantizeAxis.COLWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
             t_shape = multidim_transpose(x_aval.shape)
-            if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+            if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
                 # Don't transpose output for MXFP8
                 t_shape = x_aval.shape
             colwise_out_aval = x_aval.update(shape=t_shape, dtype=out_dtype)
@@ -168,7 +168,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             ctx,
             x,
             scale,
-            scaling_mode=scaling_mode,
+            scaling_mode=ScalingMode(scaling_mode).get_nvte_scaling_mode(),
             q_axis=q_axis,
             is_dbias=is_dbias,
         )
@@ -212,7 +212,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
         ).get_scale_shape_2x(x.shape, is_padded=False)
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             if q_axis in (QuantizeAxis.ROWWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
                 scale_inv = jax.lax.slice(
                     scale_inv, [0] * len(rowwise_scale_inv_shape), rowwise_scale_inv_shape
@@ -289,7 +289,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_axis in (QuantizeAxis.COLWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(x_spec)
             else:
                 colwise_out_spec = x_spec
@@ -308,7 +308,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         amax_sharding = scale_inv_sharding.duplicate_with_new_description(
             desc="DBiasQuantizePrimitive.amax_sharding"
         )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_sharding = NamedSharding(
                 mesh, PartitionSpec(*x_spec), desc="DBiasQuantizePrimitive.scale_inv"
             )
@@ -350,7 +350,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_axis in (QuantizeAxis.COLWISE.value, QuantizeAxis.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 colwise_out_spec = multidim_transpose(x_spec)
             else:
                 colwise_out_spec = x_spec
@@ -369,7 +369,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         amax_sharding = scale_inv_sharding.duplicate_with_new_description(
             desc="DBiasQuantizePrimitive.amax_sharding"
         )
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING.value:
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_sharding = NamedSharding(
                 mesh, PartitionSpec(*x_spec), desc="DBiasQuantizePrimitive.scale_inv"
             )
@@ -411,7 +411,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 is_outer=True,
             )
 
-            if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING.value:
+            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
             else:
                 global_updated_amax = local_amax
@@ -546,7 +546,7 @@ def _quantize_impl(
         is_outer=True,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)

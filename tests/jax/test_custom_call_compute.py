@@ -48,21 +48,21 @@ FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(256, 128), (128, 256)]
 DTYPES = [jnp.bfloat16, jnp.float32]
 is_fp8_supported, reason = helper.is_fp8_available()
-is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.NVTE_MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
 supported_scaling_modes = []
 """ Find supported scaling modes"""
 if is_fp8_supported:
-    supported_scaling_modes.append(ScalingMode.NVTE_DELAYED_TENSOR_SCALING)
+    supported_scaling_modes.append(ScalingMode.DELAYED_TENSOR_SCALING)
 if is_mxfp8_supported:
-    supported_scaling_modes.append(ScalingMode.NVTE_MXFP8_1D_SCALING)
+    supported_scaling_modes.append(ScalingMode.MXFP8_1D_SCALING)
 
 
 def is_shape_supported_by_mxfp8(input_shape):
     try:
         if isinstance(input_shape, type(pytest.param(0))):
             input_shape = input_shape.values[0]
-        ScalingMode.NVTE_MXFP8_1D_SCALING.get_scale_shape_2x(input_shape)
+        ScalingMode.MXFP8_1D_SCALING.get_scale_shape_2x(input_shape)
         return True
     except:
         # get_scale_shapes will raise an exception if the shape is not supported
@@ -167,7 +167,7 @@ class TestActivation:
         )
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             q_dtype=output_type,
             q_axis=QuantizeAxis.ROWWISE,
         )
@@ -192,7 +192,7 @@ class TestActivation:
 
         te_quantizer, jax_quantizer = QuantizerFactory.create(
             n_quantizers=2,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             q_dtype=output_type,
             q_axis=q_axis,
         )
@@ -215,7 +215,7 @@ class TestActivation:
         self.activation_type = activation_type
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING, q_dtype=output_type, q_axis=q_axis
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING, q_dtype=output_type, q_axis=q_axis
         )
 
         output = tex.act_lu(x, activation_type, quantizer)
@@ -335,7 +335,7 @@ class TestNorm:
             pytest.skip("RMSNorm and zero_centered_gamma is not supported!")
 
         quantizer = QuantizerFactory.create(
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING, q_dtype=out_dtype, q_axis=q_axis
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING, q_dtype=out_dtype, q_axis=q_axis
         )
         self._test_norm_grad(
             n, hidden, norm_type, zero_centered_gamma, epsilon, inp_dtype, quantizer
@@ -406,7 +406,7 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             q_axis=q_axis,
         )
 
@@ -423,7 +423,7 @@ class TestNorm:
             epsilon=epsilon,
             inp_dtype=inp_dtype,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING,
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
             q_axis=QuantizeAxis.ROWWISE_COLWISE,
         )
 
@@ -475,7 +475,7 @@ class TestQuantize:
             q_axis=q_axis,
         )
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             x = jax.random.uniform(key, input_shape, in_dtype)
 
@@ -483,7 +483,7 @@ class TestQuantize:
             assert_dequantized_scaled_tensor(scaled_tensor, x)
 
     def test_quantize_bitwise(self, in_dtype, input_shape, q_dtype, scaling_mode, q_axis):
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
@@ -511,7 +511,7 @@ class TestFusedQuantize:
     @pytest_parametrize_wrapper("q_axis", [QuantizeAxis.ROWWISE, QuantizeAxis.ROWWISE_COLWISE])
     def test_quantize_dbias(self, in_dtype, input_shape, out_dtype, scaling_mode, q_axis):
         transpose_axis = -1
-        if scaling_mode == ScalingMode.NVTE_MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
+        if scaling_mode == ScalingMode.MXFP8_1D_SCALING and not is_shape_supported_by_mxfp8(
             input_shape
         ):
             pytest.skip(f"Input shape {input_shape} is not supported by MXFP8")
@@ -594,7 +594,7 @@ class TestFusedQuantize:
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=in_dtype,
-            scaling_mode=ScalingMode.NVTE_NO_SCALING,
+            scaling_mode=ScalingMode.NO_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
             q_axis=QuantizeAxis.ROWWISE,
@@ -613,7 +613,7 @@ class TestFusedQuantize:
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_DELAYED_TENSOR_SCALING,
+            scaling_mode=ScalingMode.DELAYED_TENSOR_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
             q_axis=q_axis,
@@ -642,7 +642,7 @@ class TestFusedQuantize:
             in_dtype=in_dtype,
             input_shape=input_shape,
             out_dtype=out_dtype,
-            scaling_mode=ScalingMode.NVTE_MXFP8_1D_SCALING,
+            scaling_mode=ScalingMode.MXFP8_1D_SCALING,
             activation_type=activation_type,
             is_dbias=is_dbias,
             q_axis=q_axis,
@@ -757,7 +757,7 @@ class TestDense:
             scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=True
         )
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             primitive_out, (primitive_x_grad, primitive_w_grad, primitive_bias_grad) = (
                 value_n_grad_primitive_func(x, w, bias, contracting_dims, quantizer_set)
@@ -800,7 +800,7 @@ class TestFusedDense:
         Test layernorm_dense VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -856,7 +856,7 @@ class TestFusedDense:
             x, w, gamma, beta
         )
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             prim_out, (
                 prim_x_grad,
@@ -886,7 +886,7 @@ class TestFusedDense:
         Test layernorm_mlp VJP Rule
         """
         # No Norm FWD E5M2 in TE backend
-        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING:
+        if q_dtype == jnp.float8_e5m2 and scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
             pytest.skip("E5M2 is not supported in normalization with TE Backend!")
 
         # zero_centered_gamma is already tested in TestNorm
@@ -963,7 +963,7 @@ class TestFusedDense:
         value_n_grad_prim_func = value_and_grad(prim_func, range(6))
         value_n_grad_ref_func = value_and_grad(ref_func, range(6))
 
-        n_iterations = 3 if scaling_mode == ScalingMode.NVTE_DELAYED_TENSOR_SCALING else 1
+        n_iterations = 3 if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING else 1
         for _ in range(n_iterations):
             prim_out, (
                 prim_x_grad,

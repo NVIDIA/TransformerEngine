@@ -166,7 +166,7 @@ class DelayedScaleQuantizer(Quantizer):
         amax_history: History of maximum absolute values
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_DELAYED_TENSOR_SCALING
+    scaling_mode: ScalingMode = ScalingMode.DELAYED_TENSOR_SCALING
     q_axis: QuantizeAxis = QuantizeAxis.ROWWISE_COLWISE
 
     scale: jnp.ndarray = field(default_factory=lambda: jnp.ones((1,), jnp.float32))
@@ -356,7 +356,7 @@ class BlockScaleQuantizer(Quantizer):
         q_axis: Quantization axis (default: ROWWISE_COLWISE)
     """
 
-    scaling_mode: ScalingMode = ScalingMode.NVTE_MXFP8_1D_SCALING
+    scaling_mode: ScalingMode = ScalingMode.MXFP8_1D_SCALING
     q_axis: QuantizeAxis = QuantizeAxis.ROWWISE_COLWISE
 
     def get_layout(self) -> str:
@@ -500,8 +500,8 @@ class QuantizerFactory:
     """
 
     quantizer_type_map = {
-        ScalingMode.NVTE_DELAYED_TENSOR_SCALING: DelayedScaleQuantizer,
-        ScalingMode.NVTE_MXFP8_1D_SCALING: BlockScaleQuantizer,
+        ScalingMode.DELAYED_TENSOR_SCALING: DelayedScaleQuantizer,
+        ScalingMode.MXFP8_1D_SCALING: BlockScaleQuantizer,
     }
 
     @staticmethod
@@ -525,8 +525,8 @@ class QuantizerFactory:
             A single quantizer or tuple of quantizers
         """
         # (Phuong): add this assert back when NVTE_NO_SCALING is fully implememted
-        # assert scaling_mode != ScalingMode.NVTE_INVALID_SCALING
-        if scaling_mode in (ScalingMode.NVTE_NO_SCALING, ScalingMode.NVTE_INVALID_SCALING):
+        # assert scaling_mode != ScalingMode.INVALID_SCALING
+        if scaling_mode in (ScalingMode.NO_SCALING, ScalingMode.INVALID_SCALING):
             quantizers = [None] * n_quantizers
         else:
             quantizers = []
@@ -618,4 +618,4 @@ class QuantizerFactory:
         return q_set[0] if len(q_set) == 1 else tuple(q_set)
 
 
-noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NVTE_NO_SCALING)
+noop_quantizer_set = QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING)

@@ -16,6 +16,8 @@ from typing import Tuple, Dict
 from functools import reduce
 import operator
 
+from transformer_engine_jax import NVTE_Scaling_Mode
+
 from jax.tree_util import register_pytree_node_class
 import jax.numpy as jnp
 
@@ -29,6 +31,16 @@ class ScalingModeMetadataImpl(ABC):
     This abstract class defines the interface for different scaling mode implementations,
     providing methods to get scale data types and shapes.
     """
+
+    @abstractmethod
+    def get_nvte_scaling_mode(self):
+        """Get the NVTE scaling mode value.
+
+        This method should return the corresponding NVTE scaling mode value for this implementation.
+
+        Returns:
+            The NVTE scaling mode value (e.g., NVTE_DELAYED_TENSOR_SCALING or NVTE_MXFP8_1D_SCALING)
+        """
 
     @abstractmethod
     def get_scale_dtype(self) -> jnp.dtype:
@@ -59,6 +71,55 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
     This implementation provides metadata for delayed scaling mode, including scale data type and shape.
     """
+
+    def get_nvte_scaling_mode(self):
+        """Get the NVTE scaling mode value for delayed scaling.
+
+        Returns:
+            The NVTE scaling mode value corresponding to this implementation (NVTE_DELAYED_TENSOR_SCALING).
+        """
+        # Delayed scaling corresponds to NVTE_DELAYED_TENSOR_SCALING
+        return NVTE_Scaling_Mode.NVTE_DELAYED_TENSOR_SCALING.value
+
+    def get_scale_dtype(self) -> jnp.dtype:
+        """Get the data type for scale tensors in delayed scaling.
+
+        Returns:
+            The data type used for scale tensors (float32)
+        """
+        return jnp.float32
+
+    def get_scale_shape(
+        self, data_shape: Tuple[int, ...], is_colwise: bool = False, is_padded: bool = True
+    ) -> Tuple[int, ...]:
+        """Get the shape for scale tensors in delayed scaling.
+
+        Args:
+            data_shape: The shape of the tensor being scaled
+            is_colwise: Whether the scaling is column-wise
+            is_padded: Whether to return padded shape
+
+        Returns:
+            The shape for scale tensors - (1,)
+        """
+        del data_shape, is_colwise
+        return (1,)
+    
+
+class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
+    """Implementation for current scaling mode.
+
+    This implementation provides metadata for current scaling mode, including scale data type and shape.
+    """
+
+    def get_nvte_scaling_mode(self):
+        """Get the NVTE scaling mode value for current scaling.
+
+        Returns:
+            The NVTE scaling mode value corresponding to this implementation (NVTE_DELAYED_TENSOR_SCALING).
+        """
+        # Delayed scaling corresponds to NVTE_DELAYED_TENSOR_SCALING
+        return NVTE_Scaling_Mode.NVTE_DELAYED_TENSOR_SCALING.value
 
     def get_scale_dtype(self) -> jnp.dtype:
         """Get the data type for scale tensors in delayed scaling.
@@ -104,6 +165,15 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
         """
         self._block_dims = block_dims
         self._block_alignment = (128, 4)
+
+    def get_nvte_scaling_mode(self):
+        """Get the NVTE scaling mode value for block scaling.
+
+        Returns:
+            The NVTE scaling mode value corresponding to this implementation.
+        """
+        # Block scaling corresponds to NVTE_MXFP8_1D_SCALING
+        return NVTE_Scaling_Mode.NVTE_MXFP8_1D_SCALING.value
 
     def get_scale_dtype(self) -> jnp.dtype:
         """Get the data type for scale tensors in block scaling.
@@ -175,16 +245,20 @@ class ScalingMode(Enum):
     """Enumeration of tensor scaling modes with their corresponding metadata implementations.
 
     This class defines the available scaling modes for tensor quantization:
-    - NVTE_DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
-    - NVTE_MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
-    - NVTE_INVALID_SCALING: Invalid scaling mode
-    - NVTE_NO_SCALING: No scaling applied
+    - DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
+    - CURRENT_TENSOR_SCALING: Uses current scaling mode with FP8 data type and float32 scales
+    - MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
+    - INVALID_SCALING: Invalid scaling mode
+    - NO_SCALING: No scaling applied
     """
 
-    NVTE_DELAYED_TENSOR_SCALING = 0
-    NVTE_MXFP8_1D_SCALING = 1
-    NVTE_INVALID_SCALING = 4
-    NVTE_NO_SCALING = 5
+    # Note: these start at 100 to avoid conflicting with NVTEScalingMode. These are distinct as what the information the common kernels
+    # need versus the framework extensions is different. For example, the TE common kernels treat delayed scaling and current scaling the same and both are marked as NVTE_DELAYED_TENSOR_SCALING, it is up to the frameworks to handle current scaling differently, such as calculating the amax beforehand and passing nullptr as the amax_ptr in nvte_quantize to prevent recalculating the fused amax.
+    INVALID_SCALING = 100
+    NO_SCALING = 101
+    DELAYED_TENSOR_SCALING = 102
+    CURRENT_TENSOR_SCALING = 103
+    MXFP8_1D_SCALING = 104
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -199,6 +273,10 @@ class ScalingMode(Enum):
         if impl is None:
             raise ValueError("Invalid scaling mode")
         return impl
+    
+    def get_nvte_scaling_mode(self):
+        """Get the NVTE scaling mode value for use in NVTE APIs."""
+        return self._get_impl().get_nvte_scaling_mode()
 
     def get_scale_dtype(self):
         """Get the data type for scale tensors in this mode.
@@ -273,8 +351,9 @@ class ScalingMode(Enum):
 
 
 SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
-    ScalingMode.NVTE_DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
-    ScalingMode.NVTE_MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
+    ScalingMode.DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.CURRENT_TENSOR_SCALING: CurrentScalingModeMetadataImpl(),
+    ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
-    ScalingMode.NVTE_NO_SCALING: DelayedScalingModeMetadataImpl(),
+    ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
 }
