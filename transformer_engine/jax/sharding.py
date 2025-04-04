@@ -322,6 +322,16 @@ class ShardingType(Enum):
 
 
 def get_non_contracting_logical_axes(ndim, logical_axes, contracting_dims):
+    """Get logical axes for non-contracting dimensions.
+
+    Args:
+        ndim: Number of dimensions in the tensor.
+        logical_axes: Tuple of logical axes for each dimension.
+        contracting_dims: Set of dimensions that are being contracted.
+
+    Returns:
+        Tuple of logical axes for non-contracting dimensions.
+    """
     if not logical_axes:
         logical_axes = (None,) * ndim
     elif len(logical_axes) < ndim:
